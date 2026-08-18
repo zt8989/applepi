@@ -99,3 +99,9 @@ function ok(name) {
 }
 
 console.log(`\n${passed} smoke checks passed.`);
+
+// cleanup temp file written during the str_replace_editor round-trip
+import('node:fs').then((fs) => {
+  const f = new URL('./_smoke_tmp.txt', import.meta.url).pathname;
+  try { fs.unlinkSync(f); } catch {}
+});
