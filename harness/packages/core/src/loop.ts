@@ -1,9 +1,21 @@
 import { generateText } from 'ai';
 import type { Harness } from './harness.js';
 
+/** Shape of the LLM call the loop makes each turn. */
+export type LlmCall = (args: {
+  model: any;
+  messages: any[];
+  tools: any;
+}) => Promise<any>;
+
 export interface LoopOpts {
   model: any;
   maxTurns?: number;
+  /**
+   * Injectable LLM call. Defaults to Vercel AI SDK `generateText`. Swapping it
+   * lets tests drive the loop without a real provider/API key.
+   */
+  llmCall?: LlmCall;
 }
 
 /**
@@ -18,6 +30,7 @@ export async function runLoop(
   opts: LoopOpts,
 ): Promise<any[]> {
   const maxTurns = opts.maxTurns ?? 8;
+  const callLLM: LlmCall = opts.llmCall ?? ((a) => generateText(a));
   let turn = 0;
   while (turn < maxTurns) {
     turn++;
@@ -26,7 +39,7 @@ export async function runLoop(
     const llmCtx: any = { session: harness.session, state: {}, messages };
     let result: any;
     await harness.bus.run('llm', llmCtx, async () => {
-      result = await generateText({
+      result = await callLLM({
         model: opts.model,
         messages: llmCtx.messages,
         // no `execute`: SDK returns toolCalls, we run them ourselves
