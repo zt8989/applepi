@@ -18,8 +18,8 @@ harness.registerExtension((api) => {
 // Outermost security layer (priority 1000): vetoes dangerous bash commands.
 harness.registerExtension(denylistExtension);
 
-// Auto-discover local extensions dropped into ./extensions/.
-const extDir = new URL('./extensions/', import.meta.url).pathname;
+// Auto-discover local extensions dropped into <app>/extensions/ (sibling of src/).
+const extDir = new URL('../extensions/', import.meta.url).pathname;
 const loaded = await harness.loadExtensionsFromDir(extDir);
 if (loaded.length) {
   console.error(`[harness] loaded local extensions: ${loaded.join(', ')}`);

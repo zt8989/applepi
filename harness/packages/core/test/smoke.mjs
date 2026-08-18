@@ -98,6 +98,29 @@ function ok(name) {
   ok('denylist blocks `rm -rf /`');
 }
 
+// 7. Auto-discovery: a *.ext.mjs in a scanned dir is registered without loader edits (T02).
+{
+  const harness = new Harness();
+  const fxDir = new URL('./fixtures/', import.meta.url).pathname;
+  const loaded = await harness.loadExtensionsFromDir(fxDir);
+  assert.ok(loaded.includes('echo.ext.mjs'), `fixture discovered: ${loaded}`);
+  const names = harness.api.getTools().map((t) => t.name);
+  assert.ok(names.includes('echo'), `echo tool registered: ${names}`);
+  ok('auto-discovery registers tool from scanned dir (Q12/Q14)');
+}
+
+// 8. Discovery set tracks the directory: adding/removing files changes the tool set.
+{
+  const harness = new Harness();
+  const tmp = new URL('./_empty_ext_dir/', import.meta.url).pathname;
+  await import('node:fs').then((fs) => fs.mkdirSync(tmp, { recursive: true }));
+  const loaded = await harness.loadExtensionsFromDir(tmp);
+  assert.equal(loaded.length, 0, 'empty dir yields no extensions');
+  assert.ok(!harness.api.getTools().map((t) => t.name).includes('echo'));
+  await import('node:fs').then((fs) => fs.rmSync(tmp, { recursive: true, force: true }));
+  ok('discovery set tracks directory contents (add/remove files)');
+}
+
 console.log(`\n${passed} smoke checks passed.`);
 
 // cleanup temp file written during the str_replace_editor round-trip

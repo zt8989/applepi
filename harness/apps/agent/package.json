@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "pnpm --filter @harness/core build && tsx src/main.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "check-ext": "tsx scripts/check-ext.ts"
   },
   "dependencies": {
     "@harness/core": "workspace:*",
