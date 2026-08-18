@@ -1,0 +1,10 @@
+# WorkBuddy project data (not a temp cache — keep out of git)
+.workbuddy/
+
+# deps / build
+node_modules/
+dist/
+*.tsbuildinfo
+
+# logs
+*.log
