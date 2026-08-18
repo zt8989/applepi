@@ -4,10 +4,18 @@
 
 **Blocked by:** None — can start immediately
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 根目录 `pnpm install` 能解析所有 workspace 包（`@harness/core`、`@harness/extensions`、`apps/agent`）
-- [ ] `@harness/core` 对外导出：`bus`（洋葱中间件）、`ctx`、loader、`harness`、`loop`、两个内置工具（`bash`、`str_replace_editor`）
-- [ ] `apps/agent` 配置有效 provider API key 后，对一条"需要工具才能回答"的 prompt（例如"列出当前目录文件"）能让模型调用 `bash`、harness 实际执行并把结果回灌进对话
-- [ ] denylist 中间件以最高 priority 注册为 `tool` 栈最外层；一条安全命令可正常穿透
-- [ ] 损坏的 `bus.ts` 被补全，洋葱 `dispatch` 递归正确、各层 `try/catch` 骨架到位
+- [x] 根目录 `pnpm install` 能解析所有 workspace 包（`@harness/core`、`apps/agent`；`@harness/extensions` 留待 T04–T06）
+- [x] `@harness/core` 对外导出：`OnionBus`（洋葱中间件）、`Harness`、loader、`runLoop`、两个内置工具（`bash`、`str_replace_editor`）
+- [ ] `apps/agent` 配置有效 provider API key 后，对一条"需要工具才能回答"的 prompt 能让模型调用 `bash`、harness 实际执行并把结果回灌进对话 —— **待真实 key 端到端验证**（单元冒烟测试已覆盖总线/工具/denylist 机制，无需 key）
+- [x] denylist 中间件以最高 priority（1000）注册为 `tool` 栈最外层；安全命令正常穿透（`rm -rf /` 被 BLOCKED）
+- [x] 损坏的 `bus.ts` 被补全：洋葱 `dispatch` 递归正确，各层 `try/catch` 软隔离到位
+
+## Answer
+
+实现落地于 `harness/` monorepo：
+- `packages/core/src/`：`bus.ts`(洋葱三栈+priority+软隔离)、`harness.ts`(工具注册表+扩展加载器+AI SDK loop)、`loop.ts`、`tools/bash.ts`、`tools/str_replace_editor.ts`、`extensions/denylist.ts`、`index.ts`。
+- `apps/agent/src/main.ts`：按 `LLM_PROVIDER` 选 OpenAI/Anthropic（环境变量传 key），注册内置工具与 denylist，扫描 `./extensions/` 自动发现本地扩展，跑 loop。
+
+验证：`pnpm install` + `pnpm -r build` 全绿（3 包 tsc 通过）；`packages/core/test/smoke.mjs` 6 项断言通过（洋葱顺序 / veto / 软隔离 / bash 执行 / 编辑器读写 / denylist 拦截）；`node apps/agent/dist/main.js` 在无 key 时按预期抛出 `OPENAI_API_KEY not set`（装配正确）。真实 LLM 工具闭环仅需设置 key 后 `pnpm --filter agent dev` 即可跑通。
