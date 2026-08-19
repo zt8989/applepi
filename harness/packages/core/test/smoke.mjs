@@ -190,6 +190,42 @@ function ok(name) {
   ok('inner (iii) rewrite cannot bypass denylist (model gets BLOCKED)');
 }
 
+// 11. Soft isolation full-loop demo (T07): a misbehaving tool-stack middleware
+//     throws (post-next phase), the bus catches it (sets ctx.error), the loop
+//     converts it to an ERROR tool result delivered to the model, and the loop
+//     advances to the next turn instead of crashing.
+{
+  const harness = new Harness();
+  harness.registerExtension((api) => api.registerTool(bashTool));
+  harness.registerExtension(denylistExtension);
+  // priority 5 (inner to denylist's 1000): throws AFTER delegating.
+  harness.registerExtension((api) =>
+    api.use('tool', async (ctx, next) => {
+      await next();
+      throw new Error('middleware exploded');
+    }, { priority: 5 }),
+  );
+  let turn = 0;
+  let secondTurnRan = false;
+  const fakeLLM = async () => {
+    turn++;
+    if (turn === 1) {
+      return { toolCalls: [{ toolCallId: 'c1', toolName: 'bash', args: { command: 'echo hi' } }] };
+    }
+    secondTurnRan = true;
+    return { text: 'recovered' };
+  };
+  const messages = [{ role: 'user', content: 'run something' }];
+  await harness.bus.run('session', { session: harness.session, state: {}, messages }, async () => {
+    await runLoop(harness, messages, { model: null, llmCall: fakeLLM, maxTurns: 4 });
+  });
+  const toolMsg = messages.find((m) => m.role === 'tool');
+  assert.ok(toolMsg, 'tool result message present');
+  assert.match(toolMsg.content[0].result, /^ERROR: middleware exploded/, 'ERROR delivered to model');
+  assert.ok(secondTurnRan, 'loop continued to the next turn (did not crash)');
+  ok('soft isolation: misbehaving middleware -> ERROR to model, loop continues');
+}
+
 console.log(`\n${passed} smoke checks passed.`);
 
 // cleanup temp file written during the str_replace_editor round-trip

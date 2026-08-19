@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — 核心运行时 + 端到端 agent loop
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] 一个故意抛错的中间件产生 `ERROR` 结果交付给模型
 - [ ] agent loop 在出错后仍能继续后续轮次，不崩溃

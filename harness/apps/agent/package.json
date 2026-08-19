@@ -11,7 +11,8 @@
     "check-denylist": "pnpm --filter @harness/core build && tsx scripts/check-denylist.ts",
     "check-memory": "pnpm --filter @harness/extensions build && tsx scripts/check-memory.ts",
     "check-skills": "pnpm --filter @harness/extensions build && tsx scripts/check-skills.ts",
-    "check-mcp": "pnpm --filter @harness/extensions build && tsx scripts/check-mcp.ts"
+    "check-mcp": "pnpm --filter @harness/extensions build && tsx scripts/check-mcp.ts",
+    "check-soft-isolation": "tsx scripts/check-soft-isolation.ts"
   },
   "dependencies": {
     "@harness/core": "workspace:*",

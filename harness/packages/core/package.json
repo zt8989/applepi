@@ -11,7 +11,8 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test": "node test/smoke.mjs"
   },
   "dependencies": {
     "ai": "^4.0.0",
