@@ -87,3 +87,24 @@ mutate a build context, exactly like the other three stacks.
   instead of a string; `contributorSections()` is gone. In-repo call sites are
   migrated (check-skills / check-session / check-permission / test/skills.mjs
   updated accordingly).
+
+## Amendment (2026-08-19, follow-up grill): all events go through `emit(event)`
+
+The follow-up discussion removed the last bespoke method. `HarnessApi`
+no longer exposes `emitSystemPrompt()` or `appendEvent()`; it exposes a
+**single publish entry `emit(event, payload?)`**:
+
+- **Core-handled event** — `system_prompt` is registered in the harness's
+  internal handler map: rebuild the prompt via the `system_prompt` stack,
+  persist it (the private `persistSystemPrompt` path: start event + system
+  message + end event, ADR-0006 pair kept), and return `{ prompt, sections }`
+  so callers can log sections.
+- **Fallback** — any other event (`skill/start|end`, `reload/start|end`,
+  `level/set`) writes a lifecycle event line to the session store (P7).
+- `RunOpts.emitSystemPrompt` is renamed to `RunOpts.persistSystemPrompt` —
+  it is a run-time flag (persist the built prompt this run), not an event;
+  `run()` keeps calling the single `persistSystemPrompt` path directly to
+  avoid a double build.
+- All in-repo callers migrated: `main.ts` (startup, `/reload`, `/new`),
+  `permission.ts` (`/level`), `check-session.ts`. `SessionStore.appendEvent`
+  remains as the storage primitive (core-owned, P6).

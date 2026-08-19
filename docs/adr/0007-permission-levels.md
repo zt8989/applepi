@@ -62,9 +62,9 @@ discovering it by hitting blocks.
   (Q10=c); since ADR-0008 it is a `system_prompt`-stack middleware that
   pushes the section + `permission` label. The prompt is rebuilt on session
   start, `/resume`, and immediately after every `/level` switch (via
-  `emitSystemPrompt`, whose newest system message replaces `message[0]` on
-  replay — ADR-0002). Other prompt sections (base, skills) are unaffected
-  (Q15).
+  `emit('system_prompt')`, the single event-publish entry; its newest system
+  message replaces `message[0]` on replay — ADR-0002). Other prompt sections
+  (base, skills) are unaffected (Q15).
 - **Only the user can change the level (Q7)** — `/level <readonly|workspace|fullaccess>`
   is a **user-driven** slash command; the model has **no tool** to change
   levels (no self-privilege-escalation). The command writes `level/set`,

@@ -76,12 +76,16 @@ interface HarnessApi {
   registerToolFilter(fn: ToolFilter): void;  // 裁剪模型可见的工具 schema（ADR-0007）
   registerSlashCommand(name, handler): void; // 注册 slash 命令（ADR-0007 Q13）
   getSlashCommand(name): SlashHandler | undefined;
-  emitSystemPrompt(): Promise<{ prompt: string; sections: string[] }>; // 重建+持久化（ADR-0008）
-  appendEvent(event, payload?): Promise<void>; // 写生命周期事件到 jsonl（P7）
+  emit(event, payload?): Promise<any>;       // 发布事件（唯一入口，ADR-0008 演进）
   ctx: SessionContext;                        // 会话状态读写
   getTools(): ToolSpec[];
 }
 ```
+
+**事件发布（emit）**：所有事件统一走 `emit(event, payload)`——没有逐事件的专用
+方法。core 内置 `system_prompt` 事件处理器（重建 + 持久化，返回
+`{ prompt, sections }`）；其余事件（`skill/start|end`、`reload/start|end`、
+`level/set`）回退为写一条生命周期事件行到 jsonl（P7）。
 
 系统提示词经 `system_prompt` 栈构建（ADR-0008）：中间件在入口
 `ctx.promptParts.push(section)`（可整体改写数组）、`ctx.sections.push(label)`，
