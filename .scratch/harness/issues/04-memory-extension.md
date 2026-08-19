@@ -4,8 +4,8 @@
 
 **Blocked by:** 01 — 核心运行时 + 端到端 agent loop
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `memory_write` 写入一个值后，后续同一会话内的 `memory_read` 能取回该值
-- [ ] 持久化落盘到本地 JSON 文件，跨工具调用不丢（文件后端）
-- [ ] 作为 `@harness/extensions` 内的参考扩展之一，接口与 Q8/(A) 一致（同进程注册，无需子进程桥）
+- [x] `memory_write` 写入一个值后，后续同一会话内的 `memory_read` 能取回该值（scratch mirror）
+- [x] 持久化落盘到本地 JSON 文件，跨工具调用不丢（文件后端）
+- [x] 作为 `@harness/extensions` 内的参考扩展之一，接口与 Q8/(A) 一致（同进程注册，无需子进程桥）

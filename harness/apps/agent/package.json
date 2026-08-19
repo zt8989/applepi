@@ -4,14 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm --filter @harness/core build && tsx src/main.ts",
+    "dev": "pnpm --filter @harness/core build && pnpm --filter @harness/extensions build && tsx src/main.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "check-ext": "tsx scripts/check-ext.ts",
-    "check-denylist": "pnpm --filter @harness/core build && tsx scripts/check-denylist.ts"
+    "check-denylist": "pnpm --filter @harness/core build && tsx scripts/check-denylist.ts",
+    "check-memory": "pnpm --filter @harness/extensions build && tsx scripts/check-memory.ts"
   },
   "dependencies": {
     "@harness/core": "workspace:*",
+    "@harness/extensions": "workspace:*",
     "@ai-sdk/openai": "^1.0.0",
     "@ai-sdk/anthropic": "^1.0.0",
     "ai": "^4.0.0",

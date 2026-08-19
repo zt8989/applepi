@@ -6,5 +6,8 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# tsx/esbuild runtime temp files
+_tmp_*
+
 # logs
 *.log
