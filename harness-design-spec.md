@@ -9,7 +9,7 @@
 
 - **性质**：**单机（本地）运行的 agent**，不是给别人 embed 的框架。（Q1，2026-08-18 更正：原答"框架"作废）
 - **极简边界**：极简的是**核心运行时**（事件总线 + 2 个内置工具 + 加载器 + 内置 agent loop）；其余皆为内部模块/扩展，无需对外暴露公共 API。（Q5）
-- **能力注入**：所有增量能力（memory / skills / mcp …）都是 extension，运行时注入。（Q2）
+- **能力注入**：所有增量能力（memory / skills …）都是 extension，运行时注入。（Q2）
 
 ---
 
@@ -23,7 +23,7 @@
 | Q5 | 极简落点 / loop | 核心运行时极简；**agent loop 内置核心** |
 | Q6 | 扩展隔离 | (a) 同进程模块，**零进程隔离**，崩了同崩 |
 | Q7 | hook 权力 | (iii) 可观察 + 可否决 + 可改写参数 |
-| Q8 | mcp 落地 | (A) 同进程注册；mcp 经 **bash + mcp-cli** 调用，无需专用桥 |
+| Q8 | mcp 落地 | ~~(A) 同进程注册；mcp 经 **bash + mcp-cli** 调用，无需专用桥~~ → **mcp 功能已移除**（Q11，2026-08-19 /grill-with-docs） |
 | Q9 | extension 契约 | 拉模式（`api.registerTool`）；`api` 暴露 `ctx`（会话状态读写） |
 | Q11 | provider 抽象 | 第三方统一层 → **Vercel AI SDK**（TS） |
 | Q12 | 加载方式 | **自动发现**（package.json `harness-ext` 字段） |
@@ -146,10 +146,10 @@ api.registerTool({
 
 ---
 
-## 8. MCP（Q8）
+## 8. MCP（Q8 → 已移除，Q11/2026-08-19）
 
-- 无专用桥。mcp server 经 **bash 工具调用 `mcp-cli <server> <tool> <args>`** 触达。
-- 可选：提供一个 `mcp` 参考扩展，封装常用 mcp-cli 调用为注册工具，提升易用性（非必需）。
+- 原方案：无专用桥，mcp server 经 **bash 工具调用 `mcp-cli <server> <tool> <args>`** 触达。
+- **现状：mcp 功能整体移除**（`mcp_call` 工具、`createMcpExtension`、check-mcp、mcp.mjs 测试全部删除；ADR-0002 会话持久化设计中经 /grill-with-docs Q11 确认）。需要时仅凭 bash 即可触达，或后续再评估 (b) 枚举 mcp-cli servers。
 
 ---
 
@@ -164,19 +164,13 @@ api.registerTool({ name: "memory_write", parameters: z.object({ key: z.string(),
 
 ### 9.2 skills 扩展
 ```ts
-// 加载 skill 的 markdown 指令，经 "llm" 中间件注入 system prompt / context。
-api.use("llm", async (ctx, next) => {
-  ctx.messages[0].content += loadSkill(ctx.activeSkill);
-  await next();
-});
+// 加载 skill 的 markdown 指令；经系统提示词贡献钩子拼入 system prompt（Q10=c，取代 llm 中间件注入）。
+api.registerTool({ name: "skill_load", parameters: z.object({ name: z.string(), content: z.string().optional(), path: z.string().optional() }), execute });
+api.addSystemPromptContributor((ctx) => renderSkills(ctx.scratch.__skills), "skills");
 ```
-- skill 表现形式：带 frontmatter 的 markdown 指令文件；激活即注入。
+- skill 表现形式：带 frontmatter 的 markdown 指令文件；激活即进入 scratch，随下次系统提示词构建（会话开始 / `/reload`）注入。
 
-### 9.3 mcp 扩展（可选）
-```ts
-// 把 mcp-cli 调用封装为注册工具，隐藏命令行细节。
-api.registerTool({ name: "mcp_call", parameters: z.object({ server: z.string(), tool: z.string(), args: z.string() }), execute: bashMcpCli });
-```
+### 9.3 ~~mcp 扩展~~（已移除，Q11）
 
 ---
 
@@ -198,8 +192,7 @@ harness/
 │       └── denylist.ts     # 特权内置扩展（最外层 tool 中间件）
 ├── extensions/             # 参考扩展
 │   ├── memory/
-│   ├── skills/
-│   └── mcp/
+│   └── skills/
 └── examples/
     └── hello-ext/          # 最小扩展示例（含 package.json harness-ext 字段）
 ```

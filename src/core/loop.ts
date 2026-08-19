@@ -16,6 +16,8 @@ export interface LoopOpts {
    * lets tests drive the loop without a real provider/API key.
    */
   llmCall?: LlmCall;
+  /** Called after each assistant/tool message is appended (used for persistence). */
+  onMessage?: (role: string, content: any) => void | Promise<void>;
 }
 
 /**
@@ -61,6 +63,7 @@ export async function runLoop(
     }
     if (assistantParts.length > 0) {
       messages.push({ role: 'assistant', content: assistantParts });
+      await opts.onMessage?.('assistant', assistantParts);
     }
 
     if (toolCalls.length === 0) break;
@@ -94,6 +97,7 @@ export async function runLoop(
       });
     }
     messages.push(...toolMessages);
+    for (const tm of toolMessages) await opts.onMessage?.('tool', tm.content);
   }
   return messages;
 }

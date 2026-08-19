@@ -44,10 +44,19 @@ export interface SessionContext {
   scratch: Record<string, any>;
 }
 
+/**
+ * A section-builder that contributes a chunk of the system prompt. Registered
+ * by the agent (base) and by extensions (e.g. skills reading session.scratch).
+ * All contributors are concatenated (in registration order) at build time.
+ */
+export type SystemPromptContributor = (ctx: SessionContext) => string | Promise<string>;
+
 /** Surface handed to every extension's setup(api). */
 export interface HarnessApi {
   registerTool(spec: ToolSpec): void;
   use(stack: HookStack, mw: Middleware, opts?: { priority?: number }): void;
+  /** Register a system-prompt section contributor (Q10=c). */
+  addSystemPromptContributor(fn: SystemPromptContributor, label?: string): void;
   ctx: SessionContext;
   getTools(): ToolSpec[];
 }

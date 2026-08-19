@@ -33,25 +33,20 @@ ok(
 );
 ok('skill_load returns confirmation', /loaded skill/.test(res));
 
-// --- llm middleware injects the skill into the system prompt ---
-const msgs = [{ role: 'user', content: 'hi' }];
-const llmCtx = { session: harness.session, state: {}, messages: msgs };
-await harness.bus.run('llm', llmCtx, async () => {});
-ok('llm middleware prepends a system message', msgs[0].role === 'system');
-const sysText = JSON.stringify(msgs[0].content);
-ok('system message contains skill content', sysText.includes('Be friendly and concise.'));
-ok('system message tagged with skill name', sysText.includes('[Skill: polite]'));
+// --- system-prompt contributor renders loaded skills (Q10=c) ---
+const built = await harness.buildSystemPrompt();
+ok('system prompt contains skill content', built.includes('Be friendly and concise.'));
+ok('system prompt tagged with skill name', built.includes('[Skill: polite]'));
+ok(
+  'contributor label is "skills"',
+  harness.contributorSections().includes('skills'),
+);
 
-// --- no skills loaded => no injection ---
+// --- no skills loaded => contributor contributes nothing ---
 const harness2 = new Harness();
 harness2.registerExtension(createSkillsExtension());
-const msgs2 = [{ role: 'user', content: 'hi' }];
-await harness2.bus.run(
-  'llm',
-  { session: harness2.session, state: {}, messages: msgs2 },
-  async () => {},
-);
-ok('no injection when no skill is loaded', msgs2[0].role === 'user');
+const empty = await harness2.buildSystemPrompt();
+ok('no injection when no skill is loaded', !empty.includes('Be friendly and concise.') && empty === '');
 
 console.log(`\n${passed} skills checks passed, ${failed} failed.`);
 process.exit(failed ? 1 : 0);
