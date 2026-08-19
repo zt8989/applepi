@@ -8,8 +8,8 @@
 **核心运行时只保留骨架，不含任何具体能力。**
 
 `@applepi/core` 仅包含：洋葱事件总线、加载器、内置 agent loop、会话存储、
-LLM 配置解析。**不含工具**——`bash`、`str_replace_editor`、denylist 全部在
-`@applepi/extensions`（ADR-0005）。
+LLM 配置解析。**不含工具**——`bash`、`str_replace_editor`、权限级别系统
+（含 denylist 底线）全部在 `@applepi/extensions`（ADR-0005/0007）。
 
 - 依据：Q5（极简落点）、ADR-0005。
 - 后果：核心的消费方（如未来 web UI）不会被迫继承 shell 访问与安全策略。
@@ -38,12 +38,14 @@ LLM 配置解析。**不含工具**——`bash`、`str_replace_editor`、denylis
 
 **"最外层"是洋葱总线的注册约定（priority 1000），不是代码在哪个包里。**
 
-denylist 的安全性来自挂在 `tool` 栈最外层，在退出阶段审计内层改写后的
-**最终命令**。它从 core 移入 extensions、改写为纯中间件后，安全属性不变
-（ADR-0005 Q3=A）。
+安全扩展的安全性来自挂在 `tool` 栈最外层，在退出阶段审计内层改写后的
+**最终参数**。denylist 从 core 移入 extensions、改写为纯中间件后，这一性质
+不变（ADR-0005 Q3=A）；ADR-0007 将 denylist 演进为权限级别系统
+（`readonly`/`workspace`/`fullaccess`），中间件仍挂 priority 1000，denylist
+黑名单成为任何级别下都生效的绝对底线。
 
-- 依据：Q16（修订）、ADR-0005。
-- 后果：组装扩展集的消费者**有责任**把安全中间件挂到 priority 1000；
+- 依据：Q16（修订）、ADR-0005、ADR-0007。
+- 后果：组装扩展集的消费者**有责任**把权限中间件挂到 priority 1000；
   `baseExtension` 默认如此，自组装者自行承担。
 - 判据：不要用"放在核心/特权目录"来假装安全；安全必须体现在挂载约定上。
 

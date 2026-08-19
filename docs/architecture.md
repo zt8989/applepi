@@ -12,13 +12,13 @@
 ┌─────────────────────────────────────────────────────────────┐
 │  apps/agent  (@applepi/agent)                               │
 │  REPL 主入口 · main.ts 组装 core + extensions + provider     │
-│  extensions/ 本地 *.ext.ts · scripts/ 六个 key-free 检查     │
+│  extensions/ 本地 *.ext.ts · scripts/ 七个 key-free 检查     │
 └───────────────▲─────────────────────────────────────────────┘
                 │ 依赖：agent → extensions → core（单向）
 ┌───────────────┴─────────────────────────────────────────────┐
 │  packages/extensions  (@applepi/extensions)                 │
 │  参考工具 bash / str_replace_editor                          │
-│  安全扩展 denylistMiddleware（纯中间件）                     │
+│  安全扩展 权限级别系统（permission，含 denylist 底线）        │
 │  baseExtension（一键还原默认能力集）· memory · skills         │
 └───────────────▲─────────────────────────────────────────────┘
                 │ 依赖：extensions → core（单向）
@@ -81,8 +81,9 @@ interface HarnessApi {
 ### 3.4 `baseExtension`（默认能力集）
 
 `@applepi/extensions` 导出一个 `SetupFn`：注册参考工具 `bashTool` +
-`strReplaceEditorTool`，并以 **priority 1000** 挂载 `denylistMiddleware`
-（最外层）。一行调用即可还原旧版 `main.ts` 的全部接线：
+`strReplaceEditorTool`，并挂载权限扩展（`createPermissionExtension`——权限中间件
+priority 1000 最外层 + 工具裁剪 + 权限提示词段落 + `/level` 命令）。一行调用即可
+还原默认能力集：
 
 ```ts
 harness.registerExtension(baseExtension);
@@ -147,16 +148,23 @@ api.registerTool({
 
 核心在注册时把 `ToolSpec` 转成 AI SDK `tool()`，并入 `generateText({ tools })`。
 
-## 7. 安全模型
+## 7. 安全模型（Permission Levels, ADR-0007）
 
-- **denylist = 纯中间件**（`denylistMiddleware`），由 `@applepi/extensions` 提供，
-  不是核心内置。
-- **"最外层"是注册约定**：在 `tool` 栈以 priority 1000 挂载（`baseExtension`
-  默认如此），洋葱退出阶段审的是内层改写后的**最终命令**，命中黑名单即 veto。
-- **信任边界**：extension 同进程 = 等价授信；denylist 防的是**模型自主用 bash
-  犯错**，不是防扩展。
-- 消费者若自行组装扩展集，**必须**把 `denylistMiddleware` 挂在 priority 1000
-  才能保持闭环（ADR-0005 Q3=A）。
+- **权限级别系统**：`readonly` / `workspace` / `fullaccess`，会话级单一主级别，统一作用于所有工具。
+  每个级别由「可读 × 可写」两维构成——读一律全盘，写范围分级（readonly 不可写；workspace 仅限
+  project root=cwd realpath 内；fullaccess 任意）。
+- **双层机制**：注册面裁剪（`registerToolFilter` 裁剪模型可见的工具 schema，readonly 下
+  `str_replace_editor` 只剩 `view`、`memory_write` 隐藏）+ 运行时拦截（`permissionMiddleware`
+  挂 tool 栈 priority 1000 最外层，ENTRY veto + EXIT 审计内层改写后的最终参数）。
+- **denylist 底线**：原 8 条危险正则作为**任何级别下都生效的绝对底线**，内嵌于权限中间件
+  （`fullaccess` 也不允许 `rm -rf`、fork bomb 等）。
+- **提示词携带级别**：权限扩展贡献「Permission Level」系统提示词段落（级别声明 + 可用能力清单），
+  启动/恢复/`/level` 切换时重建。
+- **级别持久化**：`level/set` 事件写入会话 jsonl；当前级别 = 最后一个 `level/set` 事件的
+  `payload.level`，无则默认 `workspace`（`SessionStore.lastEvent` 读取，`restorePermissionLevel` 恢复）。
+- **只有用户能改级别**：`/level <readonly|workspace|fullaccess>` 是用户驱动的 slash 命令
+  （`registerSlashCommand` 扩展点），模型没有改级别工具（防自我提权）。
+- **信任边界**：extension 同进程 = 等价授信；权限系统防的是**模型自主用工具犯错**，不是防扩展。
 
 ## 8. 会话持久化
 
@@ -218,9 +226,9 @@ applepi/
 
 - **构建策略**：build-first，跑 agent / check 前先构建依赖包（`pnpm -r build`
   拓扑序自动处理）。
-- **验证**：`pnpm verify` = build + 各包测试 + 六个 key-free 检查脚本
-  （`check-soft-isolation` / `check-session` / `check-skills` /
-  `check-memory` / `check-denylist` / `check-config`）。
+- **验证**：`pnpm verify` = build + 各包测试 + 七个 key-free 检查脚本
+  （`check-ext` / `check-soft-isolation` / `check-session` / `check-skills` /
+  `check-memory` / `check-denylist` / `check-permission`）。
 
 ## 11. 已移除：MCP
 
@@ -231,5 +239,5 @@ check-mcp、相关测试与文档全部删除。需要外部集成时凭 bash �
 ## 12. 待确认项
 
 1. `SessionContext` 字段（history / config / scratch）的精确结构。
-2. denylist 默认黑名单/白名单的具体内容。
+2. ~~denylist 默认黑名单/白名单的具体内容~~ → 已由 ADR-0007 确认：denylist 8 条危险正则作为底线 + 权限级别白名单/路径规则。
 3. 是否生成最小可运行脚手架（含 AI SDK 接入，需 API key）。
