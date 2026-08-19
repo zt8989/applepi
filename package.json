@@ -1,0 +1,30 @@
+{
+  "name": "harness",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.30.3",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/agent/main.ts",
+    "start": "node dist/agent/main.js",
+    "test": "pnpm build && node src/core/test/smoke.mjs && node src/extensions/test/memory.mjs && node src/extensions/test/skills.mjs && node src/extensions/test/mcp.mjs",
+    "check-ext": "tsx src/agent/scripts/check-ext.ts",
+    "check-denylist": "tsx src/agent/scripts/check-denylist.ts",
+    "check-memory": "tsx src/agent/scripts/check-memory.ts",
+    "check-skills": "tsx src/agent/scripts/check-skills.ts",
+    "check-mcp": "tsx src/agent/scripts/check-mcp.ts",
+    "check-soft-isolation": "tsx src/agent/scripts/check-soft-isolation.ts",
+    "verify": "pnpm test && pnpm run check-ext && pnpm run check-denylist && pnpm run check-memory && pnpm run check-skills && pnpm run check-mcp && pnpm run check-soft-isolation"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^1.0.0",
+    "@ai-sdk/anthropic": "^1.0.0",
+    "ai": "^4.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

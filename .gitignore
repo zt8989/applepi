@@ -11,3 +11,9 @@ _tmp_*
 
 # logs
 *.log
+
+# harness runtime/test artifacts
+_smoke_tmp.txt
+_deny_sentinel.txt
+_empty_ext_dir/
+harness-memory.json

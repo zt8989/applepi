@@ -38,7 +38,7 @@ Multi-context repo (presence of `CONTEXT-MAP.md` at the root):
         └── docs/adr/
 ```
 
-Note: this repo contains a pnpm monorepo under `harness/` (`packages/core`, `packages/extensions`, `apps/agent`), but it is a single product — keep `CONTEXT.md` single-context at the repo root unless the monorepo grows genuinely separate bounded contexts.
+Note: this repo is a single pnpm package at the repo root with a flat `src/` layout (`src/core`, `src/extensions`, `src/agent`), but it is a single product — keep `CONTEXT.md` single-context at the repo root unless the project grows genuinely separate bounded contexts.
 
 ## Use the glossary's vocabulary
 

@@ -1,6 +1,6 @@
 # CONTEXT.md
 
-Project: a minimal **single-machine agent harness** (pnpm monorepo under `harness/`).
+Project: a minimal **single-machine agent harness** (single pnpm package at the repo root).
 
 ## Glossary
 
@@ -13,10 +13,10 @@ Project: a minimal **single-machine agent harness** (pnpm monorepo under `harnes
 
 ## Key decisions (locked)
 
-Full spec: `harness-design-spec.md`. Monorepo layout:
+Full spec: `harness-design-spec.md`. Flat package layout (single package at the repo root):
 
-- `packages/core` — the harness runtime (`@harness/core`)
-- `packages/extensions` — reference extensions: memory / skills / mcp (`@harness/extensions`)
-- `apps/agent` — the local agent that wires core + extensions + a provider and runs the loop
+- `src/core` — the harness runtime (onion bus, two built-in tools, loader, built-in loop)
+- `src/extensions` — reference extensions: memory / skills / mcp
+- `src/agent` — the local agent: `main.ts` wires core + extensions + a provider and runs the loop; `extensions/` holds local `*.ext.ts`; `scripts/` holds the key-free verification checks
 
 Architecture decisions are recorded as ADR-0001.
