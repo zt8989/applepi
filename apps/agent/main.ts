@@ -7,7 +7,7 @@ import {
   resolveLlmConfig,
   type ResolvedLlmConfig,
 } from '@applepi/core';
-import { baseExtension } from '@applepi/extensions';
+import { baseExtension, restorePermissionLevel } from '@applepi/extensions';
 
 const extDir = new URL('../extensions/', import.meta.url).pathname;
 
@@ -29,7 +29,7 @@ function buildModel(cfg: ResolvedLlmConfig): any {
   return createOpenAI(providerSettings)(cfg.model);
 }
 
-/** Build a fully-wired Harness: baseExtension (reference tools + denylist) + local extensions + base contributor. */
+/** Build a fully-wired Harness: baseExtension (reference tools + permission system) + local extensions + base contributor. */
 async function boot(store: SessionStore): Promise<{ harness: Harness; loaded: string[] }> {
   const harness = new Harness();
   harness.registerExtension(baseExtension);
@@ -38,6 +38,9 @@ async function boot(store: SessionStore): Promise<{ harness: Harness; loaded: st
   );
   const loaded = await harness.loadExtensionsFromDir(extDir);
   harness.attachSession(store);
+  // Restore the session's permission level from the last `level/set` event
+  // (ADR-0007 Q3/Q11); default `workspace` when absent.
+  await restorePermissionLevel(store, harness.session.scratch);
   return { harness, loaded };
 }
 
@@ -69,6 +72,7 @@ const HELP = [
   '  /resume <id>     switch to and continue session <id>',
   '  /new             start a fresh session',
   '  /sessions        list sessions in this workspace',
+  '  /level <readonly|workspace|fullaccess>   set the permission level (user-only)',
   '  /help            show this help',
   '  /exit            quit (or Ctrl-D)',
 ].join('\n');
@@ -113,6 +117,20 @@ rl.on('line', async (raw) => {
   if (line.startsWith('/')) {
     const [cmd, ...rest] = line.split(/\s+/);
     const arg = rest.join(' ');
+
+    // Extension-registered slash commands take precedence over built-ins
+    // (ADR-0007 Q13=a): `/level` is provided by the permission extension.
+    const extHandler = harness.api.getSlashCommand(cmd);
+    if (extHandler) {
+      try {
+        console.log(await extHandler(arg, harness.api));
+      } catch (e: any) {
+        console.error(`[${cmd}] error: ${e?.message}`);
+      }
+      rl.prompt();
+      return;
+    }
+
     switch (cmd) {
       case '/config': {
         try {
@@ -144,6 +162,9 @@ rl.on('line', async (raw) => {
         }
         ({ harness } = await boot(store));
         store = await harness.resume(arg);
+        // The store switched to the resumed session: re-read its last
+        // `level/set` event (ADR-0007 Q3/Q11).
+        await restorePermissionLevel(store, harness.session.scratch);
         console.log(`[resume] active session -> ${store.sessionId}`);
         break;
       }

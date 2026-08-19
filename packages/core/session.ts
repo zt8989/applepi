@@ -99,7 +99,6 @@ export class SessionStore {
       .map((l) => l.trim())
       .filter(Boolean)
       .map((l) => JSON.parse(l));
-
     const messages = lines.filter((l): l is SessionMessage => l.kind === 'message');
 
     // ADR-0006: event field carries type+phase (e.g. "reload/start"). The `?.`
@@ -121,6 +120,32 @@ export class SessionStore {
     }
 
     return { sessionId: this.sessionId, workspace: this.workspace, messages: result };
+  }
+
+  /**
+   * Read the LAST event with the given name (e.g. `level/set`), or null if
+   * none exists. Scans the file from the tail so the most recent occurrence
+   * wins; the file is never mutated. Events are otherwise discarded by
+   * `load()`, so this is the read primitive for state that lives in events.
+   */
+  async lastEvent(name: string): Promise<SessionEvent | null> {
+    if (!this.sessionId) throw new Error('SessionStore: no session id (call create() first)');
+    let raw: string;
+    try {
+      raw = await fs.readFile(this.filePath(), 'utf8');
+    } catch {
+      return null; // fresh session with no lines yet
+    }
+    const lines: SessionLine[] = raw
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const l = lines[i];
+      if (l.kind === 'event' && l.event === name) return l;
+    }
+    return null;
   }
 
   /** List session ids in this workspace (filenames without extension). */

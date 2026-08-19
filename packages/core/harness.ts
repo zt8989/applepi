@@ -8,7 +8,9 @@ import type {
   Middleware,
   SessionContext,
   SetupFn,
+  SlashHandler,
   SystemPromptContributor,
+  ToolFilter,
   ToolSpec,
 } from './types.js';
 
@@ -31,6 +33,8 @@ export class Harness {
   sessionStore: SessionStore | null = null;
   private tools = new Map<string, ToolSpec>();
   private systemPromptContributors: Contributor[] = [];
+  private toolFilters: ToolFilter[] = [];
+  private slashCommands = new Map<string, SlashHandler>();
 
   constructor(opts: { workspace?: string } = {}) {
     this.workspace = opts.workspace ?? slugWorkspace(process.cwd());
@@ -50,6 +54,22 @@ export class Harness {
         label: label ?? `contributor-${this.systemPromptContributors.length}`,
         fn,
       });
+    },
+    registerToolFilter: (fn: ToolFilter) => {
+      this.toolFilters.push(fn);
+    },
+    registerSlashCommand: (name: string, handler: SlashHandler) => {
+      const key = name.replace(/^\//, '');
+      if (this.slashCommands.has(key)) {
+        throw new Error(`slash command "/${key}" already registered`);
+      }
+      this.slashCommands.set(key, handler);
+    },
+    getSlashCommand: (name: string) =>
+      this.slashCommands.get(name.replace(/^\//, '')),
+    emitSystemPrompt: () => this.emitSystemPrompt(),
+    appendEvent: async (event: string, payload: any = {}) => {
+      await this.sessionStore?.appendEvent(event, payload);
     },
     ctx: this.session,
     getTools: () => [...this.tools.values()],
@@ -87,11 +107,23 @@ export class Harness {
     return loaded;
   }
 
-  /** Convert registered tools into Vercel AI SDK tool defs (no execute). */
+  /**
+   * Convert registered tools into Vercel AI SDK tool defs (no execute).
+   * Registered ToolFilters crop/rewrite what the model sees, applied in
+   * registration order; `null` hides the tool (ADR-0007 Q14=b).
+   */
   buildToolDefs(): Record<string, { description: string; parameters: ToolSpec['parameters'] }> {
     const defs: Record<string, { description: string; parameters: ToolSpec['parameters'] }> = {};
     for (const t of this.tools.values()) {
-      defs[t.name] = { description: t.description, parameters: t.parameters };
+      let def: { description: string; parameters: ToolSpec['parameters'] } | null = {
+        description: t.description,
+        parameters: t.parameters,
+      };
+      for (const filter of this.toolFilters) {
+        def = filter(t.name, def);
+        if (def === null) break; // once hidden, later filters cannot revive it
+      }
+      if (def !== null) defs[t.name] = def;
     }
     return defs;
   }

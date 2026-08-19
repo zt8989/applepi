@@ -7,6 +7,11 @@ import type { Middleware } from '@applepi/core';
  * of its "privileged" status (ADR-0005, Q3=A): a consumer that assembles its
  * own extension set must mount it at priority 1000 to keep the same guarantee.
  *
+ * Since ADR-0007, the denylist is the ABSOLUTE FLOOR of the permission-level
+ * system: it fires at every level (including `fullaccess`). `permissionMiddleware`
+ * composes it with level checks (scope & write permission); the denylist itself
+ * stays exported for the `check-denylist.ts` closed-loop test.
+ *
  * Two-stage check (Q16 / spec §7):
  *  - ENTRY: the model-issued command is inspected before any execution. If it
  *    matches, we veto (return without calling next) so the command NEVER runs.
@@ -24,7 +29,7 @@ import type { Middleware } from '@applepi/core';
  * scope. The exit check is defense-in-depth so that even a trusted rewrite to a
  * dangerous command yields BLOCKED to the model rather than a real result.
  */
-const DENY: RegExp[] = [
+export const DENY: RegExp[] = [
   /rm\s+-rf\b/,
   /rm\s+-r\s+\//,
   /sudo\s+rm\b/,

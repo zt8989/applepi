@@ -13,6 +13,23 @@ export interface ToolSpec {
   execute: (args: any, ctx: Ctx) => Promise<string> | string;
 }
 
+/** The model-facing shape of a tool (description + zod parameters, no execute). */
+export interface ToolDef {
+  description: string;
+  parameters: ZodType<any>;
+}
+
+/**
+ * Model-facing tool cropper (ADR-0007 Q14=b). Applied by `buildToolDefs()` in
+ * registration order: returning `null` hides the tool from the model; returning
+ * a new `ToolDef` rewrites its description/parameters (e.g. cropping an
+ * enum). Once `null`, the tool stays hidden — later filters cannot revive it.
+ */
+export type ToolFilter = (toolName: string, def: ToolDef) => ToolDef | null;
+
+/** Slash-command handler. Returns the text to print in the REPL. */
+export type SlashHandler = (arg: string, api: HarnessApi) => string | Promise<string>;
+
 /**
  * Onion middleware. Inspect/mutate ctx before calling next(),
  * and again after next() returns. Not calling next() = veto.
@@ -57,6 +74,16 @@ export interface HarnessApi {
   use(stack: HookStack, mw: Middleware, opts?: { priority?: number }): void;
   /** Register a system-prompt section contributor (Q10=c). */
   addSystemPromptContributor(fn: SystemPromptContributor, label?: string): void;
+  /** Crop what the model sees in buildToolDefs() (ADR-0007 Q14=b). */
+  registerToolFilter(fn: ToolFilter): void;
+  /** Register a slash command; dispatch checks these before built-ins (Q13=a). */
+  registerSlashCommand(name: string, handler: SlashHandler): void;
+  /** Look up an extension-registered slash command (undefined if absent). */
+  getSlashCommand(name: string): SlashHandler | undefined;
+  /** Rebuild + persist the system prompt (session start / /reload / /level). */
+  emitSystemPrompt(): Promise<string>;
+  /** Append a lifecycle event to the session store, if attached (P7). */
+  appendEvent(event: string, payload?: any): Promise<void>;
   ctx: SessionContext;
   getTools(): ToolSpec[];
 }

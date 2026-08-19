@@ -16,6 +16,7 @@
     "dev": "pnpm --filter @applepi/core build && pnpm --filter @applepi/extensions build && tsx main.ts",
     "check-ext": "pnpm --filter @applepi/core build && pnpm --filter @applepi/extensions build && tsx scripts/check-ext.ts",
     "check-denylist": "pnpm --filter @applepi/core build && pnpm --filter @applepi/extensions build && tsx scripts/check-denylist.ts",
+    "check-permission": "pnpm --filter @applepi/core build && pnpm --filter @applepi/extensions build && tsx scripts/check-permission.ts",
     "check-memory": "pnpm --filter @applepi/core build && pnpm --filter @applepi/extensions build && tsx scripts/check-memory.ts",
     "check-skills": "pnpm --filter @applepi/core build && pnpm --filter @applepi/extensions build && tsx scripts/check-skills.ts",
     "check-session": "pnpm --filter @applepi/core build && pnpm --filter @applepi/extensions build && tsx scripts/check-session.ts",

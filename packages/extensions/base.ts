@@ -1,22 +1,25 @@
 import type { SetupFn } from '@applepi/core';
 import { bashTool } from './tools/bash.js';
 import { strReplaceEditorTool } from './tools/str_replace_editor.js';
-import { denylistMiddleware } from './denylist.js';
+import { createPermissionExtension } from './permission.js';
 
 /**
- * baseExtension — the default capability set for an agent (ADR-0005, Q2).
- * One `setup(api)` call registers:
+ * baseExtension — the default capability set for an agent (ADR-0005 Q2,
+ * extended by ADR-0007). One `setup(api)` call registers:
  *  - the two reference tools (`bash`, `str_replace_editor`)
- *  - the security extension (`denylistMiddleware`) mounted OUTERMOST
- *    (priority 1000), so it enters first and exits last.
+ *  - the permission extension (`createPermissionExtension`): permission
+ *    middleware mounted OUTERMOST (priority 1000) + tool-surface cropper +
+ *    「Permission Level」 system-prompt section + `/level` slash command.
  *
- * The denylist's "privileged" status is a registration convention, not a
- * runtime guarantee: any consumer that assembles its own extension set must
- * mount `denylistMiddleware` at priority 1000 to keep the same closed loop.
- * Individual pieces remain exported for targeted use/tests (Q7=A).
+ * The permission middleware embeds the denylist (`DENY`) as the absolute
+ * floor at every level (ADR-0007 Q4); the security property of ADR-0005 (the
+ * outermost registration convention that audits the FINAL command after inner
+ * rewrites) is unchanged. Individual pieces remain exported for targeted
+ * use/tests (Q7=A / Q12): `denylistMiddleware` (floor only) and
+ * `permissionMiddleware` (floor + level checks).
  */
 export const baseExtension: SetupFn = (api) => {
   api.registerTool(bashTool);
   api.registerTool(strReplaceEditorTool);
-  api.use('tool', denylistMiddleware, { priority: 1000 });
+  createPermissionExtension()(api);
 };

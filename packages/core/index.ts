@@ -21,6 +21,9 @@ export type {
 export type {
   HookStack,
   ToolSpec,
+  ToolDef,
+  ToolFilter,
+  SlashHandler,
   Middleware,
   Ctx,
   SessionContext,
