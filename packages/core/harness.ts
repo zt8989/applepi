@@ -9,15 +9,9 @@ import type {
   SessionContext,
   SetupFn,
   SlashHandler,
-  SystemPromptContributor,
   ToolFilter,
   ToolSpec,
 } from './types.js';
-
-interface Contributor {
-  label: string;
-  fn: SystemPromptContributor;
-}
 
 export interface RunOpts {
   maxTurns?: number;
@@ -26,13 +20,19 @@ export interface RunOpts {
   emitSystemPrompt?: boolean;
 }
 
+/** Result of one system-prompt build (ADR-0008). */
+export interface BuiltSystemPrompt {
+  prompt: string;
+  /** Labels of the sections actually contributed during this build. */
+  sections: string[];
+}
+
 export class Harness {
   readonly bus = new OnionBus();
   readonly workspace: string;
   session: SessionContext = { history: [], config: {}, scratch: {} };
   sessionStore: SessionStore | null = null;
   private tools = new Map<string, ToolSpec>();
-  private systemPromptContributors: Contributor[] = [];
   private toolFilters: ToolFilter[] = [];
   private slashCommands = new Map<string, SlashHandler>();
 
@@ -49,12 +49,6 @@ export class Harness {
     },
     use: (stack: HookStack, mw: Middleware, opts?: { priority?: number }) =>
       this.bus.use(stack, mw, opts),
-    addSystemPromptContributor: (fn: SystemPromptContributor, label?: string) => {
-      this.systemPromptContributors.push({
-        label: label ?? `contributor-${this.systemPromptContributors.length}`,
-        fn,
-      });
-    },
     registerToolFilter: (fn: ToolFilter) => {
       this.toolFilters.push(fn);
     },
@@ -128,17 +122,22 @@ export class Harness {
     return defs;
   }
 
-  /** Assemble the system prompt from all registered contributors (base + extensions). */
-  async buildSystemPrompt(): Promise<string> {
-    const parts = await Promise.all(
-      this.systemPromptContributors.map((c) => c.fn(this.session)),
-    );
-    return parts.filter((p) => typeof p === 'string' && p.length > 0).join('\n\n');
-  }
-
-  /** Labels of the registered contributors (for the system_prompt event payload). */
-  contributorSections(): string[] {
-    return this.systemPromptContributors.map((c) => c.label);
+  /**
+   * Assemble the system prompt by running the `system_prompt` onion stack
+   * (ADR-0008). Middleware push sections into `ctx.promptParts` on entry and
+   * push their label into `ctx.sections` (only when they actually contribute
+   * content); the harness joins parts with `\n\n` and returns the build-time
+   * section list (Q7=b, Q8=a). Middleware must call `next()`; veto only skips
+   * later sections, it never blocks persistence (Q6=a).
+   */
+  async buildSystemPrompt(): Promise<BuiltSystemPrompt> {
+    const ctx: Ctx = { session: this.session, state: {}, promptParts: [], sections: [] };
+    await this.bus.run('system_prompt', ctx, async () => {});
+    const prompt = (ctx.promptParts ?? [])
+      .filter((p) => typeof p === 'string' && p.trim().length > 0)
+      .map((p) => p.trim())
+      .join('\n\n');
+    return { prompt, sections: ctx.sections ?? [] };
   }
 
   /** Attach a session store and install the skill-load event logger (tool stack). */
@@ -171,15 +170,14 @@ export class Harness {
   }
 
   /** Persist a fresh `system_prompt` event + message line (no user turn side effects). */
-  async emitSystemPrompt(): Promise<string> {
-    const systemPrompt = await this.buildSystemPrompt();
+  async emitSystemPrompt(): Promise<BuiltSystemPrompt> {
+    const built = await this.buildSystemPrompt();
     if (this.sessionStore) {
-      const sections = this.contributorSections();
-      await this.sessionStore.appendEvent('system_prompt/start', { sections });
-      await this.sessionStore.appendMessage('system', systemPrompt);
-      await this.sessionStore.appendEvent('system_prompt/end', { sections });
+      await this.sessionStore.appendEvent('system_prompt/start', { sections: built.sections });
+      await this.sessionStore.appendMessage('system', built.prompt);
+      await this.sessionStore.appendEvent('system_prompt/end', { sections: built.sections });
     }
-    return systemPrompt;
+    return built;
   }
 
   /** Enumerate sessions in the current workspace (delegates to core SessionStore). */
@@ -222,11 +220,10 @@ export class Harness {
   /** Run a full session turn: persist system/user/assistant/tool, record history. */
   async run(prompt: string, model: any, opts: RunOpts = {}): Promise<any[]> {
     const emitSystem = opts.emitSystemPrompt ?? false;
-    const systemPrompt = await this.buildSystemPrompt();
+    const { prompt: systemPrompt, sections } = await this.buildSystemPrompt();
 
     const messages: any[] = [];
     if (emitSystem && this.sessionStore) {
-      const sections = this.contributorSections();
       await this.sessionStore.appendEvent('system_prompt/start', { sections });
       await this.sessionStore.appendMessage('system', systemPrompt);
       await this.sessionStore.appendEvent('system_prompt/end', { sections });

@@ -11,7 +11,7 @@ import { baseExtension, restorePermissionLevel } from '@applepi/extensions';
 
 const extDir = new URL('../extensions/', import.meta.url).pathname;
 
-/** Base system-prompt section contributed by the agent (Q10=c). */
+/** Base system-prompt section contributed by the agent (Q10=c, ADR-0008). */
 function buildBaseSystemPrompt(): string {
   return [
     'You are a minimal local agent harness.',
@@ -29,12 +29,18 @@ function buildModel(cfg: ResolvedLlmConfig): any {
   return createOpenAI(providerSettings)(cfg.model);
 }
 
-/** Build a fully-wired Harness: baseExtension (reference tools + permission system) + local extensions + base contributor. */
+/** Build a fully-wired Harness: baseExtension (reference tools + permission system) + local extensions + base section. */
 async function boot(store: SessionStore): Promise<{ harness: Harness; loaded: string[] }> {
   const harness = new Harness();
   harness.registerExtension(baseExtension);
+  // Base section: outermost on the `system_prompt` stack (priority 1000) so it
+  // is appended first (ADR-0008 Q3=a).
   harness.registerExtension((api) =>
-    api.addSystemPromptContributor(() => buildBaseSystemPrompt(), 'base'),
+    api.use('system_prompt', async (ctx, next) => {
+      ctx.promptParts!.push(buildBaseSystemPrompt());
+      ctx.sections!.push('base');
+      await next();
+    }, { priority: 1000 }),
   );
   const loaded = await harness.loadExtensionsFromDir(extDir);
   harness.attachSession(store);
@@ -86,8 +92,8 @@ let { harness, loaded } = await boot(store);
 if (loaded.length) console.error(`[harness] loaded local extensions: ${loaded.join(', ')}`);
 
 // Fresh session: persist the initial system prompt once.
-await harness.emitSystemPrompt();
-console.log(`[system] system prompt built (sections: ${harness.contributorSections().join(', ')})`);
+const { sections } = await harness.emitSystemPrompt();
+console.log(`[system] system prompt built (sections: ${sections.join(', ')})`);
 
 const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: '> ' });
 const initial = process.argv[2];

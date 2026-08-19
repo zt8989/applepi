@@ -1,7 +1,7 @@
 // End-to-end check for the skills reference extension, driven without a real
 // LLM/API key. Loads the skills extension onto a real Harness and asserts that
-// loaded skills are contributed to the system prompt (Q10=c: extensions
-// contribute sections via api.addSystemPromptContributor, rebuilt on /reload).
+// loaded skills are contributed to the system prompt via the `system_prompt`
+// stack (ADR-0008; previously Q10=c contributor sections, rebuilt on /reload).
 import { Harness } from '@applepi/core';
 import { baseExtension, createSkillsExtension } from '@applepi/extensions';
 
@@ -15,7 +15,7 @@ harness.registerExtension(createSkillsExtension());
 const SKILL_CONTENT =
   'Always answer in a friendly, polite tone and start with "Hi there!".';
 
-// Before any skill is loaded the contributor contributes nothing.
+// Before any skill is loaded the section contributes nothing.
 const empty = await harness.buildSystemPrompt();
 console.log('--- system prompt (empty scratch):', JSON.stringify(empty));
 
@@ -23,13 +23,15 @@ console.log('--- system prompt (empty scratch):', JSON.stringify(empty));
 harness.session.scratch.__skills = { polite: SKILL_CONTENT };
 
 const built = await harness.buildSystemPrompt();
-console.log('--- system prompt (with skill):', built.slice(0, 220));
+console.log('--- system prompt (with skill):', built.prompt.slice(0, 220));
 
 const okInjected =
-  built.includes(SKILL_CONTENT) && built.includes('[Skill: polite]');
-const okEmpty = !empty.includes(SKILL_CONTENT);
+  built.prompt.includes(SKILL_CONTENT) && built.prompt.includes('[Skill: polite]');
+const okEmpty = !empty.prompt.includes(SKILL_CONTENT);
+const okSections =
+  !empty.sections.includes('skills') && built.sections.includes('skills');
 
-if (okInjected && okEmpty) {
+if (okInjected && okEmpty && okSections) {
   console.log('check-skills: OK');
 } else {
   console.error('check-skills: FAIL');

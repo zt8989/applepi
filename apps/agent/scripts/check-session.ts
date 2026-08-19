@@ -19,7 +19,11 @@ function boot(store: SessionStore): Harness {
   harness.registerExtension(baseExtension);
   harness.registerExtension(createSkillsExtension());
   harness.registerExtension((api) =>
-    api.addSystemPromptContributor(() => 'BASE-INSTRUCTIONS', 'base'),
+    api.use('system_prompt', async (ctx, next) => {
+      ctx.promptParts!.push('BASE-INSTRUCTIONS');
+      ctx.sections!.push('base');
+      await next();
+    }, { priority: 1000 }),
   );
   harness.attachSession(store);
   return harness;

@@ -29,7 +29,6 @@ export type {
   SessionContext,
   HarnessApi,
   SetupFn,
-  SystemPromptContributor,
   LanguageModelV1,
 } from './types.js';
 export type {

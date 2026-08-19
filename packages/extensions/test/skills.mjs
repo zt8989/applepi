@@ -33,20 +33,21 @@ ok(
 );
 ok('skill_load returns confirmation', /loaded skill/.test(res));
 
-// --- system-prompt contributor renders loaded skills (Q10=c) ---
+// --- system-prompt section renders loaded skills (Q10=c, ADR-0008) ---
 const built = await harness.buildSystemPrompt();
-ok('system prompt contains skill content', built.includes('Be friendly and concise.'));
-ok('system prompt tagged with skill name', built.includes('[Skill: polite]'));
+ok('system prompt contains skill content', built.prompt.includes('Be friendly and concise.'));
+ok('system prompt tagged with skill name', built.prompt.includes('[Skill: polite]'));
 ok(
-  'contributor label is "skills"',
-  harness.contributorSections().includes('skills'),
+  'section label is "skills" in build-time sections',
+  built.sections.includes('skills'),
 );
 
-// --- no skills loaded => contributor contributes nothing ---
+// --- no skills loaded => nothing contributed, sections empty ---
 const harness2 = new Harness();
 harness2.registerExtension(createSkillsExtension());
 const empty = await harness2.buildSystemPrompt();
-ok('no injection when no skill is loaded', !empty.includes('Be friendly and concise.') && empty === '');
+ok('no injection when no skill is loaded', !empty.prompt.includes('Be friendly and concise.') && empty.prompt === '');
+ok('no sections when nothing is contributed', empty.sections.length === 0);
 
 console.log(`\n${passed} skills checks passed, ${failed} failed.`);
 process.exit(failed ? 1 : 0);

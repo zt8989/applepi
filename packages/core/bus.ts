@@ -20,6 +20,7 @@ export class OnionBus {
     session: [],
     llm: [],
     tool: [],
+    system_prompt: [],
   };
 
   use(stack: HookStack, mw: Middleware, opts?: { priority?: number }): void {

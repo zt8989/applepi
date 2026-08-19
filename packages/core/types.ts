@@ -1,8 +1,8 @@
 import type { LanguageModelV1 } from 'ai';
 import type { ZodType } from 'zod';
 
-/** The three onion middleware stacks. */
-export type HookStack = 'session' | 'llm' | 'tool';
+/** The onion middleware stacks (ADR-0008 adds `system_prompt`). */
+export type HookStack = 'session' | 'llm' | 'tool' | 'system_prompt';
 
 /** A tool registered by core or an extension. */
 export interface ToolSpec {
@@ -49,6 +49,11 @@ export interface Ctx {
   toolName?: string;
   toolArgs?: any;
   toolResult?: string;
+  // system_prompt stack (ADR-0008)
+  /** Accumulator of system-prompt sections, pushed by middleware. */
+  promptParts?: string[];
+  /** Labels of the sections actually contributed during this build. */
+  sections?: string[];
   // error captured by soft isolation
   error?: unknown;
   [k: string]: any;
@@ -61,19 +66,10 @@ export interface SessionContext {
   scratch: Record<string, any>;
 }
 
-/**
- * A section-builder that contributes a chunk of the system prompt. Registered
- * by the agent (base) and by extensions (e.g. skills reading session.scratch).
- * All contributors are concatenated (in registration order) at build time.
- */
-export type SystemPromptContributor = (ctx: SessionContext) => string | Promise<string>;
-
 /** Surface handed to every extension's setup(api). */
 export interface HarnessApi {
   registerTool(spec: ToolSpec): void;
   use(stack: HookStack, mw: Middleware, opts?: { priority?: number }): void;
-  /** Register a system-prompt section contributor (Q10=c). */
-  addSystemPromptContributor(fn: SystemPromptContributor, label?: string): void;
   /** Crop what the model sees in buildToolDefs() (ADR-0007 Q14=b). */
   registerToolFilter(fn: ToolFilter): void;
   /** Register a slash command; dispatch checks these before built-ins (Q13=a). */
@@ -81,7 +77,7 @@ export interface HarnessApi {
   /** Look up an extension-registered slash command (undefined if absent). */
   getSlashCommand(name: string): SlashHandler | undefined;
   /** Rebuild + persist the system prompt (session start / /reload / /level). */
-  emitSystemPrompt(): Promise<string>;
+  emitSystemPrompt(): Promise<{ prompt: string; sections: string[] }>;
   /** Append a lifecycle event to the session store, if attached (P7). */
   appendEvent(event: string, payload?: any): Promise<void>;
   ctx: SessionContext;

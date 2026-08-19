@@ -13,8 +13,9 @@ const DEFAULT_SCRATCH_KEY = '__skills';
 /**
  * Skills reference extension (spec §9.2). Provides a `skill_load` tool that
  * stashes a markdown instruction blob into the session scratch bag, plus a
- * system-prompt contributor that surfaces every loaded skill's content as a
- * section of the system prompt (Q10=c — extensions contribute, not rewrite).
+ * system-prompt section on the `system_prompt` stack (ADR-0008) that surfaces
+ * every loaded skill's content as a section of the system prompt (Q10=c —
+ * extensions contribute, not rewrite; mechanism replaced by ADR-0008).
  * The system prompt is (re)built at session start and on `/reload`.
  */
 export function createSkillsExtension(options: SkillsOptions = {}): SetupFn {
@@ -54,14 +55,19 @@ export function createSkillsExtension(options: SkillsOptions = {}): SetupFn {
       },
     });
 
-    // Contributor: every loaded skill becomes a system-prompt section.
-    api.addSystemPromptContributor((ctx) => {
-      const skills = ctx.scratch[key] as Record<string, string> | undefined;
-      if (!skills || Object.keys(skills).length === 0) return '';
-      return Object.entries(skills)
-        .map(([name, content]) => `[Skill: ${name}]\n${content}`)
-        .join('\n\n');
-    }, 'skills');
+    // Section: every loaded skill becomes a system-prompt section (ADR-0008).
+    api.use('system_prompt', async (ctx, next) => {
+      const skills = ctx.session.scratch[key] as Record<string, string> | undefined;
+      if (skills && Object.keys(skills).length > 0) {
+        ctx.promptParts!.push(
+          Object.entries(skills)
+            .map(([name, content]) => `[Skill: ${name}]\n${content}`)
+            .join('\n\n'),
+        );
+        ctx.sections!.push('skills');
+      }
+      await next();
+    });
   };
 }
 

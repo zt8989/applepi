@@ -275,7 +275,7 @@ function cropTool(toolName: string, def: ToolDef, level: PermissionLevel): ToolD
   return def;
 }
 
-// ---- system-prompt contributor (Q9) ----------------------------------------
+// ---- system-prompt section (Q9, ADR-0008) ----------------------------------
 
 function buildPermissionSection(level: PermissionLevel, root: string): string {
   const lines = [`## Permission Level: ${level}`];
@@ -322,10 +322,12 @@ export async function restorePermissionLevel(
 // ---- extension -----------------------------------------------------------------
 
 /**
- * The permission extension (ADR-0007). One `setup(api)` call:
+ * The permission extension (ADR-0007, section moved to the `system_prompt`
+ * stack by ADR-0008). One `setup(api)` call:
  *  - mounts `permissionMiddleware` at priority 1000 (outermost),
  *  - registers the ToolFilter that crops the model-facing tool surface,
- *  - contributes the 「Permission Level」 system-prompt section,
+ *  - contributes the 「Permission Level」 system-prompt section via the
+ *    `system_prompt` stack (entry: push section + label),
  *  - registers the `/level` slash command (user-only; no model-facing tool).
  */
 export function createPermissionExtension(): SetupFn {
@@ -342,12 +344,16 @@ export function createPermissionExtension(): SetupFn {
       return cropTool(toolName, def, level);
     });
 
-    api.addSystemPromptContributor((ctx) => {
+    // 「Permission Level」 section: pushed on the system_prompt stack.
+    // Reads the LIVE level from ctx.session at build time (Q9 + ADR-0008).
+    api.use('system_prompt', async (ctx, next) => {
       const level =
-        (ctx.scratch[PERMISSION_SCRATCH_KEY] as PermissionLevel | undefined) ??
+        (ctx.session.scratch[PERMISSION_SCRATCH_KEY] as PermissionLevel | undefined) ??
         DEFAULT_PERMISSION_LEVEL;
-      return buildPermissionSection(level, projectRootSync());
-    }, 'permission');
+      ctx.promptParts!.push(buildPermissionSection(level, projectRootSync()));
+      ctx.sections!.push('permission');
+      await next();
+    });
 
     api.registerSlashCommand('level', async (arg: string) => {
       const level = arg.trim().toLowerCase() as PermissionLevel;

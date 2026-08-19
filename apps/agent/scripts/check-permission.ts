@@ -64,10 +64,12 @@ function fail(msg: string): never {
   if (harness.session.scratch[PERMISSION_SCRATCH_KEY] !== 'workspace') {
     fail('default scratch level is not workspace');
   }
-  const sys = await harness.buildSystemPrompt();
+  const built = await harness.buildSystemPrompt();
+  const sys = built.prompt;
   console.log('--- default system prompt section:');
   console.log(sys.split('\n').filter((l) => l.startsWith('Permission Level') || l.includes('WORKSPACE')).join('\n'));
   if (!sys.includes('Permission Level: workspace')) fail('prompt lacks Permission Level: workspace');
+  if (!built.sections.includes('permission')) fail('permission section not reported in build sections');
 }
 
 // --- 2. readonly: write blocked, view allowed, whitelist bash allowed -------
