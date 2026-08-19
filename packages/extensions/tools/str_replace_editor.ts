@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { readFile, writeFile, readdir, stat } from 'node:fs/promises';
-import type { ToolSpec } from '../types.js';
+import type { ToolSpec } from '@applepi/core';
 
 export const strReplaceEditorTool: ToolSpec = {
   name: 'str_replace_editor',

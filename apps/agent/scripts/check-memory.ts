@@ -2,18 +2,16 @@
 // LLM/API key by injecting a fake `llmCall` into runLoop. Reproduces the real
 // Harness + onion bus + built-in loop, and loads the memory extension from the
 // local extensions/ directory via the auto-discovery loader (T02 + T04 joint).
-import { Harness, bashTool, strReplaceEditorTool, denylistExtension, runLoop } from '@applepi/core';
+import { Harness, runLoop } from '@applepi/core';
+import { baseExtension } from '@applepi/extensions';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
 const harness = new Harness();
 
-// Built-in tools + outermost denylist (same wiring as main.ts).
-harness.registerExtension((api) => {
-  api.registerTool(bashTool);
-  api.registerTool(strReplaceEditorTool);
-});
-harness.registerExtension(denylistExtension);
+// baseExtension (reference tools + outermost denylist), same wiring as main.ts
+// (ADR-0005).
+harness.registerExtension(baseExtension);
 
 // Memory extension arrives via the local loader (no manual registration).
 const extDir = new URL('../extensions/', import.meta.url).pathname;

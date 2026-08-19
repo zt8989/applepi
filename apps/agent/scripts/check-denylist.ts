@@ -4,10 +4,9 @@
 //   pnpm --filter agent check-denylist
 import {
   Harness,
-  bashTool,
-  denylistExtension,
   runLoop,
 } from '@applepi/core';
+import { bashTool, denylistMiddleware } from '@applepi/extensions';
 import { writeFileSync, existsSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,7 +14,10 @@ import assert from 'node:assert/strict';
 
 const harness = new Harness();
 harness.registerExtension((api) => api.registerTool(bashTool));
-harness.registerExtension(denylistExtension); // outermost tool middleware (priority 1000)
+// Outermost tool middleware (priority 1000) — the registration convention that
+// gives the denylist its closed loop (ADR-0005, Q3=A). Same effect as
+// baseExtension's internal mounting, exercised here in the fine-grained path.
+harness.registerExtension((api) => api.use('tool', denylistMiddleware, { priority: 1000 }));
 
 // Scenario: model is tricked/decides to run `rm -rf` on a sentinel file.
 const sentinel = join(tmpdir(), 'denylist-sentinel-app');

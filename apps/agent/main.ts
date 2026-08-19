@@ -4,12 +4,10 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import {
   Harness,
   SessionStore,
-  bashTool,
-  strReplaceEditorTool,
-  denylistExtension,
   resolveLlmConfig,
   type ResolvedLlmConfig,
 } from '@applepi/core';
+import { baseExtension } from '@applepi/extensions';
 
 const extDir = new URL('../extensions/', import.meta.url).pathname;
 
@@ -17,7 +15,7 @@ const extDir = new URL('../extensions/', import.meta.url).pathname;
 function buildBaseSystemPrompt(): string {
   return [
     'You are a minimal local agent harness.',
-    'You have two built-in tools: `bash` and `str_replace_editor`.',
+    'You have two reference tools: `bash` and `str_replace_editor`.',
     'Use them to accomplish the user\'s request step by step.',
   ].join('\n');
 }
@@ -31,14 +29,10 @@ function buildModel(cfg: ResolvedLlmConfig): any {
   return createOpenAI(providerSettings)(cfg.model);
 }
 
-/** Build a fully-wired Harness: built-ins + denylist + extensions + base contributor. */
+/** Build a fully-wired Harness: baseExtension (reference tools + denylist) + local extensions + base contributor. */
 async function boot(store: SessionStore): Promise<{ harness: Harness; loaded: string[] }> {
   const harness = new Harness();
-  harness.registerExtension((api) => {
-    api.registerTool(bashTool);
-    api.registerTool(strReplaceEditorTool);
-  });
-  harness.registerExtension(denylistExtension);
+  harness.registerExtension(baseExtension);
   harness.registerExtension((api) =>
     api.addSystemPromptContributor(() => buildBaseSystemPrompt(), 'base'),
   );

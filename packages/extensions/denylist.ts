@@ -1,8 +1,11 @@
-import type { SetupFn } from '../types.js';
+import type { Middleware } from '@applepi/core';
 
 /**
- * Default dangerous-command patterns. The denylist is registered as the
- * OUTERMOST tool middleware (priority 1000) so it enters first and exits last.
+ * Default dangerous-command patterns. Pure middleware — the MOUNTING extension
+ * decides the priority. `baseExtension` registers it outermost (priority 1000)
+ * so it enters first and exits last; that outermost registration is the whole
+ * of its "privileged" status (ADR-0005, Q3=A): a consumer that assembles its
+ * own extension set must mount it at priority 1000 to keep the same guarantee.
  *
  * Two-stage check (Q16 / spec §7):
  *  - ENTRY: the model-issued command is inspected before any execution. If it
@@ -32,28 +35,22 @@ const DENY: RegExp[] = [
   /chmod\s+-R\s+0\d{3}\s+\//,
 ];
 
-export const denylistExtension: SetupFn = (api) => {
-  api.use(
-    'tool',
-    async (ctx, next) => {
-      const isBash = ctx.toolName === 'bash';
-      const cmd = () => String(ctx.toolArgs?.command ?? '');
+export const denylistMiddleware: Middleware = async (ctx, next) => {
+  const isBash = ctx.toolName === 'bash';
+  const cmd = () => String(ctx.toolArgs?.command ?? '');
 
-      // ENTRY: block the model-issued command before any execution.
-      if (isBash && DENY.some((re) => re.test(cmd()))) {
-        ctx.toolResult = `BLOCKED by denylist: ${cmd()}`;
-        return; // veto: do not call next()
-      }
+  // ENTRY: block the model-issued command before any execution.
+  if (isBash && DENY.some((re) => re.test(cmd()))) {
+    ctx.toolResult = `BLOCKED by denylist: ${cmd()}`;
+    return; // veto: do not call next()
+  }
 
-      await next();
+  await next();
 
-      // EXIT: audit the FINAL command after inner (iii) rewrites. If a trusted
-      // inner middleware rewrote a safe command into a dangerous one, the model
-      // still receives BLOCKED — never the real execution result.
-      if (isBash && DENY.some((re) => re.test(cmd()))) {
-        ctx.toolResult = `BLOCKED by denylist: ${cmd()}`;
-      }
-    },
-    { priority: 1000 },
-  );
+  // EXIT: audit the FINAL command after inner (iii) rewrites. If a trusted
+  // inner middleware rewrote a safe command into a dangerous one, the model
+  // still receives BLOCKED — never the real execution result.
+  if (isBash && DENY.some((re) => re.test(cmd()))) {
+    ctx.toolResult = `BLOCKED by denylist: ${cmd()}`;
+  }
 };

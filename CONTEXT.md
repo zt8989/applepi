@@ -1,14 +1,16 @@
 # CONTEXT.md
 
-Project: a minimal **single-machine agent harness**, organized as a **pnpm workspace** (decided via /grill-with-docs, 2026-08-19; reverses the 4f15860 single-package flatten):
+Project: a minimal **single-machine agent harness**, organized as a **pnpm workspace** (decided via /grill-with-docs, 2026-08-19; reverses the 4f15860 single-package flatten). Core is a **pure runtime skeleton with no tools** (ADR-0005).
 
 ## Glossary
 
-- **Harness** — the minimal runtime: onion event bus + two built-in tools (`bash`, `str_replace_editor`) + loader + built-in agent loop.
+- **Harness** — the minimal runtime: onion event bus + loader + built-in agent loop + session store + LLM-config resolution. **Contains no tools** (ADR-0005); all capabilities arrive as extensions.
 - **Extension** — an in-process module that injects capabilities (tools, skills, memory) at runtime via `setup(api)`.
 - **Hook / middleware** — lifecycle interceptors on three onion stacks: `session`, `llm`, `tool`. Can observe, veto (skip `next()`), or rewrite `ctx`.
 - **Tool** — a capability registered via `api.registerTool({ name, description, parameters (zod), execute })`.
-- **Denylist** — a privileged built-in extension, registered outermost on the `tool` stack, that vetoes banned `bash` commands.
+- **Reference tool** — a concrete tool shipped by the `@applepi/extensions` package as a replaceable reference implementation (not core): `bash` and `str_replace_editor`.
+- **Security extension** — the denylist, shipped as a pure middleware (`denylistMiddleware`) by `@applepi/extensions`. Its "outermost" property is a **registration convention**: mount at priority 1000 (as `baseExtension` does) so the onion exit phase audits the final command after inner rewrites. See ADR-0005 (Q3=A).
+- **baseExtension** — a single `SetupFn` from `@applepi/extensions` that registers the reference tools and mounts `denylistMiddleware` outermost (priority 1000); one call reproduces the default capability set.
 
 ## Session persistence (glossary — decided via /grill-with-docs)
 
@@ -22,7 +24,7 @@ Project: a minimal **single-machine agent harness**, organized as a **pnpm works
 - **Resume** — `/resume <id>` (core `SessionStore.load`) switches the active session to `<id>` and continues appending to its jsonl. `<id>` absent → new session.
 - **Slash commands (core capability, not CLI-only)** — `/reload`, `/resume <id>`, `/new`, `/sessions` (list `~/.applepi/sessions/<workspace>/`), `/help`, `/exit`. A future web UI drives the same core methods.
 - **REPL** — the CLI REPL reads one user turn per line (Enter submits); multi-line via `/paste` or shell heredoc. Ctrl-D / `/exit` quits.
-- **Reload** — `/reload` slash command: full harness reset (new Harness, **preserving `session.scratch` + `session.history`**), re-register built-ins + denylist + `loadExtensionsFromDir`, then rebuild the system prompt; emits a `reload` event.
+- **Reload** — `/reload` slash command: full harness reset (new Harness, **preserving `session.scratch` + `session.history`**), re-register `baseExtension` (reference tools + security extension) + `loadExtensionsFromDir`, then rebuild the system prompt; emits a `reload` event.
 - **System-prompt contributor** — extensions register a section-builder via `api.addSystemPromptContributor(fn)`; the system prompt is assembled from base + all contributors (Q10=c). Supersedes the old `llm`-middleware skills injection. On reload the contributors are re-registered and the prompt rebuilt.
 - **System prompt** — message[0]; composed of base instructions + loaded skills (via contributors). Rebuilt at session start and on `/reload`.
 - **Replay transform (read-only)** — to build the LLM message array, filter the jsonl to message lines only. If a `reload` event exists, the most-recently rebuilt system message replaces message[0]; the original jsonl is never mutated.
@@ -38,12 +40,12 @@ Project: a minimal **single-machine agent harness**, organized as a **pnpm works
 
 ## Key decisions (locked)
 
-Full spec: `harness-design-spec.md`. Pnpm workspace layout (three workspace packages, Q1=b/Q2=b):
+Wiki: start at `docs/README.md` (architecture: `docs/architecture.md`; design principles: `docs/design-principles.md`). Pnpm workspace layout (three workspace packages, Q1=b/Q2=b):
 
-- `packages/core` (`@applepi/core`) — the harness runtime (onion bus, two built-in tools, loader, built-in loop, session store)
-- `packages/extensions` (`@applepi/extensions`) — reference extensions: memory / skills (mcp removed, Q11)
+- `packages/core` (`@applepi/core`) — the harness runtime (onion bus, loader, built-in loop, session store, config). **No tools** (ADR-0005).
+- `packages/extensions` (`@applepi/extensions`) — reference extensions: reference tools (bash / str_replace_editor) + security extension (`denylistMiddleware`) + `baseExtension` + memory / skills (mcp removed, Q11)
 - `apps/agent` (`@applepi/agent`) — the local agent: `main.ts` wires core + extensions + a provider and runs the REPL; `extensions/` holds local `*.ext.ts`; `scripts/` holds the key-free verification checks
 
 Dependency graph (one direction): `@applepi/agent → @applepi/extensions → @applepi/core`. Cross-package imports use **package names** resolved to `dist/` via each package's `exports` (Q3=a); dev/test run **build-first** (Q4=a); each package has its own `tsconfig.json` extending a shared base (Q5=a); the root `package.json` orchestrates `build`/`dev`/`test`/`verify` (Q6=a).
 
-Architecture decisions are recorded as ADR-0001 (harness), ADR-0002 (session persistence: jsonl + resume + reload), and ADR-0003 (workspace split).
+Architecture decisions are recorded as ADR-0001 (harness), ADR-0002 (session persistence: jsonl + resume + reload), ADR-0003 (workspace split), ADR-0004 (LLM config sources), ADR-0005 (reference tools + denylist → `baseExtension`).

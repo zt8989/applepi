@@ -8,22 +8,15 @@ import path from 'node:path';
 import {
   Harness,
   SessionStore,
-  bashTool,
-  strReplaceEditorTool,
-  denylistExtension,
 } from '@applepi/core';
-import { createSkillsExtension } from '@applepi/extensions';
+import { baseExtension, createSkillsExtension } from '@applepi/extensions';
 
 const WS = 'check-session-tmp';
 const DIR = path.join(os.homedir(), '.applepi', 'sessions', WS);
 
 function boot(store: SessionStore): Harness {
   const harness = new Harness();
-  harness.registerExtension((api) => {
-    api.registerTool(bashTool);
-    api.registerTool(strReplaceEditorTool);
-  });
-  harness.registerExtension(denylistExtension);
+  harness.registerExtension(baseExtension);
   harness.registerExtension(createSkillsExtension());
   harness.registerExtension((api) =>
     api.addSystemPromptContributor(() => 'BASE-INSTRUCTIONS', 'base'),

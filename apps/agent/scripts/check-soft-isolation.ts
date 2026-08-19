@@ -5,15 +5,13 @@
 // surfaced as an ERROR result delivered to the model, and (2) the loop advances
 // to the next turn instead of crashing. Verifies spec §4 / Q7-(iii) soft
 // isolation under the same-process, zero-isolation premise.
-import { Harness, bashTool, strReplaceEditorTool, denylistExtension, runLoop } from '@applepi/core';
+import { Harness, runLoop } from '@applepi/core';
+import { baseExtension } from '@applepi/extensions';
 
 const harness = new Harness();
 
-harness.registerExtension((api) => {
-  api.registerTool(bashTool);
-  api.registerTool(strReplaceEditorTool);
-});
-harness.registerExtension(denylistExtension);
+// Reference tools + outermost denylist, same wiring as main.ts (ADR-0005).
+harness.registerExtension(baseExtension);
 
 // A misbehaving middleware: priority 5 (inner to denylist's 1000), throws AFTER
 // delegating to the inner chain (post-next phase) — the nastiest spot to catch.

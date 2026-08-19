@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { ToolSpec } from '../types.js';
+import type { ToolSpec } from '@applepi/core';
 
 const execAsync = promisify(exec);
 
