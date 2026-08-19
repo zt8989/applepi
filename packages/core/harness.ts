@@ -169,14 +169,24 @@ export class Harness {
     );
   }
 
-  /** Persist a fresh `system_prompt` event + message line (no user turn side effects). */
+  /**
+   * Persist a built system prompt: `system_prompt/start` event + system
+   * message line + `system_prompt/end` event. This is the ONLY place the
+   * system prompt is persisted — `emitSystemPrompt()` (session start,
+   * `/reload`, `/level`) and `run({ emitSystemPrompt: true })` both go
+   * through here, so the emit path is single (2026-08-19 follow-up).
+   */
+  private async persistSystemPrompt(built: BuiltSystemPrompt): Promise<void> {
+    if (!this.sessionStore) return;
+    await this.sessionStore.appendEvent('system_prompt/start', { sections: built.sections });
+    await this.sessionStore.appendMessage('system', built.prompt);
+    await this.sessionStore.appendEvent('system_prompt/end', { sections: built.sections });
+  }
+
+  /** Rebuild + persist the system prompt (session start / /reload / /level). */
   async emitSystemPrompt(): Promise<BuiltSystemPrompt> {
     const built = await this.buildSystemPrompt();
-    if (this.sessionStore) {
-      await this.sessionStore.appendEvent('system_prompt/start', { sections: built.sections });
-      await this.sessionStore.appendMessage('system', built.prompt);
-      await this.sessionStore.appendEvent('system_prompt/end', { sections: built.sections });
-    }
+    await this.persistSystemPrompt(built);
     return built;
   }
 
@@ -219,16 +229,12 @@ export class Harness {
 
   /** Run a full session turn: persist system/user/assistant/tool, record history. */
   async run(prompt: string, model: any, opts: RunOpts = {}): Promise<any[]> {
-    const emitSystem = opts.emitSystemPrompt ?? false;
-    const { prompt: systemPrompt, sections } = await this.buildSystemPrompt();
-
-    const messages: any[] = [];
-    if (emitSystem && this.sessionStore) {
-      await this.sessionStore.appendEvent('system_prompt/start', { sections });
-      await this.sessionStore.appendMessage('system', systemPrompt);
-      await this.sessionStore.appendEvent('system_prompt/end', { sections });
+    const built = await this.buildSystemPrompt();
+    if (opts.emitSystemPrompt) {
+      await this.persistSystemPrompt(built); // single emit path (2026-08-19)
     }
-    messages.push({ role: 'system', content: systemPrompt });
+
+    const messages: any[] = [{ role: 'system', content: built.prompt }];
     messages.push(...this.session.history);
 
     const userMsg = { role: 'user', content: prompt };
