@@ -8,6 +8,19 @@ export {
   SessionStore,
   slugWorkspace,
 } from './session.js';
+export {
+  DEFAULT_LLM_SETTINGS,
+  SUPPORTED_PROVIDERS,
+  loadSettings,
+  loadDotenv,
+  resolveApiKey,
+  resolveLlmConfig,
+} from './config.js';
+export type {
+  LlmSettings,
+  ResolvedLlmConfig,
+  SupportedProvider,
+} from './config.js';
 export type {
   HookStack,
   ToolSpec,

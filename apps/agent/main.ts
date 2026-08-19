@@ -1,12 +1,14 @@
 import { createInterface } from 'node:readline/promises';
-import { openai } from '@ai-sdk/openai';
-import { anthropic } from '@ai-sdk/anthropic';
+import { createOpenAI } from '@ai-sdk/openai';
+import { createAnthropic } from '@ai-sdk/anthropic';
 import {
   Harness,
   SessionStore,
   bashTool,
   strReplaceEditorTool,
   denylistExtension,
+  resolveLlmConfig,
+  type ResolvedLlmConfig,
 } from '@applepi/core';
 
 const extDir = new URL('../extensions/', import.meta.url).pathname;
@@ -20,18 +22,12 @@ function buildBaseSystemPrompt(): string {
   ].join('\n');
 }
 
-function pickModel(): any {
-  const provider = process.env.LLM_PROVIDER ?? 'openai';
-  if (provider === 'anthropic') {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      throw new Error('ANTHROPIC_API_KEY not set');
-    }
-    return anthropic(process.env.ANTHROPIC_MODEL ?? 'claude-3-5-sonnet-latest');
+/** Build the provider instance from resolved config (ADR-0004; no process.env). */
+function buildModel(cfg: ResolvedLlmConfig): any {
+  if (cfg.provider === 'anthropic') {
+    return createAnthropic({ apiKey: cfg.apiKey })(cfg.model);
   }
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error('OPENAI_API_KEY not set');
-  }
-  return openai(process.env.OPENAI_MODEL ?? 'gpt-4o-mini');
+  return createOpenAI({ apiKey: cfg.apiKey })(cfg.model);
 }
 
 /** Build a fully-wired Harness: built-ins + denylist + extensions + base contributor. */
@@ -73,6 +69,7 @@ function printMessages(messages: any[]): void {
 
 const HELP = [
   'Commands:',
+  '  /config          reload LLM config from ~/.applepi (settings.json + .env)',
   '  /reload          re-scan extensions/ and rebuild the system prompt',
   '  /resume <id>     switch to and continue session <id>',
   '  /new             start a fresh session',
@@ -81,7 +78,7 @@ const HELP = [
   '  /exit            quit (or Ctrl-D)',
 ].join('\n');
 
-const model = pickModel();
+let model = buildModel(await resolveLlmConfig());
 let store = new SessionStore();
 await store.create();
 console.log(`[session] ${store.sessionId} (workspace: ${store.workspace})`);
@@ -122,6 +119,17 @@ rl.on('line', async (raw) => {
     const [cmd, ...rest] = line.split(/\s+/);
     const arg = rest.join(' ');
     switch (cmd) {
+      case '/config': {
+        try {
+          model = buildModel(await resolveLlmConfig());
+          console.log('[config] LLM config reloaded from ~/.applepi');
+        } catch (e: any) {
+          // Keep the current model on failure (Q10=a): a bad edit must not
+          // kill a running session.
+          console.error(`[config] reload failed, keeping current model: ${e?.message}`);
+        }
+        break;
+      }
       case '/reload': {
         const oldScratch = harness.session.scratch;
         const oldHistory = harness.session.history;

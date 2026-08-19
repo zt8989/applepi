@@ -13,10 +13,11 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.json && node test/smoke.mjs && node test/session.mjs"
+    "test": "tsc -p tsconfig.json && node test/smoke.mjs && node test/session.mjs && node test/config.mjs"
   },
   "dependencies": {
     "ai": "^4.0.0",
+    "dotenv": "^16.4.5",
     "zod": "^3.23.0"
   }
 }

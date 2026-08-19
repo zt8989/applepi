@@ -28,6 +28,14 @@ Project: a minimal **single-machine agent harness**, organized as a **pnpm works
 - **Replay transform (read-only)** — to build the LLM message array, filter the jsonl to message lines only. If a `reload` event exists, the most-recently rebuilt system message replaces message[0]; the original jsonl is never mutated.
 - **MCP** — **feature removed** (Q11). Previously `mcp_call` via `bash`+`mcp-cli`; deleted from core/extensions/agent/docs.
 
+## LLM configuration (glossary — decided via /grill-with-docs)
+
+- **LLM settings** — `~/.applepi/settings.json`, the **only** source of LLM config (process.env is no longer read, Q3=b). Schema (Q2=a): `{ provider, model, apiKey }`. Missing file → defaults (`openai` / `gpt-4o-mini`).
+- **Secret file** — `~/.applepi/.env`, holds the real API keys. Parsed with the `dotenv` package (Q7=b).
+- **Api key reference (placeholder)** — the `apiKey` value in settings.json is treated as a **key name** into the secret file: `realKey = dotenv[apiKey] ?? apiKey` (Q1=a). Default value = the provider's canonical env name (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`); a real key written directly also works.
+- **/config** — slash command that re-reads settings.json + .env and rebuilds the model (Q5=c). `/reload` does **not** touch the provider.
+- **Config resolution (core-owned)** — core provides the load/parse/resolve primitives (`loadSettings` / `loadDotenv` / `resolveApiKey`, or a one-shot `resolveLlmConfig`), the agent assembles the provider instance (Q4=a).
+
 ## Key decisions (locked)
 
 Full spec: `harness-design-spec.md`. Pnpm workspace layout (three workspace packages, Q1=b/Q2=b):
