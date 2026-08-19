@@ -36,7 +36,8 @@ LLM 配置解析。**不含工具**——`bash`、`str_replace_editor`、权限�
   （系统提示词构建成为第 4 栈）。
 - 后果：同一套 `Middleware` 签名覆盖全部横切场景；排序即权力。系统提示词
   由 `system_prompt` 栈构建：中间件 push 段落、可整体改写，sections 取
-  构建期事实（ADR-0008）。
+  构建期事实（ADR-0008）。**洋葱栈 ≠ 事件发布**：`emit(event)` 是发布事件
+  的入口（触发 core 内置处理器或写审计行），不是第 5 个栈——两者正交。
 - 判据：需要新生命周期事件时，优先挂在既有栈上；**确有独立生命周期**
   （如系统提示词构建）才允许新增栈——新增栈是例外而非默认。
 
@@ -80,7 +81,8 @@ LLM 配置解析。**不含工具**——`bash`、`str_replace_editor`、权限�
 
 - 依据：ADR-0002（jsonl 单文件、事件/消息两行型、replay 只读变换）、
   ADR-0006（行结构精简：`type`+`phase` 合并为 `event` 字段、行内去掉
-  `session_id`/`workspace` 冗余身份字段）。
+  `session_id`/`workspace` 冗余身份字段）、ADR-0008 演进（所有事件经
+  `emit(event)` 单一入口发布，`appendEvent` 收敛为存储原语）。
 - 后果：坏掉的 reload 只靠读文件即可诊断；原始记录永不因视图变换被改写。
   行结构精简只影响"行内携带什么信息"，不影响 append-only 属性——文件路径
   仍是会话身份的权威位置（ADR-0006 的取舍：行不再自包含）。
@@ -124,6 +126,21 @@ settings.json、会话记录在 jsonl。**
 - 后果：环境问题在第一时间暴露，错误信息给出可操作路径
   （指向 settings.json / .env）。
 - 判据：用缺省值掩盖配置错误，违反本原则。
+
+## P12. 通用机制优先于专用方法（Generic over Bespoke）
+
+**能力面用通用机制表达，不为单个场景开专用 API；具体行为用注册/处理器
+注入，而不是把每个动作做成一个方法。**
+
+- 依据：ADR-0008 及其演进——系统提示词贡献从专用 `addSystemPromptContributor`
+  收敛为 `system_prompt` 洋葱栈；事件发布从 `emitSystemPrompt()` / `appendEvent()`
+  收敛为单一 `emit(event, payload)` 入口 + core 内置处理器（2026-08-19 讨论）。
+- 后果：`HarnessApi` 表面小而稳定——registerTool / use / registerToolFilter /
+  registerSlashCommand / emit，没有逐事件、逐能力的方法；新能力按「栈中间件 +
+  事件处理器」两种原语表达。扩展面对统一契约，core 的处理器/中间件是内置
+  事实而非 API 承诺。
+- 判据：为某个具体事件或能力新增专用方法前先问「能不能用既有栈或 emit +
+  处理器表达」；答案是"能"就应收敛——专用方法每多一个，通用机制就贬值一分。
 
 ---
 

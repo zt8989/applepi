@@ -87,6 +87,10 @@ interface HarnessApi {
 `{ prompt, sections }`）；其余事件（`skill/start|end`、`reload/start|end`、
 `level/set`）回退为写一条生命周期事件行到 jsonl（P7）。
 
+**emit 与洋葱栈正交**：emit 是「发布事件」（记录到审计日志 / 触发 core 内置
+处理器）；洋葱栈是「执行横切逻辑」（中间件链）。两者是不同机制——`system_prompt`
+事件**触发** `system_prompt` 栈运行，但 emit 本身不是第 5 个栈（ADR-0008 演进）。
+
 系统提示词经 `system_prompt` 栈构建（ADR-0008）：中间件在入口
 `ctx.promptParts.push(section)`（可整体改写数组）、`ctx.sections.push(label)`，
 harness 收尾 `join('\n\n')` 归一化并返回 `{ prompt, sections }`。
@@ -150,7 +154,8 @@ loop:
   zodSchema, execute })` 翻译给模型。
 - **系统提示词注入**：每轮 `messages[0]` 由 `buildSystemPrompt()` 生成——运行
   `system_prompt` 栈拼装段落（ADR-0008），会话启动 / `/reload` / `/level` 时
-  同时持久化新 system 消息行（ADR-0002 replay 语义）。
+  经 `emit('system_prompt')` 重建并持久化新 system 消息行（ADR-0002 replay
+  语义）。
 
 ## 6. 工具与 Vercel AI SDK 映射
 
@@ -201,6 +206,9 @@ api.registerTool({
     行不再自包含（旧 ADR-0002 的"每行可独立审计"语义已放弃）。
 - **SessionStore 归核心**：`create` / `appendEvent` / `appendMessage` /
   `load`（replay 变换） / `list`。CLI 与未来 web UI 都驱动同一套核心方法。
+  扩展**不直接**调 `appendEvent`——所有事件经 `emit(event, payload)` 发布
+  （core 内置处理器或回退写事件行，ADR-0008 演进），`appendEvent` 是 emit
+  底层的存储原语（P6/P7）。
 - **Replay（只读）**：读取时过滤 message 行；若存在 `reload` 事件，最新重建的
   system 消息替换 `message[0]`；原 jsonl 永不被改写。
 - **Resume / Reload**：`/resume <id>` 切换活动会话并继续追加；`/reload` 重建
@@ -209,8 +217,9 @@ api.registerTool({
 - **系统提示词 = `system_prompt` 栈构建（ADR-0008）**：中间件 push 段落到
   `ctx.promptParts`（可整体改写数组），并 push 标签到 `ctx.sections`；
   base 挂 priority 1000 最外层，扩展默认 0；harness 统一 `join('\n\n')` 归一化，
-  返回 `{ prompt, sections }`（取代 Q10=c 的 `addSystemPromptContributor` 与
-  更早的 llm 中间件注入）。
+  返回 `{ prompt, sections }`。重建由 `emit('system_prompt')` 事件触发
+  （core 内置处理器 = 构建 + 持久化），取代 Q10=c 的 `addSystemPromptContributor`
+  与更早的 llm 中间件注入。
 - **Slash 命令（核心能力，非 CLI 专属）**：`/reload` `/resume <id>` `/new`
   `/sessions` `/config` `/help` `/exit`。
 
