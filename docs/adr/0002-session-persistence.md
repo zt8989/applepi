@@ -44,7 +44,8 @@ This is exactly the stated rule: "如果包含 reload，reload 之后重建出�
   - `list()` — enumerate `~/.applepi/sessions/<workspace>/*.jsonl` for `/sessions`.
 - `Harness` holds an optional `SessionStore`. The CLI REPL and the future web UI both drive `harness.resume(id)` / `harness.listSessions()` — persistence logic lives in core, not per-UI.
 
-### System prompt = extension-contributed sections (Q10=c, Q16=a)
+### System prompt = extension-contributed sections (Q10=c, Q16=a; mechanism superseded by ADR-0008)
+- **ADR-0008 replaces the contributor API** — the system prompt is now built by running the `system_prompt` onion stack: middleware push sections into `ctx.promptParts` and labels into `ctx.sections`; `addSystemPromptContributor` and `contributorSections()` are deleted. The rest of this section is the original Q10=c design (kept for history).
 - `api.addSystemPromptContributor(fn)` where `fn(ctx) => string | Promise<string>`.
 - At build time, the harness assembles `base` section + every registered contributor section, in registration order, into one `role:"system"` message.
 - The agent registers the `base` section at startup (hardcoded `buildBaseSystemPrompt()`); the **skills** extension contributes its section by reading `session.scratch` (replacing the old `llm`-middleware injection).

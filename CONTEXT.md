@@ -6,7 +6,7 @@ Project: a minimal **single-machine agent harness**, organized as a **pnpm works
 
 - **Harness** — the minimal runtime: onion event bus + loader + built-in agent loop + session store + LLM-config resolution. **Contains no tools** (ADR-0005); all capabilities arrive as extensions.
 - **Extension** — an in-process module that injects capabilities (tools, skills, memory) at runtime via `setup(api)`.
-- **Hook / middleware** — lifecycle interceptors on three onion stacks: `session`, `llm`, `tool`. Can observe, veto (skip `next()`), or rewrite `ctx`.
+- **Hook / middleware** — lifecycle interceptors on the onion stacks: `session`, `llm`, `tool`, and `system_prompt` (ADR-0008). Can observe, veto (skip `next()`), or rewrite `ctx`.
 - **Tool** — a capability registered via `api.registerTool({ name, description, parameters (zod), execute })`.
 - **Reference tool** — a concrete tool shipped by the `@applepi/extensions` package as a replaceable reference implementation (not core): `bash` and `str_replace_editor`.
 - **Security extension** — the permission-level system (ADR-0007), shipped by `@applepi/extensions` as `createPermissionExtension` (middleware + tool cropper + prompt section + `/level`) plus the embedded **denylist floor** (`DENY`, the old `denylistMiddleware`). Its "outermost" property is a **registration convention**: mount at priority 1000 (as `baseExtension` does) so the onion exit phase audits the final command after inner rewrites. See ADR-0005 (Q3=A) + ADR-0007.
@@ -25,8 +25,8 @@ Project: a minimal **single-machine agent harness**, organized as a **pnpm works
 - **Slash commands (core capability, not CLI-only)** — `/reload`, `/resume <id>`, `/new`, `/sessions` (list `~/.applepi/sessions/<workspace>/`), `/help`, `/exit`. A future web UI drives the same core methods.
 - **REPL** — the CLI REPL reads one user turn per line (Enter submits); multi-line via `/paste` or shell heredoc. Ctrl-D / `/exit` quits.
 - **Reload** — `/reload` slash command: full harness reset (new Harness, **preserving `session.scratch` + `session.history`**), re-register `baseExtension` (reference tools + security extension) + `loadExtensionsFromDir`, then rebuild the system prompt; emits a `reload` event.
-- **System-prompt contributor** — extensions register a section-builder via `api.addSystemPromptContributor(fn)`; the system prompt is assembled from base + all contributors (Q10=c). Supersedes the old `llm`-middleware skills injection. On reload the contributors are re-registered and the prompt rebuilt.
-- **System prompt** — message[0]; composed of base instructions + loaded skills (via contributors). Rebuilt at session start and on `/reload`.
+- **System-prompt middleware（系统提示词中间件）** — extensions mount on the `system_prompt` onion stack via `api.use('system_prompt', mw)`; middleware push sections into `ctx.promptParts` (and their label into `ctx.sections`) on entry, and may rewrite the array (ADR-0008). The system prompt is assembled by `buildSystemPrompt()` from all sections (base + extensions). Replaces the old `addSystemPromptContributor` API (Q10=c, superseded by ADR-0008) and the `llm`-middleware skills injection before it. On reload the middleware are re-registered and the prompt rebuilt.
+- **System prompt** — message[0]; composed of base instructions + extension sections (via the `system_prompt` stack, ADR-0008). Rebuilt at session start and on `/reload`.
 - **Replay transform (read-only)** — to build the LLM message array, filter the jsonl to message lines only. If a `reload` event exists, the most-recently rebuilt system message replaces message[0]; the original jsonl is never mutated.
 - **MCP** — **feature removed** (Q11). Previously `mcp_call` via `bash`+`mcp-cli`; deleted from core/extensions/agent/docs.
 
@@ -48,7 +48,7 @@ Wiki: start at `docs/README.md` (architecture: `docs/architecture.md`; design pr
 
 Dependency graph (one direction): `@applepi/agent → @applepi/extensions → @applepi/core`. Cross-package imports use **package names** resolved to `dist/` via each package's `exports` (Q3=a); dev/test run **build-first** (Q4=a); each package has its own `tsconfig.json` extending a shared base (Q5=a); the root `package.json` orchestrates `build`/`dev`/`test`/`verify` (Q6=a).
 
-Architecture decisions are recorded as ADR-0001 (harness), ADR-0002 (session persistence: jsonl + resume + reload), ADR-0003 (workspace split), ADR-0004 (LLM config sources), ADR-0005 (reference tools + denylist → `baseExtension`), ADR-0006 (event schema slimming), and ADR-0007 (permission levels: read/write scoped tool access).
+Architecture decisions are recorded as ADR-0001 (harness), ADR-0002 (session persistence: jsonl + resume + reload), ADR-0003 (workspace split), ADR-0004 (LLM config sources), ADR-0005 (reference tools + denylist → `baseExtension`), ADR-0006 (event schema slimming), ADR-0007 (permission levels: read/write scoped tool access), and ADR-0008 (system prompt built on the `system_prompt` onion stack).
 
 ## Permission levels (designing — via /grill-with-docs, round 1)
 
@@ -68,7 +68,7 @@ Architecture decisions are recorded as ADR-0001 (harness), ADR-0002 (session per
 - **提示词改造（Q9）** — 权限扩展贡献一段固定结构的「权限声明」段落（级别名 + 该级别允许/禁止行为 + project root 路径 + 按级别裁剪后的可用工具清单）；注入时机 = 会话启动/恢复/`/level` 切换后**立即重建**系统提示词（走 `emitSystemPrompt` 流程 append 新 system 消息行，ADR-0002 replay 语义：最新 system 替换 message[0]）。模型每轮「看到」权限边界，而非靠撞拦截才知道。
 - **双层机制（Q10=c）** — 主路径是**注册面裁剪**：`buildToolDefs()` 按级别裁剪暴露给模型的工具与参数 schema（readonly 下 `bash` 只暴露只读白名单命令说明、`str_replace_editor` 参数枚举裁成 `['view']`），模型看不到不允许的东西；兜底是**运行时拦截**：权限中间件仍挂 priority 1000 审计最终执行（防裁剪漏洞/内层改写）。core 的 `buildToolDefs` 保持极简，只提供通用 `registerToolFilter` 钩子，不含权限语义（P1/P2）。
 - **级别事件与恢复（Q11=a）** — `level/set` 事件格式：`{"kind":"event","event":"level/set","payload":{"level":"workspace"},"ts":"..."}`（沿用 ADR-0006 行结构，无 start/end 相位，原子事件）。`SessionStore` 新增 `lastEvent(name): SessionEvent | null`（扫文件取最后一个匹配事件）；恢复逻辑：`/resume` 与启动时 `const ev = await store.lastEvent('level/set'); level = ev?.payload?.level ?? 'workspace'`，写入 `session.scratch['__permissionLevel']`。存储读取原语归 core（P6），语义解析归权限扩展。
-- **实现拆分（Q12）** — `packages/extensions/denylist.ts` **保留**（危险正则列表 + `denylistMiddleware` 原样导出，`check-denylist.ts` 继续用），成为权限系统的**内部底线组件**；新增 `packages/extensions/permission.ts`：导出 `permissionMiddleware`（先跑 denylist 底线、再按 `session.scratch['__permissionLevel']` 级别判定）、`createPermissionExtension()`（SetupFn：挂中间件 priority 1000 + 注册 `registerToolFilter` 裁剪器 + 注册权限声明 contributor + `/level` 语义实现）。`baseExtension` 改挂 `permissionMiddleware` + `createPermissionExtension()`；新增 `apps/agent/scripts/check-permission.ts`。
+- **实现拆分（Q12）** — `packages/extensions/denylist.ts` **保留**（危险正则列表 + `denylistMiddleware` 原样导出，`check-denylist.ts` 继续用），成为权限系统的**内部底线组件**；新增 `packages/extensions/permission.ts`：导出 `permissionMiddleware`（先跑 denylist 底线、再按 `session.scratch['__permissionLevel']` 级别判定）、`createPermissionExtension()`（SetupFn：挂中间件 priority 1000 + 注册 `registerToolFilter` 裁剪器 + 注册权限声明段落 + `/level` 语义实现）。`baseExtension` 改挂 `permissionMiddleware` + `createPermissionExtension()`；新增 `apps/agent/scripts/check-permission.ts`。（注：权限声明段落最初记为 "注册权限声明 contributor"，ADR-0008 后改为挂 `system_prompt` 栈中间件，本行保留当时表述。）
 
 ## Permission levels (designing — via /grill-with-docs, round 4)
 

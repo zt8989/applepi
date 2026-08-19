@@ -55,13 +55,16 @@ discovering it by hitting blocks.
   audits the **final** args after inner rewrites (two-stage ENTRY/EXIT, the
   ADR-0005 convention), so even a mis-cropped or rewritten call cannot surface
   a real result.
-- **System prompt carries the level (Q9)** — the permission extension registers
-  a system-prompt contributor emitting a fixed-structure「权限声明」section:
+- **System prompt carries the level (Q9; mechanism superseded by ADR-0008)** —
+  the permission extension contributes a fixed-structure「权限声明」section:
   level name, what that level allows/forbids, project root path, and the
-  level-cropped tool list. The prompt is rebuilt on session start, `/resume`,
-  and immediately after every `/level` switch (via `emitSystemPrompt`, whose
-  newest system message replaces `message[0]` on replay — ADR-0002). Other
-  prompt sections (base, skills) are unaffected (Q15).
+  level-cropped tool list. Originally a system-prompt contributor
+  (Q10=c); since ADR-0008 it is a `system_prompt`-stack middleware that
+  pushes the section + `permission` label. The prompt is rebuilt on session
+  start, `/resume`, and immediately after every `/level` switch (via
+  `emitSystemPrompt`, whose newest system message replaces `message[0]` on
+  replay — ADR-0002). Other prompt sections (base, skills) are unaffected
+  (Q15).
 - **Only the user can change the level (Q7)** — `/level <readonly|workspace|fullaccess>`
   is a **user-driven** slash command; the model has **no tool** to change
   levels (no self-privilege-escalation). The command writes `level/set`,
@@ -108,8 +111,9 @@ discovering it by hitting blocks.
   prompt section + `/level`). One line still reproduces the default harness.
 - Consumers assembling their own extension set inherit the same
   responsibility as before (ADR-0005 Q3): mount the permission middleware at
-  priority 1000 and register the filter/prompt contributor if they want the
-  same guarantees.
+  priority 1000 and register the filter / contribute the prompt section
+  (now a `system_prompt`-stack middleware, ADR-0008) if they want the same
+  guarantees.
 - Breaking change: `HarnessApi` gains new members (additive); `buildToolDefs`
   now applies filters (behavioral, but no consumer relied on unfiltered defs
   beyond the model-facing surface). `main.ts` slash dispatch changes shape.

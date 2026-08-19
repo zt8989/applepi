@@ -24,7 +24,7 @@
                 │ 依赖：extensions → core（单向）
 ┌───────────────┴─────────────────────────────────────────────┐
 │  packages/core  (@applepi/core)  —— 纯运行时骨架，无工具      │
-│  洋葱事件总线（session/llm/tool 三栈）· loader               │
+│  洋葱事件总线（session/llm/tool/system_prompt 四栈）· loader   │
 │  内置 agent loop · SessionStore · LLM 配置解析               │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -36,7 +36,7 @@
 
 核心只有五样东西，**不含任何工具**（ADR-0005 把工具与 denylist 全部移出核心）：
 
-1. **洋葱事件总线** — 三个中间件栈（`session` / `llm` / `tool`），见 §4。
+1. **洋葱事件总线** — 四个中间件栈（`session` / `llm` / `tool` / `system_prompt`），见 §4。
 2. **加载器（Loader）** — 发现并加载扩展，见 §3。
 3. **内置 agent loop** — 会话循环，见 §5。
 4. **SessionStore** — 会话持久化（jsonl），见 §6。
@@ -70,13 +70,22 @@ export default function setup(api: HarnessApi): void {
 ```ts
 interface HarnessApi {
   registerTool(spec: ToolSpec): void;        // 拉模式注册工具
-  use(stack: "session" | "llm" | "tool",     // 挂载中间件到某栈
+  use(stack: "session" | "llm" | "tool" | "system_prompt", // 挂载中间件到某栈
       mw: Middleware,
       opts?: { priority?: number }): void;
+  registerToolFilter(fn: ToolFilter): void;  // 裁剪模型可见的工具 schema（ADR-0007）
+  registerSlashCommand(name, handler): void; // 注册 slash 命令（ADR-0007 Q13）
+  getSlashCommand(name): SlashHandler | undefined;
+  emitSystemPrompt(): Promise<{ prompt: string; sections: string[] }>; // 重建+持久化（ADR-0008）
+  appendEvent(event, payload?): Promise<void>; // 写生命周期事件到 jsonl（P7）
   ctx: SessionContext;                        // 会话状态读写
-  addSystemPromptContributor(fn, name): void; // 贡献系统提示词段落
+  getTools(): ToolSpec[];
 }
 ```
+
+系统提示词经 `system_prompt` 栈构建（ADR-0008）：中间件在入口
+`ctx.promptParts.push(section)`（可整体改写数组）、`ctx.sections.push(label)`，
+harness 收尾 `join('\n\n')` 归一化并返回 `{ prompt, sections }`。
 
 ### 3.4 `baseExtension`（默认能力集）
 
@@ -91,13 +100,14 @@ harness.registerExtension(baseExtension);
 
 ## 4. 洋葱事件总线（Hook 契约）
 
-3 个中间件栈，每个都是**洋葱模型**（中间件栈，`next()` 串联，进出双向）：
+4 个中间件栈，每个都是**洋葱模型**（中间件栈，`next()` 串联，进出双向）：
 
 | 栈 | 包裹范围 |
 |---|---|
 | `session` | 整个会话生命周期 |
 | `llm` | 单次 LLM 调用（进：改 messages；出：改 response） |
 | `tool` | 单次工具执行（进：改 args / 否决；出：改 result） |
+| `system_prompt` | 系统提示词构建（进：push 段落 + 标签 / 可整体改写；ADR-0008） |
 
 ```ts
 type Middleware = (ctx: Ctx, next: () => Promise<void>) => Promise<void>;
@@ -105,10 +115,12 @@ type Middleware = (ctx: Ctx, next: () => Promise<void>) => Promise<void>;
 
 - **观察**：读 `ctx`，调 `await next()`。
 - **否决（veto）**：不调 `next()`（或 `throw`），内层与最终执行被截断。
+  `system_prompt` 栈上 veto 只跳过后续段落，不拦持久化（ADR-0008 Q6）。
 - **改写**：`next()` 前改入参、`next()` 后改出参（mutate `ctx`）。
 
-**排序**：同栈内按 `priority` 排序；洋葱语义下**先注册 = 最外层**
-（进入最先、退出最后）。安全扩展据此卡在最外圈审最终参数。
+**排序**：同栈内按 `priority` 排序（高 = 外层，进入最先、退出最后）。
+`system_prompt` 栈约定 base 挂 priority 1000 使段落最前（ADR-0008 Q3）；安全
+扩展据此卡在 tool 栈最外圈审最终参数。
 
 **软隔离**：总线在每层 `next()` 外包 `try/catch`，单个中间件抛错降级并 log，
 不拖死整个 loop（tool 栈把异常转成 `ERROR` 结果）。
@@ -132,6 +144,9 @@ loop:
   provider 适配器），不自己写多模型适配。
 - **工具暴露给模型**：扩展注册的工具经 AI SDK `tool({ description, parameters:
   zodSchema, execute })` 翻译给模型。
+- **系统提示词注入**：每轮 `messages[0]` 由 `buildSystemPrompt()` 生成——运行
+  `system_prompt` 栈拼装段落（ADR-0008），会话启动 / `/reload` / `/level` 时
+  同时持久化新 system 消息行（ADR-0002 replay 语义）。
 
 ## 6. 工具与 Vercel AI SDK 映射
 
@@ -158,7 +173,8 @@ api.registerTool({
   挂 tool 栈 priority 1000 最外层，ENTRY veto + EXIT 审计内层改写后的最终参数）。
 - **denylist 底线**：原 8 条危险正则作为**任何级别下都生效的绝对底线**，内嵌于权限中间件
   （`fullaccess` 也不允许 `rm -rf`、fork bomb 等）。
-- **提示词携带级别**：权限扩展贡献「Permission Level」系统提示词段落（级别声明 + 可用能力清单），
+- **提示词携带级别**：权限扩展在 `system_prompt` 栈上贡献「Permission Level」
+  系统提示词段落（级别声明 + 可用能力清单，ADR-0008），
   启动/恢复/`/level` 切换时重建。
 - **级别持久化**：`level/set` 事件写入会话 jsonl；当前级别 = 最后一个 `level/set` 事件的
   `payload.level`，无则默认 `workspace`（`SessionStore.lastEvent` 读取，`restorePermissionLevel` 恢复）。
@@ -186,8 +202,11 @@ api.registerTool({
 - **Resume / Reload**：`/resume <id>` 切换活动会话并继续追加；`/reload` 重建
   整个 Harness（保留 `session.scratch` + `session.history`），重新发现扩展并
   重建系统提示词。
-- **系统提示词 = 段落拼装**：base 段 + 各 `addSystemPromptContributor` 贡献段，
-  注册顺序拼接成一条 `role:"system"` 消息（Q10=c，取代旧 llm 中间件注入）。
+- **系统提示词 = `system_prompt` 栈构建（ADR-0008）**：中间件 push 段落到
+  `ctx.promptParts`（可整体改写数组），并 push 标签到 `ctx.sections`；
+  base 挂 priority 1000 最外层，扩展默认 0；harness 统一 `join('\n\n')` 归一化，
+  返回 `{ prompt, sections }`（取代 Q10=c 的 `addSystemPromptContributor` 与
+  更早的 llm 中间件注入）。
 - **Slash 命令（核心能力，非 CLI 专属）**：`/reload` `/resume <id>` `/new`
   `/sessions` `/config` `/help` `/exit`。
 
@@ -212,14 +231,14 @@ applepi/
 ├── tsconfig.base.json      # 共享编译配置
 ├── packages/
 │   ├── core/               # @applepi/core：总线 / loader / loop / session / config（无工具）
-│   └── extensions/         # @applepi/extensions：参考工具 + denylist + baseExtension + memory/skills
+│   └── extensions/         # @applepi/extensions：参考工具 + 权限级别系统 + baseExtension + memory/skills
 ├── apps/
 │   └── agent/              # @applepi/agent：REPL 主入口 + *.ext.ts + scripts/check-*
 ├── docs/
 │   ├── README.md           # Wiki 首页（本页）
 │   ├── architecture.md     # 本文档
 │   ├── design-principles.md
-│   ├── adr/                # ADR-0001 ~ 0006
+│   ├── adr/                # ADR-0001 ~ 0008
 │   └── agents/             # agent 协作约定
 └── CONTEXT.md              # 术语表 + 已锁定决策（单一事实来源）
 ```
