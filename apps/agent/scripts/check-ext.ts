@@ -1,7 +1,7 @@
 // Key-free verification that a real *.ext.ts in <app>/extensions/ is
 // auto-discovered and its tool registered. Run with tsx:
 //   pnpm --filter agent check-ext
-import { Harness } from '../../core/index.js';
+import { Harness } from '@applepi/core';
 
 const harness = new Harness();
 const extDir = new URL('../extensions/', import.meta.url).pathname;

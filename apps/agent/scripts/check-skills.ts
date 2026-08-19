@@ -2,8 +2,8 @@
 // LLM/API key. Loads the skills extension onto a real Harness and asserts that
 // loaded skills are contributed to the system prompt (Q10=c: extensions
 // contribute sections via api.addSystemPromptContributor, rebuilt on /reload).
-import { Harness, bashTool, strReplaceEditorTool, denylistExtension } from '../../core/index.js';
-import { createSkillsExtension } from '../../extensions/index.js';
+import { Harness, bashTool, strReplaceEditorTool, denylistExtension } from '@applepi/core';
+import { createSkillsExtension } from '@applepi/extensions';
 
 const harness = new Harness();
 

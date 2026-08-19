@@ -1,0 +1,22 @@
+{
+  "name": "@applepi/core",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node test/smoke.mjs && node test/session.mjs"
+  },
+  "dependencies": {
+    "ai": "^4.0.0",
+    "zod": "^3.23.0"
+  }
+}

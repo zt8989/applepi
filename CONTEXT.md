@@ -1,6 +1,6 @@
 # CONTEXT.md
 
-Project: a minimal **single-machine agent harness** (single pnpm package at the repo root).
+Project: a minimal **single-machine agent harness**, organized as a **pnpm workspace** (decided via /grill-with-docs, 2026-08-19; reverses the 4f15860 single-package flatten):
 
 ## Glossary
 
@@ -15,7 +15,7 @@ Project: a minimal **single-machine agent harness** (single pnpm package at the 
 - **Session** — a persistent conversation bound to a `session_id`; recorded append-only to a jsonl file. The CLI runs a REPL; **resume & session-listing are core capabilities**, so a future web UI reuses the same core (CLI is just one interface).
 - **Session id** — uuid (v4) generated per session, printed at start, reused to resume.
 - **Workspace** — slug of the process cwd absolute path; the directory tier under `~/.applepi/sessions/<workspace>/`.
-- **SessionStore** — a **core-owned** class managing the append-only jsonl for a workspace: `create`, `appendEvent`, `appendMessage`, `load` (replay → LLM message array), `list` (for `/sessions`). Lives in `src/core`, not the agent, so any UI can drive it.
+- **SessionStore** — a **core-owned** class managing the append-only jsonl for a workspace: `create`, `appendEvent`, `appendMessage`, `load` (replay → LLM message array), `list` (for `/sessions`). Lives in the **core package** (`packages/core`), not the agent, so any UI can drive it.
 - **Session store file** — single append-only jsonl at `~/.applepi/sessions/<workspace>/<session_id>.jsonl`. Each line is either an **event line** (`kind:"event"`) or a **message line** (`kind:"message"`).
 - **Event** — `kind:"event"` line recording a lifecycle span with `phase:"start"|"end"`. Event types: `system_prompt`, `skill`, `reload`. (No `tool_subagent` — out of scope, Q1; `mcp` removed with the mcp feature, Q11.)
 - **Message line** — `kind:"message"` line mirroring an LLM message (`role`: system|user|assistant|tool). The first system message is the system prompt.
@@ -30,10 +30,12 @@ Project: a minimal **single-machine agent harness** (single pnpm package at the 
 
 ## Key decisions (locked)
 
-Full spec: `harness-design-spec.md`. Flat package layout (single package at the repo root):
+Full spec: `harness-design-spec.md`. Pnpm workspace layout (three workspace packages, Q1=b/Q2=b):
 
-- `src/core` — the harness runtime (onion bus, two built-in tools, loader, built-in loop)
-- `src/extensions` — reference extensions: memory / skills (mcp removed, Q11)
-- `src/agent` — the local agent: `main.ts` wires core + extensions + a provider and runs the loop; `extensions/` holds local `*.ext.ts`; `scripts/` holds the key-free verification checks
+- `packages/core` (`@applepi/core`) — the harness runtime (onion bus, two built-in tools, loader, built-in loop, session store)
+- `packages/extensions` (`@applepi/extensions`) — reference extensions: memory / skills (mcp removed, Q11)
+- `apps/agent` (`@applepi/agent`) — the local agent: `main.ts` wires core + extensions + a provider and runs the REPL; `extensions/` holds local `*.ext.ts`; `scripts/` holds the key-free verification checks
 
-Architecture decisions are recorded as ADR-0001 (harness) and ADR-0002 (session persistence: jsonl + resume + reload).
+Dependency graph (one direction): `@applepi/agent → @applepi/extensions → @applepi/core`. Cross-package imports use **package names** resolved to `dist/` via each package's `exports` (Q3=a); dev/test run **build-first** (Q4=a); each package has its own `tsconfig.json` extending a shared base (Q5=a); the root `package.json` orchestrates `build`/`dev`/`test`/`verify` (Q6=a).
+
+Architecture decisions are recorded as ADR-0001 (harness), ADR-0002 (session persistence: jsonl + resume + reload), and ADR-0003 (workspace split).

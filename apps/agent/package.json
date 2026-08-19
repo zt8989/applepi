@@ -1,0 +1,32 @@
+{
+  "name": "@applepi/agent",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/main.js",
+  "types": "./dist/main.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/main.d.ts",
+      "import": "./dist/main.js"
+    }
+  },
+  "scripts": {
+    "build": "pnpm --filter @applepi/core build && pnpm --filter @applepi/extensions build && tsc -p tsconfig.json",
+    "dev": "pnpm --filter @applepi/core build && pnpm --filter @applepi/extensions build && tsx main.ts",
+    "check-ext": "pnpm --filter @applepi/core build && pnpm --filter @applepi/extensions build && tsx scripts/check-ext.ts",
+    "check-denylist": "pnpm --filter @applepi/core build && pnpm --filter @applepi/extensions build && tsx scripts/check-denylist.ts",
+    "check-memory": "pnpm --filter @applepi/core build && pnpm --filter @applepi/extensions build && tsx scripts/check-memory.ts",
+    "check-skills": "pnpm --filter @applepi/core build && pnpm --filter @applepi/extensions build && tsx scripts/check-skills.ts",
+    "check-session": "pnpm --filter @applepi/core build && pnpm --filter @applepi/extensions build && tsx scripts/check-session.ts",
+    "check-soft-isolation": "pnpm --filter @applepi/core build && pnpm --filter @applepi/extensions build && tsx scripts/check-soft-isolation.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^1.0.0",
+    "@ai-sdk/openai": "^1.0.0",
+    "@applepi/core": "workspace:*",
+    "@applepi/extensions": "workspace:*",
+    "ai": "^4.0.0",
+    "zod": "^3.23.0"
+  }
+}

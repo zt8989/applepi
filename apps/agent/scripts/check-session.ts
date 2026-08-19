@@ -11,8 +11,8 @@ import {
   bashTool,
   strReplaceEditorTool,
   denylistExtension,
-} from '../../core/index.js';
-import { createSkillsExtension } from '../../extensions/index.js';
+} from '@applepi/core';
+import { createSkillsExtension } from '@applepi/extensions';
 
 const WS = 'check-session-tmp';
 const DIR = path.join(os.homedir(), '.applepi', 'sessions', WS);

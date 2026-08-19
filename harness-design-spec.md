@@ -174,28 +174,23 @@ api.addSystemPromptContributor((ctx) => renderSkills(ctx.scratch.__skills), "ski
 
 ---
 
-## 10. 建议目录骨架
+## 10. 目录骨架（pnpm workspace，2026-08-19 由单包改回）
 
 ```
-harness/
-├── package.json            # 自身声明 + 依赖 ai-sdk
-├── src/
-│   ├── core/
-│   │   ├── bus.ts          # 洋葱中间件总线
-│   │   ├── loader.ts       # 扫描 harness-ext 字段、import、setup
-│   │   ├── loop.ts         # 内置 agent loop（调 AI SDK）
-│   │   └── ctx.ts          # SessionContext
-│   ├── tools/
-│   │   ├── bash.ts         # 内置工具
-│   │   └── str_replace_editor.ts
-│   └── builtin/
-│       └── denylist.ts     # 特权内置扩展（最外层 tool 中间件）
-├── extensions/             # 参考扩展
-│   ├── memory/
-│   └── skills/
-└── examples/
-    └── hello-ext/          # 最小扩展示例（含 package.json harness-ext 字段）
+applepi/
+├── package.json            # workspace 编排器（build / dev / test / verify）
+├── pnpm-workspace.yaml     # packages: ["packages/*", "apps/*"]
+├── tsconfig.base.json      # 共享编译配置（各包 extends）
+├── packages/
+│   ├── core/               # @applepi/core：洋葱总线 / loop / session store / 内置工具 / denylist
+│   └── extensions/         # @applepi/extensions：参考扩展（memory / skills）
+├── apps/
+│   └── agent/              # @applepi/agent：REPL 主入口 + extensions/*.ext.ts + scripts/check-*
+├── docs/adr/               # ADR-0001（harness）/ 0002（会话持久化）/ 0003（workspace 拆分）
+└── harness-design-spec.md
 ```
+- 依赖方向：`agent → extensions → core`（包名 import，解析到各包 dist）。
+- dev/test 采用 build-first：跑 agent 前先构建依赖包（脚本内自动 `pnpm --filter` 构建）。
 
 ---
 

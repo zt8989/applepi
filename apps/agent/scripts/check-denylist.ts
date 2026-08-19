@@ -7,7 +7,7 @@ import {
   bashTool,
   denylistExtension,
   runLoop,
-} from '../../core/index.js';
+} from '@applepi/core';
 import { writeFileSync, existsSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

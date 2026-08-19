@@ -5,7 +5,7 @@
 // surfaced as an ERROR result delivered to the model, and (2) the loop advances
 // to the next turn instead of crashing. Verifies spec §4 / Q7-(iii) soft
 // isolation under the same-process, zero-isolation premise.
-import { Harness, bashTool, strReplaceEditorTool, denylistExtension, runLoop } from '../../core/index.js';
+import { Harness, bashTool, strReplaceEditorTool, denylistExtension, runLoop } from '@applepi/core';
 
 const harness = new Harness();
 

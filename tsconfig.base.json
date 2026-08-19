@@ -10,9 +10,6 @@
     "declaration": true,
     "sourceMap": true,
     "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "outDir": "./dist",
-    "rootDir": "./src"
-  },
-  "include": ["src"]
+    "resolveJsonModule": true
+  }
 }

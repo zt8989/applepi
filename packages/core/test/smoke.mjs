@@ -8,7 +8,7 @@ import {
   strReplaceEditorTool,
   denylistExtension,
   runLoop,
-} from '../../../dist/core/index.js';
+} from '../dist/index.js';
 
 let passed = 0;
 function ok(name) {

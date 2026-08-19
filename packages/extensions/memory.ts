@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { SetupFn, HarnessApi, Ctx } from '../core/index.js';
+import type { SetupFn, HarnessApi, Ctx } from '@applepi/core';
 
 export interface MemoryOptions {
   /** Path to the JSON file backing memory. Defaults to ./harness-memory.json. */

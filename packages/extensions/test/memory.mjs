@@ -1,4 +1,4 @@
-import { createMemoryExtension } from '../../../dist/extensions/index.js';
+import { createMemoryExtension } from '../dist/index.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';

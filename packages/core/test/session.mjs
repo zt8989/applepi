@@ -9,7 +9,7 @@ import path from 'node:path';
 import {
   SessionStore,
   slugWorkspace,
-} from '../../../dist/core/index.js';
+} from '../dist/index.js';
 
 let passed = 0;
 function ok(name) {
@@ -18,7 +18,10 @@ function ok(name) {
 }
 
 const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'applepi-session-test-'));
-const ws = 'test-workspace';
+// Unique workspace per run: the store appends to ~/.applepi/sessions/<ws>,
+// so a fixed name would let previous runs' files pollute append-only asserts.
+const ws = 'test-ws-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+const storeBase = path.join(os.homedir(), '.applepi', 'sessions', ws);
 
 // 1. slugWorkspace turns an absolute path into a filesystem-safe token.
 {
@@ -37,7 +40,7 @@ const ws = 'test-workspace';
   const raw = await fs.readFile(s.filePath(), 'utf8');
   assert.match(raw, /"kind":"message"/);
   assert.match(raw, /"session_id":"sess-a"/);
-  assert.match(raw, /"workspace":"test-workspace"/);
+  assert.match(raw, /"workspace":"test-ws-[^"]+"/);
   ok('create(): fixed id, append writes a valid message line');
 }
 
@@ -120,4 +123,5 @@ const ws = 'test-workspace';
 }
 
 await fs.rm(tmpRoot, { recursive: true, force: true });
+await fs.rm(storeBase, { recursive: true, force: true });
 console.log(`\n${passed} session checks passed.`);

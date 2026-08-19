@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { SetupFn, HarnessApi, Ctx } from '../core/index.js';
+import type { SetupFn, HarnessApi, Ctx } from '@applepi/core';
 
 export interface SkillsOptions {
   /** Marker key in session.scratch holding the loaded skills map. */

@@ -7,7 +7,7 @@ import {
   bashTool,
   strReplaceEditorTool,
   denylistExtension,
-} from '../core/index.js';
+} from '@applepi/core';
 
 const extDir = new URL('../extensions/', import.meta.url).pathname;
 

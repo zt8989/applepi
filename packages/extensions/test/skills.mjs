@@ -1,5 +1,5 @@
-import { createSkillsExtension } from '../../../dist/extensions/index.js';
-import { Harness } from '../../../dist/core/index.js';
+import { createSkillsExtension } from '../dist/index.js';
+import { Harness } from '@applepi/core';
 
 let passed = 0;
 let failed = 0;

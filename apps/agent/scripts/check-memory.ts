@@ -2,7 +2,7 @@
 // LLM/API key by injecting a fake `llmCall` into runLoop. Reproduces the real
 // Harness + onion bus + built-in loop, and loads the memory extension from the
 // local extensions/ directory via the auto-discovery loader (T02 + T04 joint).
-import { Harness, bashTool, strReplaceEditorTool, denylistExtension, runLoop } from '../../core/index.js';
+import { Harness, bashTool, strReplaceEditorTool, denylistExtension, runLoop } from '@applepi/core';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 

@@ -1,4 +1,4 @@
-import type { SetupFn } from '../../core/index.js';
+import type { SetupFn } from '@applepi/core';
 import { z } from 'zod';
 
 /**
