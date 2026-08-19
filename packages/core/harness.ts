@@ -16,8 +16,10 @@ import type {
 export interface RunOpts {
   maxTurns?: number;
   llmCall?: LlmCall;
-  /** Persist a `system_prompt` event + message line. True on session start / /reload. */
-  emitSystemPrompt?: boolean;
+  /** Also persist the built system prompt this run (start event + message +
+   *  end event) via the single `persistSystemPrompt` path. True on session
+   *  start / /reload; false on ordinary turns. */
+  persistSystemPrompt?: boolean;
 }
 
 /** Result of one system-prompt build (ADR-0008). */
@@ -35,9 +37,30 @@ export class Harness {
   private tools = new Map<string, ToolSpec>();
   private toolFilters: ToolFilter[] = [];
   private slashCommands = new Map<string, SlashHandler>();
+  /** Core event handlers: `system_prompt` is handled here; everything else
+   *  falls back to writing a lifecycle event line (ADR-0008 follow-up). */
+  private eventHandlers = new Map<string, (payload: any) => Promise<any>>();
 
   constructor(opts: { workspace?: string } = {}) {
     this.workspace = opts.workspace ?? slugWorkspace(process.cwd());
+    // system_prompt is a core-handled event: rebuild + persist, returning the
+    // built { prompt, sections } so callers can log sections.
+    this.eventHandlers.set('system_prompt', async () => {
+      const built = await this.buildSystemPrompt();
+      await this.persistSystemPrompt(built);
+      return built;
+    });
+  }
+
+  /**
+   * Publish an event (single entry for all events, ADR-0008 follow-up).
+   * Handled events (currently `system_prompt`) run their handler; any other
+   * event writes a lifecycle event line to the session store (P7), if attached.
+   */
+  async emit(event: string, payload: any = {}): Promise<any> {
+    const handler = this.eventHandlers.get(event);
+    if (handler) return handler(payload);
+    await this.sessionStore?.appendEvent(event, payload);
   }
 
   readonly api: HarnessApi = {
@@ -61,10 +84,7 @@ export class Harness {
     },
     getSlashCommand: (name: string) =>
       this.slashCommands.get(name.replace(/^\//, '')),
-    emitSystemPrompt: () => this.emitSystemPrompt(),
-    appendEvent: async (event: string, payload: any = {}) => {
-      await this.sessionStore?.appendEvent(event, payload);
-    },
+    emit: (event: string, payload?: any) => this.emit(event, payload),
     ctx: this.session,
     getTools: () => [...this.tools.values()],
   };
@@ -153,11 +173,11 @@ export class Harness {
             : ctx.toolArgs?.path
               ? 'path'
               : 'unknown';
-          await this.sessionStore?.appendEvent('skill/start', { name, source });
+          await this.emit('skill/start', { name, source });
           await next();
           const res = ctx.toolResult ?? '';
           const ok = !res.startsWith('ERROR');
-          await this.sessionStore?.appendEvent('skill/end', {
+          await this.emit('skill/end', {
             ok,
             error: ok ? undefined : res,
           });
@@ -172,22 +192,15 @@ export class Harness {
   /**
    * Persist a built system prompt: `system_prompt/start` event + system
    * message line + `system_prompt/end` event. This is the ONLY place the
-   * system prompt is persisted — `emitSystemPrompt()` (session start,
-   * `/reload`, `/level`) and `run({ emitSystemPrompt: true })` both go
-   * through here, so the emit path is single (2026-08-19 follow-up).
+   * system prompt is persisted — the `system_prompt` event handler (session
+   * start, `/reload`, `/level`) and `run({ persistSystemPrompt: true })` both
+   * go through here, so the persist path is single (2026-08-19 follow-up).
    */
   private async persistSystemPrompt(built: BuiltSystemPrompt): Promise<void> {
     if (!this.sessionStore) return;
-    await this.sessionStore.appendEvent('system_prompt/start', { sections: built.sections });
+    await this.emit('system_prompt/start', { sections: built.sections });
     await this.sessionStore.appendMessage('system', built.prompt);
-    await this.sessionStore.appendEvent('system_prompt/end', { sections: built.sections });
-  }
-
-  /** Rebuild + persist the system prompt (session start / /reload / /level). */
-  async emitSystemPrompt(): Promise<BuiltSystemPrompt> {
-    const built = await this.buildSystemPrompt();
-    await this.persistSystemPrompt(built);
-    return built;
+    await this.emit('system_prompt/end', { sections: built.sections });
   }
 
   /** Enumerate sessions in the current workspace (delegates to core SessionStore). */
@@ -230,8 +243,8 @@ export class Harness {
   /** Run a full session turn: persist system/user/assistant/tool, record history. */
   async run(prompt: string, model: any, opts: RunOpts = {}): Promise<any[]> {
     const built = await this.buildSystemPrompt();
-    if (opts.emitSystemPrompt) {
-      await this.persistSystemPrompt(built); // single emit path (2026-08-19)
+    if (opts.persistSystemPrompt) {
+      await this.persistSystemPrompt(built); // single persist path (2026-08-19)
     }
 
     const messages: any[] = [{ role: 'system', content: built.prompt }];

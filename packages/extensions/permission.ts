@@ -361,8 +361,8 @@ export function createPermissionExtension(): SetupFn {
         return `usage: /level <${PERMISSION_LEVELS.join('|')}>`;
       }
       api.ctx.scratch[PERMISSION_SCRATCH_KEY] = level;
-      await api.appendEvent('level/set', { level });
-      await api.emitSystemPrompt();
+      await api.emit('level/set', { level });
+      await api.emit('system_prompt'); // rebuild + persist (core handler)
       return `[level] ${level} (system prompt rebuilt; tool surface re-cropped)`;
     });
   };

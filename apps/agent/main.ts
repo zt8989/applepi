@@ -91,15 +91,15 @@ console.log(`[session] ${store.sessionId} (workspace: ${store.workspace})`);
 let { harness, loaded } = await boot(store);
 if (loaded.length) console.error(`[harness] loaded local extensions: ${loaded.join(', ')}`);
 
-// Fresh session: persist the initial system prompt once.
-const { sections } = await harness.emitSystemPrompt();
+// Fresh session: persist the initial system prompt once (via emit, ADR-0008).
+const { sections } = await harness.emit('system_prompt');
 console.log(`[system] system prompt built (sections: ${sections.join(', ')})`);
 
 const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: '> ' });
 const initial = process.argv[2];
 
 async function handleTurn(input: string): Promise<void> {
-  const messages = await harness.run(input, model, { emitSystemPrompt: false });
+  const messages = await harness.run(input, model, { persistSystemPrompt: false });
   printMessages(messages.filter((m) => m.role !== 'system'));
   rl.prompt();
 }
@@ -152,12 +152,12 @@ rl.on('line', async (raw) => {
       case '/reload': {
         const oldScratch = harness.session.scratch;
         const oldHistory = harness.session.history;
-        await store.appendEvent('reload/start', { extensionsDiscovered: loaded });
+        await harness.emit('reload/start', { extensionsDiscovered: loaded });
         ({ harness, loaded } = await boot(store));
         harness.session.scratch = oldScratch;
         harness.session.history = oldHistory;
-        await harness.emitSystemPrompt();
-        await store.appendEvent('reload/end', { extensionsDiscovered: loaded });
+        await harness.emit('system_prompt');
+        await harness.emit('reload/end', { extensionsDiscovered: loaded });
         console.log(`[reload] extensions re-scanned (${loaded.length}), system prompt rebuilt`);
         break;
       }
@@ -178,7 +178,7 @@ rl.on('line', async (raw) => {
         store = new SessionStore();
         await store.create();
         ({ harness, loaded } = await boot(store));
-        await harness.emitSystemPrompt();
+        await harness.emit('system_prompt');
         console.log(`[new] session ${store.sessionId}`);
         break;
       }

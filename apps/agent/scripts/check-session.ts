@@ -34,7 +34,7 @@ const store = new SessionStore({ workspace: WS });
 await store.create();
 const sid = store.sessionId!;
 let harness = boot(store);
-await harness.emitSystemPrompt();
+await harness.emit('system_prompt');
 
 let turn = 0;
 const fakeLlm: any = async () => {
@@ -102,12 +102,12 @@ if (!ids.includes(sid)) {
 const storeR = new SessionStore({ workspace: WS });
 await storeR.create();
 let hR = boot(storeR);
-await hR.emitSystemPrompt(); // original: BASE only
+await hR.emit('system_prompt'); // original: BASE only
 hR.session.scratch = harness.session.scratch; // skill "polite" carried over
 hR.session.history = harness.session.history;
-await storeR.appendEvent('reload/start', { extensionsDiscovered: [] });
-await hR.emitSystemPrompt(); // rebuilt: BASE + [Skill: polite]
-await storeR.appendEvent('reload/end', { extensionsDiscovered: [] });
+await hR.emit('reload/start', { extensionsDiscovered: [] });
+await hR.emit('system_prompt'); // rebuilt: BASE + [Skill: polite]
+await hR.emit('reload/end', { extensionsDiscovered: [] });
 const lr = await storeR.load();
 const rebuilt = lr.messages[0].content;
 console.log('--- rebuilt system prompt head:', rebuilt.slice(0, 120));

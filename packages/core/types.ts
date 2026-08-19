@@ -76,10 +76,14 @@ export interface HarnessApi {
   registerSlashCommand(name: string, handler: SlashHandler): void;
   /** Look up an extension-registered slash command (undefined if absent). */
   getSlashCommand(name: string): SlashHandler | undefined;
-  /** Rebuild + persist the system prompt (session start / /reload / /level). */
-  emitSystemPrompt(): Promise<{ prompt: string; sections: string[] }>;
-  /** Append a lifecycle event to the session store, if attached (P7). */
-  appendEvent(event: string, payload?: any): Promise<void>;
+  /**
+   * Publish an event (ADR-0008 follow-up). The harness owns a handler map:
+   * `system_prompt` is handled in core (rebuild + persist, returning the
+   * built `{ prompt, sections }`); any other event falls back to writing a
+   * lifecycle event line to the session store (P7). All events go through
+   * this single entry — there is no per-event method on the API.
+   */
+  emit(event: string, payload?: any): Promise<any>;
   ctx: SessionContext;
   getTools(): ToolSpec[];
 }
