@@ -39,8 +39,8 @@ const storeBase = path.join(os.homedir(), '.applepi', 'sessions', ws);
   await s.appendMessage('user', 'hello');
   const raw = await fs.readFile(s.filePath(), 'utf8');
   assert.match(raw, /"kind":"message"/);
-  assert.match(raw, /"session_id":"sess-a"/);
-  assert.match(raw, /"workspace":"test-ws-[^"]+"/);
+  assert.doesNotMatch(raw, /"session_id"/);
+  assert.doesNotMatch(raw, /"workspace"/);
   ok('create(): fixed id, append writes a valid message line');
 }
 
@@ -52,29 +52,29 @@ const storeBase = path.join(os.homedir(), '.applepi', 'sessions', ws);
   ok('create(): auto uuid session id');
 }
 
-// 4. appendEvent writes an event line with type/phase/payload.
+// 4. appendEvent writes an event line with the merged event field (ADR-0006).
 {
   const s = new SessionStore({ workspace: ws, sessionId: 'sess-b' });
   await s.create();
-  await s.appendEvent('skill', 'start', { name: 'polite', source: 'content' });
-  await s.appendEvent('skill', 'end', { ok: true });
+  await s.appendEvent('skill/start', { name: 'polite', source: 'content' });
+  await s.appendEvent('skill/end', { ok: true });
   const raw = await fs.readFile(s.filePath(), 'utf8');
   const lines = raw.split('\n').filter(Boolean).map((l) => JSON.parse(l));
   assert.equal(lines.length, 2);
   assert.deepEqual(lines[0].payload, { name: 'polite', source: 'content' });
   assert.equal(lines[0].kind, 'event');
-  assert.equal(lines[0].phase, 'start');
-  assert.equal(lines[1].phase, 'end');
-  ok('appendEvent: event lines carry type/phase/payload');
+  assert.equal(lines[0].event, 'skill/start');
+  assert.equal(lines[1].event, 'skill/end');
+  ok('appendEvent: event lines carry merged event/payload');
 }
 
 // 5. load() filters to message lines only.
 {
   const s = new SessionStore({ workspace: ws, sessionId: 'sess-c' });
   await s.create();
-  await s.appendEvent('system_prompt', 'start', { sections: ['base', 'skills'] });
+  await s.appendEvent('system_prompt/start', { sections: ['base', 'skills'] });
   await s.appendMessage('system', 'SYS-ORIGINAL');
-  await s.appendEvent('system_prompt', 'end', { sections: ['base', 'skills'] });
+  await s.appendEvent('system_prompt/end', { sections: ['base', 'skills'] });
   await s.appendMessage('user', 'hi');
   await s.appendMessage('assistant', 'hello');
   const loaded = await s.load();
@@ -95,9 +95,9 @@ const storeBase = path.join(os.homedir(), '.applepi', 'sessions', ws);
   await s.appendMessage('system', 'SYS-ORIGINAL');
   await s.appendMessage('user', 'u1');
   await s.appendMessage('assistant', 'a1');
-  await s.appendEvent('reload', 'start', { extensionsDiscovered: [], reset: true });
+  await s.appendEvent('reload/start', { extensionsDiscovered: [] });
   await s.appendMessage('system', 'SYS-REBUILT-AFTER-RELOAD');
-  await s.appendEvent('reload', 'end', { extensionsDiscovered: [], reset: true });
+  await s.appendEvent('reload/end', { extensionsDiscovered: [] });
   await s.appendMessage('user', 'u2');
 
   const loaded = await s.load();

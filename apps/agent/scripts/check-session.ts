@@ -53,14 +53,14 @@ const raw = await fs.readFile(store.filePath(), 'utf8');
 const lines = raw.split('\n').filter(Boolean).map((l) => JSON.parse(l));
 const roles = lines.filter((l) => l.kind === 'message').map((l) => l.role);
 console.log('--- message roles:', roles.join(','));
-console.log('--- event types:', lines.filter((l) => l.kind === 'event').map((l) => `${l.type}:${l.phase}`).join(','));
+console.log('--- event types:', lines.filter((l) => l.kind === 'event').map((l) => l.event).join(','));
 
 if (!roles.includes('system') || !roles.includes('user') || !roles.includes('assistant') || !roles.includes('tool')) {
   console.error('check-session: FAIL (missing message roles)');
   process.exit(1);
 }
-const skillEvents = lines.filter((l) => l.kind === 'event' && l.type === 'skill');
-if (skillEvents.length !== 2 || skillEvents[0].phase !== 'start' || skillEvents[1].phase !== 'end') {
+const skillEvents = lines.filter((l) => l.kind === 'event' && (l.event === 'skill/start' || l.event === 'skill/end'));
+if (skillEvents.length !== 2 || skillEvents[0].event !== 'skill/start' || skillEvents[1].event !== 'skill/end') {
   console.error('check-session: FAIL (skill start/end events)');
   process.exit(1);
 }
@@ -101,9 +101,9 @@ let hR = boot(storeR);
 await hR.emitSystemPrompt(); // original: BASE only
 hR.session.scratch = harness.session.scratch; // skill "polite" carried over
 hR.session.history = harness.session.history;
-await storeR.appendEvent('reload', 'start', { extensionsDiscovered: [], reset: true });
+await storeR.appendEvent('reload/start', { extensionsDiscovered: [] });
 await hR.emitSystemPrompt(); // rebuilt: BASE + [Skill: polite]
-await storeR.appendEvent('reload', 'end', { extensionsDiscovered: [], reset: true });
+await storeR.appendEvent('reload/end', { extensionsDiscovered: [] });
 const lr = await storeR.load();
 const rebuilt = lr.messages[0].content;
 console.log('--- rebuilt system prompt head:', rebuilt.slice(0, 120));

@@ -4,6 +4,8 @@
 
 Accepted — 2026-08-19, decided via a 3-round `/grill-with-docs` interview (frontier Q1–Q18). Implemented as tickets T09–T14; `pnpm verify` all green.
 
+**Partially superseded** — the line-schema section (`type`+`phase` split, per-line `session_id`/`workspace`) is replaced by ADR-0006 (merged `event` field, identity dropped from lines). Resume/reload semantics, the replay transform, and the audit-timeline intent remain in force.
+
 ## Context
 
 The harness currently runs a single prompt and exits; there is no system-prompt builder, no `/reload`, and no persistence. We want multi-turn sessions that survive process restarts and are inspectable, with an append-only audit log that distinguishes **lifecycle events** (system-prompt build, skill load, reload) from **messages sent to the LLM**. Resume and session-listing must be **core capabilities** (CLI is one interface; a web UI will reuse the same core later).
@@ -14,15 +16,15 @@ The harness currently runs a single prompt and exits; there is no system-prompt 
 - One append-only jsonl file per session: `~/.applepi/sessions/<workspace>/<session_id>.jsonl`.
 - `<workspace>` = a slug of the process cwd **absolute path** (e.g. `/Users/x/applepi` → `Users-x-applepi`), so different projects never collide.
 - `<session_id>` = uuid v4, printed at start, reused to resume.
-- **Single file, two line kinds** (no separate event/message files):
-  - Event line: `{"kind":"event","ts":<ISO>,"session_id":...,"workspace":...,"type":"system_prompt|skill|reload","phase":"start"|"end","payload":{...}}`
-  - Message line: `{"kind":"message","ts":<ISO>,"session_id":...,"workspace":...,"role":"system|user|assistant|tool","content":...}`
+- **Single file, two line kinds** (no separate event/message files); **line schema per ADR-0006**:
+  - Event line: `{"kind":"event","event":"system_prompt/start","payload":{...},"ts":<ISO>}`
+  - Message line: `{"kind":"message","role":"system|user|assistant|tool","content":...}`
 - File is **append-only**; existing lines are never rewritten.
 
 ### Event types (final set)
 - `system_prompt` — emitted when the system prompt is (re)built. `payload: { sections: string[] }` (e.g. `["base","skills"]`); the full text is already persisted as a `role:"system"` message line, so the event carries only the section list.
 - `skill` — emitted **per `skill_load` tool execution** (start/end). start `payload: { name, source: "content"|"path" }`; end `payload: { ok: boolean, error?: string }`.
-- `reload` — emitted by `/reload`. `payload: { extensionsDiscovered: string[], reset: true }`.
+- `reload` — emitted by `/reload`. `payload: { extensionsDiscovered: string[] }` (formerly `reset: true`, dropped per ADR-0006).
 - `tool_subagent` — **out of scope** (Q1). `mcp` event — **removed** with the mcp feature (Q11/Q18).
 
 ### The replay transform (read-only)
@@ -36,7 +38,7 @@ This is exactly the stated rule: "如果包含 reload，reload 之后重建出�
 ### SessionStore is core-owned
 - New `src/core/session.ts` exporting a `SessionStore` class (workspace-scoped):
   - `create(sessionId?)` — open (or create) the jsonl for a session id under the current workspace.
-  - `appendEvent(type, phase, payload)` — write one event line.
+  - `appendEvent(event, payload)` — write one event line (`event` = e.g. `"skill/start"`).
   - `appendMessage(role, content)` — write one message line.
   - `load()` — replay transform → `{ messages, sessionId, workspace }` message array (per the rule above).
   - `list()` — enumerate `~/.applepi/sessions/<workspace>/*.jsonl` for `/sessions`.

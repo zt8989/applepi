@@ -128,12 +128,12 @@ rl.on('line', async (raw) => {
       case '/reload': {
         const oldScratch = harness.session.scratch;
         const oldHistory = harness.session.history;
-        await store.appendEvent('reload', 'start', { extensionsDiscovered: loaded, reset: true });
+        await store.appendEvent('reload/start', { extensionsDiscovered: loaded });
         ({ harness, loaded } = await boot(store));
         harness.session.scratch = oldScratch;
         harness.session.history = oldHistory;
         await harness.emitSystemPrompt();
-        await store.appendEvent('reload', 'end', { extensionsDiscovered: loaded, reset: true });
+        await store.appendEvent('reload/end', { extensionsDiscovered: loaded });
         console.log(`[reload] extensions re-scanned (${loaded.length}), system prompt rebuilt`);
         break;
       }

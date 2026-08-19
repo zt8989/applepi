@@ -122,11 +122,11 @@ export class Harness {
             : ctx.toolArgs?.path
               ? 'path'
               : 'unknown';
-          await this.sessionStore?.appendEvent('skill', 'start', { name, source });
+          await this.sessionStore?.appendEvent('skill/start', { name, source });
           await next();
           const res = ctx.toolResult ?? '';
           const ok = !res.startsWith('ERROR');
-          await this.sessionStore?.appendEvent('skill', 'end', {
+          await this.sessionStore?.appendEvent('skill/end', {
             ok,
             error: ok ? undefined : res,
           });
@@ -143,9 +143,9 @@ export class Harness {
     const systemPrompt = await this.buildSystemPrompt();
     if (this.sessionStore) {
       const sections = this.contributorSections();
-      await this.sessionStore.appendEvent('system_prompt', 'start', { sections });
+      await this.sessionStore.appendEvent('system_prompt/start', { sections });
       await this.sessionStore.appendMessage('system', systemPrompt);
-      await this.sessionStore.appendEvent('system_prompt', 'end', { sections });
+      await this.sessionStore.appendEvent('system_prompt/end', { sections });
     }
     return systemPrompt;
   }
@@ -195,9 +195,9 @@ export class Harness {
     const messages: any[] = [];
     if (emitSystem && this.sessionStore) {
       const sections = this.contributorSections();
-      await this.sessionStore.appendEvent('system_prompt', 'start', { sections });
+      await this.sessionStore.appendEvent('system_prompt/start', { sections });
       await this.sessionStore.appendMessage('system', systemPrompt);
-      await this.sessionStore.appendEvent('system_prompt', 'end', { sections });
+      await this.sessionStore.appendEvent('system_prompt/end', { sections });
     }
     messages.push({ role: 'system', content: systemPrompt });
     messages.push(...this.session.history);

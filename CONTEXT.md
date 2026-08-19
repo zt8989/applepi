@@ -18,8 +18,8 @@ Project: a minimal **single-machine agent harness**, organized as a **pnpm works
 - **Session id** — uuid (v4) generated per session, printed at start, reused to resume.
 - **Workspace** — slug of the process cwd absolute path; the directory tier under `~/.applepi/sessions/<workspace>/`.
 - **SessionStore** — a **core-owned** class managing the append-only jsonl for a workspace: `create`, `appendEvent`, `appendMessage`, `load` (replay → LLM message array), `list` (for `/sessions`). Lives in the **core package** (`packages/core`), not the agent, so any UI can drive it.
-- **Session store file** — single append-only jsonl at `~/.applepi/sessions/<workspace>/<session_id>.jsonl`. Each line is either an **event line** (`kind:"event"`) or a **message line** (`kind:"message"`).
-- **Event** — `kind:"event"` line recording a lifecycle span with `phase:"start"|"end"`. Event types: `system_prompt`, `skill`, `reload`. (No `tool_subagent` — out of scope, Q1; `mcp` removed with the mcp feature, Q11.)
+- **Session store file** — single append-only jsonl at `~/.applepi/sessions/<workspace>/<session_id>.jsonl`. Each line is either an **event line** (`kind:"event"`) or a **message line** (`kind:"message"`); session/workspace identity lives in the file path, not in the lines (ADR-0006).
+- **Event** — `kind:"event"` line recording a lifecycle span in the merged `event` field with embedded phase, e.g. `system_prompt/start` / `system_prompt/end`, `skill/start` / `skill/end`, `reload/start` / `reload/end`. (No `tool_subagent` — out of scope, Q1; `mcp` removed with the mcp feature, Q11; `type`+`phase` merged into `event`, ADR-0006.)
 - **Message line** — `kind:"message"` line mirroring an LLM message (`role`: system|user|assistant|tool). The first system message is the system prompt.
 - **Resume** — `/resume <id>` (core `SessionStore.load`) switches the active session to `<id>` and continues appending to its jsonl. `<id>` absent → new session.
 - **Slash commands (core capability, not CLI-only)** — `/reload`, `/resume <id>`, `/new`, `/sessions` (list `~/.applepi/sessions/<workspace>/`), `/help`, `/exit`. A future web UI drives the same core methods.
@@ -48,4 +48,4 @@ Wiki: start at `docs/README.md` (architecture: `docs/architecture.md`; design pr
 
 Dependency graph (one direction): `@applepi/agent → @applepi/extensions → @applepi/core`. Cross-package imports use **package names** resolved to `dist/` via each package's `exports` (Q3=a); dev/test run **build-first** (Q4=a); each package has its own `tsconfig.json` extending a shared base (Q5=a); the root `package.json` orchestrates `build`/`dev`/`test`/`verify` (Q6=a).
 
-Architecture decisions are recorded as ADR-0001 (harness), ADR-0002 (session persistence: jsonl + resume + reload), ADR-0003 (workspace split), ADR-0004 (LLM config sources), ADR-0005 (reference tools + denylist → `baseExtension`).
+Architecture decisions are recorded as ADR-0001 (harness), ADR-0002 (session persistence: jsonl + resume + reload), ADR-0003 (workspace split), ADR-0004 (LLM config sources), ADR-0005 (reference tools + denylist → `baseExtension`), and ADR-0006 (event schema slimming).

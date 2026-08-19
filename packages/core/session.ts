@@ -13,13 +13,11 @@ export function slugWorkspace(cwd: string): string {
 
 export interface SessionLineBase {
   ts: string;
-  session_id: string;
-  workspace: string;
 }
 export interface SessionEvent extends SessionLineBase {
   kind: 'event';
-  type: string;
-  phase: 'start' | 'end';
+  /** Lifecycle event name with embedded phase, e.g. "system_prompt/start". (ADR-0006) */
+  event: string;
   payload: any;
 }
 export interface SessionMessage extends SessionLineBase {
@@ -41,7 +39,7 @@ export interface LoadedSession {
 }
 
 type AppendableLine =
-  | { kind: 'event'; type: string; phase: 'start' | 'end'; payload: any; ts?: string }
+  | { kind: 'event'; event: string; payload: any; ts?: string }
   | { kind: 'message'; role: string; content: any; ts?: string };
 
 /**
@@ -80,14 +78,12 @@ export class SessionStore {
     const full = {
       ...line,
       ts: line.ts ?? new Date().toISOString(),
-      session_id: this.sessionId,
-      workspace: this.workspace,
     };
     await fs.appendFile(this.filePath(), JSON.stringify(full) + '\n', 'utf8');
   }
 
-  async appendEvent(type: string, phase: 'start' | 'end', payload: any = {}): Promise<void> {
-    await this.append({ kind: 'event', type, phase, payload });
+  async appendEvent(event: string, payload: any = {}): Promise<void> {
+    await this.append({ kind: 'event', event, payload });
   }
 
   async appendMessage(role: string, content: any): Promise<void> {
@@ -106,7 +102,10 @@ export class SessionStore {
 
     const messages = lines.filter((l): l is SessionMessage => l.kind === 'message');
 
-    const hasReload = lines.some((l) => l.kind === 'event' && l.type === 'reload');
+    // ADR-0006: event field carries type+phase (e.g. "reload/start"). The `?.`
+    // guard tolerates pre-0006 files where the line has no `event` field —
+    // they simply never match, which is the intended no-back-compat behavior.
+    const hasReload = lines.some((l) => l.kind === 'event' && l.event?.startsWith('reload'));
     let result = messages;
     if (hasReload) {
       const sysIdxs = messages
