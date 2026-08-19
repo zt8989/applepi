@@ -160,11 +160,17 @@ api.registerTool({
 
 ## 8. 会话持久化
 
-见 ADR-0002 完整决策。要点：
+见 ADR-0002 + ADR-0006 完整决策。要点：
 
 - **存储**：每个会话一个 append-only jsonl：
   `~/.applepi/sessions/<workspace>/<session_id>.jsonl`。
   每行是 `kind:"event"`（生命周期事件）或 `kind:"message"`（LLM 消息）。
+- **行结构（ADR-0006 精简后）**：
+  - 事件行：`{"kind":"event","event":"system_prompt/start","payload":{...},"ts":<ISO>}`
+    —— `event` 字段合并了类型与阶段（`system_prompt/skill/reload` × `start/end`）。
+  - 消息行：`{"kind":"message","role":"system|user|assistant|tool","content":...,"ts":<ISO>}`。
+  - 行内**不含** `session_id` / `workspace`：会话与工作区身份由文件路径承载，
+    行不再自包含（旧 ADR-0002 的"每行可独立审计"语义已放弃）。
 - **SessionStore 归核心**：`create` / `appendEvent` / `appendMessage` /
   `load`（replay 变换） / `list`。CLI 与未来 web UI 都驱动同一套核心方法。
 - **Replay（只读）**：读取时过滤 message 行；若存在 `reload` 事件，最新重建的
@@ -205,7 +211,7 @@ applepi/
 │   ├── README.md           # Wiki 首页（本页）
 │   ├── architecture.md     # 本文档
 │   ├── design-principles.md
-│   ├── adr/                # ADR-0001 ~ 0005
+│   ├── adr/                # ADR-0001 ~ 0006
 │   └── agents/             # agent 协作约定
 └── CONTEXT.md              # 术语表 + 已锁定决策（单一事实来源）
 ```
