@@ -19,14 +19,6 @@ export interface ToolDef {
   parameters: ZodType<any>;
 }
 
-/**
- * Model-facing tool cropper (ADR-0007 Q14=b). Applied by `buildToolDefs()` in
- * registration order: returning `null` hides the tool from the model; returning
- * a new `ToolDef` rewrites its description/parameters (e.g. cropping an
- * enum). Once `null`, the tool stays hidden — later filters cannot revive it.
- */
-export type ToolFilter = (toolName: string, def: ToolDef) => ToolDef | null;
-
 /** Slash-command handler. Returns the text to print in the REPL. */
 export type SlashHandler = (arg: string, api: HarnessApi) => string | Promise<string>;
 
@@ -70,8 +62,13 @@ export interface SessionContext {
 export interface HarnessApi {
   registerTool(spec: ToolSpec): void;
   use(stack: HookStack, mw: Middleware, opts?: { priority?: number }): void;
-  /** Crop what the model sees in buildToolDefs() (ADR-0007 Q14=b). */
-  registerToolFilter(fn: ToolFilter): void;
+  /**
+   * Register an EXTERNAL side effect (timer, fs watcher, child process, ...)
+   * created by this extension. The effect runs synchronously during `setup`;
+   * its return value (if a function) is the cleanup invoked when the harness
+   * reloads (ADR-0009 Q21–Q23). May be called multiple times.
+   */
+  useEffect(effect: () => (() => void) | void): void;
   /** Register a slash command; dispatch checks these before built-ins (Q13=a). */
   registerSlashCommand(name: string, handler: SlashHandler): void;
   /** Look up an extension-registered slash command (undefined if absent). */

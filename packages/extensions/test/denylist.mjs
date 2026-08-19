@@ -1,11 +1,11 @@
-// Denylist security-extension tests for @applepi/extensions (ADR-0005) — no
-// API key required. Moved here from packages/core/test/smoke.mjs (Q5=A) and
-// rewritten for the pure `denylistMiddleware` shape (Q7=A): it is mounted
-// manually at priority 1000, exercising the fine-grained path (as opposed to
-// baseExtension's internal mounting).
+// Denylist tests for @applepi/extensions (ADR-0009 Q9=a): the denylist floor
+// moved INTO the bash tool — no middleware, no registration convention. These
+// drive the tool directly and through the loop, asserting the floor fires at
+// every level.
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
 import { Harness, runLoop } from '@applepi/core';
-import { bashTool, denylistMiddleware } from '../dist/index.js';
+import { bashTool } from '../dist/index.js';
 
 let passed = 0;
 function ok(name) {
@@ -13,29 +13,33 @@ function ok(name) {
   console.log(`  ok - ${name}`);
 }
 
-/** Wire bash + denylistMiddleware outermost (the ADR-0005 registration convention). */
 function boot() {
   const harness = new Harness();
   harness.registerExtension((api) => api.registerTool(bashTool));
-  harness.registerExtension((api) => api.use('tool', denylistMiddleware, { priority: 1000 }));
   return harness;
 }
 
-// 1. Denylist blocks a dangerous bash command (unit level).
-{
-  const harness = boot();
-  const ctx = { session: harness.session, state: {}, toolName: 'bash', toolArgs: { command: 'rm -rf /' } };
+/** Drive one bash call through the `tool` onion stack (as runLoop does). */
+async function callBash(harness, command) {
+  const ctx = { session: harness.session, state: {}, toolName: 'bash', toolArgs: { command } };
   await harness.bus.run('tool', ctx, async () => { await harness.executeTool(ctx); });
-  assert.match(ctx.toolResult, /BLOCKED by denylist/);
-  ok('denylist blocks `rm -rf /`');
+  return String(ctx.toolResult ?? '');
 }
 
-// 2. Closed loop: model issues dangerous bash -> denylist vetoes at ENTRY ->
-//    BLOCKED returned to model, command never executes (T03, no API key).
+// 1. Denylist blocks a dangerous bash command at the default level (workspace).
+{
+  const harness = boot();
+  const res = await callBash(harness, 'rm -rf /');
+  assert.match(res, /BLOCKED/);
+  ok('denylist blocks `rm -rf /` at workspace');
+}
+
+// 2. Closed loop: model issues dangerous bash -> BLOCKED returned to model,
+//    command never executes (sentinel survives).
 {
   const harness = boot();
   const fs = await import('node:fs');
-  const sentinel = new URL('./_deny_sentinel.txt', import.meta.url).pathname;
+  const sentinel = fileURLToPath(new URL('./_deny_sentinel.txt', import.meta.url));
   fs.writeFileSync(sentinel, 'i exist');
   let turn = 0;
   const fakeLLM = async () => {
@@ -52,7 +56,7 @@ function boot() {
     });
     const toolMsg = messages.find((m) => m.role === 'tool');
     assert.ok(toolMsg, 'tool result message present');
-    assert.match(toolMsg.content[0].result, /BLOCKED by denylist/);
+    assert.match(toolMsg.content[0].result, /BLOCKED/);
     assert.ok(fs.existsSync(sentinel), 'command never executed (sentinel survives)');
     ok('closed loop: denylist blocks model command, BLOCKED returned, no execution');
   } finally {
@@ -60,37 +64,15 @@ function boot() {
   }
 }
 
-// 3. Inner (iii) rewrite cannot surface a real result: an inner middleware
-//    rewrites a SAFE command into `rm -rf`, denylist EXIT check overwrites the
-//    result with BLOCKED (Q16 / spec §7: outermost gate audits final command).
+// 3. The floor fires at fullaccess too (level changes permission SIZE, not the floor).
 {
   const harness = boot();
-  // inner (iii) middleware: priority 1 (inner to denylist's 1000)
-  harness.registerExtension((api) =>
-    api.use('tool', async (ctx, next) => {
-      if (ctx.toolName === 'bash') {
-        ctx.toolArgs = { ...ctx.toolArgs, command: 'rm -rf /tmp/denylist-nonexistent-xyz' };
-      }
-      await next();
-    }, { priority: 1 }),
-  );
-
-  let turn = 0;
-  const fakeLLM = async () => {
-    turn++;
-    if (turn === 1) {
-      return { toolCalls: [{ toolCallId: 'c1', toolName: 'bash', args: { command: 'echo safe' } }] };
-    }
-    return { text: 'done' };
-  };
-  const messages = [{ role: 'user', content: 'run a command' }];
-  await harness.bus.run('session', { session: harness.session, state: {}, messages }, async () => {
-    await runLoop(harness, messages, { model: null, llmCall: fakeLLM, maxTurns: 4 });
-  });
-  const toolMsg = messages.find((m) => m.role === 'tool');
-  assert.ok(toolMsg, 'tool result message present');
-  assert.match(toolMsg.content[0].result, /BLOCKED by denylist/, 'inner rewrite still yields BLOCKED');
-  ok('inner (iii) rewrite cannot bypass denylist (model gets BLOCKED)');
+  const levelHandler = harness.api.getSlashCommand('level');
+  assert.ok(levelHandler, 'core SecurityPolicy /level command installed');
+  await levelHandler('fullaccess', harness.api);
+  const res = await callBash(harness, 'rm -rf /tmp/denylist-nonexistent-xyz');
+  assert.match(res, /BLOCKED/);
+  ok('denylist floor fires at fullaccess');
 }
 
 console.log(`\n${passed} denylist checks passed.`);

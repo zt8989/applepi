@@ -4,6 +4,7 @@
 // moved to @applepi/extensions, ADR-0005; their tests live in
 // packages/extensions/test/{tools,denylist}.mjs).
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
 import {
   Harness,
   OnionBus,
@@ -78,7 +79,9 @@ const stubTool = {
 // 4. Auto-discovery: a *.ext.mjs in a scanned dir is registered without loader edits (T02).
 {
   const harness = new Harness();
-  const fxDir = new URL('./fixtures/', import.meta.url).pathname;
+  // fileURLToPath (not .pathname): .pathname yields a `/C:/...` root-relative
+  // path on Windows, which fs.readdir fails to resolve.
+  const fxDir = fileURLToPath(new URL('./fixtures/', import.meta.url));
   const loaded = await harness.loadExtensionsFromDir(fxDir);
   assert.ok(loaded.includes('echo.ext.mjs'), `fixture discovered: ${loaded}`);
   const names = harness.api.getTools().map((t) => t.name);
@@ -89,7 +92,7 @@ const stubTool = {
 // 5. Discovery set tracks the directory: adding/removing files changes the tool set.
 {
   const harness = new Harness();
-  const tmp = new URL('./_empty_ext_dir/', import.meta.url).pathname;
+  const tmp = fileURLToPath(new URL('./_empty_ext_dir/', import.meta.url));
   await import('node:fs').then((fs) => fs.mkdirSync(tmp, { recursive: true }));
   const loaded = await harness.loadExtensionsFromDir(tmp);
   assert.equal(loaded.length, 0, 'empty dir yields no extensions');

@@ -27,6 +27,14 @@ export class OnionBus {
     this.stacks[stack].push({ mw, priority: opts?.priority ?? 0 });
   }
 
+  /**
+   * Remove a middleware by reference from a stack (ADR-0009 extension-reload:
+   * scoped registrations are revoked by identity). No-op if absent.
+   */
+  remove(stack: HookStack, mw: Middleware): void {
+    this.stacks[stack] = this.stacks[stack].filter((l) => l.mw !== mw);
+  }
+
   private chain(
     stack: HookStack,
     ctx: Ctx,

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { SetupFn, HarnessApi, Ctx } from '@applepi/core';
+import { getPermissionLevel } from '@applepi/core';
 
 export interface MemoryOptions {
   /** Path to the JSON file backing memory. Defaults to ./harness-memory.json. */
@@ -41,6 +42,12 @@ export function createMemoryExtension(options: MemoryOptions = {}): SetupFn {
         value: z.string().describe('Value to store'),
       }),
       execute: async (args: { key: string; value: string }, ctx: Ctx) => {
+        // Self-determination (ADR-0009): memory_write is a write — rejected at
+        // readonly. Its target file is extension-configured (trusted), so no
+        // path check beyond the level gate.
+        if (getPermissionLevel(ctx) === 'readonly') {
+          return 'BLOCKED (readonly): memory_write is a write';
+        }
         const store = await load();
         store[args.key] = args.value;
         await save(store);

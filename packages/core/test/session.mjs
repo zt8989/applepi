@@ -25,10 +25,20 @@ const storeBase = path.join(os.homedir(), '.applepi', 'sessions', ws);
 
 // 1. slugWorkspace turns an absolute path into a filesystem-safe token.
 {
-  assert.equal(slugWorkspace('/Users/x/applepi'), 'Users-x-applepi');
-  assert.equal(slugWorkspace('/'), '');
-  assert.ok(!slugWorkspace('/a/b').includes('/'));
-  ok('slugWorkspace: absolute path -> hyphen slug');
+  // Platform-specific exact slugs: POSIX strips the leading slash, Windows
+  // keeps the drive (as `C--`, after reserved-char filtering) so different
+  // drives never collide on the same session dir.
+  if (process.platform === 'win32') {
+    assert.equal(slugWorkspace('C:\\Users\\x\\applepi'), 'C--Users-x-applepi');
+    assert.equal(slugWorkspace('/'), 'C--');
+  } else {
+    assert.equal(slugWorkspace('/Users/x/applepi'), 'Users-x-applepi');
+    assert.equal(slugWorkspace('/'), '');
+  }
+  const slug = slugWorkspace('/a/b');
+  assert.ok(!slug.includes('/') && !slug.includes('\\'), 'no separators');
+  assert.ok(!/[<>:"|?*]/.test(slug), 'no Windows-reserved chars');
+  ok('slugWorkspace: absolute path -> safe hyphen slug');
 }
 
 // 2. create() generates a session id and creates the file on first append.

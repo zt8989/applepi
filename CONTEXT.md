@@ -9,8 +9,8 @@ Project: a minimal **single-machine agent harness**, organized as a **pnpm works
 - **Hook / middleware** — lifecycle interceptors on the onion stacks: `session`, `llm`, `tool`, and `system_prompt` (ADR-0008). Can observe, veto (skip `next()`), or rewrite `ctx`.
 - **Tool** — a capability registered via `api.registerTool({ name, description, parameters (zod), execute })`.
 - **Reference tool** — a concrete tool shipped by the `@applepi/extensions` package as a replaceable reference implementation (not core): `bash` and `str_replace_editor`.
-- **Security extension** — the permission-level system (ADR-0007), shipped by `@applepi/extensions` as `createPermissionExtension` (middleware + tool cropper + prompt section + `/level`) plus the embedded **denylist floor** (`DENY`, the old `denylistMiddleware`). Its "outermost" property is a **registration convention**: mount at priority 1000 (as `baseExtension` does) so the onion exit phase audits the final command after inner rewrites. See ADR-0005 (Q3=A) + ADR-0007.
-- **baseExtension** — a single `SetupFn` from `@applepi/extensions` that registers the reference tools and mounts `denylistMiddleware` outermost (priority 1000); one call reproduces the default capability set.
+- **SecurityPolicy（安全策略）** — core 内置的安全机制（ADR-0009）：接口 + 默认实现。默认实现含三值级别模型（readonly/workspace/fullaccess）、`level/set` 事件 + lastEvent 恢复、提示词「Permission Level」段落、`/level`。**无运行时拦截中间件**（permissionMiddleware 已删，Q12=a）——「闸口」退化为 level 上下文保证：每个工具 execute 的 ctx 都带当前级别。可被消费者显式替换（替换即自负责）。取代旧的 **Security extension**（ADR-0007 的 `createPermissionExtension`，已随 ADR-0009 删除）。
+- **baseExtension** — a single `SetupFn` from `@applepi/extensions` that registers the reference tools (`bash`, `str_replace_editor`) + memory/skills. No security wiring since ADR-0009 — security is a core mechanism, not an extension.
 
 ## Session persistence (glossary — decided via /grill-with-docs)
 
@@ -43,12 +43,12 @@ Project: a minimal **single-machine agent harness**, organized as a **pnpm works
 Wiki: start at `docs/README.md` (architecture: `docs/architecture.md`; design principles: `docs/design-principles.md`). Pnpm workspace layout (three workspace packages, Q1=b/Q2=b):
 
 - `packages/core` (`@applepi/core`) — the harness runtime (onion bus, loader, built-in loop, session store, config). **No tools** (ADR-0005).
-- `packages/extensions` (`@applepi/extensions`) — reference extensions: reference tools (bash / str_replace_editor) + security extension (permission levels incl. denylist floor, ADR-0007) + `baseExtension` + memory / skills (mcp removed, Q11)
+- `packages/extensions` (`@applepi/extensions`) — reference extensions: reference tools (bash / str_replace_editor, each self-determining per level) + memory / skills + `baseExtension`. Security mechanism lives in **core** since ADR-0009 (was the security extension here, ADR-0007).
 - `apps/agent` (`@applepi/agent`) — the local agent: `main.ts` wires core + extensions + a provider and runs the REPL; `extensions/` holds local `*.ext.ts`; `scripts/` holds the key-free verification checks
 
 Dependency graph (one direction): `@applepi/agent → @applepi/extensions → @applepi/core`. Cross-package imports use **package names** resolved to `dist/` via each package's `exports` (Q3=a); dev/test run **build-first** (Q4=a); each package has its own `tsconfig.json` extending a shared base (Q5=a); the root `package.json` orchestrates `build`/`dev`/`test`/`verify` (Q6=a).
 
-Architecture decisions are recorded as ADR-0001 (harness), ADR-0002 (session persistence: jsonl + resume + reload), ADR-0003 (workspace split), ADR-0004 (LLM config sources), ADR-0005 (reference tools + denylist → `baseExtension`), ADR-0006 (event schema slimming), ADR-0007 (permission levels: read/write scoped tool access), and ADR-0008 (system prompt built on the `system_prompt` onion stack).
+Architecture decisions are recorded as ADR-0001 (harness), ADR-0002 (session persistence: jsonl + resume + reload), ADR-0003 (workspace split), ADR-0004 (LLM config sources), ADR-0005 (reference tools + denylist → `baseExtension`), ADR-0006 (event schema slimming), ADR-0007 (permission levels: read/write scoped tool access), ADR-0008 (system prompt built on the `system_prompt` onion stack), and ADR-0009 (security as tool self-determination: core-built SecurityPolicy + extension reload).
 
 ## Permission levels (designing — via /grill-with-docs, round 1)
 
@@ -76,3 +76,39 @@ Architecture decisions are recorded as ADR-0001 (harness), ADR-0002 (session per
 - **Tool filter 签名（Q14=b）** — `type ToolFilter = (toolName: string, def: { description; parameters }) => { description; parameters } | null`；null = 不暴露，返回新 def = 改写（readonly 下把 `str_replace_editor` schema 裁成只有 `view`）。filter 按注册顺序串联，任一 filter 返回 null 即不可复活。`buildToolDefs()` 遍历工具时依次应用所有 filter。
 - **边界收尾（Q15）** — 权限级别**只约束工具行为 + 权限声明段落**；其他系统提示词段落（skills 注入、base）不受级别影响。`memory_write`/`skill_load` 按**工具名分类**为写/读（memory_write 目标文件是扩展固定的 `harness-memory.json`，在 project root 内，workspace 放行、readonly 拦、fullaccess 放行；skill_load 算读，全级别放行）。
 - **验证与文档（Q16）** — check-permission.ts 验证 5 条：默认 workspace + 提示词声明、readonly 拦截（write/白名单外 bash）、workspace 路径前缀（root 内放行、/tmp 拦）、fullaccess 放行但 denylist 底线仍拦、`/level` 切换后事件写入 + 提示词重建 + lastEvent 恢复。ADR-0007 记录全部决策。
+
+## Security model (designing — via /grill-with-docs, round 1)
+
+- **威胁模型（Q1=a）** — 安全**只防「模型越权」**：扩展全可信（zero-isolation，信任边界同 ADR-0005，不因本轮改变）。防恶意扩展 = OS 级隔离，不在本决策范围。
+- **安全职责模型（Q2=c）** — **工具声明安全语义，统一层执行审计**：ToolSpec 增加安全声明（读/写/mixed + 写目标提取器），permission 中间件 / 注册面裁剪 / denylist 全部基于声明工作，**按工具名特判消失**（`checkTool` 的 bash/sre/memory_write 硬编码退化为内置工具的默认声明）。未声明工具的默认策略待定（Q5）。
+- **安全机制归属（Q3=b + 补充）** — **permission 由 core 内置**：core 强制保证 tool 栈最外层审计位存在，权限级别模型 / permissionMiddleware / ToolFilter / 权限声明段落 / `/level` 内聚进 core，不再是 `@applepi/extensions` 的可选扩展。部分逆转 ADR-0005（"安全移出 core"），本质是「注册约定 → core 机制」的演进，需 ADR-0009 记录。
+
+## Security model (designing — via /grill-with-docs, round 2)
+
+- **安全语义载体（Q4）** — **不引入 ToolSpec 声明字段**。工具/扩展在 execute 时从上下文读取当前 permission level（readonly / workspace / fullaccess 三值），**自行判断并约束自身行为**（动态组合）：bash 在 readonly 自限只读命令、str_replace_editor 自限 view 等。Q2=c 由此细化成形：「上下文注入 → 工具自决」，统一层不再认识任何工具。
+- **注册与默认策略（Q5）** — **不需要申请 / 声明 / 注册期校验**。上下文天然携带当前 permission，工具运行时读取并动态组合。无默认拦截策略；安全强度 = 每个工具的自决程度（Q1=a 扩展可信的推论，后果确认见 Q11）。
+- **特判逻辑去向（Q6=a）** — `permission.ts` 的 checkBash / checkSre / checkTool / cropTool 等按工具名特判**全部从统一层移除**，逻辑迁入工具自身（bash 的命令分析、sre 的 path 检查、各自的面裁剪）；core 内置 permission 不再认识任何具体工具名。面裁剪执行机制的留废见 Q8，denylist 底线去向见 Q9。
+- **内置形态（Q7=b）** — core 提供 **SecurityPolicy 接口 + 默认实现**（级别模型 / level 状态与事件 / 上下文注入 / 底线审计 / 提示词段落 / `/level`），默认挂载不可绕（Q3=b）；消费者可显式替换策略，替换即自负责。默认实现的具体组成见 Q10/Q12。
+
+## Security model (designing — via /grill-with-docs, round 3)
+
+- **注册面裁剪（Q8=b）** — **取消 ToolFilter 参数级裁剪**：已注册工具不按 level 裁剪参数 schema，模型看到完整工具面；违规行为靠工具 execute 运行时拒绝。工具**集合**级的注册面切换由「扩展重建」机制承担（见下）。
+- **denylist 底线（Q9=a）** — `DENY` 正则迁入 **bash 工具自身**（execute 前先跑，任何 level 生效）；core 不再持有任何工具特定规则。
+- **级别骨架（Q10=a）** — 三值级别模型、`level/set` 事件 + lastEvent 恢复、提示词「Permission Level」段落、`/level` 命令，全部归 core 内置默认 SecurityPolicy；替换策略 = 骨架整体替换。
+- **保护强度（Q11=a）** — 确认 readonly 为「君子协定」：不读 level 的工具在 readonly 下仍全权执行，core 不兜底。统一层的运行时拦截角色大幅退场。
+- **运行时闸口（Q12=a）** — **撤销 permissionMiddleware**（priority 1000 的 entry/exit 审计）；「闸口」退化为「level 上下文保证」：core 保证每个工具 execute 的 ctx 带当前 level。
+- **扩展重建机制（补充，形态待定）** — 为实现动态 Permission，引入**扩展加载/卸载机制**：扩展 setup 时注册的工具被 core **记录**；重建时**卸载全部注册产物**，扩展以当前 level 重新 setup 注入新工具集。触发时机 / 卸载形态 / 与现有 `/reload` 的关系待定（Q13–Q17）。
+
+## Security model (designing — via /grill-with-docs, round 4)
+
+- **卸载形态（Q13=b）** — core 自动跟踪**注册作用域**：`registerTool` / `use` / `registerSlashCommand` 的记录自动归属「当前 setup 的扩展」，重建时 core 按扩展撤销全部注册；扩展无感，只需 setup 时读 level 注册合适工具。
+- **触发时机（Q14=b + 补充）** — 事件驱动，**分两级**：
+  - `level/set`（`/level`）→ **轻量**：只重建系统提示词（权限声明段落），**不卸载工具** —— Level 只是权限大小变化，工具 execute 自决即时生效（每轮读 scratch）
+  - 扩展新增/删除（`/reload`）→ **重量**：卸载全部注册产物 → 重读扩展目录 → 重新 setup 注入 → 重建提示词
+- **注册面与自决（Q15=a 细化）** — 工具**集合** = f(扩展集合)，由 reload 管理；工具**行为** = f(level)，由 execute 自决。**所有工具无论 level 保持注册**（readonly 下 `memory_write` 仍可见，被调用时 execute 自决拒绝 + 提示词声明告知模型不可用）。
+- **`/reload` 重定义（Q17=a）** — 不再 new Harness：= 扩展卸载 + 重注入 + 提示词重建，保留 `session.scratch` / `history`。与 `/level` 共享「扩展环境变化」概念但动作不同：level 轻（提示词重建）、扩展增删重（卸载+重注入）。
+- **外部副作用管理（useEffect，补充）** — 扩展副作用分两类：harness 知道的（`registerTool` / `use` / `registerSlashCommand`，由注册作用域 Q13=b 自动撤销）与 **harness 不知道的外部副作用**（定时器 / fs watcher / 子进程 / HTTP server 等扩展自建资源）。新增 `api.useEffect(fn: () => (() => void) | void)`：setup 时**同步执行** fn，返回的 cleanup 归入当前 setup 作用域；可多次调用。reload 重建顺序：① 调用全部 cleanup（先释放外部资源）→ ② 撤销注册 → ③ 重新读目录 + setup → ④ 重建提示词。cleanup 抛错按软隔离处理（捕获、不中断重建）。副作用不得依赖跨 reload 的进程级状态。
+
+> **Confirmed — 2026-08-19（Q1–Q23 全部敲定，ADR-0009 记录；supersedes ADR-0007 的双层机制与 ADR-0005 的安全移出 core 部分）。**
+>
+> **Implementation — complete（2026-08-19）**：`extensions/permission.ts` 与 `denylist.ts` 已删除（DENY 并入 `tools/bash.ts`）；core 新增 `security.ts`（SecurityPolicy 接口 + 默认实现 + `getPermissionLevel` / `isInsideProjectRoot` 原语）与注册作用域/reload（`harness.reloadExtensions` + `api.useEffect`）；bash / str_replace_editor / memory 在 execute 内自决；`registerToolFilter` / `ToolFilter` 移除；`baseExtension` 瘦身；`check-permission.ts` → `check-security.ts`。全部 build / test / check 通过。

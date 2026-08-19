@@ -9,22 +9,17 @@ import {
   Harness,
   SessionStore,
 } from '@applepi/core';
-import { baseExtension, createSkillsExtension } from '@applepi/extensions';
+import { baseExtension, createSkillsExtension, BASE_SYSTEM_PROMPT } from '@applepi/extensions';
 
 const WS = 'check-session-tmp';
 const DIR = path.join(os.homedir(), '.applepi', 'sessions', WS);
 
 function boot(store: SessionStore): Harness {
   const harness = new Harness();
+  // base section comes from baseExtension (ADR-0005); skills from the local
+  // extension loader path exercised via createSkillsExtension.
   harness.registerExtension(baseExtension);
   harness.registerExtension(createSkillsExtension());
-  harness.registerExtension((api) =>
-    api.use('system_prompt', async (ctx, next) => {
-      ctx.promptParts!.push('BASE-INSTRUCTIONS');
-      ctx.sections!.push('base');
-      await next();
-    }, { priority: 1000 }),
-  );
   harness.attachSession(store);
   return harness;
 }
@@ -69,9 +64,9 @@ if (skillEvents.length !== 2 || skillEvents[0].event !== 'skill/start' || skillE
   process.exit(1);
 }
 
-// 2. Replay: first message is the emitted system prompt.
+// 2. Replay: first message is the emitted system prompt (base from baseExtension).
 const loaded = await store.load();
-if (loaded.messages[0].role !== 'system' || !loaded.messages[0].content.includes('BASE-INSTRUCTIONS')) {
+if (loaded.messages[0].role !== 'system' || !loaded.messages[0].content.includes(BASE_SYSTEM_PROMPT)) {
   console.error('check-session: FAIL (replay first message is system prompt)');
   process.exit(1);
 }
@@ -111,10 +106,10 @@ await hR.emit('reload/end', { extensionsDiscovered: [] });
 const lr = await storeR.load();
 const rebuilt = lr.messages[0].content;
 console.log('--- rebuilt system prompt head:', rebuilt.slice(0, 120));
-if (!rebuilt.includes('BASE-INSTRUCTIONS') || !rebuilt.includes('[Skill: polite]')) {
+if (!rebuilt.includes(BASE_SYSTEM_PROMPT) || !rebuilt.includes('[Skill: polite]')) {
   console.error('check-session: FAIL (reload rebuild did not include skill)');
   process.exit(1);
 }
 
-await fs.rm(DIR, { recursive: true, force: true });
+await fs.rm(DIR, { recursive: true, force: true }).catch(() => {});
 console.log('check-session: OK');

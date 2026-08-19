@@ -8,7 +8,11 @@ export function slugWorkspace(cwd: string): string {
   return path
     .resolve(cwd)
     .replace(/^[/\\]+/, '')
-    .replace(/[/\\]+/g, '-');
+    .replace(/[/\\]+/g, '-')
+    // Windows forbids these characters in file/dir names. The drive colon
+    // (`C:`) in an absolute path would otherwise produce an invalid slug
+    // (mkdir then fails with ENOENT).
+    .replace(/[<>:"|?*]/g, '-');
 }
 
 export interface SessionLineBase {
@@ -68,9 +72,10 @@ export class SessionStore {
   /** Open (create if needed) a session and return its id. */
   async create(sessionId?: string): Promise<string> {
     // Honor an explicit arg, else an id set via options, else generate one.
-    this.sessionId = sessionId ?? this.sessionId ?? randomUUID();
+    const id = sessionId ?? this.sessionId ?? randomUUID();
+    this.sessionId = id;
     await fs.mkdir(this.baseDir(), { recursive: true });
-    return this.sessionId;
+    return id;
   }
 
   private async append(line: AppendableLine): Promise<void> {

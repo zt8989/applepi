@@ -56,10 +56,13 @@ mutate a build context, exactly like the other three stacks.
   `system_prompt/start|end` event payload and the agent's startup log use the
   **built** sections, not a registration-time list. `contributorSections()`
   is deleted.
-- **Ordering by priority, base outermost (Q3=a)** — base mounts at
+- **Ordering by priority, base outermost (Q3=a)** — the base section mounts at
   priority 1000 so it enters first and its section comes first; extensions
   default to 0 in registration order. This fixes the latent ordering bug
-  (permission used to precede base).
+  (permission used to precede base). The base section is owned by
+  `baseExtension` in `@applepi/extensions` (moved out of `main.ts` on
+  2026-08-19), so every consumer that registers `baseExtension` gets the full
+  wiring.
 - **Must call `next()`; veto is not persistence-blocking (Q6=a)** — by
   convention every section middleware calls `next()`. Not calling it merely
   skips later sections; it never blocks prompt persistence. The bus's soft
@@ -68,8 +71,9 @@ mutate a build context, exactly like the other three stacks.
 - **API removed, no sugar (Q5=a)** — `HarnessApi.addSystemPromptContributor`
   and the `SystemPromptContributor` type are deleted; no compatibility
   wrapper. All call sites migrate to `api.use('system_prompt', ...)`:
-  `main.ts` (base, priority 1000), `permission.ts` (permission section),
-  `skills.ts` (skills section), and the three check scripts.
+  `baseExtension` (base section, priority 1000 — moved out of `main.ts` on
+  2026-08-19), `permission.ts` (permission section), `skills.ts` (skills
+  section), and the three check scripts.
 
 ## Consequences
 

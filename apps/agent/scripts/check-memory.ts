@@ -6,6 +6,7 @@ import { Harness, runLoop } from '@applepi/core';
 import { baseExtension } from '@applepi/extensions';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const harness = new Harness();
 
@@ -14,12 +15,14 @@ const harness = new Harness();
 harness.registerExtension(baseExtension);
 
 // Memory extension arrives via the local loader (no manual registration).
-const extDir = new URL('../extensions/', import.meta.url).pathname;
+// fileURLToPath (not .pathname): .pathname yields a `/C:/...` root-relative
+// path on Windows, which fs.readdir cannot resolve.
+const extDir = fileURLToPath(new URL('../extensions/', import.meta.url));
 const loaded = await harness.loadExtensionsFromDir(extDir);
 console.error(`[check-memory] auto-discovered: ${loaded.join(', ') || '(none)'}`);
 
 const MEM_FILE = path.resolve('harness-memory.json');
-await fs.rm(MEM_FILE, { force: true });
+await fs.rm(MEM_FILE, { force: true }).catch(() => {});
 
 // Fake LLM: turn 1 writes, turn 2 reads, turn 3 stops.
 let turn = 0;
@@ -63,7 +66,7 @@ console.log('--- file content:', fileContent);
 const okInSession = typeof readResult === 'string' && readResult.includes('harness');
 const okPersisted = fileExists && fileContent.includes('harness');
 
-await fs.rm(MEM_FILE, { force: true });
+await fs.rm(MEM_FILE, { force: true }).catch(() => {});
 
 if (okInSession && okPersisted) {
   console.log('check-memory: OK');

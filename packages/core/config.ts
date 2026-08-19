@@ -51,14 +51,21 @@ function defaultBaseDir(): string {
   return path.join(os.homedir(), '.applepi');
 }
 
-/** Read settings.json; missing file → defaults; malformed JSON → throw. */
+/** Read settings.json; missing file → throw (fail fast); malformed JSON → throw. */
 export async function loadSettings(baseDir: string = defaultBaseDir()): Promise<LlmSettings> {
   const file = path.join(baseDir, 'settings.json');
   let raw: string;
   try {
     raw = await fs.readFile(file, 'utf8');
-  } catch {
-    return { ...DEFAULT_LLM_SETTINGS };
+  } catch (e: any) {
+    if (e?.code === 'ENOENT') {
+      throw new Error(
+        `~/.applepi/settings.json not found (looked at ${file}). ` +
+          `Create it with { "provider": "openai", "model": "gpt-4o-mini", "apiKey": "OPENAI_API_KEY" }; ` +
+          `real keys go in ~/.applepi/.env (ADR-0004).`,
+      );
+    }
+    throw e;
   }
   let data: any;
   try {

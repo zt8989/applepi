@@ -13,6 +13,21 @@ export {
   resolveApiKey,
   resolveLlmConfig,
 } from './config.js';
+export {
+  PERMISSION_SCRATCH_KEY,
+  PERMISSION_LEVELS,
+  DEFAULT_PERMISSION_LEVEL,
+  getPermissionLevel,
+  restorePermissionLevel,
+  projectRoot,
+  isInsideProjectRoot,
+  buildPermissionSection,
+  defaultSecurityPolicy,
+} from './security.js';
+export type {
+  SecurityPolicy,
+  PermissionLevel,
+} from './security.js';
 export type {
   LlmSettings,
   ResolvedLlmConfig,
@@ -22,7 +37,6 @@ export type {
   HookStack,
   ToolSpec,
   ToolDef,
-  ToolFilter,
   SlashHandler,
   Middleware,
   Ctx,

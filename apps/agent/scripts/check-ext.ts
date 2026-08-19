@@ -2,9 +2,12 @@
 // auto-discovered and its tool registered. Run with tsx:
 //   pnpm --filter agent check-ext
 import { Harness } from '@applepi/core';
+import { fileURLToPath } from 'node:url';
 
 const harness = new Harness();
-const extDir = new URL('../extensions/', import.meta.url).pathname;
+// fileURLToPath (not .pathname): .pathname yields a `/C:/...` root-relative
+// path on Windows, which fs.readdir cannot resolve.
+const extDir = fileURLToPath(new URL('../extensions/', import.meta.url));
 const loaded = await harness.loadExtensionsFromDir(extDir);
 
 console.log('loaded extensions:', loaded);

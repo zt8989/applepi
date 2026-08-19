@@ -1,6 +1,7 @@
 import { OnionBus } from './bus.js';
 import { runLoop, type LlmCall } from './loop.js';
 import { SessionStore, slugWorkspace, type SessionMessage } from './session.js';
+import { defaultSecurityPolicy, type SecurityPolicy } from './security.js';
 import type {
   Ctx,
   HarnessApi,
@@ -9,7 +10,6 @@ import type {
   SessionContext,
   SetupFn,
   SlashHandler,
-  ToolFilter,
   ToolSpec,
 } from './types.js';
 
@@ -29,20 +29,49 @@ export interface BuiltSystemPrompt {
   sections: string[];
 }
 
+export interface HarnessOptions {
+  /** Workspace slug override (defaults to slugWorkspace(process.cwd())). */
+  workspace?: string;
+  /**
+   * The security policy. Defaults to `defaultSecurityPolicy` (ADR-0009 Q7=b):
+   * core always ships a working policy; supplying your own replaces it and
+   * means self-responsibility for the level skeleton.
+   */
+  securityPolicy?: SecurityPolicy;
+}
+
+/**
+ * Everything one extension registered during `setup`, tracked so a reload can
+ * revoke it (ADR-0009 Q13=b: core tracks registration scopes automatically).
+ */
+interface ExtensionScope {
+  tools: string[];
+  middlewares: { stack: HookStack; mw: Middleware }[];
+  slashCommands: string[];
+  /** Cleanups returned by `useEffect` calls, run in registration order. */
+  effects: (() => void)[];
+}
+
 export class Harness {
   readonly bus = new OnionBus();
   readonly workspace: string;
+  readonly securityPolicy: SecurityPolicy;
   session: SessionContext = { history: [], config: {}, scratch: {} };
   sessionStore: SessionStore | null = null;
   private tools = new Map<string, ToolSpec>();
-  private toolFilters: ToolFilter[] = [];
   private slashCommands = new Map<string, SlashHandler>();
   /** Core event handlers: `system_prompt` is handled here; everything else
    *  falls back to writing a lifecycle event line (ADR-0008 follow-up). */
   private eventHandlers = new Map<string, (payload: any) => Promise<any>>();
 
-  constructor(opts: { workspace?: string } = {}) {
+  // Extension lifecycle (ADR-0009): the scope being set up right now, and all
+  // scopes recorded since construction, so reloadExtensions() can revoke them.
+  private currentScope: ExtensionScope | null = null;
+  private scopes: ExtensionScope[] = [];
+
+  constructor(opts: HarnessOptions = {}) {
     this.workspace = opts.workspace ?? slugWorkspace(process.cwd());
+    this.securityPolicy = opts.securityPolicy ?? defaultSecurityPolicy;
     // system_prompt is a core-handled event: rebuild + persist, returning the
     // built { prompt, sections } so callers can log sections.
     this.eventHandlers.set('system_prompt', async () => {
@@ -50,6 +79,8 @@ export class Harness {
       await this.persistSystemPrompt(built);
       return built;
     });
+    // Core-owned registrations (survive extension reload).
+    this.securityPolicy.install(this.api);
   }
 
   /**
@@ -69,11 +100,15 @@ export class Harness {
         throw new Error(`tool "${spec.name}" already registered`);
       }
       this.tools.set(spec.name, spec);
+      this.currentScope?.tools.push(spec.name);
     },
-    use: (stack: HookStack, mw: Middleware, opts?: { priority?: number }) =>
-      this.bus.use(stack, mw, opts),
-    registerToolFilter: (fn: ToolFilter) => {
-      this.toolFilters.push(fn);
+    use: (stack: HookStack, mw: Middleware, opts?: { priority?: number }) => {
+      this.bus.use(stack, mw, opts);
+      this.currentScope?.middlewares.push({ stack, mw });
+    },
+    useEffect: (effect: () => (() => void) | void) => {
+      const cleanup = effect();
+      if (typeof cleanup === 'function') this.currentScope?.effects.push(cleanup);
     },
     registerSlashCommand: (name: string, handler: SlashHandler) => {
       const key = name.replace(/^\//, '');
@@ -81,6 +116,7 @@ export class Harness {
         throw new Error(`slash command "/${key}" already registered`);
       }
       this.slashCommands.set(key, handler);
+      this.currentScope?.slashCommands.push(key);
     },
     getSlashCommand: (name: string) =>
       this.slashCommands.get(name.replace(/^\//, '')),
@@ -89,9 +125,24 @@ export class Harness {
     getTools: () => [...this.tools.values()],
   };
 
-  /** Register an extension by its setup(api) function. */
+  /** Restore policy state (permission level) from the attached session store. */
+  async restoreSecurity(store: SessionStore): Promise<void> {
+    await this.securityPolicy.restore(store, this.session);
+  }
+
+  /**
+   * Register an extension by its setup(api) function. Everything it registers
+   * is tracked in a fresh scope, revoked by `reloadExtensions()` (ADR-0009).
+   */
   registerExtension(fn: SetupFn): void {
-    fn(this.api);
+    const scope: ExtensionScope = { tools: [], middlewares: [], slashCommands: [], effects: [] };
+    this.scopes.push(scope);
+    this.currentScope = scope;
+    try {
+      fn(this.api);
+    } finally {
+      this.currentScope = null;
+    }
   }
 
   /**
@@ -102,6 +153,7 @@ export class Harness {
   async loadExtensionsFromDir(dir: string): Promise<string[]> {
     const fs = await import('node:fs/promises');
     const path = await import('node:path');
+    const { pathToFileURL } = await import('node:url');
     let files: string[] = [];
     try {
       files = await fs.readdir(dir);
@@ -111,7 +163,8 @@ export class Harness {
     const loaded: string[] = [];
     const extFiles = files.filter((f) => /\.ext\.(ts|js|mjs)$/.test(f));
     for (const f of extFiles) {
-      const mod = await import(path.join(dir, f));
+      // file URL, not a raw path: Windows backslashes break dynamic import()
+      const mod = await import(pathToFileURL(path.join(dir, f)).href);
       const setup = (mod.setup ?? mod.default) as SetupFn | undefined;
       if (typeof setup === 'function') {
         this.registerExtension(setup);
@@ -122,22 +175,43 @@ export class Harness {
   }
 
   /**
+   * Extension reload (ADR-0009 Q17=a, Q21–Q23): revoke every scoped
+   * registration from ALL previously set-up extensions — run `useEffect`
+   * cleanups first (release external resources), then remove tools,
+   * middlewares, and slash commands — then re-scan `dir` and re-inject.
+   * `session.scratch` / `session.history` are preserved (no new Harness).
+   * Core-owned registrations (SecurityPolicy) are untouched.
+   *
+   * Note: extensions registered directly via `registerExtension` (e.g.
+   * `baseExtension`) are also revoked here; the caller re-registers them
+   * after this call (as main.ts does).
+   */
+  async reloadExtensions(dir: string): Promise<string[]> {
+    for (const scope of this.scopes) {
+      for (const cleanup of scope.effects) {
+        try {
+          cleanup();
+        } catch (e: any) {
+          // Soft isolation: a bad cleanup must not abort the reload.
+          console.error(`[reload] effect cleanup failed: ${e?.message ?? e}`);
+        }
+      }
+      for (const name of scope.tools) this.tools.delete(name);
+      for (const { stack, mw } of scope.middlewares) this.bus.remove(stack, mw);
+      for (const name of scope.slashCommands) this.slashCommands.delete(name);
+    }
+    this.scopes = [];
+    return this.loadExtensionsFromDir(dir);
+  }
+
+  /**
    * Convert registered tools into Vercel AI SDK tool defs (no execute).
-   * Registered ToolFilters crop/rewrite what the model sees, applied in
-   * registration order; `null` hides the tool (ADR-0007 Q14=b).
+   * No cropping since ADR-0009 (Q8=b): the model always sees the full surface.
    */
   buildToolDefs(): Record<string, { description: string; parameters: ToolSpec['parameters'] }> {
     const defs: Record<string, { description: string; parameters: ToolSpec['parameters'] }> = {};
     for (const t of this.tools.values()) {
-      let def: { description: string; parameters: ToolSpec['parameters'] } | null = {
-        description: t.description,
-        parameters: t.parameters,
-      };
-      for (const filter of this.toolFilters) {
-        def = filter(t.name, def);
-        if (def === null) break; // once hidden, later filters cannot revive it
-      }
-      if (def !== null) defs[t.name] = def;
+      defs[t.name] = { description: t.description, parameters: t.parameters };
     }
     return defs;
   }
@@ -261,9 +335,7 @@ export class Harness {
         maxTurns: opts.maxTurns,
         llmCall: opts.llmCall,
         onMessage: this.sessionStore
-          ? (role, content) => {
-              this.sessionStore!.appendMessage(role, content);
-            }
+          ? (role, content) => this.sessionStore!.appendMessage(role, content)
           : undefined,
       });
     });

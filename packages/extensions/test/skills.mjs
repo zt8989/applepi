@@ -42,12 +42,14 @@ ok(
   built.sections.includes('skills'),
 );
 
-// --- no skills loaded => nothing contributed, sections empty ---
+// --- no skills loaded => nothing contributed from the skills section ---
+// (the prompt is NOT empty since ADR-0009: the core SecurityPolicy always
+// contributes the 「Permission Level」 section)
 const harness2 = new Harness();
 harness2.registerExtension(createSkillsExtension());
 const empty = await harness2.buildSystemPrompt();
-ok('no injection when no skill is loaded', !empty.prompt.includes('Be friendly and concise.') && empty.prompt === '');
-ok('no sections when nothing is contributed', empty.sections.length === 0);
+ok('no injection when no skill is loaded', !empty.prompt.includes('Be friendly and concise.') && !empty.prompt.includes('[Skill:'));
+ok('no skills section when nothing is contributed', !empty.sections.includes('skills'));
 
 console.log(`\n${passed} skills checks passed, ${failed} failed.`);
 process.exit(failed ? 1 : 0);

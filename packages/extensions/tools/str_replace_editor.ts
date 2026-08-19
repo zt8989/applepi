@@ -1,7 +1,14 @@
 import { z } from 'zod';
 import { readFile, writeFile, readdir, stat } from 'node:fs/promises';
-import type { ToolSpec } from '@applepi/core';
+import type { Ctx, ToolSpec } from '@applepi/core';
+import { getPermissionLevel, isInsideProjectRoot } from '@applepi/core';
 
+/**
+ * str_replace_editor — self-determining per level (ADR-0009 Q6=a; the sre path
+ * rule moved here from permission.ts): readonly allows `view` only; workspace
+ * allows `write`/`str_replace` only inside the project root; fullaccess allows
+ * all. The model always sees the full schema (Q8=b, no cropping).
+ */
 export const strReplaceEditorTool: ToolSpec = {
   name: 'str_replace_editor',
   description:
@@ -21,9 +28,26 @@ export const strReplaceEditorTool: ToolSpec = {
       .optional()
       .describe('Replacement string (required for str_replace)'),
   }),
-  async execute(args) {
+  async execute(args, ctx: Ctx) {
+    const level = getPermissionLevel(ctx);
+    const command = args.command;
+
+    // Self-determination (ADR-0009): scope by level before touching the disk.
+    if (level === 'readonly' && command !== 'view') {
+      return `BLOCKED (readonly): str_replace_editor view only`;
+    }
+    if (
+      level === 'workspace' &&
+      (command === 'write' || command === 'str_replace')
+    ) {
+      const p = args.path;
+      if (typeof p !== 'string' || !(await isInsideProjectRoot(p))) {
+        return `BLOCKED (workspace): write path outside project root: ${String(p)}`;
+      }
+    }
+
     try {
-      if (args.command === 'view') {
+      if (command === 'view') {
         const s = await stat(args.path);
         if (s.isDirectory()) {
           const entries = await readdir(args.path, { withFileTypes: true });
@@ -33,12 +57,12 @@ export const strReplaceEditorTool: ToolSpec = {
         }
         return await readFile(args.path, 'utf8');
       }
-      if (args.command === 'write') {
+      if (command === 'write') {
         if (args.content === undefined) return 'ERROR: content required for write';
         await writeFile(args.path, args.content, 'utf8');
         return `WROTE ${args.path} (${args.content.length} bytes)`;
       }
-      if (args.command === 'str_replace') {
+      if (command === 'str_replace') {
         if (!args.old_str || args.new_str === undefined) {
           return 'ERROR: old_str and new_str required for str_replace';
         }

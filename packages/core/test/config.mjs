@@ -1,5 +1,5 @@
 // Plain-node unit test for the core LLM config primitives (ADR-0004). No API key.
-// Covers: loadSettings (defaults / parse / invalid JSON), loadDotenv (parse
+// Covers: loadSettings (missing → throw / parse / invalid JSON), loadDotenv (parse
 // rules), resolveApiKey (lookup-by-name), resolveLlmConfig (placeholder+secret,
 // direct key, fail-fast). All runs use an injected temp baseDir, self-cleaned.
 import assert from 'node:assert/strict';
@@ -23,13 +23,10 @@ const base = await fs.mkdtemp(path.join(os.tmpdir(), 'applepi-config-test-'));
 const settingsFile = path.join(base, 'settings.json');
 const envFile = path.join(base, '.env');
 
-// 1. loadSettings: missing file -> defaults.
+// 1. loadSettings: missing file -> throws (fail fast, ADR-0004 amendment).
 {
-  const s = await loadSettings(base);
-  assert.equal(s.provider, 'openai');
-  assert.equal(s.model, 'gpt-4o-mini');
-  assert.equal(s.apiKey, 'OPENAI_API_KEY');
-  ok('loadSettings: missing file -> defaults');
+  await assert.rejects(() => loadSettings(base), /settings\.json not found/);
+  ok('loadSettings: missing file -> throws (fail fast)');
 }
 
 // 2. loadSettings: valid JSON parsed (partial fields fall back).

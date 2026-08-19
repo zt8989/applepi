@@ -1,4 +1,5 @@
 import { createInterface } from 'node:readline/promises';
+import { fileURLToPath } from 'node:url';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import {
@@ -7,18 +8,11 @@ import {
   resolveLlmConfig,
   type ResolvedLlmConfig,
 } from '@applepi/core';
-import { baseExtension, restorePermissionLevel } from '@applepi/extensions';
+import { baseExtension } from '@applepi/extensions';
 
-const extDir = new URL('../extensions/', import.meta.url).pathname;
-
-/** Base system-prompt section contributed by the agent (Q10=c, ADR-0008). */
-function buildBaseSystemPrompt(): string {
-  return [
-    'You are a minimal local agent harness.',
-    'You have two reference tools: `bash` and `str_replace_editor`.',
-    'Use them to accomplish the user\'s request step by step.',
-  ].join('\n');
-}
+// fileURLToPath (not .pathname): .pathname yields a `/C:/...` root-relative
+// path on Windows, which fs.readdir cannot resolve (extensions would be missed).
+const extDir = fileURLToPath(new URL('../extensions/', import.meta.url));
 
 /** Build the provider instance from resolved config (ADR-0004; no process.env). */
 function buildModel(cfg: ResolvedLlmConfig): any {
@@ -29,24 +23,15 @@ function buildModel(cfg: ResolvedLlmConfig): any {
   return createOpenAI(providerSettings)(cfg.model);
 }
 
-/** Build a fully-wired Harness: baseExtension (reference tools + permission system) + local extensions + base section. */
+/** Build a fully-wired Harness: baseExtension (reference tools + base prompt) + local extensions. */
 async function boot(store: SessionStore): Promise<{ harness: Harness; loaded: string[] }> {
   const harness = new Harness();
   harness.registerExtension(baseExtension);
-  // Base section: outermost on the `system_prompt` stack (priority 1000) so it
-  // is appended first (ADR-0008 Q3=a).
-  harness.registerExtension((api) =>
-    api.use('system_prompt', async (ctx, next) => {
-      ctx.promptParts!.push(buildBaseSystemPrompt());
-      ctx.sections!.push('base');
-      await next();
-    }, { priority: 1000 }),
-  );
   const loaded = await harness.loadExtensionsFromDir(extDir);
   harness.attachSession(store);
-  // Restore the session's permission level from the last `level/set` event
-  // (ADR-0007 Q3/Q11); default `workspace` when absent.
-  await restorePermissionLevel(store, harness.session.scratch);
+  // Restore the session's permission level from the last `level/set` event via
+  // the core SecurityPolicy (ADR-0009); default `workspace` when absent.
+  await harness.restoreSecurity(store);
   return { harness, loaded };
 }
 
@@ -125,7 +110,8 @@ rl.on('line', async (raw) => {
     const arg = rest.join(' ');
 
     // Extension-registered slash commands take precedence over built-ins
-    // (ADR-0007 Q13=a): `/level` is provided by the permission extension.
+    // (ADR-0007 Q13=a): `/level` is registered by the core SecurityPolicy
+    // (ADR-0009) via the same mechanism.
     const extHandler = harness.api.getSlashCommand(cmd);
     if (extHandler) {
       try {
@@ -150,12 +136,13 @@ rl.on('line', async (raw) => {
         break;
       }
       case '/reload': {
-        const oldScratch = harness.session.scratch;
-        const oldHistory = harness.session.history;
+        // Extension reload (ADR-0009 Q17=a): revoke every scoped registration
+        // (running useEffect cleanups), re-scan extensions/, re-register
+        // baseExtension, rebuild the prompt. scratch/history are preserved —
+        // no new Harness.
         await harness.emit('reload/start', { extensionsDiscovered: loaded });
-        ({ harness, loaded } = await boot(store));
-        harness.session.scratch = oldScratch;
-        harness.session.history = oldHistory;
+        loaded = await harness.reloadExtensions(extDir);
+        harness.registerExtension(baseExtension);
         await harness.emit('system_prompt');
         await harness.emit('reload/end', { extensionsDiscovered: loaded });
         console.log(`[reload] extensions re-scanned (${loaded.length}), system prompt rebuilt`);
@@ -169,8 +156,8 @@ rl.on('line', async (raw) => {
         ({ harness } = await boot(store));
         store = await harness.resume(arg);
         // The store switched to the resumed session: re-read its last
-        // `level/set` event (ADR-0007 Q3/Q11).
-        await restorePermissionLevel(store, harness.session.scratch);
+        // `level/set` event (ADR-0009, core SecurityPolicy).
+        await harness.restoreSecurity(store);
         console.log(`[resume] active session -> ${store.sessionId}`);
         break;
       }

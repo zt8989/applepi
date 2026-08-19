@@ -2,6 +2,7 @@
 // required. Exercises `bash` and `str_replace_editor` end-to-end through a
 // real Harness (moved here from packages/core/test/smoke.mjs, Q5=A).
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
 import { Harness } from '@applepi/core';
 import { bashTool, strReplaceEditorTool } from '../dist/index.js';
 
@@ -25,7 +26,9 @@ function ok(name) {
 {
   const harness = new Harness();
   harness.registerExtension((api) => api.registerTool(strReplaceEditorTool));
-  const f = new URL('./_tools_tmp.txt', import.meta.url).pathname;
+  // fileURLToPath (not .pathname): .pathname yields a `/C:/...` root-relative
+  // path on Windows, which the tool then mis-resolves to `C:\C:\...`.
+  const f = fileURLToPath(new URL('./_tools_tmp.txt', import.meta.url));
   const wctx = { session: harness.session, state: {}, toolName: 'str_replace_editor', toolArgs: { command: 'write', path: f, content: 'line1\nline2' } };
   await harness.bus.run('tool', wctx, async () => { await harness.executeTool(wctx); });
   assert.match(wctx.toolResult, /WROTE/);
@@ -39,6 +42,6 @@ console.log(`\n${passed} tools checks passed.`);
 
 // cleanup temp file written during the str_replace_editor round-trip
 import('node:fs').then((fs) => {
-  const f = new URL('./_tools_tmp.txt', import.meta.url).pathname;
+  const f = fileURLToPath(new URL('./_tools_tmp.txt', import.meta.url));
   try { fs.unlinkSync(f); } catch {}
 });

@@ -1,8 +1,9 @@
-// Key-free verification of the permission-level system (ADR-0007) in the real
-// agent context (Harness + onion bus + baseExtension). A fake LLM is NOT needed:
-// we drive tool calls through the `tool` stack directly, exactly as the loop
-// would, and inspect results. Run:
-//   pnpm --filter agent check-permission
+// Key-free verification of the ADR-0009 security model in the real agent
+// context: tool self-determination (bash whitelist, sre view-only, path
+// scoping), the denylist floor at every level, the core SecurityPolicy
+// (level/set event + prompt rebuild WITHOUT unloading tools), and extension
+// reload (unload + re-inject + useEffect cleanup). Run:
+//   pnpm --filter agent check-security
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,33 +11,30 @@ import { tmpdir } from 'node:os';
 import {
   Harness,
   SessionStore,
-} from '@applepi/core';
-import {
-  baseExtension,
-  restorePermissionLevel,
   PERMISSION_SCRATCH_KEY,
   DEFAULT_PERMISSION_LEVEL,
+  restorePermissionLevel,
   type PermissionLevel,
-} from '@applepi/extensions';
+} from '@applepi/core';
+import { baseExtension, createMemoryExtension } from '@applepi/extensions';
 
-const WS = 'check-permission-tmp';
+const WS = 'check-security-tmp';
 const DIR = path.join(os.homedir(), '.applepi', 'sessions', WS);
 
 const harness = new Harness();
 harness.registerExtension(baseExtension);
+// memory_write self-blocking is verified here too (ADR-0009 Q4/Q5).
+harness.registerExtension(createMemoryExtension({ filePath: path.join(tmpdir(), 'sec-check-memory.json') }));
 const store = new SessionStore({ workspace: WS });
 await store.create();
 harness.attachSession(store);
+await harness.restoreSecurity(store);
 
-// Test file lives in the cwd (project root) — the harness writes real files.
-const innerFile = path.join(process.cwd(), '.perm-check-inner.txt');
-const outerFile = path.join(tmpdir(), 'perm-check-outer.txt');
-const existingFile = path.join(process.cwd(), '.perm-check-existing.txt');
-
-async function writeExisting(): Promise<void> {
-  await fs.writeFile(existingFile, 'hello perm', 'utf8');
-}
-await writeExisting();
+// Test files: inner lives in the cwd (project root); outer in the OS tmpdir.
+const innerFile = path.join(process.cwd(), '.sec-check-inner.txt');
+const outerFile = path.join(tmpdir(), 'sec-check-outer.txt');
+const existingFile = path.join(process.cwd(), '.sec-check-existing.txt');
+await fs.writeFile(existingFile, 'hello sec', 'utf8');
 
 /** Drive one tool call through the `tool` onion stack (as runLoop does). */
 async function callTool(toolName: string, args: any): Promise<string> {
@@ -53,7 +51,7 @@ async function setLevel(level: PermissionLevel): Promise<void> {
 }
 
 function fail(msg: string): never {
-  console.error(`check-permission: FAIL — ${msg}`);
+  console.error(`check-security: FAIL — ${msg}`);
   process.exit(1);
 }
 
@@ -66,32 +64,25 @@ function fail(msg: string): never {
   }
   const built = await harness.buildSystemPrompt();
   const sys = built.prompt;
-  console.log('--- default system prompt section:');
-  console.log(sys.split('\n').filter((l) => l.startsWith('Permission Level') || l.includes('WORKSPACE')).join('\n'));
   if (!sys.includes('Permission Level: workspace')) fail('prompt lacks Permission Level: workspace');
   if (!built.sections.includes('permission')) fail('permission section not reported in build sections');
 }
 
-// --- 2. readonly: write blocked, view allowed, whitelist bash allowed -------
+// --- 2. readonly: tool self-determination -----------------------------------
 {
   await setLevel('readonly');
 
-  const defs = harness.buildToolDefs();
-  if (!defs.bash.description.includes('read-only')) fail('readonly: bash def not cropped');
-  const sreParams: any = defs.str_replace_editor.parameters;
-  if (sreParams.shape.command._def.typeName !== 'ZodLiteral') {
-    fail('readonly: str_replace_editor command not cropped to literal view');
-  }
-
   const viewRes = await callTool('str_replace_editor', { command: 'view', path: existingFile });
-  if (!viewRes.includes('hello perm')) fail('readonly: view should pass');
+  if (!viewRes.includes('hello sec')) fail('readonly: view should pass');
   const writeRes = await callTool('str_replace_editor', { command: 'write', path: innerFile, content: 'x' });
   if (!writeRes.includes('BLOCKED')) fail('readonly: write should be blocked');
   const bashRead = await callTool('bash', { command: 'pwd' });
   if (bashRead.startsWith('BLOCKED')) fail('readonly: whitelisted bash (pwd) blocked');
   const bashWrite = await callTool('bash', { command: `touch ${innerFile}` });
   if (!bashWrite.includes('BLOCKED')) fail('readonly: bash write should be blocked');
-  console.log('--- readonly: view ok, write blocked, bash whitelist enforced');
+  const memWrite = await callTool('memory_write', { key: 'k', value: 'v' });
+  if (!memWrite.includes('BLOCKED')) fail('readonly: memory_write should self-block');
+  console.log('--- readonly: view ok, write blocked, bash whitelist + memory self-block enforced');
 }
 
 // --- 3. workspace: writes inside project root pass, outside blocked ---------
@@ -115,13 +106,14 @@ function fail(msg: string): never {
 
   const f1 = await callTool('str_replace_editor', { command: 'write', path: outerFile, content: 'outer' });
   if (!f1.startsWith('WROTE')) fail(`fullaccess: outer write failed: ${f1}`);
-  const f2 = await callTool('bash', { command: `rm -rf ${path.join(tmpdir(), 'perm-check-nothing')}` });
+  const f2 = await callTool('bash', { command: `rm -rf ${path.join(tmpdir(), 'sec-check-nothing')}` });
   if (!f2.includes('BLOCKED')) fail('fullaccess: rm -rf should still hit the denylist floor');
   console.log('--- fullaccess: write anywhere ok, denylist floor still blocks rm -rf');
 }
 
-// --- 5. /level persists a level/set event; lastEvent restores it -----------
+// --- 5. /level persists an event + rebuilds the prompt; tools are NOT unloaded
 {
+  const before = harness.api.getTools().map((t) => t.name).sort();
   const ev = await store.lastEvent('level/set');
   if (!ev || ev.payload?.level !== 'fullaccess') fail('level/set event not persisted');
   const fresh: Record<string, any> = {};
@@ -129,19 +121,73 @@ function fail(msg: string): never {
   if (restored !== 'fullaccess' || fresh[PERMISSION_SCRATCH_KEY] !== 'fullaccess') {
     fail('lastEvent did not restore fullaccess');
   }
-  // A missing event falls back to workspace.
   const store2 = new SessionStore({ workspace: `${WS}-2` });
   await store2.create();
   const restored2 = await restorePermissionLevel(store2, {});
   if (restored2 !== 'workspace') fail('empty session did not default to workspace');
-  console.log('--- level/set event persisted; lastEvent restore verified');
+
+  // Level is a change in permission SIZE, not a tool unload (ADR-0009 Q14
+  // amendment): the registered tool set is identical across level switches.
+  await setLevel('readonly');
+  const after = harness.api.getTools().map((t) => t.name).sort();
+  if (JSON.stringify(before) !== JSON.stringify(after)) {
+    fail(`level switch changed the tool set: ${before} -> ${after}`);
+  }
+  await setLevel('workspace');
+  console.log('--- level/set persisted; prompt rebuilt; tool set unchanged across levels');
 }
 
-// cleanup
+// --- 6. extension reload: unload + re-inject + useEffect cleanup -----------
+{
+  const extDir = path.join(tmpdir(), `sec-check-ext-${Date.now()}`);
+  await fs.mkdir(extDir, { recursive: true });
+  const extFile = path.join(extDir, 'probe.ext.mjs');
+  await fs.writeFile(
+    extFile,
+    `
+export default (api) => {
+  api.useEffect(() => {
+    return () => { globalThis.__secCheckCleaned = true; };
+  });
+  api.registerTool({
+    name: 'reload_probe',
+    description: 'probe tool for reload verification',
+    parameters: {},
+    execute: () => 'probe-ok',
+  });
+};
+`,
+    'utf8',
+  );
+
+  const loaded = await harness.loadExtensionsFromDir(extDir);
+  if (!loaded.includes('probe.ext.mjs')) fail(`probe extension not loaded: ${loaded}`);
+  if (!harness.api.getTools().some((t) => t.name === 'reload_probe')) {
+    fail('reload_probe tool not registered');
+  }
+  const probeRes = await callTool('reload_probe', {});
+  if (probeRes !== 'probe-ok') fail(`probe tool call failed: ${probeRes}`);
+
+  // Remove the file, reload into the now-empty dir: tool must be unloaded and
+  // the useEffect cleanup must have run.
+  await fs.rm(extFile, { force: true });
+  const reloaded = await harness.reloadExtensions(extDir);
+  if (reloaded.length !== 0) fail(`reload should find no extensions: ${reloaded}`);
+  if (harness.api.getTools().some((t) => t.name === 'reload_probe')) {
+    fail('reload_probe still registered after reload');
+  }
+  if ((globalThis as any).__secCheckCleaned !== true) {
+    fail('useEffect cleanup was not invoked on reload');
+  }
+  await fs.rm(extDir, { recursive: true, force: true }).catch(() => {});
+  console.log('--- reload: registrations revoked, useEffect cleanup ran');
+}
+
+// cleanup — best-effort: a failed cleanup must not fail the verification.
 for (const f of [innerFile, outerFile, existingFile]) {
-  await fs.rm(f, { force: true });
+  await fs.rm(f, { force: true }).catch(() => {});
 }
-await fs.rm(DIR, { recursive: true, force: true });
-await fs.rm(path.join(os.homedir(), '.applepi', 'sessions', `${WS}-2`), { recursive: true, force: true });
+await fs.rm(DIR, { recursive: true, force: true }).catch(() => {});
+await fs.rm(path.join(os.homedir(), '.applepi', 'sessions', `${WS}-2`), { recursive: true, force: true }).catch(() => {});
 
-console.log('OK: permission-level system verified (default/readonly/workspace/fullaccess, tool cropping, prompt declaration, level/set persistence)');
+console.log('OK: security model verified (self-determination, denylist floor, level skeleton, reload lifecycle)');
