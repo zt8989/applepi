@@ -12,7 +12,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node test/memory.mjs && node test/skills.mjs"
+    "test": "node test/memory.mjs && node test/skills.mjs && node test/mcp.mjs"
   },
   "dependencies": {
     "@harness/core": "workspace:*",

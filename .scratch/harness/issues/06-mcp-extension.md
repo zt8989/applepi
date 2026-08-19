@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — 核心运行时 + 端到端 agent loop
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] 在本机存在 `mcp-cli` 的前提下，`mcp_call` 能触达某个外部 MCP server 并通过 bash 桥返回其输出
 - [ ] 这是一个 thin slice（端到端打通即可），明确依赖本机已安装 `mcp-cli`
