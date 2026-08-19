@@ -30,7 +30,7 @@ Project: a minimal **single-machine agent harness**, organized as a **pnpm works
 
 ## LLM configuration (glossary — decided via /grill-with-docs)
 
-- **LLM settings** — `~/.applepi/settings.json`, the **only** source of LLM config (process.env is no longer read, Q3=b). Schema (Q2=a): `{ provider, model, apiKey, baseUrl? }` (`baseUrl` overrides the API endpoint, forwarded to the SDK provider factory). Missing file → defaults (`openai` / `gpt-4o-mini`).
+- **LLM settings** — `~/.applepi/settings.json`, the **only** source of LLM config (process.env is no longer read, Q3=b). Schema (Q2=a): `{ provider, model, apiKey, baseURL? }` (`baseURL` overrides the API endpoint, forwarded to the SDK provider factory). Missing file → defaults (`openai` / `gpt-4o-mini`).
 - **Secret file** — `~/.applepi/.env`, holds the real API keys. Parsed with the `dotenv` package (Q7=b).
 - **Api key reference (placeholder)** — the `apiKey` value in settings.json is treated as a **key name** into the secret file: `realKey = dotenv[apiKey] ?? apiKey` (Q1=a). Default value = the provider's canonical env name (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`); a real key written directly also works.
 - **/config** — slash command that re-reads settings.json + .env and rebuilds the model (Q5=c). `/reload` does **not** touch the provider.

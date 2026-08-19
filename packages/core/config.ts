@@ -16,7 +16,7 @@ export interface LlmSettings {
   model: string;
   apiKey: string;
   /** Optional base URL override (mapped to the SDK provider's `baseURL`). */
-  baseUrl?: string;
+  baseURL?: string;
 }
 
 export const SUPPORTED_PROVIDERS = ['openai', 'anthropic'] as const;
@@ -44,7 +44,7 @@ export interface ResolvedLlmConfig {
   model: string;
   apiKey: string;
   /** Optional base URL override, forwarded to the provider factory. */
-  baseUrl?: string;
+  baseURL?: string;
 }
 
 function defaultBaseDir(): string {
@@ -80,9 +80,9 @@ export async function loadSettings(baseDir: string = defaultBaseDir()): Promise<
     typeof data.apiKey === 'string'
       ? data.apiKey
       : (DEFAULT_API_KEY_REFS[provider] ?? DEFAULT_LLM_SETTINGS.apiKey);
-  const baseUrl =
-    typeof data.baseUrl === 'string' && data.baseUrl ? data.baseUrl : undefined;
-  return { provider, model, apiKey, baseUrl };
+  const baseURL =
+    typeof data.baseURL === 'string' && data.baseURL ? data.baseURL : undefined;
+  return { provider, model, apiKey, baseURL };
 }
 
 /** Read .env via dotenv.parse (pure — never writes process.env); missing → {}. */
@@ -123,6 +123,6 @@ export async function resolveLlmConfig(baseDir: string = defaultBaseDir()): Prom
     provider: settings.provider as SupportedProvider,
     model: settings.model,
     apiKey,
-    baseUrl: settings.baseUrl,
+    baseURL: settings.baseURL,
   };
 }

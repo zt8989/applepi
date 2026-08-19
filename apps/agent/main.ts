@@ -24,7 +24,7 @@ function buildBaseSystemPrompt(): string {
 
 /** Build the provider instance from resolved config (ADR-0004; no process.env). */
 function buildModel(cfg: ResolvedLlmConfig): any {
-  const providerSettings = { apiKey: cfg.apiKey, ...(cfg.baseUrl ? { baseURL: cfg.baseUrl } : {}) };
+  const providerSettings = { apiKey: cfg.apiKey, ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}) };
   if (cfg.provider === 'anthropic') {
     return createAnthropic(providerSettings)(cfg.model);
   }
