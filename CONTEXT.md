@@ -48,7 +48,7 @@ Wiki: start at `docs/README.md` (architecture: `docs/architecture.md`; design pr
 
 Dependency graph (one direction): `@applepi/agent → @applepi/extensions → @applepi/core`. Cross-package imports use **package names** resolved to `dist/` via each package's `exports` (Q3=a); dev/test run **build-first** (Q4=a); each package has its own `tsconfig.json` extending a shared base (Q5=a); the root `package.json` orchestrates `build`/`dev`/`test`/`verify` (Q6=a).
 
-Architecture decisions are recorded as ADR-0001 (harness), ADR-0002 (session persistence: jsonl + resume + reload), ADR-0003 (workspace split), ADR-0004 (LLM config sources), ADR-0005 (reference tools + denylist → `baseExtension`), ADR-0006 (event schema slimming), ADR-0007 (permission levels: read/write scoped tool access), ADR-0008 (system prompt built on the `system_prompt` onion stack), and ADR-0009 (security as tool self-determination: core-built SecurityPolicy + extension reload).
+Architecture decisions are recorded as ADR-0001 (harness), ADR-0002 (session persistence: jsonl + resume + reload), ADR-0003 (workspace split), ADR-0004 (LLM config sources), ADR-0005 (reference tools + denylist → `baseExtension`), ADR-0006 (event schema slimming), ADR-0007 (permission levels: read/write scoped tool access), ADR-0008 (system prompt built on the `system_prompt` onion stack), ADR-0009 (security as tool self-determination: core-built SecurityPolicy + extension reload), and ADR-0010 (system prompt = PromptBag of three block stacks, supersedes ADR-0008).
 
 ## Permission levels (designing — via /grill-with-docs, round 1)
 
@@ -76,6 +76,16 @@ Architecture decisions are recorded as ADR-0001 (harness), ADR-0002 (session per
 - **Tool filter 签名（Q14=b）** — `type ToolFilter = (toolName: string, def: { description; parameters }) => { description; parameters } | null`；null = 不暴露，返回新 def = 改写（readonly 下把 `str_replace_editor` schema 裁成只有 `view`）。filter 按注册顺序串联，任一 filter 返回 null 即不可复活。`buildToolDefs()` 遍历工具时依次应用所有 filter。
 - **边界收尾（Q15）** — 权限级别**只约束工具行为 + 权限声明段落**；其他系统提示词段落（skills 注入、base）不受级别影响。`memory_write`/`skill_load` 按**工具名分类**为写/读（memory_write 目标文件是扩展固定的 `harness-memory.json`，在 project root 内，workspace 放行、readonly 拦、fullaccess 放行；skill_load 算读，全级别放行）。
 - **验证与文档（Q16）** — check-permission.ts 验证 5 条：默认 workspace + 提示词声明、readonly 拦截（write/白名单外 bash）、workspace 路径前缀（root 内放行、/tmp 拦）、fullaccess 放行但 denylist 底线仍拦、`/level` 切换后事件写入 + 提示词重建 + lastEvent 恢复。ADR-0007 记录全部决策。
+
+## System prompt blocks (decided — via /grill-with-docs, Q1–Q17, ADR-0010)
+
+- **System prompt block（提示词分块）** — 系统提示词的规范组成单元。固定 3 块，规范顺序：`base`（系统提示词）→ `permission`（权限）→ `skills`（技能）（Q2/Q16）。顺序是**结构性保证**：每块挂在**各自的中间件栈**上（Q5），构建时按规范顺序依次装配——与注册顺序/priority 无关（SecurityPolicy 即使最先安装也只写 `permission` 块，天然落在第二）。
+- **Block stack（块栈）** — 块名 = 栈名，统一加 `prompt/` 前缀（Q6=a/Q16）：`HookStack` 变为 `session | llm | tool | prompt/base | prompt/permission | prompt/skills`，`system_prompt` 栈删除；`api.use('prompt/base', mw)` 与 `bag.set('base', ...)` 共享短块名。
+- **PromptBag（提示词袋）** — 构建上下文里替代 `promptParts: string[]` 的结构（Q5）：对象含 3 个数组（每块一个）+ `set(block, array | (old) => new)` 方法，第一参为块短名、第二参为数组或旧值→新值更新函数。**写入只走 `set`**（Q7=b，无直接数组变异）；updater 的 `old` = **本块**旧数组（Q14=a），块间互不可见。
+- **Rebuild-all semantics（全量重建语义）** — 任一块事件触发时**重建全部 3 块**并持久化一条完整 system 消息（Q4）；块事件 `system_prompt/<block>`（Q9=a）只是语义化触发点，不是增量重建入口；`system_prompt` 保留为全量入口（启动 / `/reload` / `/new`，Q12=a）。
+- **Sections（构建期块列表）** — `buildSystemPrompt()` 仍返回 `{ prompt, sections }`，`sections` = **非空的块名列表**（按规范顺序，Q10）；`system_prompt/start|end` 事件对与持久化路径不变。
+- **Base 块内容（Q13/Q17）** — `BASE_SYSTEM_PROMPT` 只留「你是谁 + 怎么用」；「You have two reference tools」句删除且**不恢复**——工具信息只走 tool defs（Vercel SDK），系统提示词不再承载工具清单（`tools` 块已删除，Q16/Q17=b）。
+- **Veto 语义（Q15=a）** — 分块后 veto **块内有效**（跳过该块后续中间件）、**跨块 veto 消失**；持久化照旧不受 veto 影响（ADR-0008 Q6 不变）。
 
 ## Security model (designing — via /grill-with-docs, round 1)
 

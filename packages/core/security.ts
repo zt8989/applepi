@@ -11,7 +11,8 @@ import type { SessionStore } from './session.js';
  *
  * The default policy owns the **level skeleton**: the three-value level model,
  * the `level/set` event + `lastEvent` restore, the 「Permission Level」
- * system-prompt section, and the user-only `/level` command. It has NO runtime
+ * system-prompt section (on the `prompt/permission` block stack, ADR-0010),
+ * and the user-only `/level` command. It has NO runtime
  * interception middleware (permissionMiddleware was removed, Q12=a) — the
  * "gate" is a level-context guarantee: every tool `execute` reads the current
  * level via `getPermissionLevel(ctx)` and self-determines its behavior.
@@ -126,12 +127,14 @@ export const defaultSecurityPolicy: SecurityPolicy = {
   },
 
   install(api) {
-    // 「Permission Level」 section on the system_prompt stack (ADR-0008).
+    // 「Permission Level」 section on the `prompt/permission` block stack
+    // (ADR-0010: block name = stack name; set() is the only write path).
     api.use(
-      'system_prompt',
+      'prompt/permission',
       async (ctx, next) => {
-        ctx.promptParts!.push(buildPermissionSection(getPermissionLevel(ctx), projectRoot()));
-        ctx.sections!.push('permission');
+        ctx.prompt!.set('permission', [
+          buildPermissionSection(getPermissionLevel(ctx), projectRoot()),
+        ]);
         await next();
       },
       { priority: 1000 },
@@ -145,7 +148,8 @@ export const defaultSecurityPolicy: SecurityPolicy = {
       }
       api.ctx.scratch[PERMISSION_SCRATCH_KEY] = level;
       await api.emit('level/set', { level });
-      await api.emit('system_prompt'); // rebuild + persist (core handler)
+      // Block event = semantic trigger; rebuilds ALL blocks (rebuild-all, Q4).
+      await api.emit('system_prompt/permission', { level });
       return `[level] ${level} (system prompt rebuilt; tools self-determine per call)`;
     });
   },

@@ -129,8 +129,10 @@ specific tool.**
 - **ADR-0007 is superseded**: the double layer (cropping + runtime
   interception) is replaced by tool self-determination. The level model,
   `level/set` event, prompt section, and `/level` survive, now owned by core.
-- **ADR-0008 is unaffected**: the `system_prompt` stack continues to carry
-  the permission section.
+- **ADR-0008 is superseded by ADR-0010**: the `system_prompt` stack becomes
+  three `prompt/*` block stacks; the permission section now rides the
+  `prompt/permission` block (originally: "ADR-0008 is unaffected: the
+  `system_prompt` stack continues to carry the permission section").
 - **Security posture changes**: `readonly` shifts from a hard boundary to a
   cooperative one; the uniform layer no longer intercepts anything at runtime.
   This is the accepted cost of letting tools own their safety (Q11=a).

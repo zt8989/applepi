@@ -13,10 +13,10 @@ const DEFAULT_SCRATCH_KEY = '__skills';
 /**
  * Skills reference extension (spec §9.2). Provides a `skill_load` tool that
  * stashes a markdown instruction blob into the session scratch bag, plus a
- * system-prompt section on the `system_prompt` stack (ADR-0008) that surfaces
- * every loaded skill's content as a section of the system prompt (Q10=c —
- * extensions contribute, not rewrite; mechanism replaced by ADR-0008).
- * The system prompt is (re)built at session start and on `/reload`.
+ * `skills` system-prompt block on the `prompt/skills` stack (ADR-0010) that
+ * surfaces every loaded skill's content. The system prompt is (re)built at
+ * session start and on `/reload`; loading a skill emits
+ * `system_prompt/skills` so the harness rebuilds all blocks.
  */
 export function createSkillsExtension(options: SkillsOptions = {}): SetupFn {
   const key = options.scratchKey ?? DEFAULT_SCRATCH_KEY;
@@ -51,20 +51,24 @@ export function createSkillsExtension(options: SkillsOptions = {}): SetupFn {
         const skills = (ctx.session.scratch[key] as Record<string, string>) ?? {};
         skills[args.name] = content;
         ctx.session.scratch[key] = skills;
-        return `loaded skill "${args.name}" (${content.length} chars) — will be contributed to the system prompt on next build`;
+        // Block event = semantic trigger; rebuilds ALL blocks (rebuild-all,
+        // ADR-0010 Q9=a/Q12=a). Persisting happens in the core handler.
+        await api.emit('system_prompt/skills', { name: args.name });
+        return `loaded skill "${args.name}" (${content.length} chars) — system prompt rebuilt`;
       },
     });
 
-    // Section: every loaded skill becomes a system-prompt section (ADR-0008).
-    api.use('system_prompt', async (ctx, next) => {
+    // Block: every loaded skill becomes the `skills` block (ADR-0010).
+    // Contributes only when there is content; `sections` then includes
+    // 'skills' (build-time truth).
+    api.use('prompt/skills', async (ctx, next) => {
       const skills = ctx.session.scratch[key] as Record<string, string> | undefined;
       if (skills && Object.keys(skills).length > 0) {
-        ctx.promptParts!.push(
+        ctx.prompt!.set('skills', [
           Object.entries(skills)
             .map(([name, content]) => `[Skill: ${name}]\n${content}`)
             .join('\n\n'),
-        );
-        ctx.sections!.push('skills');
+        ]);
       }
       await next();
     });

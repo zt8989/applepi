@@ -1,8 +1,12 @@
 import type { LanguageModelV1 } from 'ai';
 import type { ZodType } from 'zod';
 
-/** The onion middleware stacks (ADR-0008 adds `system_prompt`). */
-export type HookStack = 'session' | 'llm' | 'tool' | 'system_prompt';
+/** The onion middleware stacks (ADR-0010: `system_prompt` split into three `prompt/*` block stacks). */
+export type HookStack = 'session' | 'llm' | 'tool' | 'prompt/base' | 'prompt/permission' | 'prompt/skills';
+
+/** Canonical system-prompt blocks in assembly order (ADR-0010 Q2/Q16). */
+export const PROMPT_BLOCKS = ['base', 'permission', 'skills'] as const;
+export type PromptBlockName = (typeof PROMPT_BLOCKS)[number];
 
 /** A tool registered by core or an extension. */
 export interface ToolSpec {
@@ -41,14 +45,33 @@ export interface Ctx {
   toolName?: string;
   toolArgs?: any;
   toolResult?: string;
-  // system_prompt stack (ADR-0008)
-  /** Accumulator of system-prompt sections, pushed by middleware. */
-  promptParts?: string[];
-  /** Labels of the sections actually contributed during this build. */
-  sections?: string[];
+  // system_prompt → PromptBag (ADR-0010)
+  /**
+   * The accumulated prompt blocks, one array per canonical block. Writes go
+   * ONLY through `set(block, array | (old) => new)` — no direct mutation
+   * (Q7=b). The updater form receives THIS block's old array (Q14=a); blocks
+   * are invisible to each other.
+   */
+  prompt?: PromptBag;
   // error captured by soft isolation
   error?: unknown;
   [k: string]: any;
+}
+
+/**
+ * PromptBag (ADR-0010): the mutable build surface for the system prompt.
+ * `buildSystemPrompt()` runs the three `prompt/*` stacks in canonical order,
+ * then joins the non-empty block arrays. Block order is structural — it
+ * follows PROMPT_BLOCKS, never registration order or priority.
+ */
+export interface PromptBag {
+  base: string[];
+  permission: string[];
+  skills: string[];
+  set(
+    block: PromptBlockName,
+    value: string[] | ((old: string[]) => string[]),
+  ): void;
 }
 
 export interface SessionContext {
@@ -74,11 +97,13 @@ export interface HarnessApi {
   /** Look up an extension-registered slash command (undefined if absent). */
   getSlashCommand(name: string): SlashHandler | undefined;
   /**
-   * Publish an event (ADR-0008 follow-up). The harness owns a handler map:
-   * `system_prompt` is handled in core (rebuild + persist, returning the
-   * built `{ prompt, sections }`); any other event falls back to writing a
-   * lifecycle event line to the session store (P7). All events go through
-   * this single entry — there is no per-event method on the API.
+   * Publish an event (ADR-0008 follow-up, ADR-0010). The harness owns a
+   * handler map: `system_prompt` (full-rebuild entry) and the block events
+   * `system_prompt/base|permission|skills` (semantic triggers) are handled in
+   * core (rebuild ALL blocks + persist, returning `{ prompt, sections }`);
+   * any other event falls back to writing a lifecycle event line to the
+   * session store (P7). All events go through this single entry — there is no
+   * per-event method on the API.
    */
   emit(event: string, payload?: any): Promise<any>;
   ctx: SessionContext;

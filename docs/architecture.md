@@ -24,7 +24,7 @@
                 │ 依赖：extensions → core（单向）
 ┌───────────────┴─────────────────────────────────────────────┐
 │  packages/core  (@applepi/core)  —— 纯运行时骨架，无工具      │
-│  洋葱事件总线（session/llm/tool/system_prompt 四栈）· loader   │
+│  洋葱事件总线（session/llm/tool + prompt/base|permission|skills）│
 │  内置 agent loop · SessionStore · LLM 配置解析               │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -36,7 +36,8 @@
 
 核心只有五样东西，**不含任何工具**（ADR-0005 把工具与 denylist 全部移出核心）：
 
-1. **洋葱事件总线** — 四个中间件栈（`session` / `llm` / `tool` / `system_prompt`），见 §4。
+1. **洋葱事件总线** — 三个横切栈（`session` / `llm` / `tool`）+ 三个提示词块栈
+   （`prompt/base` / `prompt/permission` / `prompt/skills`，ADR-0010），见 §4。
 2. **加载器（Loader）** — 发现并加载扩展，见 §3。
 3. **内置 agent loop** — 会话循环，见 §5。
 4. **SessionStore** — 会话持久化（jsonl），见 §6。
@@ -70,10 +71,9 @@ export default function setup(api: HarnessApi): void {
 ```ts
 interface HarnessApi {
   registerTool(spec: ToolSpec): void;        // 拉模式注册工具
-  use(stack: "session" | "llm" | "tool" | "system_prompt", // 挂载中间件到某栈
+  use(stack: "session" | "llm" | "tool" | "prompt/base" | "prompt/permission" | "prompt/skills", // 挂载中间件到某栈（ADR-0010）
       mw: Middleware,
       opts?: { priority?: number }): void;
-  registerToolFilter(fn: ToolFilter): void;  // 裁剪模型可见的工具 schema（ADR-0007）
   registerSlashCommand(name, handler): void; // 注册 slash 命令（ADR-0007 Q13）
   getSlashCommand(name): SlashHandler | undefined;
   emit(event, payload?): Promise<any>;       // 发布事件（唯一入口，ADR-0008 演进）
@@ -83,24 +83,27 @@ interface HarnessApi {
 ```
 
 **事件发布（emit）**：所有事件统一走 `emit(event, payload)`——没有逐事件的专用
-方法。core 内置 `system_prompt` 事件处理器（重建 + 持久化，返回
-`{ prompt, sections }`）；其余事件（`skill/start|end`、`reload/start|end`、
-`level/set`）回退为写一条生命周期事件行到 jsonl（P7）。
+方法。core 内置提示词重建事件族（`system_prompt` 全量入口 + `system_prompt/base|permission|skills`
+块事件，重建全部块并持久化，返回 `{ prompt, sections }`）；其余事件
+（`skill/start|end`、`reload/start|end`、`level/set`）回退为写一条生命周期事件行到
+jsonl（P7）。
 
 **emit 与洋葱栈正交**：emit 是「发布事件」（记录到审计日志 / 触发 core 内置
-处理器）；洋葱栈是「执行横切逻辑」（中间件链）。两者是不同机制——`system_prompt`
-事件**触发** `system_prompt` 栈运行，但 emit 本身不是第 5 个栈（ADR-0008 演进）。
+处理器）；洋葱栈是「执行横切逻辑」（中间件链）。两者是不同机制——提示词重建
+事件**触发**三个 `prompt/*` 块栈运行（ADR-0010），但 emit 本身不是第 7 个栈。
 
-系统提示词经 `system_prompt` 栈构建（ADR-0008）：中间件在入口
-`ctx.promptParts.push(section)`（可整体改写数组）、`ctx.sections.push(label)`，
-harness 收尾 `join('\n\n')` 归一化并返回 `{ prompt, sections }`。
+系统提示词经三个块栈构建（ADR-0010）：块名 = 栈名（`prompt/base` 等），中间件用
+`ctx.prompt.set(block, array | (old) => new)` 写入自己的块（PromptBag，只走 set、
+无直接数组变异）；harness 按规范顺序 base → permission → skills 跑栈、join 非空块
+并返回 `{ prompt, sections }`（sections = 非空块名列表）。顺序是**结构性保证**，
+与注册顺序 / priority 无关——SecurityPolicy 即使最先安装也只写 `permission` 块。
 
 ### 3.4 `baseExtension`（默认能力集）
 
 `@applepi/extensions` 导出一个 `SetupFn`：注册参考工具 `bashTool` +
-`strReplaceEditorTool`，并挂载权限扩展（`createPermissionExtension`——权限中间件
-priority 1000 最外层 + 工具裁剪 + 权限提示词段落 + `/level` 命令）。一行调用即可
-还原默认能力集：
+`strReplaceEditorTool`，并贡献 `base` 提示词块（挂在 `prompt/base` 栈）。安全机制
+由 core 内置（ADR-0009 SecurityPolicy，贡献 `permission` 块 + `/level`）。一行调用
+即可还原默认能力集：
 
 ```ts
 harness.registerExtension(baseExtension);
@@ -115,7 +118,9 @@ harness.registerExtension(baseExtension);
 | `session` | 整个会话生命周期 |
 | `llm` | 单次 LLM 调用（进：改 messages；出：改 response） |
 | `tool` | 单次工具执行（进：改 args / 否决；出：改 result） |
-| `system_prompt` | 系统提示词构建（进：push 段落 + 标签 / 可整体改写；ADR-0008） |
+| `prompt/base` | 系统提示词 base 块（ADR-0010，身份 + 工作方式） |
+| `prompt/permission` | 权限块（Permission Level 声明） |
+| `prompt/skills` | 技能块（已加载 skills，有内容才贡献） |
 
 ```ts
 type Middleware = (ctx: Ctx, next: () => Promise<void>) => Promise<void>;
@@ -123,12 +128,14 @@ type Middleware = (ctx: Ctx, next: () => Promise<void>) => Promise<void>;
 
 - **观察**：读 `ctx`，调 `await next()`。
 - **否决（veto）**：不调 `next()`（或 `throw`），内层与最终执行被截断。
-  `system_prompt` 栈上 veto 只跳过后续段落，不拦持久化（ADR-0008 Q6）。
-- **改写**：`next()` 前改入参、`next()` 后改出参（mutate `ctx`）。
+  veto 只作用于**本块栈内**的后续中间件，跨块 veto 不存在（ADR-0010 Q15=a）；
+  不拦持久化（ADR-0008 Q6 延续）。
+- **改写**：`next()` 前改入参、`next()` 后改出参（mutate `ctx`）；提示词块用
+  `ctx.prompt.set(block, ...)` 写入（只走 set，无直接数组变异）。
 
 **排序**：同栈内按 `priority` 排序（高 = 外层，进入最先、退出最后）。
-`system_prompt` 栈约定 base 挂 priority 1000 使段落最前（ADR-0008 Q3）；安全
-扩展据此卡在 tool 栈最外圈审最终参数。
+**块间顺序**：`buildSystemPrompt()` 按 base → permission → skills 固定顺序跑三个
+块栈，与注册顺序 / priority 无关（结构性保证，ADR-0010）。
 
 **软隔离**：总线在每层 `next()` 外包 `try/catch`，单个中间件抛错降级并 log，
 不拖死整个 loop（tool 栈把异常转成 `ERROR` 结果）。
@@ -152,10 +159,11 @@ loop:
   provider 适配器），不自己写多模型适配。
 - **工具暴露给模型**：扩展注册的工具经 AI SDK `tool({ description, parameters:
   zodSchema, execute })` 翻译给模型。
-- **系统提示词注入**：每轮 `messages[0]` 由 `buildSystemPrompt()` 生成——运行
-  `system_prompt` 栈拼装段落（ADR-0008），会话启动 / `/reload` / `/level` 时
-  经 `emit('system_prompt')` 重建并持久化新 system 消息行（ADR-0002 replay
-  语义）。
+- **系统提示词注入**：每轮 `messages[0]` 由 `buildSystemPrompt()` 生成——按
+  base → permission → skills 顺序跑三个 `prompt/*` 块栈拼装（ADR-0010），
+  会话启动 / `/reload` 经 `emit('system_prompt')`、`/level` 经
+  `emit('system_prompt/permission')` 重建并持久化新 system 消息行（ADR-0002
+  replay 语义；任一块事件都全量重建，Q4）。
 
 ## 6. 工具与 Vercel AI SDK 映射
 
@@ -172,19 +180,17 @@ api.registerTool({
 
 核心在注册时把 `ToolSpec` 转成 AI SDK `tool()`，并入 `generateText({ tools })`。
 
-## 7. 安全模型（Permission Levels, ADR-0007）
+## 7. 安全模型（Permission Levels, ADR-0007 + ADR-0009）
 
 - **权限级别系统**：`readonly` / `workspace` / `fullaccess`，会话级单一主级别，统一作用于所有工具。
   每个级别由「可读 × 可写」两维构成——读一律全盘，写范围分级（readonly 不可写；workspace 仅限
   project root=cwd realpath 内；fullaccess 任意）。
-- **双层机制**：注册面裁剪（`registerToolFilter` 裁剪模型可见的工具 schema，readonly 下
-  `str_replace_editor` 只剩 `view`、`memory_write` 隐藏）+ 运行时拦截（`permissionMiddleware`
-  挂 tool 栈 priority 1000 最外层，ENTRY veto + EXIT 审计内层改写后的最终参数）。
-- **denylist 底线**：原 8 条危险正则作为**任何级别下都生效的绝对底线**，内嵌于权限中间件
+- **工具自决（ADR-0009）**：core 内置 SecurityPolicy（默认实现），无运行时拦截中间件；
+  每个工具 execute 读 `ctx` 中的 level 自行约束行为（bash 只读白名单、sre view-only 等）。
+- **denylist 底线**：原 8 条危险正则作为**任何级别下都生效的绝对底线**，内嵌于 bash 工具自身
   （`fullaccess` 也不允许 `rm -rf`、fork bomb 等）。
-- **提示词携带级别**：权限扩展在 `system_prompt` 栈上贡献「Permission Level」
-  系统提示词段落（级别声明 + 可用能力清单，ADR-0008），
-  启动/恢复/`/level` 切换时重建。
+- **提示词携带级别**：SecurityPolicy 在 `prompt/permission` 块栈上贡献「Permission Level」
+  系统提示词段落（级别声明，ADR-0010），启动/恢复/`/level` 切换时重建。
 - **级别持久化**：`level/set` 事件写入会话 jsonl；当前级别 = 最后一个 `level/set` 事件的
   `payload.level`，无则默认 `workspace`（`SessionStore.lastEvent` 读取，`restorePermissionLevel` 恢复）。
 - **只有用户能改级别**：`/level <readonly|workspace|fullaccess>` 是用户驱动的 slash 命令
@@ -214,12 +220,13 @@ api.registerTool({
 - **Resume / Reload**：`/resume <id>` 切换活动会话并继续追加；`/reload` 重建
   整个 Harness（保留 `session.scratch` + `session.history`），重新发现扩展并
   重建系统提示词。
-- **系统提示词 = `system_prompt` 栈构建（ADR-0008）**：中间件 push 段落到
-  `ctx.promptParts`（可整体改写数组），并 push 标签到 `ctx.sections`；
-  base 挂 priority 1000 最外层，扩展默认 0；harness 统一 `join('\n\n')` 归一化，
-  返回 `{ prompt, sections }`。重建由 `emit('system_prompt')` 事件触发
-  （core 内置处理器 = 构建 + 持久化），取代 Q10=c 的 `addSystemPromptContributor`
-  与更早的 llm 中间件注入。
+- **系统提示词 = 三个块栈构建（ADR-0010，supersedes ADR-0008）**：中间件用
+  `ctx.prompt.set(block, array | (old) => new)` 写入自己的块（PromptBag，只走
+  set、无直接数组变异）；harness 按 base → permission → skills 固定顺序跑栈、
+  join 非空块，返回 `{ prompt, sections }`（sections = 非空块名列表）。顺序是
+  结构性保证，与注册顺序 / priority 无关。重建由 `system_prompt`（全量）或
+  `system_prompt/<block>`（语义触发）事件驱动（core 内置处理器 = 构建 + 持久化，
+  任一块事件都全量重建）。
 - **Slash 命令（核心能力，非 CLI 专属）**：`/reload` `/resume <id>` `/new`
   `/sessions` `/config` `/help` `/exit`。
 

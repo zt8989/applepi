@@ -20,7 +20,11 @@ export class OnionBus {
     session: [],
     llm: [],
     tool: [],
-    system_prompt: [],
+    // ADR-0010: three block stacks (base → permission → skills), run in that
+    // fixed order by buildSystemPrompt().
+    'prompt/base': [],
+    'prompt/permission': [],
+    'prompt/skills': [],
   };
 
   use(stack: HookStack, mw: Middleware, opts?: { priority?: number }): void {

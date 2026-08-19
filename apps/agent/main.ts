@@ -76,9 +76,9 @@ console.log(`[session] ${store.sessionId} (workspace: ${store.workspace})`);
 let { harness, loaded } = await boot(store);
 if (loaded.length) console.error(`[harness] loaded local extensions: ${loaded.join(', ')}`);
 
-// Fresh session: persist the initial system prompt once (via emit, ADR-0008).
+// Fresh session: persist the initial system prompt once (via emit, ADR-0010).
 const { sections } = await harness.emit('system_prompt');
-console.log(`[system] system prompt built (sections: ${sections.join(', ')})`);
+console.log(`[system] system prompt built (blocks: ${sections.join(', ')})`);
 
 const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: '> ' });
 const initial = process.argv[2];

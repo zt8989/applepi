@@ -2,6 +2,16 @@
 
 ## Status
 
+**Superseded by ADR-0010 (2026-08-19)** — the single `system_prompt` stack was
+split into three block stacks (`prompt/base` / `prompt/permission` /
+`prompt/skills`) with a PromptBag (`ctx.prompt.set(block, ...)`) and
+structurally guaranteed block order. The single-stack design's ordering-by-
+priority proved fragile (the core SecurityPolicy installed at construction
+ended up *before* baseExtension's base section despite both being priority
+1000). Kept below for history; the live design is ADR-0010.
+
+## Status (original)
+
 Accepted — 2026-08-19, decided via `/grill-with-docs` (rounds 1–2, Q1–Q8).
 **Supersedes the Q10=c contributor API from ADR-0002** (the
 `addSystemPromptContributor` mechanism; note ADR-0007's own Q10=c refers to

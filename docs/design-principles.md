@@ -23,23 +23,27 @@ LLM 配置解析。**不含工具**——`bash`、`str_replace_editor`、权限�
 
 - 依据：Q2（extension = 能力载体）。
 - 后果：核心对能力无感知；扩展的注册顺序与组合决定最终行为。系统提示词
-  段落（base 之外的 skills、权限声明）同样是扩展经 `system_prompt` 栈注入的
-  能力，核心只提供栈机制、不含任何段落（ADR-0008）。
+  段落（base 之外的 skills、权限声明）同样是扩展经各自块栈
+  （`prompt/base` / `prompt/permission` / `prompt/skills`）注入的能力，核心只
+  提供 PromptBag 机制与固定装配顺序、不含任何段落（ADR-0010）。
 - 判据：新增能力时，先问"能不能做成扩展"，答案永远应该是"能"。
 
 ## P3. 洋葱模型（Onion Hooks）
 
-**横切逻辑用中间件栈（session / llm / tool / system_prompt）表达，观察、
-否决、改写三种权力内建于同一机制；priority 高 = 外层（先进入）。**
+**横切逻辑用中间件栈（session / llm / tool / prompt/base / prompt/permission /
+prompt/skills）表达，观察、否决、改写三种权力内建于同一机制；priority 高 =
+外层（先进入）。**
 
 - 依据：Q15（洋葱模型取代离散事件表）、Q7（权力级别 iii）、ADR-0008
-  （系统提示词构建成为第 4 栈）。
-- 后果：同一套 `Middleware` 签名覆盖全部横切场景；排序即权力。系统提示词
-  由 `system_prompt` 栈构建：中间件 push 段落、可整体改写，sections 取
-  构建期事实（ADR-0008）。**洋葱栈 ≠ 事件发布**：`emit(event)` 是发布事件
-  的入口（触发 core 内置处理器或写审计行），不是第 5 个栈——两者正交。
+  （系统提示词构建成为栈）、ADR-0010（拆分为三个块栈，supersedes ADR-0008）。
+- 后果：同一套 `Middleware` 签名覆盖全部横切场景；排序即权力（栈内）。
+  系统提示词由三个 `prompt/*` 块栈构建：中间件用 `ctx.prompt.set(block, ...)`
+  写入自己的块（PromptBag，只走 set），harness 按 base → permission → skills
+  固定顺序拼装，sections 取构建期非空块列表（ADR-0010）。**洋葱栈 ≠ 事件
+  发布**：`emit(event)` 是发布事件的入口（触发 core 内置处理器或写审计行），
+  不是第 7 个栈——两者正交。
 - 判据：需要新生命周期事件时，优先挂在既有栈上；**确有独立生命周期**
-  （如系统提示词构建）才允许新增栈——新增栈是例外而非默认。
+  （如提示词构建）才允许新增栈——新增栈是例外而非默认。
 
 ## P4. 安全是最外层约定，不是位置特权（Convention over Mechanism）
 
@@ -133,9 +137,10 @@ settings.json、会话记录在 jsonl。**
 注入，而不是把每个动作做成一个方法。**
 
 - 依据：ADR-0008 及其演进——系统提示词贡献从专用 `addSystemPromptContributor`
-  收敛为 `system_prompt` 洋葱栈；事件发布从 `emitSystemPrompt()` / `appendEvent()`
+  收敛为 `system_prompt` 洋葱栈（ADR-0008），再演进为三个 `prompt/*` 块栈 +
+  PromptBag.set（ADR-0010）；事件发布从 `emitSystemPrompt()` / `appendEvent()`
   收敛为单一 `emit(event, payload)` 入口 + core 内置处理器（2026-08-19 讨论）。
-- 后果：`HarnessApi` 表面小而稳定——registerTool / use / registerToolFilter /
+- 后果：`HarnessApi` 表面小而稳定——registerTool / use /
   registerSlashCommand / emit，没有逐事件、逐能力的方法；新能力按「栈中间件 +
   事件处理器」两种原语表达。扩展面对统一契约，core 的处理器/中间件是内置
   事实而非 API 承诺。

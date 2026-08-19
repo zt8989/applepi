@@ -2,11 +2,13 @@ import { OnionBus } from './bus.js';
 import { runLoop, type LlmCall } from './loop.js';
 import { SessionStore, slugWorkspace, type SessionMessage } from './session.js';
 import { defaultSecurityPolicy, type SecurityPolicy } from './security.js';
+import { PROMPT_BLOCKS, type PromptBlockName } from './types.js';
 import type {
   Ctx,
   HarnessApi,
   HookStack,
   Middleware,
+  PromptBag,
   SessionContext,
   SetupFn,
   SlashHandler,
@@ -22,12 +24,32 @@ export interface RunOpts {
   persistSystemPrompt?: boolean;
 }
 
-/** Result of one system-prompt build (ADR-0008). */
+/** Result of one system-prompt build (ADR-0010). */
 export interface BuiltSystemPrompt {
   prompt: string;
-  /** Labels of the sections actually contributed during this build. */
+  /** Canonical block names that actually contributed content this build. */
   sections: string[];
 }
+
+/** Build-time prompt accumulator: 3 arrays + `set` (ADR-0010 Q5/Q7/Q14). */
+export function createPromptBag(): PromptBag {
+  const bag: PromptBag = {
+    base: [],
+    permission: [],
+    skills: [],
+    set(block, value) {
+      bag[block] = typeof value === 'function' ? value(bag[block]) : value;
+    },
+  };
+  return bag;
+}
+
+/**
+ * The event names that trigger a full prompt rebuild. `system_prompt` is the
+ * blanket entry (session start / `/reload` / `/new`); `system_prompt/<block>`
+ * are semantic triggers recording WHICH block changed (ADR-0010 Q9/Q12).
+ */
+const PROMPT_REBUILD_EVENTS = ['system_prompt', ...PROMPT_BLOCKS.map((b) => `system_prompt/${b}`)];
 
 export interface HarnessOptions {
   /** Workspace slug override (defaults to slugWorkspace(process.cwd())). */
@@ -72,21 +94,26 @@ export class Harness {
   constructor(opts: HarnessOptions = {}) {
     this.workspace = opts.workspace ?? slugWorkspace(process.cwd());
     this.securityPolicy = opts.securityPolicy ?? defaultSecurityPolicy;
-    // system_prompt is a core-handled event: rebuild + persist, returning the
-    // built { prompt, sections } so callers can log sections.
-    this.eventHandlers.set('system_prompt', async () => {
-      const built = await this.buildSystemPrompt();
-      await this.persistSystemPrompt(built);
-      return built;
-    });
+    // Prompt rebuild is a core-handled event family: `system_prompt` (blanket)
+    // and `system_prompt/<block>` (semantic triggers) all rebuild ALL blocks
+    // (rebuild-all, Q4) and persist ONE complete system message, returning
+    // { prompt, sections } so callers can log sections.
+    for (const ev of PROMPT_REBUILD_EVENTS) {
+      this.eventHandlers.set(ev, async () => {
+        const built = await this.buildSystemPrompt();
+        await this.persistSystemPrompt(built);
+        return built;
+      });
+    }
     // Core-owned registrations (survive extension reload).
     this.securityPolicy.install(this.api);
   }
 
   /**
    * Publish an event (single entry for all events, ADR-0008 follow-up).
-   * Handled events (currently `system_prompt`) run their handler; any other
-   * event writes a lifecycle event line to the session store (P7), if attached.
+   * Handled events (the prompt-rebuild family: `system_prompt` and
+   * `system_prompt/<block>`) run their handler; any other event writes a
+   * lifecycle event line to the session store (P7), if attached.
    */
   async emit(event: string, payload: any = {}): Promise<any> {
     const handler = this.eventHandlers.get(event);
@@ -217,21 +244,31 @@ export class Harness {
   }
 
   /**
-   * Assemble the system prompt by running the `system_prompt` onion stack
-   * (ADR-0008). Middleware push sections into `ctx.promptParts` on entry and
-   * push their label into `ctx.sections` (only when they actually contribute
-   * content); the harness joins parts with `\n\n` and returns the build-time
-   * section list (Q7=b, Q8=a). Middleware must call `next()`; veto only skips
-   * later sections, it never blocks persistence (Q6=a).
+   * Assemble the system prompt by running the three `prompt/*` block stacks
+   * (ADR-0010). Order is STRUCTURAL: base → permission → skills (Q2/Q16),
+   * independent of registration order or priority. Each stack's middleware
+   * writes its block via `bag.set(block, ...)`; the harness joins the
+   * non-empty blocks in canonical order and reports which blocks contributed
+   * as `sections` (Q10). Veto (skipping `next()`) affects only later
+   * middleware WITHIN the same block stack (Q15=a); it never blocks
+   * persistence.
    */
   async buildSystemPrompt(): Promise<BuiltSystemPrompt> {
-    const ctx: Ctx = { session: this.session, state: {}, promptParts: [], sections: [] };
-    await this.bus.run('system_prompt', ctx, async () => {});
-    const prompt = (ctx.promptParts ?? [])
-      .filter((p) => typeof p === 'string' && p.trim().length > 0)
-      .map((p) => p.trim())
-      .join('\n\n');
-    return { prompt, sections: ctx.sections ?? [] };
+    const ctx: Ctx = { session: this.session, state: {}, prompt: createPromptBag() };
+    for (const block of PROMPT_BLOCKS) {
+      await this.bus.run(`prompt/${block}` as HookStack, ctx, async () => {});
+    }
+    const sections: PromptBlockName[] = [];
+    const parts: string[] = [];
+    for (const block of PROMPT_BLOCKS) {
+      const arr = ctx.prompt![block] ?? [];
+      const trimmed = arr.filter((p) => typeof p === 'string' && p.trim().length > 0).map((p) => p.trim());
+      if (trimmed.length > 0) {
+        sections.push(block);
+        parts.push(trimmed.join('\n\n'));
+      }
+    }
+    return { prompt: parts.join('\n\n'), sections };
   }
 
   /** Attach a session store and install the skill-load event logger (tool stack). */

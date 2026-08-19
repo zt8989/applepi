@@ -33,7 +33,7 @@ ok(
 );
 ok('skill_load returns confirmation', /loaded skill/.test(res));
 
-// --- system-prompt section renders loaded skills (Q10=c, ADR-0008) ---
+// --- system-prompt `skills` block renders loaded skills (ADR-0010) ---
 const built = await harness.buildSystemPrompt();
 ok('system prompt contains skill content', built.prompt.includes('Be friendly and concise.'));
 ok('system prompt tagged with skill name', built.prompt.includes('[Skill: polite]'));

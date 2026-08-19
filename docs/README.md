@@ -9,7 +9,7 @@
 |---|---|
 | [architecture.md](architecture.md) | 系统架构：核心运行时、扩展协议、洋葱总线、agent loop、会话持久化、LLM 配置、仓库布局 |
 | [design-principles.md](design-principles.md) | 设计原则：极简核心、能力注入、洋葱模型、信任模型、约定优于机制等 |
-| [adr/](adr/) | 架构决策记录（ADR-0001 ~ 0009），按编号阅读，描述每个决策的上下文与后果 |
+| [adr/](adr/) | 架构决策记录（ADR-0001 ~ 0010），按编号阅读，描述每个决策的上下文与后果 |
 | [agents/](agents/) | Agent 协作约定：issue tracker、triage 标签、领域文档规范 |
 
 ## 快速了解

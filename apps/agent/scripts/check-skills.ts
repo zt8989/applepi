@@ -1,7 +1,8 @@
 // End-to-end check for the skills reference extension, driven without a real
 // LLM/API key. Loads the skills extension onto a real Harness and asserts that
-// loaded skills are contributed to the system prompt via the `system_prompt`
-// stack (ADR-0008; previously Q10=c contributor sections, rebuilt on /reload).
+// loaded skills are contributed to the `skills` system-prompt block
+// (ADR-0010: prompt/base|permission|skills block stacks; sections = non-empty
+// block names).
 import { Harness } from '@applepi/core';
 import { baseExtension, createSkillsExtension } from '@applepi/extensions';
 
