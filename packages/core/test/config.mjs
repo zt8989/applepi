@@ -118,5 +118,27 @@ const envFile = path.join(base, '.env');
   ok('resolveLlmConfig: unsupported provider -> throws');
 }
 
+// 11. baseUrl: parsed from settings and passed through; absent -> undefined.
+{
+  await fs.writeFile(envFile, 'OPENAI_API_KEY=sk-base-url');
+  await fs.writeFile(
+    settingsFile,
+    JSON.stringify({ provider: 'openai', model: 'gpt-4o-mini', apiKey: 'OPENAI_API_KEY', baseUrl: 'https://gateway.example.com/v1' }),
+  );
+  const s = await loadSettings(base);
+  assert.equal(s.baseUrl, 'https://gateway.example.com/v1');
+  const cfg = await resolveLlmConfig(base);
+  assert.equal(cfg.baseUrl, 'https://gateway.example.com/v1');
+  ok('baseUrl: parsed from settings and passed through');
+}
+
+// 12. baseUrl: absent from settings -> undefined (SDK default used).
+{
+  await fs.writeFile(settingsFile, JSON.stringify({ provider: 'openai', model: 'gpt-4o-mini', apiKey: 'OPENAI_API_KEY' }));
+  const cfg = await resolveLlmConfig(base);
+  assert.equal(cfg.baseUrl, undefined);
+  ok('baseUrl: absent -> undefined');
+}
+
 await fs.rm(base, { recursive: true, force: true });
 console.log(`\n${passed} config checks passed.`);

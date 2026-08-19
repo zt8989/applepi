@@ -24,10 +24,11 @@ function buildBaseSystemPrompt(): string {
 
 /** Build the provider instance from resolved config (ADR-0004; no process.env). */
 function buildModel(cfg: ResolvedLlmConfig): any {
+  const providerSettings = { apiKey: cfg.apiKey, ...(cfg.baseUrl ? { baseURL: cfg.baseUrl } : {}) };
   if (cfg.provider === 'anthropic') {
-    return createAnthropic({ apiKey: cfg.apiKey })(cfg.model);
+    return createAnthropic(providerSettings)(cfg.model);
   }
-  return createOpenAI({ apiKey: cfg.apiKey })(cfg.model);
+  return createOpenAI(providerSettings)(cfg.model);
 }
 
 /** Build a fully-wired Harness: built-ins + denylist + extensions + base contributor. */
