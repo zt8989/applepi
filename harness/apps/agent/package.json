@@ -9,7 +9,8 @@
     "start": "node dist/main.js",
     "check-ext": "tsx scripts/check-ext.ts",
     "check-denylist": "pnpm --filter @harness/core build && tsx scripts/check-denylist.ts",
-    "check-memory": "pnpm --filter @harness/extensions build && tsx scripts/check-memory.ts"
+    "check-memory": "pnpm --filter @harness/extensions build && tsx scripts/check-memory.ts",
+    "check-skills": "pnpm --filter @harness/extensions build && tsx scripts/check-skills.ts"
   },
   "dependencies": {
     "@harness/core": "workspace:*",

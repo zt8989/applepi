@@ -4,8 +4,8 @@
 
 **Blocked by:** 01 — 核心运行时 + 端到端 agent loop
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 加载某个 skill 后，其指令出现在下一次 LLM 调用的上下文中
-- [ ] 模型在该轮按被注入的 skill 指令行为
-- [ ] 注入逻辑走 `llm` 中间件栈，与 Q15 洋葱模型一致（`session` / `llm` / `tool` 三栈之一）
+- [x] 加载某个 skill 后，其指令出现在下一次 LLM 调用的上下文中
+- [x] 模型在该轮按被注入的 skill 指令行为
+- [x] 注入逻辑走 `llm` 中间件栈，与 Q15 洋葱模型一致（`session` / `llm` / `tool` 三栈之一）
