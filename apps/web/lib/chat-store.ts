@@ -86,9 +86,12 @@ function toText(message: { content: string | readonly { type: string; text?: str
 }
 
 export function useChatStore(): ChatStore {
-  const [workspace, setWorkspaceState] = useState<string | null>(() =>
-    typeof window === 'undefined' ? null : (localStorage.getItem(WS_KEY) ?? null),
-  );
+  // Initialize to null on BOTH server and client first render so the DOM
+  // matches during hydration. The persisted workspace (if any) is restored in
+  // a mount effect below — reading localStorage in the initializer would
+  // diverge the client's first render from the server's and trip a hydration
+  // mismatch.
+  const [workspace, setWorkspaceState] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionTitle, setSessionTitle] = useState<string | null>(null);
   const [level, setLevelState] = useState('workspace');
@@ -106,6 +109,13 @@ export function useChatStore(): ChatStore {
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  // Restore the persisted workspace after mount (never during the first
+  // render) so hydration stays deterministic.
+  useEffect(() => {
+    const saved = localStorage.getItem(WS_KEY);
+    if (saved) setWorkspaceState(saved);
+  }, []);
 
   const commit = useCallback((next: ThreadMessageLike[]) => {
     messagesRef.current = next;
