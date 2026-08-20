@@ -9,7 +9,7 @@
 |---|---|
 | [architecture.md](architecture.md) | 系统架构：核心运行时、扩展协议、洋葱总线、agent loop、会话持久化、LLM 配置、仓库布局 |
 | [design-principles.md](design-principles.md) | 设计原则：极简核心、能力注入、洋葱模型、信任模型、约定优于机制等 |
-| [adr/](adr/) | 架构决策记录（ADR-0001 ~ 0010），按编号阅读，描述每个决策的上下文与后果 |
+| [adr/](adr/) | 架构决策记录（ADR-0001 ~ 0012），按编号阅读，描述每个决策的上下文与后果 |
 | [agents/](agents/) | Agent 协作约定：issue tracker、triage 标签、领域文档规范 |
 
 ## 快速了解
@@ -21,13 +21,16 @@
   `setup(api)` 运行时注入。安全机制在 core（ADR-0009），不再由扩展提供。
 - **仓库布局**：pnpm workspace 三包 `apps/agent → packages/extensions → packages/core`，
   依赖单向（ADR-0003）。
+- **双界面**：CLI（`apps/agent` REPL）+ Web（`apps/web` Next.js 界面），共享同一 core
+  （流式 loop、工具批准、Langfuse 埋点都在 core，ADR-0011 / ADR-0012）。
 
 ## 常用命令
 
 ```bash
 pnpm install      # 安装依赖（workspace）
 pnpm build        # 构建全部包（build-first，跑 dev/check 前必须）
-pnpm dev          # 启动 REPL
+pnpm dev          # 启动 CLI（REPL，@applepi/agent）
+pnpm dev:web      # 启动 Web 界面（@applepi/web，默认端口 3000）
 pnpm test         # 各包测试
 pnpm verify       # build + test + 全部 key-free 检查
 ```

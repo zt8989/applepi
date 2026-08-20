@@ -1,6 +1,6 @@
 # 设计原则（Design Principles）
 
-> 从已锁定的设计决策（Q1–Q16 + ADR-0001~0008）中提炼的指导原则。
+> 从已锁定的设计决策（Q1–Q16 + ADR-0001~0012）中提炼的指导原则。
 > 新增功能或修改架构时，应逐条对照；违反任何一条都需要走 grill 流程重新确认。
 
 ## P1. 极简核心（Minimal Core）
@@ -45,20 +45,22 @@ prompt/skills）表达，观察、否决、改写三种权力内建于同一机�
 - 判据：需要新生命周期事件时，优先挂在既有栈上；**确有独立生命周期**
   （如提示词构建）才允许新增栈——新增栈是例外而非默认。
 
-## P4. 安全是最外层约定，不是位置特权（Convention over Mechanism）
+## P4. 安全是级别模型 + 工具自决，不是特权中间件（Convention over Mechanism）
 
-**"最外层"是洋葱总线的注册约定（priority 1000），不是代码在哪个包里。**
+**安全由「级别模型 + 上下文注入 + 工具自决」表达，不是靠某个特权中间件或特权目录。**
 
-安全扩展的安全性来自挂在 `tool` 栈最外层，在退出阶段审计内层改写后的
-**最终参数**。denylist 从 core 移入 extensions、改写为纯中间件后，这一性质
-不变（ADR-0005 Q3=A）；ADR-0007 将 denylist 演进为权限级别系统
-（`readonly`/`workspace`/`fullaccess`），中间件仍挂 priority 1000，denylist
-黑名单成为任何级别下都生效的绝对底线。
+ADR-0009 撤销了 priority-1000 的 permissionMiddleware（运行时闸口退场）：core 内置
+SecurityPolicy 只保证两件事——① 级别模型（`readonly`/`workspace`/`fullaccess`）与
+`level/set` 事件恢复；② 每个工具 execute 的 ctx 都携带当前 level。工具**自行**按
+level 约束行为（bash 只读白名单、sre view-only、denylist 8 条危险正则内嵌 bash 自身
+作为任何级别生效的底线）。「闸口」是**君子协定**（readonly 下不读 level 的工具仍全权），
+core 不兜底——这是信任扩展边界的直接推论（P5）。
 
-- 依据：Q16（修订）、ADR-0005、ADR-0007。
-- 后果：组装扩展集的消费者**有责任**把权限中间件挂到 priority 1000；
-  `baseExtension` 默认如此，自组装者自行承担。
-- 判据：不要用"放在核心/特权目录"来假装安全；安全必须体现在挂载约定上。
+- 依据：Q12=a / Q16（撤销中间件）、ADR-0009。
+- 后果：安全强度 = 每个工具的自决程度；模型没有任何改级别的工具（防自我提权），
+  级别只能由用户通过 `/level`（CLI）或权限胶囊（web）切换。
+- 判据：不要用"挂一个特权中间件"或"放在核心/特权目录"来假装安全；安全必须
+  体现在级别模型与工具自决上。
 
 ## P5. 单机信任模型（Local Trust）
 
@@ -72,12 +74,17 @@ prompt/skills）表达，观察、否决、改写三种权力内建于同一机�
 
 ## P6. UI 无关的核心（UI-Agnostic Core）
 
-**持久化、配置解析、slash 命令语义是核心能力；CLI 只是核心的一个接口。**
+**持久化、配置解析、slash 命令语义、流式 loop、工具批准、trace 埋点都是核心
+能力；CLI 与 Web 只是核心的两个接口。**
 
-- 依据：ADR-0002（SessionStore 归 core）、ADR-0004（配置解析原语归 core）。
-- 后果：未来的 web UI 直接驱动 `harness.resume()` / `listSessions()` /
-  `resolveLlmConfig()`，无需重写业务逻辑。
-- 判据：新功能如果只能被 CLI 用、无法被其它界面复用，说明放错了层。
+- 依据：ADR-0002（SessionStore 归 core）、ADR-0004（配置解析归 core）、
+  ADR-0011（流式 loop + 批准状态机归 core）、ADR-0012（Langfuse trace 埋点归 core）。
+- 后果：Web 界面（`@applepi/web`）直接驱动 `runLoopStreamSegment` / `SessionStore` /
+  `resolveLlmConfig` / `trace`，不重写业务逻辑；批准卡片、工作区选择器、会话动作只是
+  core 能力的 HTTP 适配。**core 不清算任何 UI 概念**（「活跃会话高亮」「会话树」等
+  属于 web 层，不在 core）。
+- 判据：新功能若只能被 CLI 用、无法被其它界面复用，或反过来把 UI 概念塞进 core，
+  都说明放错了层。
 
 ## P7. 不可变审计日志（Immutable, Append-Only Audit）
 
@@ -147,6 +154,46 @@ settings.json、会话记录在 jsonl。**
 - 判据：为某个具体事件或能力新增专用方法前先问「能不能用既有栈或 emit +
   处理器表达」；答案是"能"就应收敛——专用方法每多一个，通用机制就贬值一分。
 
+## P13. 循环状态即文件，批准不重跑 LLM（Durable Loop State）
+
+**流式 loop 的暂停点是会话 jsonl 本身；批准后续跑从持久化点 resume，不重新调用 LLM。**
+
+`runLoopStreamSegment` 在遇到 `ask` 工具时持久化 `tool/approval-pending` 事件并
+暂停；`POST /api/chat/approve` 从 jsonl 的暂停点续跑。`jsonl` 既是审计日志
+（P7）又是 loop 状态机——这是「文件即状态」的延伸：状态不需要额外的内存/数据库。
+
+- 依据：ADR-0011。
+- 后果：进程崩溃后可从 jsonl 恢复续跑；拒绝 = 工具结果回填模型（模型自愈），
+  不需要回滚 jsonl。
+- 判据：为 loop 新增「内存态」「续跑索引」等非文件状态前先三思——它破坏
+  了「jsonl 是权威状态」的不变量。
+
+## P14. 可观测性归核心，双端共享（Observability in Core）
+
+**trace 埋点位于 core，而非每个界面各自埋；CLI 与 Web 自动获得同样的追踪。**
+
+core 的 `trace.ts` 在每轮、每次 LLM 调用、每次工具执行处打点，目标 Langfuse
+Cloud（未配置则 no-op）。界面只负责把 trace id 透传给前端展示，不负责采集。
+
+- 依据：ADR-0012（round 2 将 Langfuse 从自建改为云端、并把埋点下沉到 core）。
+- 后果：新增界面不必重新埋点；追踪维度（token usage、工具 span）由 core 统一定义。
+- 判据：在 web / agent 层写 LLM 调用埋点，说明该埋点本应归 core。
+
+## P15. UI 复刻要有显式产品增量（Faithful Replication, Explicit Deltas）
+
+**复刻成熟 UI（如 assistant-ui base 壳）时，视觉 faithfully 跟随，但每个偏离
+默认的产品决策都要显式记录、可追溯到 grill 结论。**
+
+web 壳复刻 base 风格（两栏、外层圆角白卡、线性图标、中性色），但做了明确的产品
+取舍：工作区选择胶囊**仅在新会话空态出现**、权限胶囊常驻、会话列表按工作区分组
+树、不做建议 chips、placeholder 显式提示技能/指令——这些 delta 都来自
+`/grill-with-docs` 的结论，写在 CONTEXT.md「Web UI shell」段。
+
+- 依据：Web UI shell 设计轮次（Q1–Q12 + R3-Q1~Q4，2026-08-20）。
+- 后果：reviewer 能区分「复刻了什么」和「改了什么、为什么改」，避免无意识偏离
+  或重复讨论已决事项。
+- 判据：UI 改动若找不到对应的 grill 结论或产品理由，应回到 grill 确认。
+
 ---
 
-*每条原则均对应一个或多个已锁定决策；标注（Q#）为 grill 轮次，ADR-XXXX 为决策记录。*
+*每条原则均对应一个或多个已锁定决策；标注（Q#）为 grill 轮次，ADR-XXXX 为决策记录。最后更新 2026-08-20，纳入 ADR-0011 / ADR-0012 对应的流式 loop、工具批准、双接口与可观测性。*
