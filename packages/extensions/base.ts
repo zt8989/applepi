@@ -7,10 +7,7 @@ import { strReplaceEditorTool } from './tools/str_replace_editor.js';
  * Identity + working style only — tool information lives in the Vercel tool
  * defs, not the prompt (Q13/Q17=b: no tool listing in the system prompt).
  */
-export const BASE_SYSTEM_PROMPT = [
-  'You are a minimal local agent harness.',
-  'Use the tools available to you to accomplish the user\'s request step by step.',
-].join('\n');
+export const BASE_SYSTEM_PROMPT = 'You are a helpful software engineer assistant.';
 
 /**
  * baseExtension — the default capability set for an agent (ADR-0005 Q2,
