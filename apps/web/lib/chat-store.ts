@@ -72,6 +72,10 @@ export interface ChatStore {
   toggleNotify: (sessionId: string, enabled: boolean) => Promise<void>;
   archiveSession: (sessionId: string) => Promise<void>;
   exportSession: (sessionId: string) => void;
+  references: string[];
+  addReference: (path: string) => void;
+  removeReference: (path: string) => void;
+  send: (text: string) => Promise<void>;
 }
 
 function toText(message: { content: string | readonly { type: string; text?: string }[] }): string {
@@ -93,6 +97,7 @@ export function useChatStore(): ChatStore {
   const [pending, setPending] = useState<PendingApprovalInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<WorkspaceNode[]>([]);
+  const [references, setReferences] = useState<string[]>([]);
 
   const messagesRef = useRef<ThreadMessageLike[]>(messages);
   const assistantIdRef = useRef<string | null>(null);
@@ -325,6 +330,11 @@ export function useChatStore(): ChatStore {
     workspaceRef.current = workspace;
   }, [workspace]);
 
+  const referencesRef = useRef(references);
+  useEffect(() => {
+    referencesRef.current = references;
+  }, [references]);
+
   const sessionIdRef = useRef(sessionId);
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -371,29 +381,45 @@ export function useChatStore(): ChatStore {
     [appendText, appendToolCall, attachToolResult, handleData],
   );
 
-  const onNew = useCallback(
-    async (message: { content: string | readonly { type: string; text?: string }[] }) => {
+  const addReference = useCallback((p: string) => {
+    setReferences((prev) => (prev.includes(p) ? prev : [...prev, p].sort()));
+  }, []);
+
+  const removeReference = useCallback((p: string) => {
+    setReferences((prev) => prev.filter((x) => x !== p));
+  }, []);
+
+  // Core send: inject any referenced-file paths as a structured prefix so the
+  // model and tools see them, then stream the turn.
+  const send = useCallback(
+    async (rawText: string) => {
       if (!workspaceRef.current) {
         setError('请先选择或添加一个工作区');
         return;
       }
-      const text = toText(message).trim();
+      const text = rawText.trim();
       if (!text) return;
+      const refs = referencesRef.current;
+      const prefix = refs.length
+        ? `用户引用了以下文件：\n${refs.map((p) => `- ${p}`).join('\n')}\n\n`
+        : '';
+      const full = prefix + text;
       const assistantId = genId();
       assistantIdRef.current = assistantId;
       commit([
         ...messagesRef.current,
-        { role: 'user', id: genId(), content: [{ type: 'text', text }] },
+        { role: 'user', id: genId(), content: [{ type: 'text', text: full }] },
         { role: 'assistant', id: assistantId, content: [] },
       ]);
       setPending(null);
       setError(null);
       setIsRunning(true);
+      setReferences([]);
       const body: ChatRequestBody = {
         workspace: workspaceRef.current,
         sessionId: sessionIdRef.current ?? undefined,
         messageId: assistantId,
-        message: text,
+        message: full,
         // Pre-chosen permission level for a brand-new session.
         level: sessionIdRef.current ? undefined : levelRef.current,
       };
@@ -401,6 +427,14 @@ export function useChatStore(): ChatStore {
       await refreshWorkspaces();
     },
     [commit, runSegment, refreshWorkspaces],
+  );
+
+  const onNew = useCallback(
+    async (message: { content: string | readonly { type: string; text?: string }[] }) => {
+      const text = toText(message).trim();
+      if (text) await send(text);
+    },
+    [send],
   );
 
   const respond = useCallback(
@@ -591,5 +625,9 @@ export function useChatStore(): ChatStore {
     toggleNotify,
     archiveSession,
     exportSession,
+    references,
+    addReference,
+    removeReference,
+    send,
   };
 }

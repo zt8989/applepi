@@ -292,6 +292,16 @@ Cloud**（`~/.applepi/.env` 的 `LANGFUSE_BASE_URL` / `PUBLIC_KEY` / `SECRET_KEY
 空态新会话出现、权限胶囊常驻）；会话/工具/批准卡片统一 base 审美。视觉 faithfully
 跟随、产品 delta 显式记录（见 P15 与 CONTEXT.md「Web UI shell」段）。
 
+### 9.6 二期增量（会话搜索 / @引用文件 / 通知推送）
+
+一期壳之上的三个增量（2026-08-20）：
+
+- **会话搜索**：侧栏「空间(N)」头下搜索框，跨工作区按标题实时过滤，扁平展示（标题 + 所属工作区 + 时间），清空恢复树。纯前端、零依赖。
+- **@引用文件（路径引用）**：`GET /api/files`（受工作区根约束的安全递归列举，跳过 `.git`/`node_modules`/`.next` 等大目录，限深度 10 / 遍历预算 6000 / 返回 60 条）支持 `@` 触发路径输入 + 建议；选中注入路径 chip，发送时把引用路径作为结构化前缀（`用户引用了以下文件：\n- <path>`）拼入 user 消息，LLM/工具据此读取——走路径引用而非内容注入，避免上下文膨胀。`chat-store` 新增 `references`/`addReference`/`removeReference`/`send`（发送前拼前缀并清空引用）。
+- **通知推送**：会话出现 pending 批准时，已授权弹浏览器桌面通知（`Notification` API，首次发送时在用户手势内 `requestPermission`），否则降级页面内 toast（5s 自动消失）。客户端监听 `pending` 变化触发。
+
+> 见 CONTEXT.md「Web 二期」段与 `apps/web`（`sidebar.tsx` / `chat-ui.tsx` / `chat-store.ts` / `app/api/files/route.ts`）。
+
 ## 10. LLM 配置
 
 见 ADR-0004 完整决策。要点：

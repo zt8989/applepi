@@ -146,3 +146,13 @@ Architecture decisions are recorded as ADR-0001 (harness), ADR-0002 (session per
 - 不做建议 chips（用户明确不需要）；placeholder「发送消息…（/ 调用技能或指令）」；主区标题 = 活跃会话标题 / 空态「新对话」。
 
 > **Implementation — complete（2026-08-20）**：`apps/web` 重构（sidebar / workspace-dropdown / composer-footer / chat-ui / approval-tool 重画；icons 内联 SVG）；服务端新增 `/api/pick-folder`、`/api/session` GET 支持 `format=jsonl` 导出 + level/title 返回、PATCH（rename/pin/unpin/archive/unarchive/notify/level）；`/api/workspaces` 富化（每会话 title/ts/pinned/notify）；`/api/chat` 首条消息支持 `level`。E2E 验证：rename/pin/archive/unarchive/export/level 全部通过。构建 + verify 全绿。
+
+## Web 二期（confirmed — 2026-08-20；F1 会话搜索 / F2 @引用文件 / F3 通知推送）
+
+一期壳之上的三个增量，全部采纳推荐方案：
+
+- **F1 会话搜索** — 侧栏「空间 (N)」头下方加搜索框；输入时跨**所有工作区**按会话标题实时过滤，扁平展示（标题 + 所属工作区小字 + 相对时间），清空恢复树状分组。纯前端、零外部依赖。
+- **F2 @引用文件** — 走**路径引用**（非内容注入）：composer 输入 `@` 触发文件建议下拉（基于当前工作区）；后端新增 `GET /api/files`（受工作区根约束的安全递归列举，跳过 `.git`/`node_modules`/`.next` 等大目录，限深度 10 / 遍历预算 6000 / 返回 60 条）；选中注入路径 chip，发送时把引用路径作为结构化前缀（`用户引用了以下文件：\n- <path>`）拼入 user 消息，LLM/工具据此自行读取——既不膨胀上下文也能引用大文件。`chat-store` 新增 `references`/`addReference`/`removeReference`/`send`（发送前拼前缀并清空引用）。
+- **F3 通知推送** — 会话出现 pending 批准请求时：若已授权则弹**浏览器桌面通知**（`Notification` API，首次发送时在用户手势内 `requestPermission`），否则降级**页面内 toast**（5s 自动消失）。客户端监听 `pending` 变化触发。
+
+> **Implementation — complete（2026-08-20）**：`sidebar.tsx`（搜索框 + `SearchRow` 扁平结果）、`chat-ui.tsx`（自管理 textarea composer，`@` 检测 + 建议下拉 + 引用 chip + 发送走 `store.send`；`pending` 监听触发桌面通知/toast）、`/api/files/route.ts` 新增、`chat-store.ts` 加 `references`/`send`。`tsc` 全绿；`/api/files` E2E 验证过滤与跳过大目录正确。

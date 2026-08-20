@@ -1,10 +1,9 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from 'react';
 import ReactMarkdown from 'react-markdown';
 import {
   AssistantRuntimeProvider,
-  ComposerPrimitive,
   type ThreadMessageLike,
 } from '@assistant-ui/react';
 import type { ChatStore } from '@/lib/chat-store';
@@ -59,53 +58,196 @@ function MessageRow({ message }: { message: ThreadMessageLike }) {
   );
 }
 
-function Composer({ disabled }: { disabled: boolean }) {
+function Composer({ store }: { store: ChatStore }) {
+  const [value, setValue] = useState('');
+  const [mention, setMention] = useState<{ query: string; start: number } | null>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const detectMention = (v: string, caret: number) => {
+    const before = v.slice(0, caret);
+    const m = before.match(/(?:^|\s)@([^\s@]*)$/);
+    if (!m) {
+      setMention(null);
+      return;
+    }
+    const query = m[1];
+    const start = caret - query.length - 1;
+    setMention({ query, start });
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (!store.workspace) {
+      setSuggestions([]);
+      return;
+    }
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const r = await fetch(
+          `/api/files?workspace=${encodeURIComponent(store.workspace!)}&q=${encodeURIComponent(query)}`,
+        );
+        if (r.ok) {
+          const d = (await r.json()) as { files: string[] };
+          setSuggestions(d.files.slice(0, 30));
+        }
+      } catch {
+        // ignore transient fetch errors
+      }
+    }, 120);
+  };
+
+  const onChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
+    const v = e.target.value;
+    setValue(v);
+    detectMention(v, e.target.selectionStart ?? v.length);
+  };
+
+  const pick = (rel: string) => {
+    if (!mention) return;
+    const caret = taRef.current?.selectionStart ?? value.length;
+    const next = value.slice(0, mention.start) + '@' + rel + ' ' + value.slice(caret);
+    setValue(next);
+    setMention(null);
+    setSuggestions([]);
+    store.addReference(rel);
+    requestAnimationFrame(() => taRef.current?.focus());
+  };
+
+  const submit = () => {
+    const text = value.trim();
+    if (!text || !store.workspace) return;
+    // Ask for desktop-notification permission on this user gesture (once).
+    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
+    void store.send(text);
+    setValue('');
+    setMention(null);
+    setSuggestions([]);
+  };
+
+  const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      submit();
+    } else if (e.key === 'Escape' && mention) {
+      setMention(null);
+      setSuggestions([]);
+    }
+  };
+
+  const disabled = !store.workspace;
+
   return (
-    <ComposerPrimitive.Root
-      className={`rounded-2xl border border-neutral-200 bg-white shadow-sm transition ${
-        disabled ? 'pointer-events-none opacity-60' : ''
+    <div
+      className={`relative rounded-2xl border border-neutral-200 bg-white shadow-sm transition ${
+        disabled ? 'opacity-60' : ''
       }`}
     >
-      <ComposerPrimitive.Input
-        placeholder="发送消息…（/ 调用技能或指令）"
+      {store.references.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 px-3 pt-2.5">
+          {store.references.map((p) => (
+            <span
+              key={p}
+              className="inline-flex items-center gap-1 rounded-md bg-neutral-100 px-1.5 py-0.5 text-[11px] text-neutral-600"
+            >
+              <span className="max-w-[220px] truncate">{p}</span>
+              <button
+                type="button"
+                onClick={() => store.removeReference(p)}
+                className="text-neutral-400 hover:text-neutral-700"
+                title="移除引用"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <textarea
+        ref={taRef}
+        value={value}
+        onChange={onChange}
+        onKeyDown={onKeyDown}
+        placeholder={
+          disabled ? '请先选择工作空间' : '发送消息…（输入 @ 引用文件，/ 调用技能或指令）'
+        }
         className="max-h-48 w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-sm text-neutral-900 outline-none placeholder:text-neutral-400"
       />
+      {mention && suggestions.length > 0 && (
+        <div className="absolute bottom-full z-30 mb-2 max-h-56 w-full overflow-y-auto rounded-xl border border-neutral-200 bg-white py-1 shadow-lg">
+          {suggestions.map((s) => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => pick(s)}
+              className="block w-full truncate px-3 py-1.5 text-left text-xs text-neutral-700 hover:bg-neutral-50"
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="flex items-center justify-between px-2 pb-2">
-        <button
-          type="button"
-          title="附件（暂未支持）"
-          className="rounded-lg p-1.5 text-neutral-400"
-          disabled
-        >
+        <button type="button" title="附件（暂未支持）" className="rounded-lg p-1.5 text-neutral-400" disabled>
           <PlusIcon className="h-4 w-4" />
         </button>
         <div className="flex items-center gap-1">
-          <button type="button" title="语音输入（暂未支持）" className="rounded-full p-2 text-neutral-400" disabled>
+          <button
+            type="button"
+            title="语音输入（暂未支持）"
+            className="rounded-full p-2 text-neutral-400"
+            disabled
+          >
             <MicIcon className="h-4 w-4" />
           </button>
-          <ComposerPrimitive.Send asChild>
-            <button
-              className="flex h-9 w-9 items-center justify-center rounded-full bg-neutral-900 text-white hover:bg-neutral-700 disabled:opacity-40"
-              title="发送"
-            >
-              <SendIcon className="h-4 w-4" />
-            </button>
-          </ComposerPrimitive.Send>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={disabled}
+            className="flex h-9 w-9 items-center justify-center rounded-full bg-neutral-900 text-white hover:bg-neutral-700 disabled:opacity-40"
+            title="发送"
+          >
+            <SendIcon className="h-4 w-4" />
+          </button>
         </div>
       </div>
-    </ComposerPrimitive.Root>
+    </div>
   );
 }
 
 export function ChatUI({ store }: { store: ChatStore }) {
   const { runtime, isRunning, pending, respond, error, messages } = store;
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const prevPending = useRef(pending);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, isRunning]);
+
+  // Surface a new approval request: desktop notification when permitted,
+  // falling back to an in-page toast.
+  useEffect(() => {
+    if (pending && !prevPending.current && pending.toolName) {
+      const title = `需要批准：${pending.toolName}`;
+      const body = JSON.stringify(pending.args ?? {}).slice(0, 160);
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        try {
+          const n = new Notification(title, { body });
+          n.onclick = () => window.focus();
+        } catch {
+          // notification construction can throw in some browsers; ignore
+        }
+      } else {
+        setToast(`${title}　${body}`);
+        const t = setTimeout(() => setToast(null), 5000);
+        return () => clearTimeout(t);
+      }
+    }
+    prevPending.current = pending;
+  }, [pending]);
 
   const empty = messages.length === 0;
 
@@ -186,12 +328,17 @@ export function ChatUI({ store }: { store: ChatStore }) {
 
               {/* composer area */}
               <div className="mx-auto w-full max-w-2xl px-4 pb-4 pt-2">
-                <Composer disabled={!store.workspace} />
+                <Composer store={store} />
                 <ComposerFooter store={store} />
               </div>
             </main>
           </div>
         </div>
+        {toast && (
+          <div className="fixed bottom-4 right-4 z-50 max-w-xs rounded-lg border border-neutral-200 bg-white px-4 py-3 text-sm text-neutral-800 shadow-lg">
+            {toast}
+          </div>
+        )}
       </ApprovalContext.Provider>
     </AssistantRuntimeProvider>
   );
