@@ -169,7 +169,7 @@ function Composer({ store }: { store: ChatStore }) {
         onChange={onChange}
         onKeyDown={onKeyDown}
         placeholder={
-          disabled ? '请先选择工作空间' : '发送消息…（输入 @ 引用文件，/ 调用技能或指令）'
+          disabled ? '请先选择工作区' : '发送消息…（输入 @ 引用文件，/ 调用技能或指令）'
         }
         className="max-h-48 w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-sm text-neutral-900 outline-none placeholder:text-neutral-400"
       />
@@ -308,7 +308,7 @@ export function ChatUI({ store }: { store: ChatStore }) {
                         今天帮你做些什么？
                       </h1>
                       <p className="mt-1.5 text-sm text-neutral-400">
-                        选择一个工作空间，或继续已有会话
+                        选择一个工作区，或继续已有会话
                       </p>
                     </div>
                     <Composer store={store} />

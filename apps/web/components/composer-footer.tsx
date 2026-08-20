@@ -86,7 +86,7 @@ export function ComposerFooter({ store }: { store: ChatStore }) {
     : undefined;
   const pillLabel = store.workspace
     ? current?.name ?? store.workspace.split('/').pop() ?? store.workspace
-    : '选择工作空间';
+    : '选择工作区';
   return (
     <div className="flex flex-wrap items-center gap-2 px-1 pt-2">
       {showWorkspace && (

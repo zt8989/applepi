@@ -62,3 +62,22 @@ workspace.
   the web. This is the trade-off: cleaner and predictable, at the cost of
   auto-discovery.
 - Deleting directories needs explicit user confirmation; data is safe.
+
+## Amendment (2026-08-20): Display-name override + logical delete
+
+The original ADR treated the manifest entry as a plain `slug → path` string.
+To support user-facing rename and removal without touching the on-disk
+directory, the manifest entry type was extended to
+`string | { path: string; name?: string }`:
+
+- **Rename** (`PATCH /api/workspaces { action: 'rename', slug, name }`) stores a
+  `name` override in the manifest only. An empty name clears the override so the
+  display falls back to `path.basename`. The on-disk directory is never renamed.
+- **Remove** (`PATCH /api/workspaces { action: 'remove', slug }`) is a *logical
+  delete*: it drops the manifest entry so `listWorkspaces` no longer returns the
+  workspace, but every session `.jsonl` file stays on disk. Re-adding the same
+  path (via `addWorkspace`) restores it. This is distinct from physical deletion
+  and keeps ADR-0013's file-safety guarantee intact.
+
+`entryPath()` / `entryName()` normalize both legacy string entries and the new
+object form, so old manifests keep working.
