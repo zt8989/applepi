@@ -1,5 +1,6 @@
 import { generateText } from 'ai';
 import type { Harness } from './harness.js';
+import { getTracer, modelLabel, type Tracer, type TraceHandle } from './trace.js';
 
 /** Shape of the LLM call the loop makes each turn. */
 export type LlmCall = (args: {
@@ -18,6 +19,8 @@ export interface LoopOpts {
   llmCall?: LlmCall;
   /** Called after each assistant/tool message is appended (used for persistence). */
   onMessage?: (role: string, content: any) => void | Promise<void>;
+  /** Override the Langfuse tracer (defaults to the env-configured one). */
+  trace?: Tracer | null;
 }
 
 /**
@@ -33,6 +36,10 @@ export async function runLoop(
 ): Promise<any[]> {
   const maxTurns = opts.maxTurns ?? 8;
   const callLLM: LlmCall = opts.llmCall ?? ((a) => generateText(a));
+  const tracer = opts.trace !== undefined ? opts.trace : await getTracer();
+  const traceHandle = tracer?.session('agent-turn', harness.sessionStore?.sessionId ?? harness.workspace, {
+    input: [...messages].reverse().find((m: any) => m?.role === 'user')?.content,
+  });
   let turn = 0;
   while (turn < maxTurns) {
     turn++;
@@ -49,6 +56,8 @@ export async function runLoop(
       });
     });
     const r: any = result;
+    const gen = traceHandle?.generation('llm', { messages: llmCtx.messages }, { model: modelLabel(opts.model) });
+    gen?.end(r?.text ?? '', r?.usage);
 
     const toolCalls: any[] = r?.toolCalls ?? [];
     const assistantParts: any[] = [];
@@ -70,6 +79,7 @@ export async function runLoop(
 
     const toolMessages: any[] = [];
     for (const tc of toolCalls) {
+      const span = traceHandle?.span('tool', { name: tc.toolName, args: tc.args });
       const tctx: any = {
         session: harness.session,
         state: {},
@@ -84,6 +94,7 @@ export async function runLoop(
       if (tctx.error) {
         res = `ERROR: ${(tctx.error as Error)?.message ?? String(tctx.error)}`;
       }
+      span?.end({ result: res });
       toolMessages.push({
         role: 'tool',
         content: [

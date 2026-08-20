@@ -8,6 +8,16 @@ export type HookStack = 'session' | 'llm' | 'tool' | 'prompt/base' | 'prompt/per
 export const PROMPT_BLOCKS = ['base', 'permission', 'skills'] as const;
 export type PromptBlockName = (typeof PROMPT_BLOCKS)[number];
 
+/**
+ * How a tool call is gated in stream interfaces (web UI) before it executes
+ * (ADR-0011): `auto` runs without asking; `ask` pauses the stream for an
+ * explicit user decision. May be a function of the args so a tool can
+ * classify per call (e.g. bash: read commands auto, writes ask). Absent ->
+ * `ask` (conservative default). The CLI never consults this — its interactive
+ * level model is unchanged.
+ */
+export type ApprovalMode = 'auto' | 'ask';
+
 /** A tool registered by core or an extension. */
 export interface ToolSpec {
   name: string;
@@ -15,6 +25,8 @@ export interface ToolSpec {
   /** Zod schema for the tool arguments (maps to Vercel AI SDK parameters). */
   parameters: ZodType<any>;
   execute: (args: any, ctx: Ctx) => Promise<string> | string;
+  /** Stream-interface approval classification (ADR-0011). Default 'ask'. */
+  approval?: ApprovalMode | ((args: any) => ApprovalMode | Promise<ApprovalMode>);
 }
 
 /** The model-facing shape of a tool (description + zod parameters, no execute). */

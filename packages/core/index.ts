@@ -2,6 +2,20 @@ export { OnionBus } from './bus.js';
 export { Harness } from './harness.js';
 export { runLoop } from './loop.js';
 export {
+  runLoopStreamSegment,
+  executeApprovedTool,
+  classifyApproval,
+  pendingToolCalls,
+} from './stream-loop.js';
+export type {
+  PendingApproval,
+  StreamLoopOpts,
+  StreamFinishReason,
+  StreamSegmentResult,
+} from './stream-loop.js';
+export { getTracer, flushTraces, resetTracer, modelLabel } from './trace.js';
+export type { Tracer, TraceHandle, SpanHandle } from './trace.js';
+export {
   SessionStore,
   slugWorkspace,
 } from './session.js';
@@ -20,6 +34,7 @@ export {
   getPermissionLevel,
   restorePermissionLevel,
   projectRoot,
+  workspaceRoot,
   isInsideProjectRoot,
   buildPermissionSection,
   defaultSecurityPolicy,
@@ -37,6 +52,7 @@ export type {
   HookStack,
   ToolSpec,
   ToolDef,
+  ApprovalMode,
   SlashHandler,
   Middleware,
   Ctx,

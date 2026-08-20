@@ -57,11 +57,23 @@ export function projectRoot(): string {
 }
 
 /**
+ * The tool working root for a session: the workspace path from
+ * `session.config.workspace` (set by stream/web interfaces, ADR-0011) when
+ * present, else the process cwd (CLI behavior unchanged).
+ */
+export function workspaceRoot(ctx: { session?: { config?: Record<string, any> } }): string {
+  const w = ctx?.session?.config?.workspace;
+  return typeof w === 'string' && w ? path.resolve(w) : projectRoot();
+}
+
+/**
  * True if `p` (after realpath resolution) is inside the project root.
+ * `rootOverride` lets stream/web sessions scope checks to the selected
+ * workspace instead of the process cwd.
  * Shared mechanism for tools that scope writes (bash, str_replace_editor).
  */
-export async function isInsideProjectRoot(p: string): Promise<boolean> {
-  const root = projectRoot();
+export async function isInsideProjectRoot(p: string, rootOverride?: string): Promise<boolean> {
+  const root = rootOverride ? path.resolve(rootOverride) : projectRoot();
   const abs = path.resolve(root, p);
   let resolved = abs;
   try {
@@ -133,7 +145,7 @@ export const defaultSecurityPolicy: SecurityPolicy = {
       'prompt/permission',
       async (ctx, next) => {
         ctx.prompt!.set('permission', [
-          buildPermissionSection(getPermissionLevel(ctx), projectRoot()),
+          buildPermissionSection(getPermissionLevel(ctx), workspaceRoot(ctx)),
         ]);
         await next();
       },

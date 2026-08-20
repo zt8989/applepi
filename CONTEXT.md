@@ -122,3 +122,27 @@ Architecture decisions are recorded as ADR-0001 (harness), ADR-0002 (session per
 > **Confirmed — 2026-08-19（Q1–Q23 全部敲定，ADR-0009 记录；supersedes ADR-0007 的双层机制与 ADR-0005 的安全移出 core 部分）。**
 >
 > **Implementation — complete（2026-08-19）**：`extensions/permission.ts` 与 `denylist.ts` 已删除（DENY 并入 `tools/bash.ts`）；core 新增 `security.ts`（SecurityPolicy 接口 + 默认实现 + `getPermissionLevel` / `isInsideProjectRoot` 原语）与注册作用域/reload（`harness.reloadExtensions` + `api.useEffect`）；bash / str_replace_editor / memory 在 execute 内自决；`registerToolFilter` / `ToolFilter` 移除；`baseExtension` 瘦身；`check-permission.ts` → `check-security.ts`。全部 build / test / check 通过。
+
+## Web interface (confirmed — via /grill-with-docs, 2026-08-20, rounds 1–3; ADR-0011 + ADR-0012)
+
+- **Web Chat 界面（web chat interface）** — 继 CLI 之后的第二个 harness 界面：Next.js App Router（`apps/web`，`@applepi/web`，端口 3000）+ assistant-ui 0.15 primitives（ExternalStoreRuntime 适配器，Tailwind v4）+ Vercel AI SDK v4 数据流协议（`createDataStreamResponse` + `processDataStream`）。复用同一 core（Harness + runLoopStreamSegment + SessionStore），与 CLI 共享事件总线、安全策略、工具链。个人本地工具，无鉴权。
+- **流式 loop（streaming loop）** — core 新增 `runLoopStreamSegment`（`streamText` 变体，token 级分段流 + 暂停/恢复状态机，ADR-0011）；CLI 的 `runLoop`（generateText）原样保留。
+- **工具批准（tool approval）** — web 会话对工具执行采用**前端批准**：`ToolSpec.approval`（`auto`/`ask`/按参数函数，缺省 `ask`）分类；`ask` 工具暂停并持久化 `tool/approval-pending` 事件；`POST /api/chat/approve` 从暂停点续跑（**不重跑 LLM**，jsonl 即 loop 状态）。读类自动执行（memory_read / skill_load / view / bash 只读命令），写/执行类须批准；**拒绝 = 工具结果回填模型**（模型可自愈）。CLI 语义不变。
+- **工作区选择器（workspace picker）** — 页面可**选择已有工作区或手动添加**（`GET|POST /api/workspaces`，manifest 记录 slug↔path）；`session.config.workspace` 决定工具 cwd 与 project root（`workspaceRoot(ctx)`）；切换后 resume 该工作区最近会话（无则新建），选择持久化 localStorage。`GET /api/session` 刷新恢复 + 重新浮出待批卡片。
+- **Trace（可观测性追踪）** — 埋点位于 **core 层**（`trace.ts`：每轮一条 trace + 每条 LLM 调用一个 generation 带 token usage + 每工具一个 span），CLI 与 web 双端自动受益；目标 **Langfuse Cloud**（`~/.applepi/.env` 的 `LANGFUSE_BASE_URL` / `PUBLIC_KEY` / `SECRET_KEY`，ADR-0004 约定；未配置则为 no-op）。
+
+> **Confirmed — 2026-08-20（Q1–Q13 全部敲定，ADR-0011 记录流式 loop + 批准状态机，ADR-0012 记录技术栈 + 埋点；round 2 将 Langfuse 从自建改为云端）。**
+>
+> **Implementation — complete（2026-08-20）**：core 新增 `stream-loop.ts`（`runLoopStreamSegment` / `executeApprovedTool` / `classifyApproval` / `pendingToolCalls`）、`trace.ts`（getTracer/flushTraces）、`ToolSpec.approval`、`workspaceRoot`（isInsideProjectRoot 支持 root 覆盖）；extensions 五工具加 approval 分类 + 跟随 workspace root；`apps/web`（assistant-ui + Tailwind v4 + 四个 API 路由 + 批准卡片 + 工作区选择器，ExternalStoreRuntime 适配器）；根脚本 `dev:web`。E2E 验证：分段流暂停 → 批准执行 → 续跑自动读工具 → 最终文本；拒绝回填模型自愈；会话水合；mismatch 守卫。全部 build / test / 检查通过。
+
+## Web UI shell (confirmed — via /grill-with-docs, 2026-08-20; base-style redesign)
+
+复刻 assistant-ui playground base 壳视觉（两栏、外层圆角白卡、极简线性图标、中性配色、克制圆角/阴影），并做产品化适配：
+
+- **布局**：外层灰底 + 圆角白卡（桌面）两栏；移动端侧栏折叠为抽屉。
+- **侧栏树**：品牌「applepi π」→ 新对话 → 「空间 (N)」汇总头 → 按工作区分组的会话树（folder + ⌄ 折叠，默认展开，每工作区 5 条 + 查看更多；活跃会话浅色高亮，hover 显示 bell/archive/⋯ 动作：重命名 / 置顶 / 导出 jsonl / 通知标志）。会话元数据：`title/set`（缺省取首条 user 消息截断 40 字）、`pin/set`、`notify/set` 事件；归档 = 移入 `.archive/` 子目录。
+- **composer 脚部**：composer 大圆角框（输入 + `+`/mic/圆形发送）；框下独立一行胶囊 —— **工作区胶囊仅在首屏新会话空态出现**（选好工作区后归属该会话，不再显示）；**权限胶囊常驻**（只读/工作区/完全访问，改级别 = 写 `level/set` + 重建提示词，与 CLI `/level` 同语义；新会话首条消息可带预选级别）。
+- **工作区下拉**：搜索 + 文件夹列表 + 「新建工作空间」（内联路径）+「打开本地文件夹」（**macOS 原生目录选择**：浏览器 showDirectoryPicker 拿不到绝对路径，改由服务端 osascript `choose folder` 返回真实路径；非 macOS 降级为路径输入）。
+- 不做建议 chips（用户明确不需要）；placeholder「发送消息…（/ 调用技能或指令）」；主区标题 = 活跃会话标题 / 空态「新对话」。
+
+> **Implementation — complete（2026-08-20）**：`apps/web` 重构（sidebar / workspace-dropdown / composer-footer / chat-ui / approval-tool 重画；icons 内联 SVG）；服务端新增 `/api/pick-folder`、`/api/session` GET 支持 `format=jsonl` 导出 + level/title 返回、PATCH（rename/pin/unpin/archive/unarchive/notify/level）；`/api/workspaces` 富化（每会话 title/ts/pinned/notify）；`/api/chat` 首条消息支持 `level`。E2E 验证：rename/pin/archive/unarchive/export/level 全部通过。构建 + verify 全绿。

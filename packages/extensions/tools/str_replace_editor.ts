@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { readFile, writeFile, readdir, stat } from 'node:fs/promises';
 import type { Ctx, ToolSpec } from '@applepi/core';
-import { getPermissionLevel, isInsideProjectRoot } from '@applepi/core';
+import { getPermissionLevel, isInsideProjectRoot, workspaceRoot } from '@applepi/core';
 
 /**
  * str_replace_editor — self-determining per level (ADR-0009 Q6=a; the sre path
@@ -28,6 +28,7 @@ export const strReplaceEditorTool: ToolSpec = {
       .optional()
       .describe('Replacement string (required for str_replace)'),
   }),
+  approval: (args) => (args?.command === 'view' ? 'auto' : 'ask'),
   async execute(args, ctx: Ctx) {
     const level = getPermissionLevel(ctx);
     const command = args.command;
@@ -41,7 +42,7 @@ export const strReplaceEditorTool: ToolSpec = {
       (command === 'write' || command === 'str_replace')
     ) {
       const p = args.path;
-      if (typeof p !== 'string' || !(await isInsideProjectRoot(p))) {
+      if (typeof p !== 'string' || !(await isInsideProjectRoot(p, workspaceRoot(ctx)))) {
         return `BLOCKED (workspace): write path outside project root: ${String(p)}`;
       }
     }

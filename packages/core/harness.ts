@@ -152,6 +152,11 @@ export class Harness {
     getTools: () => [...this.tools.values()],
   };
 
+  /** Look up a registered tool by name (undefined if absent). */
+  getTool(name: string): ToolSpec | undefined {
+    return this.tools.get(name);
+  }
+
   /** Restore policy state (permission level) from the attached session store. */
   async restoreSecurity(store: SessionStore): Promise<void> {
     await this.securityPolicy.restore(store, this.session);

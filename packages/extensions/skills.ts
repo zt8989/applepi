@@ -37,6 +37,7 @@ export function createSkillsExtension(options: SkillsOptions = {}): SetupFn {
           .optional()
           .describe('Path to a markdown file holding the skill instructions'),
       }),
+      approval: 'auto',
       execute: async (
         args: { name: string; content?: string; path?: string },
         ctx: Ctx,

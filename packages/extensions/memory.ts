@@ -41,6 +41,7 @@ export function createMemoryExtension(options: MemoryOptions = {}): SetupFn {
         key: z.string().describe('Unique key for the memory entry'),
         value: z.string().describe('Value to store'),
       }),
+      approval: 'ask',
       execute: async (args: { key: string; value: string }, ctx: Ctx) => {
         // Self-determination (ADR-0009): memory_write is a write — rejected at
         // readonly. Its target file is extension-configured (trusted), so no
@@ -64,6 +65,7 @@ export function createMemoryExtension(options: MemoryOptions = {}): SetupFn {
       parameters: z.object({
         key: z.string().describe('Key to look up'),
       }),
+      approval: 'auto',
       execute: async (args: { key: string }, ctx: Ctx) => {
         // In-session mirror first (proves ctx read); fall back to the file as
         // the source of truth for values written in a prior session/call.

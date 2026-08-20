@@ -17,3 +17,4 @@ _smoke_tmp.txt
 _deny_sentinel.txt
 _empty_ext_dir/
 harness-memory.json
+.next/

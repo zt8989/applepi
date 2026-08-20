@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { Ctx, ToolSpec } from '@applepi/core';
-import { getPermissionLevel, isInsideProjectRoot, type PermissionLevel } from '@applepi/core';
+import { getPermissionLevel, isInsideProjectRoot, workspaceRoot, type PermissionLevel } from '@applepi/core';
 
 const execAsync = promisify(exec);
 
@@ -92,7 +92,11 @@ function blocked(reason: string): Verdict {
 }
 
 /** Self-determine whether `cmd` may run at `level` (ADR-0009 Q4/Q5). */
-async function checkBash(cmd: string, level: PermissionLevel): Promise<Verdict> {
+async function checkBash(
+  cmd: string,
+  level: PermissionLevel,
+  root: string,
+): Promise<Verdict> {
   for (const re of DENY) {
     if (re.test(cmd)) return blocked(`denylist: ${cmd}`);
   }
@@ -106,7 +110,7 @@ async function checkBash(cmd: string, level: PermissionLevel): Promise<Verdict> 
   if (targets.length > 0) {
     if (level === 'readonly') return blocked(`readonly: no writes allowed`);
     for (const t of targets) {
-      if (!(await isInsideProjectRoot(t))) {
+      if (!(await isInsideProjectRoot(t, root))) {
         return blocked(`workspace: write target outside project root: ${t}`);
       }
     }
@@ -115,6 +119,21 @@ async function checkBash(cmd: string, level: PermissionLevel): Promise<Verdict> 
   // Not a recognized write: allow only whitelisted read-only commands.
   if (READONLY_BASH_COMMANDS.has(first)) return { allow: true };
   return blocked(`command not allowed at ${level}: ${first}`);
+}
+
+/**
+ * Web-interface approval classification (ADR-0011): read-only commands from
+ * the readonly whitelist run automatically; writes / compound / unrecognized
+ * commands pause for explicit approval.
+ */
+export function classifyBashApproval(args: any): 'auto' | 'ask' {
+  const cmd = String(args?.command ?? '').trim();
+  const first = cmd.split(/\s+/)[0] ?? '';
+  if (!first) return 'ask';
+  const targets = identifyWriteTargets(cmd);
+  if (targets === null) return 'ask'; // compound/unanalyzable -> ask (fail closed)
+  if (targets.length > 0) return 'ask';
+  return READONLY_BASH_COMMANDS.has(first) ? 'auto' : 'ask';
 }
 
 export const bashTool: ToolSpec = {
@@ -128,17 +147,19 @@ export const bashTool: ToolSpec = {
       .optional()
       .describe('Maximum runtime in milliseconds (default 30000)'),
   }),
+  approval: (args) => classifyBashApproval(args),
   async execute(args, ctx: Ctx) {
     const cmd = String(args.command ?? '');
     const level = getPermissionLevel(ctx);
+    const root = workspaceRoot(ctx);
     // Self-determination (ADR-0009): the denylist floor fires at EVERY level;
     // scope rules apply below fullaccess. A BLOCKED verdict never executes.
-    const verdict = await checkBash(cmd, level);
+    const verdict = await checkBash(cmd, level, root);
     if (!verdict.allow) return `BLOCKED (${level}): ${verdict.reason}`;
     try {
       const { stdout, stderr } = await execAsync(cmd, {
         timeout: args.timeout ?? 30000,
-        cwd: process.cwd(),
+        cwd: root,
         maxBuffer: 10 * 1024 * 1024,
       });
       const out = [stdout, stderr].filter(Boolean).join('\n');
