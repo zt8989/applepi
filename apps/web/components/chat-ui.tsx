@@ -256,8 +256,8 @@ export function ChatUI({ store }: { store: ChatStore }) {
       <ApprovalContext.Provider
         value={{ pendingToolCallId: pending?.toolCallId ?? null, isRunning, respond }}
       >
-        <div className="flex h-dvh items-stretch justify-center bg-stone-100 sm:p-4">
-          <div className="flex h-full w-full max-w-7xl overflow-hidden bg-white sm:rounded-3xl sm:border sm:border-neutral-200/70 sm:shadow-sm">
+        <div className="flex h-dvh w-full items-stretch justify-center bg-stone-100">
+          <div className="flex h-full w-full overflow-hidden bg-white">
             {/* desktop sidebar */}
             <div className="hidden h-full md:block">
               <Sidebar store={store} />

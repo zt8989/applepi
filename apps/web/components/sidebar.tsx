@@ -266,24 +266,15 @@ export function Sidebar({ store, onNavigate }: { store: ChatStore; onNavigate?: 
 
   return (
     <div className="flex h-full w-72 flex-col border-r border-neutral-200/70 bg-white">
-      {/* brand + new chat */}
-      <div className="flex items-center justify-between px-3 pb-1 pt-3">
-        <div className="flex items-center gap-2">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-neutral-900 text-sm font-medium text-white">
-            π
-          </div>
-          <span className="text-sm font-medium text-neutral-900">applepi</span>
+      {/* brand */}
+      <div className="flex items-center gap-2 px-3 pb-1 pt-3">
+        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-neutral-900 text-sm font-medium text-white">
+          π
         </div>
-        <button
-          type="button"
-          onClick={() => goto(store.newSession)}
-          className="rounded-lg px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-100 hover:text-neutral-800"
-        >
-          新对话
-        </button>
+        <span className="text-sm font-medium text-neutral-900">applepi</span>
       </div>
 
-      {/* spaces header */}
+      {/* spaces header + new chat */}
       <div className="mt-2 flex items-center justify-between px-3 py-1">
         <button
           type="button"
@@ -294,6 +285,14 @@ export function Sidebar({ store, onNavigate }: { store: ChatStore; onNavigate?: 
             className={`h-3 w-3 transition-transform ${collapsedAll ? '-rotate-90' : ''}`}
           />
           空间 ({store.workspaces.reduce((n, w) => n + w.sessions.length, 0)})
+        </button>
+        <button
+          type="button"
+          title="新对话"
+          onClick={() => goto(store.newSession)}
+          className="rounded p-1 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700"
+        >
+          <PlusIcon className="h-3.5 w-3.5" />
         </button>
       </div>
 
@@ -354,17 +353,6 @@ export function Sidebar({ store, onNavigate }: { store: ChatStore; onNavigate?: 
         )}
       </div>
 
-      {/* sidebar footer: new workspace */}
-      <div className="border-t border-neutral-100 p-2">
-        <button
-          type="button"
-          onClick={() => goto(store.newSession)}
-          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-neutral-500 hover:bg-neutral-50 hover:text-neutral-800"
-        >
-          <PlusIcon className="h-3.5 w-3.5" />
-          新建会话
-        </button>
-      </div>
     </div>
   );
 }
