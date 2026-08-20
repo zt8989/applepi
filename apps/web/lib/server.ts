@@ -159,6 +159,8 @@ export interface SessionInfo {
 export interface WorkspaceInfo {
   slug: string;
   path?: string;
+  /** Display name: last path segment (basename), e.g. `applepi`. */
+  name?: string;
   sessions: SessionInfo[];
 }
 
@@ -224,25 +226,20 @@ export async function sessionNotify(workspace: string, id: string): Promise<bool
 }
 
 /**
- * List existing workspaces (slugs from the sessions dir) with their sessions,
- * each session with title / mtime / pinned / notify. Archived sessions (in
- * `.archive`) are excluded. Workspaces without a manifest path are resolved
- * best-effort from their slug (CLI-created dirs) and backfilled.
+ * List existing workspaces. Discovery is **manifest-only**: we read the
+ * slug→path entries from `~/.applepi/sessions/.manifest.json` (written by
+ * `addWorkspace` and the CLI) instead of scanning the sessions dir for every
+ * subdirectory. This keeps stale / test directories (e.g. `test-ws-*`) out of
+ * the UI. Each manifest entry still resolves its sessions by slug; sessions
+ * without a recorded path are skipped. The display name is the path basename.
  */
 export async function listWorkspaces(): Promise<WorkspaceInfo[]> {
   const manifest = await readManifest();
-  let slugs: string[] = [];
-  try {
-    slugs = (await fs.readdir(SESSIONS_DIR(), { withFileTypes: true }))
-      .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
-      .map((e) => e.name)
-      .sort();
-  } catch {
-    // sessions dir missing -> no workspaces yet
-  }
-  let changed = false;
+  const slugs = Object.keys(manifest).sort();
   const out: WorkspaceInfo[] = [];
   for (const slug of slugs) {
+    const wsPath = manifest[slug];
+    if (!wsPath) continue; // manifest entries are always path-backed
     const dir = path.join(SESSIONS_DIR(), slug);
     let files: { id: string; ts: number }[] = [];
     try {
@@ -254,7 +251,7 @@ export async function listWorkspaces(): Promise<WorkspaceInfo[]> {
         files.push({ id, ts: st.mtimeMs });
       }
     } catch {
-      // skip unreadable workspace
+      // skip unreadable workspace (e.g. sessions dir missing)
     }
     files.sort((a, b) => b.ts - a.ts);
     const sessions: SessionInfo[] = [];
@@ -267,20 +264,7 @@ export async function listWorkspaces(): Promise<WorkspaceInfo[]> {
         notify: await sessionNotify(slug, f.id),
       });
     }
-    let wsPath: string | undefined = manifest[slug];
-    if (!wsPath) {
-      // CLI-created workspace: recover the real path from the slug so tools
-      // and session access work (and the picker shows a path, not a slug).
-      wsPath = (await unslugWorkspace(slug)) ?? undefined;
-      if (wsPath) {
-        manifest[slug] = wsPath;
-        changed = true;
-      }
-    }
-    out.push({ slug, path: wsPath, sessions });
-  }
-  if (changed) {
-    await fs.writeFile(MANIFEST_FILE(), JSON.stringify(manifest, null, 2), 'utf8').catch(() => {});
+    out.push({ slug, path: wsPath, name: path.basename(wsPath), sessions });
   }
   return out;
 }

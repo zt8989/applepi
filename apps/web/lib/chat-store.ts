@@ -46,6 +46,8 @@ export interface SessionNode {
 export interface WorkspaceNode {
   slug: string;
   path?: string;
+  /** Display name: last path segment (basename), e.g. `applepi`. */
+  name?: string;
   sessions: SessionNode[];
 }
 
@@ -134,6 +136,14 @@ export function useChatStore(): ChatStore {
       // offline/server not ready: keep the last list
     }
   }, []);
+
+  // Load the workspace list once on mount, independent of the selected
+  // workspace, so the sidebar shows registered workspaces even on a fresh
+  // empty state (workspace === null). Without this the list only refreshed
+  // after a workspace was picked, leaving the sidebar empty by default.
+  useEffect(() => {
+    void refreshWorkspaces();
+  }, [refreshWorkspaces]);
 
   const addWorkspace = useCallback(
     async (p: string) => {

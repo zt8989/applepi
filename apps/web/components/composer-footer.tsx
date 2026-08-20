@@ -81,6 +81,12 @@ function PermissionDropdown({
  */
 export function ComposerFooter({ store }: { store: ChatStore }) {
   const showWorkspace = !store.activeSessionId && store.messages.length === 0;
+  const current = store.workspace
+    ? store.workspaces.find((w) => w.path === store.workspace)
+    : undefined;
+  const pillLabel = store.workspace
+    ? current?.name ?? store.workspace.split('/').pop() ?? store.workspace
+    : '选择工作空间';
   return (
     <div className="flex flex-wrap items-center gap-2 px-1 pt-2">
       {showWorkspace && (
@@ -90,7 +96,7 @@ export function ComposerFooter({ store }: { store: ChatStore }) {
           onSelect={store.setWorkspace}
           onAdd={store.addWorkspace}
           trigger={(open) => (
-            <WorkspacePillTrigger label={store.workspace ?? '选择工作空间'} open={open} />
+            <WorkspacePillTrigger label={pillLabel} open={open} title={store.workspace ?? undefined} />
           )}
         />
       )}

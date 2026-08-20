@@ -94,16 +94,18 @@ export function WorkspaceDropdown({ workspaces, current, onSelect, onAdd, trigge
                   <p className="px-3 py-3 text-xs text-neutral-400">没有匹配的工作空间</p>
                 )}
                 {filtered.map((w) => {
-                  const label = w.path ?? w.slug;
-                  const active = current === label;
+                  const label = w.name ?? w.path ?? w.slug;
+                  const fullPath = w.path ?? w.slug;
+                  const active = current === fullPath;
                   return (
                     <button
                       key={w.slug}
                       type="button"
-                      onClick={() => pick(label)}
+                      onClick={() => pick(fullPath)}
                       className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-neutral-50 ${
                         active ? 'font-medium text-neutral-900' : 'text-neutral-600'
                       }`}
+                      title={fullPath}
                     >
                       <FolderIcon className="h-4 w-4 shrink-0 text-neutral-400" />
                       <span className="flex-1 truncate">{label}</span>
@@ -177,9 +179,12 @@ export function WorkspaceDropdown({ workspaces, current, onSelect, onAdd, trigge
 }
 
 /** The base-style pill trigger used in the composer footer. */
-export function WorkspacePillTrigger({ label, open }: { label: string; open: boolean }) {
+export function WorkspacePillTrigger({ label, open, title }: { label: string; open: boolean; title?: string }) {
   return (
-    <span className="flex items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-3 py-1.5 text-xs text-neutral-600 hover:bg-neutral-50">
+    <span
+      title={title ?? label}
+      className="flex items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-3 py-1.5 text-xs text-neutral-600 hover:bg-neutral-50"
+    >
       <FolderIcon className="h-3.5 w-3.5 text-neutral-400" />
       <span className="max-w-48 truncate">{label}</span>
       <ChevronIcon className={`h-3 w-3 text-neutral-400 transition-transform ${open ? 'rotate-180' : ''}`} />

@@ -175,7 +175,8 @@ function WorkspaceGroup({
   const [expanded, setExpanded] = useState(false);
   const visible = expanded ? ws.sessions : ws.sessions.slice(0, PAGE);
   const hidden = ws.sessions.length - visible.length;
-  const label = ws.path ?? ws.slug;
+  const label = ws.name ?? ws.path ?? ws.slug;
+  const fullPath = ws.path ?? ws.slug;
 
   return (
     <div className="mb-1">
@@ -183,6 +184,7 @@ function WorkspaceGroup({
         type="button"
         onClick={onToggle}
         className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-left hover:bg-neutral-50"
+        title={fullPath}
       >
         <ChevronIcon
           className={`h-3 w-3 shrink-0 text-neutral-400 transition-transform ${collapsed ? '-rotate-90' : ''}`}
@@ -197,8 +199,8 @@ function WorkspaceGroup({
             <SessionRow
               key={s.id}
               session={s}
-              workspacePath={label}
-              active={store.workspace === label && store.activeSessionId === s.id}
+              workspacePath={fullPath}
+              active={store.workspace === fullPath && store.activeSessionId === s.id}
               store={store}
             />
           ))}
@@ -220,17 +222,19 @@ function WorkspaceGroup({
 // Flat result row used while a session search query is active.
 function SearchRow({
   session,
-  workspaceLabel,
+  workspaceName,
+  workspacePath,
   store,
 }: {
   session: SessionNode;
-  workspaceLabel: string;
+  workspaceName: string;
+  workspacePath: string;
   store: ChatStore;
 }) {
   return (
     <button
       type="button"
-      onClick={() => void store.openSession(workspaceLabel, session.id)}
+      onClick={() => void store.openSession(workspacePath, session.id)}
       className="block w-full rounded-lg px-2 py-1.5 text-left hover:bg-neutral-50"
     >
       <div className="flex items-center gap-1.5">
@@ -240,7 +244,7 @@ function SearchRow({
         </span>
         <span className="shrink-0 text-[11px] text-neutral-400">{relativeTime(session.ts)}</span>
       </div>
-      <div className="truncate pl-0.5 text-[10px] text-neutral-400">{workspaceLabel}</div>
+      <div className="truncate pl-0.5 text-[10px] text-neutral-400">{workspaceName}</div>
     </button>
   );
 }
@@ -260,7 +264,11 @@ export function Sidebar({ store, onNavigate }: { store: ChatStore; onNavigate?: 
     ? store.workspaces.flatMap((w) =>
         w.sessions
           .filter((s) => s.title.toLowerCase().includes(q))
-          .map((s) => ({ session: s, label: w.path ?? w.slug })),
+          .map((s) => ({
+            session: s,
+            name: w.name ?? w.path ?? w.slug,
+            path: w.path ?? w.slug,
+          })),
       )
     : [];
 
@@ -284,7 +292,7 @@ export function Sidebar({ store, onNavigate }: { store: ChatStore; onNavigate?: 
           <ChevronIcon
             className={`h-3 w-3 transition-transform ${collapsedAll ? '-rotate-90' : ''}`}
           />
-          空间 ({store.workspaces.reduce((n, w) => n + w.sessions.length, 0)})
+          空间 ({store.workspaces.length})
         </button>
         <button
           type="button"
@@ -325,8 +333,8 @@ export function Sidebar({ store, onNavigate }: { store: ChatStore; onNavigate?: 
           matches.length === 0 ? (
             <p className="px-2 py-4 text-xs text-neutral-400">无匹配会话</p>
           ) : (
-            matches.map(({ session, label }) => (
-              <SearchRow key={session.id} session={session} workspaceLabel={label} store={store} />
+            matches.map(({ session, name, path }) => (
+              <SearchRow key={session.id} session={session} workspaceName={name} workspacePath={path} store={store} />
             ))
           )
         ) : store.workspaces.length === 0 ? (

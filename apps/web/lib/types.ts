@@ -27,11 +27,21 @@ export interface PendingApprovalInfo {
   args: Record<string, unknown>;
 }
 
+export interface SessionSummary {
+  id: string;
+  title: string;
+  ts: string;
+  pinned: boolean;
+  notify?: boolean;
+}
+
 export interface WorkspaceInfo {
   slug: string;
   /** Human path from the manifest, when recorded. */
   path?: string;
-  sessions: string[];
+  /** Display name: last path segment (basename), e.g. `applepi`. */
+  name?: string;
+  sessions: SessionSummary[];
 }
 
 /** A serialized session message line (SessionStore replay, no system role). */

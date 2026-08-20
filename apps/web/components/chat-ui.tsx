@@ -276,7 +276,9 @@ export function ChatUI({ store }: { store: ChatStore }) {
               </div>
             )}
 
-            {/* main */}
+            {/* main: content is centered within this chat column (excludes the
+                sidebar). Empty state groups the hero + composer and centers them
+                on both axes here. */}
             <main className="flex min-w-0 flex-1 flex-col bg-white">
               <div className="flex items-center gap-2 border-b border-neutral-100 px-4 py-2.5">
                 <button
@@ -298,10 +300,10 @@ export function ChatUI({ store }: { store: ChatStore }) {
                 </div>
               )}
 
-              <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
-                {empty ? (
-                  <div className="flex h-full flex-col items-center justify-center gap-6">
-                    <div className="text-center">
+              {empty ? (
+                <div className="relative flex min-h-0 flex-1 items-center justify-center px-4">
+                  <div className="relative w-full max-w-2xl">
+                    <div className="absolute bottom-full left-0 right-0 mb-6 text-center">
                       <h1 className="text-2xl font-semibold tracking-tight text-neutral-900">
                         今天帮你做些什么？
                       </h1>
@@ -309,28 +311,34 @@ export function ChatUI({ store }: { store: ChatStore }) {
                         选择一个工作空间，或继续已有会话
                       </p>
                     </div>
+                    <Composer store={store} />
+                    <ComposerFooter store={store} />
                   </div>
-                ) : (
-                  <div className="mx-auto flex max-w-3xl flex-col gap-5">
-                    {messages.map((m) => (
-                      <MessageRow key={m.id ?? String(messages.indexOf(m))} message={m} />
-                    ))}
-                    {isRunning && (
-                      <div className="flex justify-start">
-                        <span className="rounded-full bg-neutral-100 px-3 py-1.5 text-xs text-neutral-500">
-                          运行中…
-                        </span>
-                      </div>
-                    )}
+                </div>
+              ) : (
+                <>
+                  <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
+                    <div className="mx-auto flex max-w-3xl flex-col gap-5">
+                      {messages.map((m) => (
+                        <MessageRow key={m.id ?? String(messages.indexOf(m))} message={m} />
+                      ))}
+                      {isRunning && (
+                        <div className="flex justify-start">
+                          <span className="rounded-full bg-neutral-100 px-3 py-1.5 text-xs text-neutral-500">
+                            运行中…
+                          </span>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                )}
-              </div>
 
-              {/* composer area */}
-              <div className="mx-auto w-full max-w-2xl px-4 pb-4 pt-2">
-                <Composer store={store} />
-                <ComposerFooter store={store} />
-              </div>
+                  {/* composer area: horizontally centered within main */}
+                  <div className="mx-auto w-full max-w-2xl px-4 pb-4 pt-2">
+                    <Composer store={store} />
+                    <ComposerFooter store={store} />
+                  </div>
+                </>
+              )}
             </main>
           </div>
         </div>
