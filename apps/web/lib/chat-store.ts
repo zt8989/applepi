@@ -65,6 +65,8 @@ export interface ChatStore {
   workspaces: WorkspaceNode[];
   refreshWorkspaces: () => Promise<void>;
   addWorkspace: (p: string) => Promise<string>;
+  renameWorkspace: (slug: string, name: string) => Promise<void>;
+  removeWorkspace: (slug: string) => Promise<void>;
   newSession: () => void;
   openSession: (workspacePath: string, sessionId: string) => Promise<void>;
   activeSessionId: string | null;
@@ -182,6 +184,50 @@ export function useChatStore(): ChatStore {
       return ws.path;
     },
     [refreshWorkspaces],
+  );
+
+  const renameWorkspace = useCallback(
+    async (slug: string, name: string) => {
+      const res = await fetch('/api/workspaces', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'rename', slug, name }),
+      });
+      if (!res.ok) throw new Error((await res.text()) || 'failed to rename workspace');
+      await refreshWorkspaces();
+    },
+    [refreshWorkspaces],
+  );
+
+  const removeWorkspace = useCallback(
+    async (slug: string) => {
+      const res = await fetch('/api/workspaces', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'remove', slug }),
+      });
+      if (!res.ok) throw new Error((await res.text()) || 'failed to remove workspace');
+      // If the active workspace was just removed, fall back to the first
+      // remaining one (or none) so the composer never points at a ghost.
+      setWorkspaceState((cur) => {
+        if (cur && workspacesRef.current.find((w) => w.slug === slug)?.path === cur) {
+          const remaining = workspacesRef.current.filter((w) => w.slug !== slug);
+          const next = remaining[0]?.path ?? null;
+          if (next) localStorage.setItem(WS_KEY, next);
+          else localStorage.removeItem(WS_KEY);
+          setSessionId(null);
+          setSessionTitle(null);
+          assistantIdRef.current = null;
+          setPending(null);
+          setError(null);
+          commit([]);
+          return next;
+        }
+        return cur;
+      });
+      await refreshWorkspaces();
+    },
+    [commit, refreshWorkspaces],
   );
 
   const setWorkspace = useCallback(
@@ -388,6 +434,11 @@ export function useChatStore(): ChatStore {
   useEffect(() => {
     levelRef.current = level;
   }, [level]);
+
+  const workspacesRef = useRef(workspaces);
+  useEffect(() => {
+    workspacesRef.current = workspaces;
+  }, [workspaces]);
 
   const runSegment = useCallback(
     async (url: string, body: ChatRequestBody | ApproveRequestBody, assistantId: string) => {
@@ -655,6 +706,8 @@ export function useChatStore(): ChatStore {
     workspaces,
     refreshWorkspaces,
     addWorkspace,
+    renameWorkspace,
+    removeWorkspace,
     newSession,
     openSession,
     activeSessionId: sessionId,

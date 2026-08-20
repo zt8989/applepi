@@ -113,6 +113,24 @@ export async function bindSession(
   if (!workspace.includes('/') && !workspace.includes('\\')) {
     toolRoot = (await unslugWorkspace(workspace)) ?? workspace;
   }
+
+  // Ensure the workspace is discoverable: server-side discovery is
+  // manifest-only (ADR-0013). Register absolute-path workspaces that aren't
+  // yet in the manifest so the sidebar / session history surface them even
+  // when the client neglected to (e.g. the native "open local folder" picker
+  // before the client-side registration fix, or a stale localStorage entry).
+  if (path.isAbsolute(workspace)) {
+    const manifest = await readManifest();
+    if (!(slug in manifest)) {
+      try {
+        await addWorkspace(workspace);
+      } catch {
+        // best-effort: a non-directory or unreadable path just won't appear
+        // in the sidebar; the turn can still proceed.
+      }
+    }
+  }
+
   harness.session.config.workspace = toolRoot;
   let store: SessionStore;
   if (sessionId) {
@@ -135,8 +153,24 @@ export async function buildTurnMessages(harness: Harness): Promise<any[]> {
   return [{ role: 'system', content: built.prompt }, ...harness.session.history];
 }
 
+/**
+ * Manifest entry. Backward compatible: old entries are plain path strings;
+ * new entries are objects so a display name override (rename) can be stored
+ * without touching the on-disk directory.
+ */
+export type ManifestEntry = string | { path: string; name?: string };
+
+/** Normalize a manifest entry to its absolute path. */
+export function entryPath(e: ManifestEntry): string {
+  return typeof e === 'string' ? e : e.path;
+}
+/** Optional display-name override for a manifest entry. */
+export function entryName(e: ManifestEntry): string | undefined {
+  return typeof e === 'string' ? undefined : e.name;
+}
+
 /** Read the slug -> path manifest (best effort). */
-export async function readManifest(): Promise<Record<string, string>> {
+export async function readManifest(): Promise<Record<string, ManifestEntry>> {
   try {
     return JSON.parse(await fs.readFile(MANIFEST_FILE(), 'utf8'));
   } catch {
@@ -238,8 +272,10 @@ export async function listWorkspaces(): Promise<WorkspaceInfo[]> {
   const slugs = Object.keys(manifest).sort();
   const out: WorkspaceInfo[] = [];
   for (const slug of slugs) {
-    const wsPath = manifest[slug];
-    if (!wsPath) continue; // manifest entries are always path-backed
+    const entry = manifest[slug];
+    if (!entry) continue; // manifest entries are always path-backed
+    const wsPath = entryPath(entry);
+    const nameOverride = entryName(entry);
     const dir = path.join(SESSIONS_DIR(), slug);
     let files: { id: string; ts: number }[] = [];
     try {
@@ -264,7 +300,7 @@ export async function listWorkspaces(): Promise<WorkspaceInfo[]> {
         notify: await sessionNotify(slug, f.id),
       });
     }
-    out.push({ slug, path: wsPath, name: path.basename(wsPath), sessions });
+    out.push({ slug, path: wsPath, name: nameOverride ?? path.basename(wsPath), sessions });
   }
   return out;
 }
@@ -279,9 +315,35 @@ export async function addWorkspace(p: string): Promise<{ slug: string; path: str
   const slug = slugWorkspace(abs);
   await fs.mkdir(path.join(SESSIONS_DIR(), slug), { recursive: true });
   const manifest = await readManifest();
-  manifest[slug] = abs;
+  manifest[slug] = { path: abs };
   await fs.writeFile(MANIFEST_FILE(), JSON.stringify(manifest, null, 2), 'utf8');
   return { slug, path: abs };
+}
+
+/**
+ * Rename a workspace's display label. Stores a `name` override in the manifest
+ * (does NOT rename the on-disk directory). An empty name clears the override so
+ * the display falls back to the path basename.
+ */
+export async function renameWorkspace(slug: string, name: string): Promise<void> {
+  const manifest = await readManifest();
+  const existing = manifest[slug];
+  if (!existing) throw new Error(`workspace not found: ${slug}`);
+  const trimmed = name.trim().slice(0, 80);
+  manifest[slug] = { path: entryPath(existing), name: trimmed || undefined };
+  await fs.writeFile(MANIFEST_FILE(), JSON.stringify(manifest, null, 2), 'utf8');
+}
+
+/**
+ * Remove a workspace from the UI (logical delete). Drops the manifest entry so
+ * `listWorkspaces` no longer returns it, but leaves every session file on disk
+ * untouched — re-adding the same path restores it.
+ */
+export async function removeWorkspace(slug: string): Promise<void> {
+  const manifest = await readManifest();
+  if (!(slug in manifest)) throw new Error(`workspace not found: ${slug}`);
+  delete manifest[slug];
+  await fs.writeFile(MANIFEST_FILE(), JSON.stringify(manifest, null, 2), 'utf8');
 }
 
 export interface SessionActionRequest {
