@@ -1,6 +1,9 @@
 # WorkBuddy project data (not a temp cache — keep out of git)
 .workbuddy/
 
+# git worktrees
+.worktrees/
+
 # deps / build
 node_modules/
 dist/
