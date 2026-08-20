@@ -51,6 +51,11 @@ export interface WorkspaceNode {
   sessions: SessionNode[];
 }
 
+export interface LlmConfig {
+  provider: string;
+  model: string;
+}
+
 export interface ChatStore {
   runtime: AssistantRuntime;
   isRunning: boolean;
@@ -66,6 +71,8 @@ export interface ChatStore {
   sessionTitle: string | null;
   level: string;
   setLevel: (level: string) => Promise<void>;
+  llm: LlmConfig | null;
+  refreshLlm: () => Promise<void>;
   pending: PendingApprovalInfo | null;
   respond: (decision: 'approve' | 'deny') => Promise<void>;
   error: string | null;
@@ -97,6 +104,7 @@ export function useChatStore(): ChatStore {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionTitle, setSessionTitle] = useState<string | null>(null);
   const [level, setLevelState] = useState('workspace');
+  const [llm, setLlm] = useState<LlmConfig | null>(null);
   const [messages, setMessages] = useState<ThreadMessageLike[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [pending, setPending] = useState<PendingApprovalInfo | null>(null);
@@ -144,6 +152,22 @@ export function useChatStore(): ChatStore {
   useEffect(() => {
     void refreshWorkspaces();
   }, [refreshWorkspaces]);
+
+  const refreshLlm = useCallback(async () => {
+    try {
+      const res = await fetch('/api/config');
+      if (!res.ok) return;
+      const data = (await res.json()) as LlmConfig;
+      setLlm(data);
+    } catch {
+      // keep the last known config
+    }
+  }, []);
+
+  // Load the active LLM config once on mount so the model picker can display it.
+  useEffect(() => {
+    void refreshLlm();
+  }, [refreshLlm]);
 
   const addWorkspace = useCallback(
     async (p: string) => {
@@ -637,6 +661,8 @@ export function useChatStore(): ChatStore {
     sessionTitle,
     level,
     setLevel,
+    llm,
+    refreshLlm,
     pending,
     respond,
     error,

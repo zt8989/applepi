@@ -10,7 +10,16 @@ import type { ChatStore } from '@/lib/chat-store';
 import { ApprovalContext, ToolCallCard } from './approval-tool';
 import { Sidebar } from './sidebar';
 import { ComposerFooter } from './composer-footer';
-import { MenuIcon, MicIcon, PlusIcon, SendIcon } from './icons';
+import {
+  ChevronIcon,
+  FullAccessIcon,
+  MenuIcon,
+  MicIcon,
+  PlusIcon,
+  ReadOnlyIcon,
+  SendIcon,
+  WorkspaceWriteIcon,
+} from './icons';
 
 function AssistantParts({ parts }: { parts: any[] }) {
   return (
@@ -54,6 +63,202 @@ function MessageRow({ message }: { message: ThreadMessageLike }) {
       <div className="max-w-[92%]">
         <AssistantParts parts={message.content as any[]} />
       </div>
+    </div>
+  );
+}
+
+const LEVEL_META: Record<string, { label: string; desc: string; icon: React.ComponentType<{ className?: string }> }> = {
+  readonly: { label: 'Read Only', desc: '可读任意位置，禁止所有写入', icon: ReadOnlyIcon },
+  workspace: { label: 'Workspace Write', desc: '可写限定在工作区内（默认）', icon: WorkspaceWriteIcon },
+  fullaccess: { label: 'Full access', desc: '读写任意位置（仍受危险命令黑名单约束）', icon: FullAccessIcon },
+};
+
+function PermissionToolbarDropdown({
+  level,
+  onChange,
+}: {
+  level: string;
+  onChange: (l: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  const meta = LEVEL_META[level] ?? LEVEL_META.workspace;
+  const Icon = meta.icon;
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex cursor-pointer items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-2.5 py-1 text-xs text-neutral-600 hover:bg-neutral-50"
+        title="权限级别"
+      >
+        <Icon className="h-3.5 w-3.5 text-neutral-500" />
+        <span className="hidden sm:inline">{meta.label}</span>
+        <ChevronIcon className={`h-3 w-3 text-neutral-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="absolute bottom-full left-0 z-30 mb-2 w-64 overflow-hidden rounded-xl border border-neutral-200 bg-white py-1 shadow-lg">
+          {Object.entries(LEVEL_META).map(([key, v]) => {
+            const ItemIcon = v.icon;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => {
+                  onChange(key);
+                  setOpen(false);
+                }}
+                className="flex w-full items-start gap-3 px-3 py-2.5 text-left hover:bg-neutral-50"
+              >
+                <ItemIcon className={`mt-0.5 h-4 w-4 shrink-0 ${level === key ? 'text-neutral-900' : 'text-neutral-500'}`} />
+                <span className="flex-1">
+                  <span className={`flex items-center gap-2 text-sm ${level === key ? 'font-medium text-neutral-900' : 'text-neutral-700'}`}>
+                    {v.label}
+                    {level === key && <span className="text-xs">✓</span>}
+                  </span>
+                  <span className="block text-[11px] text-neutral-400">{v.desc}</span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function textOf(message: ThreadMessageLike): string {
+  if (typeof message.content === 'string') return message.content;
+  return (message.content as any[])
+    .map((p) => (p.type === 'text' ? p.text ?? '' : JSON.stringify(p)))
+    .join(' ');
+}
+
+function contextLimit(model: string): number {
+  const m = model.toLowerCase();
+  if (m.includes('claude')) return 200_000;
+  if (m.includes('32k')) return 32_768;
+  if (m.includes('128k') || m.includes('gpt-4o')) return 128_000;
+  return 128_000;
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`;
+  return String(n);
+}
+
+function estimateUsage(messages: ThreadMessageLike[], model: string) {
+  const limit = contextLimit(model);
+  const systemTokens = 1_000;
+  const toolTokens = messages.reduce((sum, m) => {
+    const content = Array.isArray(m.content) ? m.content : [];
+    return (
+      sum +
+      content
+        .filter((p: any) => p.type === 'tool-call' || p.type === 'tool-result')
+        .reduce((s: number, p: any) => s + Math.ceil(JSON.stringify(p).length / 4), 0)
+    );
+  }, 0);
+  const messageTokens = messages.reduce((sum, m) => sum + Math.ceil(textOf(m).length / 4), 0);
+  const tokens = Math.min(limit, systemTokens + toolTokens + messageTokens);
+  const percent = Math.max(1, Math.min(100, Math.round((tokens / limit) * 100)));
+  return { tokens, limit, percent, systemTokens, toolTokens, messageTokens };
+}
+
+function ModelPicker({ store }: { store: ChatStore }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  const model = store.llm?.model ?? '默认模型';
+  const usage = estimateUsage(store.messages, model);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex cursor-pointer items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-2.5 py-1 text-xs text-neutral-600 hover:bg-neutral-50"
+        title="模型与用量"
+      >
+        <span className="max-w-[120px] truncate">{model}</span>
+        <span className="text-neutral-400">High</span>
+        <ChevronIcon className={`h-3 w-3 text-neutral-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="absolute bottom-full right-0 z-30 mb-2 w-72 overflow-hidden rounded-xl border border-neutral-200 bg-white py-2 shadow-lg">
+          <div className="flex items-center justify-between px-4 py-2">
+            <span className="text-sm text-neutral-900">模型</span>
+            <span className="flex items-center gap-1 text-sm text-neutral-500">
+              {model} <span className="text-neutral-300">&gt;</span>
+            </span>
+          </div>
+          <div className="flex items-center justify-between px-4 py-2">
+            <span className="text-sm text-neutral-900">推理等级</span>
+            <span className="flex items-center gap-1 text-sm text-neutral-500">
+              High <span className="text-neutral-300">&gt;</span>
+            </span>
+          </div>
+          <div className="mx-4 my-1.5 h-px bg-neutral-100" />
+          <div className="px-4 py-2">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-neutral-900">上下文已用 {usage.percent}%</span>
+              <span className="text-neutral-500">
+                ~{formatTokens(usage.tokens)} / {formatTokens(usage.limit)}
+              </span>
+            </div>
+            <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-neutral-100">
+              <div
+                className="h-full rounded-full bg-blue-500 transition-all"
+                style={{ width: `${usage.percent}%` }}
+              />
+            </div>
+            <div className="mt-3 space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="flex items-center gap-2 text-neutral-600">
+                  <span className="h-2 w-2 rounded-sm bg-neutral-400" />
+                  系统提示词
+                </span>
+                <span className="text-neutral-500">~{formatTokens(usage.systemTokens)}</span>
+              </div>
+              <div className="flex items-center justify-between text-xs">
+                <span className="flex items-center gap-2 text-neutral-600">
+                  <span className="h-2 w-2 rounded-sm bg-purple-500" />
+                  工具
+                </span>
+                <span className="text-neutral-500">~{formatTokens(usage.toolTokens)}</span>
+              </div>
+              <div className="flex items-center justify-between text-xs">
+                <span className="flex items-center gap-2 text-neutral-600">
+                  <span className="h-2 w-2 rounded-sm bg-blue-500" />
+                  对话消息
+                </span>
+                <span className="text-neutral-500">~{formatTokens(usage.messageTokens)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -188,10 +393,14 @@ function Composer({ store }: { store: ChatStore }) {
         </div>
       )}
       <div className="flex items-center justify-between px-2 pb-2">
-        <button type="button" title="附件（暂未支持）" className="rounded-lg p-1.5 text-neutral-400" disabled>
-          <PlusIcon className="h-4 w-4" />
-        </button>
         <div className="flex items-center gap-1">
+          <button type="button" title="附件（暂未支持）" className="rounded-lg p-1.5 text-neutral-400" disabled>
+            <PlusIcon className="h-4 w-4" />
+          </button>
+          <PermissionToolbarDropdown level={store.level} onChange={(l) => void store.setLevel(l)} />
+        </div>
+        <div className="flex items-center gap-1">
+          <ModelPicker store={store} />
           <button
             type="button"
             title="语音输入（暂未支持）"
