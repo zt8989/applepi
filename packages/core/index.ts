@@ -37,6 +37,8 @@ export {
   writeDotenvKey,
   resolveApiKey,
   resolveLlmConfig,
+  resolveSessionConfig,
+  mergedProviders,
   providerSecretName,
 } from './config.js';
 export {
@@ -57,7 +59,9 @@ export type {
 } from './security.js';
 export type {
   LlmSettings,
+  GeneralConfig,
   ResolvedLlmConfig,
+  ResolvedSessionConfig,
   ProviderConfig,
   ProviderProtocol,
   ReasoningLevel,

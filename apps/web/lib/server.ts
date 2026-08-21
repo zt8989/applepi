@@ -120,7 +120,7 @@ export async function getProviders(): Promise<{
   lastUsedModel?: { providerId: string; modelId: string };
   lastUsedLevel?: ReasoningLevel;
 }> {
-  const settings = await loadSettings().catch(() => ({ providers: {}, lastUsedModel: undefined } as any));
+  const settings = await loadSettings().catch(() => ({ providers: {} } as any));
   const user: Record<string, ProviderConfig> = {};
   for (const [id, pc] of Object.entries(settings.providers)) {
     user[id] = pc as ProviderConfig;
@@ -128,7 +128,14 @@ export async function getProviders(): Promise<{
   const availableBuiltins = Object.entries(BUILTIN_PROVIDERS)
     .filter(([id]) => !(id in user))
     .map(([id, p]) => ({ id, displayName: p.displayName }));
-  return { user, availableBuiltins, lastUsedModel: settings.lastUsedModel, lastUsedLevel: settings.lastUsedLevel };
+  // Client-facing keys stay `lastUsedModel`/`lastUsedLevel`; they now source
+  // from the `general` block (ADR-0016) instead of top-level legacy fields.
+  return {
+    user,
+    availableBuiltins,
+    lastUsedModel: settings.general?.model,
+    lastUsedLevel: settings.general?.reasoningLevel,
+  };
 }
 
 /**
@@ -168,7 +175,12 @@ export async function saveProviders(payload: {
       out[id] = { ...rest, apiKeyRef: ref };
     }
   }
-  await saveSettings({ providers: out, lastUsedModel: payload.lastUsedModel });
+  // The client sends `lastUsedModel`; store it under the `general` block
+  // (ADR-0016) as the global default model.
+  await saveSettings({
+    providers: out,
+    ...(payload.lastUsedModel ? { general: { model: payload.lastUsedModel } } : {}),
+  });
   invalidateModel();
 }
 
@@ -199,21 +211,21 @@ export async function listModels(providerId: string): Promise<ModelEntry[]> {
   return ids.map((id) => ({ id, displayName: id }));
 }
 
-/** Persist last-used model (global default, ADR-0014 Q10/Q13). */
+/** Persist the global default model (settings.json.general.model, ADR-0016). */
 export async function saveLastUsed(providerId: string, modelId: string): Promise<void> {
   const settings = await loadSettings();
-  settings.lastUsedModel = { providerId, modelId };
+  settings.general = { ...settings.general, model: { providerId, modelId } };
   await saveSettings(settings);
   invalidateModel();
 }
 
-/** Persist the global default reasoning level (settings.json.lastUsedLevel). */
+/** Persist the global default reasoning level (settings.json.general.reasoningLevel). */
 export async function saveLastUsedLevel(level: ReasoningLevel): Promise<void> {
   if (!(REASONING_LEVELS as readonly string[]).includes(level)) {
     throw new Error(`level must be one of: ${REASONING_LEVELS.join('|')}`);
   }
   const settings = await loadSettings();
-  settings.lastUsedLevel = level;
+  settings.general = { ...settings.general, reasoningLevel: level };
   await saveSettings(settings);
 }
 
@@ -236,8 +248,8 @@ export async function sessionReasoningLevel(
   if (override && (REASONING_LEVELS as readonly string[]).includes(override)) {
     return override;
   }
-  const settings = await loadSettings().catch(() => ({ lastUsedLevel: undefined } as any));
-  return (settings.lastUsedLevel as ReasoningLevel) ?? DEFAULT_REASONING_LEVEL;
+  const settings = await loadSettings().catch(() => ({ general: undefined } as any));
+  return (settings.general?.reasoningLevel as ReasoningLevel) ?? DEFAULT_REASONING_LEVEL;
 }
 
 /** Whether the "open config file" action is available on this platform (Q4/Q9). */

@@ -4,15 +4,23 @@ import path from 'node:path';
 import dotenv from 'dotenv';
 
 /**
- * LLM configuration — multi-provider registry (ADR-0014, supersedes ADR-0004's
- * single-provider shape). Two files under ~/.applepi/:
- *  - settings.json — the only source of LLM config: `{ providers, lastUsedModel? }`
+ * LLM configuration — multi-provider registry (ADR-0014 extended by ADR-0016).
+ * Two files under ~/.applepi/:
+ *  - settings.json — the only source of LLM config: `{ providers, general? }`
  *  - .env          — secret file holding real API key values (one per provider)
+ *
+ * `general` (ADR-0016) holds the global default slots for the session-overridable
+ * keys (model / reasoningLevel / permissionLevel); the cascade is
+ * `会话覆盖 ?? general ?? builtin`. The old top-level `lastUsedModel` /
+ * `lastUsedLevel` fields are gone — no compatible read (ADR-0016).
  *
  * A provider's `apiKeyRef` is a *reference* (a name into .env); the value
  * itself is used when the lookup misses. The legacy `provider` string is now a
  * display/grouping label only — the SDK factory is selected by `protocol`.
  */
+
+import type { PermissionLevel } from './security.js';
+import { PERMISSION_LEVELS, DEFAULT_PERMISSION_LEVEL } from './security.js';
 
 export type ProviderProtocol =
   | 'openai-completions'
@@ -64,12 +72,24 @@ export interface ProviderConfig {
   builtin?: boolean;
 }
 
+/**
+ * Global default slots for the session-overridable keys (ADR-0016). These are
+ * the only place a global default lives; each is overridable per-session via
+ * `session.config`, and the model's builtin default tier is computed at read.
+ */
+export interface GeneralConfig {
+  /** Global default model (providerId + modelId). */
+  model?: { providerId: string; modelId: string };
+  /** Global default reasoning level; session override ?? this ?? medium. */
+  reasoningLevel?: ReasoningLevel;
+  /** Global default permission level; session override ?? this ?? workspace. */
+  permissionLevel?: PermissionLevel;
+}
+
 export interface LlmSettings {
   providers: Record<string, ProviderConfig>;
-  /** Global single record of the last-used model; pre-selected in the selector. */
-  lastUsedModel?: { providerId: string; modelId: string };
-  /** Global default reasoning level; per-session `reasoning/set` overrides it. */
-  lastUsedLevel?: ReasoningLevel;
+  /** Global default slots (ADR-0016); set via 设置-通用设置, not by session actions. */
+  general?: GeneralConfig;
 }
 
 export interface ResolvedLlmConfig {
@@ -167,9 +187,11 @@ function settingsFile(baseDir: string = defaultBaseDir()): string {
 }
 
 /**
- * Read settings.json. Supports the multi-provider registry only (ADR-0014):
- * `{ providers, lastUsedModel? }`. Missing file → throw (fail fast);
- * malformed JSON → throw. (No legacy flat-shape migration in code — see ADR-0014.)
+ * Read settings.json. Supports the multi-provider registry + `general` block
+ * (ADR-0014/0016): `{ providers, general? }`. Missing file → throw (fail fast);
+ * malformed JSON → throw. The old top-level `lastUsedModel`/`lastUsedLevel` are
+ * ignored (no compatible read, ADR-0016). (No legacy flat-shape migration in
+ * code — see ADR-0014.)
  */
 export async function loadSettings(baseDir: string = defaultBaseDir()): Promise<LlmSettings> {
   let raw: string;
@@ -180,8 +202,8 @@ export async function loadSettings(baseDir: string = defaultBaseDir()): Promise<
       throw new Error(
         `~/.applepi/settings.json not found (looked at ${settingsFile(baseDir)}). ` +
           `Create it with a provider registry, e.g. ` +
-          `{ "providers": { "openai": { "displayName": "OpenAI", "protocol": "openai-completions", "apiKeyRef": "PROVIDER_OPENAI_API_KEY" } }, "lastUsedModel": { "providerId": "openai", "modelId": "gpt-4o-mini" } }; ` +
-          `real keys go in ~/.applepi/.env (ADR-0004/0014).`,
+          `{ "providers": { "openai": { "displayName": "OpenAI", "protocol": "openai-completions", "apiKeyRef": "PROVIDER_OPENAI_API_KEY" } }, "general": { "model": { "providerId": "openai", "modelId": "gpt-4o-mini" } } }; ` +
+          `real keys go in ~/.applepi/.env (ADR-0004/0014/0016).`,
       );
     }
     throw e;
@@ -194,7 +216,7 @@ export async function loadSettings(baseDir: string = defaultBaseDir()): Promise<
   }
   if (!data || typeof data !== 'object' || typeof data.providers !== 'object' || data.providers === null) {
     throw new Error(
-      `~/.applepi/settings.json must be a provider registry: { "providers": {...}, "lastUsedModel"?: {...} }`,
+      `~/.applepi/settings.json must be a provider registry: { "providers": {...}, "general"?: {...} }`,
     );
   }
   const providers: Record<string, ProviderConfig> = {};
@@ -237,15 +259,34 @@ export async function loadSettings(baseDir: string = defaultBaseDir()): Promise<
       builtin: preset ? true : pc.builtin === true,
     };
   }
-  const lastUsedModel =
-    data.lastUsedModel && typeof data.lastUsedModel.providerId === 'string' && typeof data.lastUsedModel.modelId === 'string'
-      ? { providerId: data.lastUsedModel.providerId, modelId: data.lastUsedModel.modelId }
-      : undefined;
-  const lastUsedLevel =
-    typeof data.lastUsedLevel === 'string' && (REASONING_LEVELS as readonly string[]).includes(data.lastUsedLevel)
-      ? (data.lastUsedLevel as ReasoningLevel)
-      : undefined;
-  return { providers, lastUsedModel, ...(lastUsedLevel !== undefined ? { lastUsedLevel } : {}) };
+  // `general` block (ADR-0016): global default slots for model/reasoningLevel/
+  // permissionLevel. Values are validated; invalid/absent → that slot omitted
+  // (falls through to the builtin default at cascade time).
+  let general: GeneralConfig | undefined;
+  if (data.general && typeof data.general === 'object') {
+    const g = data.general;
+    const model =
+      g.model && typeof g.model.providerId === 'string' && typeof g.model.modelId === 'string'
+        ? { providerId: g.model.providerId, modelId: g.model.modelId }
+        : undefined;
+    const reasoningLevel =
+      typeof g.reasoningLevel === 'string' && (REASONING_LEVELS as readonly string[]).includes(g.reasoningLevel)
+        ? (g.reasoningLevel as ReasoningLevel)
+        : undefined;
+    const permissionLevel =
+      typeof g.permissionLevel === 'string' &&
+      (PERMISSION_LEVELS as readonly string[]).includes(g.permissionLevel)
+        ? (g.permissionLevel as PermissionLevel)
+        : undefined;
+    if (model || reasoningLevel || permissionLevel) {
+      general = {
+        ...(model ? { model } : {}),
+        ...(reasoningLevel !== undefined ? { reasoningLevel } : {}),
+        ...(permissionLevel !== undefined ? { permissionLevel } : {}),
+      };
+    }
+  }
+  return { providers, ...(general ? { general } : {}) };
 }
 
 /** Write settings.json (atomic-ish: full rewrite). */
@@ -297,47 +338,104 @@ export function providerSecretName(providerId: string): string {
 }
 
 /**
+ * Usable providers = user providers ∪ builtin presets (user entries win on name
+ * clash). Builtin presets are code-defined and need not appear in settings.json
+ * (ADR-0014): a default/general model may point at a builtin alone.
+ *
+ * A pure builtin preset (not listed in settings.json) has no `models` catalog
+ * of its own — loadSettings fills it from DEFAULT_CATALOG only when the entry
+ * is listed. Here we backfill the default catalog for any provider that lacks
+ * `models`, so the model cascade's "first usable provider's first model" tier
+ * (ADR-0016) can resolve against a builtin-only registry too.
+ */
+export function mergedProviders(settings: Pick<LlmSettings, 'providers'>): Record<string, ProviderConfig> {
+  const merged: Record<string, ProviderConfig> = { ...BUILTIN_PROVIDERS, ...settings.providers };
+  for (const id of Object.keys(merged)) {
+    const pc = merged[id];
+    if (!pc.models && DEFAULT_CATALOG[id]) {
+      merged[id] = { ...pc, models: DEFAULT_CATALOG[id] };
+    }
+  }
+  return merged;
+}
+
+/** Effective per-overridable-key config (ADR-0016): `覆盖 ?? general ?? builtin`. */
+export interface ResolvedSessionConfig {
+  /** Resolved model (providerId + modelId), computed at read. */
+  model: { providerId: string; modelId: string };
+  reasoningLevel: ReasoningLevel;
+  permissionLevel: PermissionLevel;
+}
+
+/**
+ * Model's default tier is **computed at read, never persisted** (ADR-0016):
+ * session override → general.model → the first usable provider's first model.
+ * The last tier re-derives automatically when the default's provider is deleted
+ * or its catalog empties — no write-back repair path.
+ */
+function resolveModel(
+  override: { providerId: string; modelId: string } | undefined,
+  generalModel: { providerId: string; modelId: string } | undefined,
+  providers: Record<string, ProviderConfig>,
+): { providerId: string; modelId: string } {
+  const pick = (m: { providerId: string; modelId: string } | undefined) =>
+    m && m.providerId in providers ? m : undefined;
+  const fromOverride = pick(override);
+  if (fromOverride) return fromOverride;
+  const fromGeneral = pick(generalModel);
+  if (fromGeneral) return fromGeneral;
+  for (const id of Object.keys(providers)) {
+    const firstModel = providers[id].models?.[0]?.id;
+    if (firstModel) return { providerId: id, modelId: firstModel };
+  }
+  throw new Error(
+    'no usable model: configure "general.model" or a provider with a model catalog in ~/.applepi/settings.json',
+  );
+}
+
+/**
+ * The unified cascade (ADR-0016): `session.config override ?? general default
+ * ?? builtin default`, as a pure function over config inputs (no I/O). Applies
+ * to every session-overridable key. `model` resolves via cross-provider
+ * fallback (see resolveModel); reasoning defaults to `medium`, permission to
+ * `workspace`.
+ */
+export function resolveSessionConfig(
+  overrides: { model?: { providerId: string; modelId: string }; reasoningLevel?: ReasoningLevel; permissionLevel?: PermissionLevel } | undefined,
+  general: GeneralConfig | undefined,
+  providers: Record<string, ProviderConfig>,
+): ResolvedSessionConfig {
+  const reasoningLevel = overrides?.reasoningLevel ?? general?.reasoningLevel ?? DEFAULT_REASONING_LEVEL;
+  const permissionLevel = overrides?.permissionLevel ?? general?.permissionLevel ?? DEFAULT_PERMISSION_LEVEL;
+  const model = resolveModel(overrides?.model, general?.model, providers);
+  return { model, reasoningLevel, permissionLevel };
+}
+
+/**
  * One-shot: settings + secrets + resolution + validation (fail fast).
- * Resolves the *last-used* provider+model (no global `active`, ADR-0014).
+ * Resolves the *general default* provider+model (no global `active`, ADR-0014;
+ * session overrides applied upstream by the caller via resolveSessionConfig).
  */
 export async function resolveLlmConfig(baseDir: string = defaultBaseDir()): Promise<ResolvedLlmConfig> {
   const settings = await loadSettings(baseDir);
   const secrets = await loadDotenv(baseDir);
+  const providers = mergedProviders(settings);
 
-  // Usable providers = user providers ∪ builtin presets (user entries win on
-  // name clash). Builtin presets are code-defined and need not appear in
-  // settings.json (ADR-0014): a lastUsedModel may point at a builtin alone.
-  const merged: Record<string, ProviderConfig> = { ...BUILTIN_PROVIDERS, ...settings.providers };
-
-  const target = settings.lastUsedModel;
-  let providerId: string | undefined = target?.providerId;
-  let modelId: string | undefined = target?.modelId;
-
-  if (!providerId || !(providerId in merged)) {
-    // fall back to the first usable provider
-    providerId = Object.keys(merged)[0];
-    modelId = undefined;
-  }
-  if (!providerId) {
-    throw new Error('no providers configured in ~/.applepi/settings.json');
-  }
-  const pc = merged[providerId];
-  if (!modelId) {
-    modelId = pc.models?.[0]?.id ?? '';
-  }
+  const resolved = resolveSessionConfig(undefined, settings.general, providers);
+  const pc = providers[resolved.model.providerId];
 
   const apiKey = resolveApiKey(pc.apiKeyRef, secrets);
   if (!apiKey) {
     throw new Error(
-      `no usable apiKey for provider "${providerId}": add "${pc.apiKeyRef}=<your key>" to ~/.applepi/.env`,
+      `no usable apiKey for provider "${resolved.model.providerId}": add "${pc.apiKeyRef}=<your key>" to ~/.applepi/.env`,
     );
   }
   return {
     provider: pc.displayName,
     protocol: pc.protocol,
-    model: modelId,
+    model: resolved.model.modelId,
     apiKey,
     baseURL: pc.baseURL,
-    reasoningLevel: settings.lastUsedLevel ?? DEFAULT_REASONING_LEVEL,
+    reasoningLevel: resolved.reasoningLevel,
   };
 }

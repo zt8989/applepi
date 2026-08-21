@@ -1,8 +1,10 @@
 // Plain-node unit test for the core LLM config primitives (ADR-0014 multi-provider
-// registry). No API key. Covers: loadSettings (missing -> throw / parse / invalid
-// JSON / protocol validation), loadDotenv (parse rules), resolveApiKey
-// (lookup-by-name), resolveLlmConfig (placeholder+secret, direct key, fail-fast,
-// lastUsedModel resolution, baseURL pass-through). All runs use a temp baseDir.
+// registry + ADR-0016 general/cascade). No API key. Covers: loadSettings (missing
+// -> throw / parse / invalid JSON / protocol validation / general block),
+// loadDotenv (parse rules), resolveApiKey (lookup-by-name), resolveLlmConfig
+// (placeholder+secret, direct key, fail-fast, model/general resolution, baseURL
+// pass-through), resolveSessionConfig (override ?? general ?? builtin cascade,
+// model dynamic default). All runs use a temp baseDir.
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -12,6 +14,9 @@ import {
   loadDotenv,
   resolveApiKey,
   resolveLlmConfig,
+  resolveSessionConfig,
+  mergedProviders,
+  BUILTIN_PROVIDERS,
 } from '../dist/index.js';
 
 let passed = 0;
@@ -24,9 +29,14 @@ const base = await fs.mkdtemp(path.join(os.tmpdir(), 'applepi-config-test-'));
 const settingsFile = path.join(base, 'settings.json');
 const envFile = path.join(base, '.env');
 
-function reg(providers, lastUsedModel) {
-  return JSON.stringify({ providers, ...(lastUsedModel ? { lastUsedModel } : {}) });
+/** Registry json: providers + optional general block (ADR-0016). */
+function reg(providers, general) {
+  return JSON.stringify({ providers, ...(general ? { general } : {}) });
 }
+
+/** A minimal non-empty merged provider map for cascade tests (builtin deepseek). */
+const merged = mergedProviders({ providers: {} });
+
 
 // 1. loadSettings: missing file -> throws (fail fast).
 {
@@ -125,13 +135,13 @@ function reg(providers, lastUsedModel) {
   ok('resolveApiKey: hit uses secret, miss uses the ref value');
 }
 
-// 9. resolveLlmConfig: placeholder + .env secret -> real key, lastUsedModel drives model.
+// 9. resolveLlmConfig: placeholder + .env secret -> real key, general.model drives model.
 {
   await fs.writeFile(
     settingsFile,
     reg(
       { openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'PROVIDER_OPENAI_API_KEY' } },
-      { providerId: 'openai', modelId: 'gpt-4o-mini' },
+      { model: { providerId: 'openai', modelId: 'gpt-4o-mini' } },
     ),
   );
   await fs.writeFile(envFile, 'PROVIDER_OPENAI_API_KEY=sk-from-env');
@@ -140,7 +150,7 @@ function reg(providers, lastUsedModel) {
   assert.equal(cfg.protocol, 'openai-completions');
   assert.equal(cfg.model, 'gpt-4o-mini');
   assert.equal(cfg.apiKey, 'sk-from-env');
-  ok('resolveLlmConfig: lastUsedModel model + placeholder resolves through .env');
+  ok('resolveLlmConfig: general.model model + placeholder resolves through .env');
 }
 
 // 10. resolveLlmConfig: direct real key in settings (no .env hit) -> key itself.
@@ -149,7 +159,7 @@ function reg(providers, lastUsedModel) {
   await fs.writeFile(
     settingsFile,
     reg({ openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'sk-direct-in-settings' } },
-      { providerId: 'openai', modelId: 'gpt-4o-mini' }),
+      { model: { providerId: 'openai', modelId: 'gpt-4o-mini' } }),
   );
   const cfg = await resolveLlmConfig(base);
   assert.equal(cfg.apiKey, 'sk-direct-in-settings');
@@ -165,7 +175,7 @@ function reg(providers, lastUsedModel) {
   await fs.writeFile(
     settingsFile,
     reg({ openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'PROVIDER_OPENAI_API_KEY' } },
-      { providerId: 'openai', modelId: 'gpt-4o-mini' }),
+      { model: { providerId: 'openai', modelId: 'gpt-4o-mini' } }),
   );
   const cfg = await resolveLlmConfig(base);
   assert.equal(cfg.apiKey, 'PROVIDER_OPENAI_API_KEY', 'missing .env key -> ref passed through to SDK');
@@ -179,7 +189,7 @@ function reg(providers, lastUsedModel) {
     settingsFile,
     reg(
       { openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'PROVIDER_OPENAI_API_KEY', baseURL: 'https://gateway.example.com/v1' } },
-      { providerId: 'openai', modelId: 'gpt-4o-mini' },
+      { model: { providerId: 'openai', modelId: 'gpt-4o-mini' } },
     ),
   );
   const cfg = await resolveLlmConfig(base);
@@ -187,7 +197,7 @@ function reg(providers, lastUsedModel) {
   ok('baseURL: parsed from settings and passed through');
 }
 
-// 13. resolveLlmConfig: lastUsedModel pointing at missing provider -> falls back to
+// 13. resolveLlmConfig: general.model pointing at missing provider -> falls back to
 //     the first *usable* provider (user ∪ builtin; builtin presets win on spread order).
 {
   await fs.writeFile(envFile, 'PROVIDER_OPENAI_API_KEY=sk-fb');
@@ -195,42 +205,56 @@ function reg(providers, lastUsedModel) {
     settingsFile,
     reg(
       { openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'PROVIDER_OPENAI_API_KEY' } },
-      { providerId: 'ghost', modelId: 'nope' },
+      { model: { providerId: 'ghost', modelId: 'nope' } },
     ),
   );
   const cfg = await resolveLlmConfig(base);
   // merged = { ...BUILTIN_PROVIDERS, ...user } -> deepseek is first.
   assert.equal(cfg.provider, 'DeepSeek');
-  ok('resolveLlmConfig: dangling lastUsedModel -> first usable provider fallback (builtin included)');
+  ok('resolveLlmConfig: dangling general.model -> first usable provider fallback (builtin included)');
 }
 
-// 14. loadSettings: parses lastUsedLevel; invalid value dropped; absent -> undefined.
+// 14. loadSettings: parses the general block; invalid model/reasoningLevel/permissionLevel
+//     dropped; absent -> undefined. Top-level lastUsedModel/lastUsedLevel are ignored
+//     (no compatible read, ADR-0016).
 {
   await fs.writeFile(
     settingsFile,
     JSON.stringify({
       providers: { openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'PROVIDER_OPENAI_API_KEY' } },
-      lastUsedLevel: 'high',
+      general: { model: { providerId: 'openai', modelId: 'gpt-4o-mini' }, reasoningLevel: 'high', permissionLevel: 'readonly' },
     }),
   );
   const s = await loadSettings(base);
-  assert.equal(s.lastUsedLevel, 'high');
+  assert.deepEqual(s.general.model, { providerId: 'openai', modelId: 'gpt-4o-mini' });
+  assert.equal(s.general.reasoningLevel, 'high');
+  assert.equal(s.general.permissionLevel, 'readonly');
+  // invalid level values dropped -> nothing valid to store -> general absent
   await fs.writeFile(
     settingsFile,
     JSON.stringify({
       providers: { openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'PROVIDER_OPENAI_API_KEY' } },
-      lastUsedLevel: 'extreme',
+      general: { reasoningLevel: 'extreme', permissionLevel: 'enhanced' },
     }),
   );
   const s2 = await loadSettings(base);
-  assert.equal(s2.lastUsedLevel, undefined);
-  await fs.writeFile(settingsFile, reg({}));
+  assert.equal(s2.general, undefined, 'all-invalid general block -> general omitted');
+  // legacy top-level lastUsed* ignored (no compat read)
+  await fs.writeFile(
+    settingsFile,
+    JSON.stringify({
+      providers: { openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'PROVIDER_OPENAI_API_KEY' } },
+      lastUsedModel: { providerId: 'openai', modelId: 'gpt-4o' },
+      lastUsedLevel: 'high',
+    }),
+  );
   const s3 = await loadSettings(base);
-  assert.equal(s3.lastUsedLevel, undefined);
-  ok('loadSettings: parses lastUsedLevel, drops invalid/absent');
+  assert.equal(s3.general, undefined, 'legacy lastUsed* fields ignored, no general');
+  assert.ok(!('lastUsedModel' in s3) && !('lastUsedLevel' in s3), 'lastUsed* not produced');
+  ok('loadSettings: parses general (validated), drops invalid, ignores legacy lastUsed*');
 }
 
-// 15. resolveLlmConfig: reasoningLevel defaults to medium when absent.
+// 15. resolveLlmConfig: reasoningLevel defaults to medium; general.reasoningLevel honored.
 {
   await fs.writeFile(settingsFile, reg({}));
   await fs.writeFile(envFile, 'PROVIDER_DEEPSEEK_API_KEY=sk-fb');
@@ -240,12 +264,70 @@ function reg(providers, lastUsedModel) {
     settingsFile,
     JSON.stringify({
       providers: { openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'PROVIDER_OPENAI_API_KEY' } },
-      lastUsedLevel: 'low',
+      general: { reasoningLevel: 'low' },
     }),
   );
   const cfg2 = await resolveLlmConfig(base);
   assert.equal(cfg2.reasoningLevel, 'low');
-  ok('resolveLlmConfig: reasoningLevel defaults to medium, honors lastUsedLevel');
+  ok('resolveLlmConfig: reasoningLevel defaults to medium, honors general.reasoningLevel');
+}
+
+// 16. resolveSessionConfig: cascade for reasoning/permission — session override ?? general ?? builtin.
+{
+  // no override, no general -> builtin defaults
+  let r = resolveSessionConfig(undefined, undefined, merged);
+  assert.equal(r.reasoningLevel, 'medium');
+  assert.equal(r.permissionLevel, 'workspace');
+  // general only
+  r = resolveSessionConfig(undefined, { reasoningLevel: 'low', permissionLevel: 'readonly' }, merged);
+  assert.equal(r.reasoningLevel, 'low');
+  assert.equal(r.permissionLevel, 'readonly');
+  // session override beats general
+  r = resolveSessionConfig(
+    { reasoningLevel: 'high', permissionLevel: 'fullaccess' },
+    { reasoningLevel: 'low', permissionLevel: 'readonly' },
+    merged,
+  );
+  assert.equal(r.reasoningLevel, 'high');
+  assert.equal(r.permissionLevel, 'fullaccess');
+  // empty general slot falls through to builtin
+  r = resolveSessionConfig(undefined, {}, merged);
+  assert.equal(r.reasoningLevel, 'medium');
+  ok('resolveSessionConfig: override ?? general ?? builtin cascade for reasoning/permission');
+}
+
+// 17. resolveSessionConfig: model — override ?? general ?? dynamic default (first usable provider's first model).
+{
+  // no override/general -> dynamic default = deepseek's first catalog model
+  let r = resolveSessionConfig(undefined, undefined, merged);
+  assert.equal(r.model.providerId, 'deepseek');
+  assert.equal(r.model.modelId, 'deepseek-chat');
+  // general wins over dynamic
+  r = resolveSessionConfig(undefined, { model: { providerId: 'openai', modelId: 'gpt-4o-mini' } }, merged);
+  assert.equal(r.model.modelId, 'gpt-4o-mini');
+  // override wins over general
+  r = resolveSessionConfig(
+    { model: { providerId: 'anthropic', modelId: 'claude-opus' } },
+    { model: { providerId: 'openai', modelId: 'gpt-4o-mini' } },
+    merged,
+  );
+  assert.equal(r.model.providerId, 'anthropic');
+  assert.equal(r.model.modelId, 'claude-opus');
+  ok('resolveSessionConfig: model override ?? general ?? dynamic default');
+}
+
+// 18. resolveSessionConfig: dangling override/general model (provider deleted) -> re-derives
+//     to the first usable provider's first model (read-time, no repair path).
+{
+  const r = resolveSessionConfig(
+    { model: { providerId: 'ghost', modelId: 'nope' } },
+    { model: { providerId: 'vanished', modelId: 'gone' } },
+    merged,
+  );
+  // neither ghost nor vanished exists -> re-derive to deepseek-chat
+  assert.equal(r.model.providerId, 'deepseek');
+  assert.equal(r.model.modelId, 'deepseek-chat');
+  ok('resolveSessionConfig: dangling model override+general -> dynamic re-derive (no repair write-back)');
 }
 
 await fs.rm(base, { recursive: true, force: true });
