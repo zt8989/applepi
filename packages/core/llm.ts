@@ -1,25 +1,20 @@
-import { generateText, streamText } from 'ai';
+import { streamText } from 'ai';
 import type { ProviderProtocol, ReasoningLevel } from './config.js';
 import type { Ctx, SessionContext, ToolDef, ToolSpec } from './types.js';
 
 /**
  * The LLM-interaction deep module (ADR-0015): the single place that owns the
- * model-facing surface — the tool catalog and one LLM response segment — while
- * hiding the concrete AI SDK. `loop` drives the multi-turn orchestration; this
- * module produces ONE response (non-streaming `generate` or streaming `stream`)
- * from `{ model, messages, tools }` and the reasoning mapping.
+ * model-facing surface — the tool catalog and one **streamed** LLM response
+ * segment — while hiding the concrete AI SDK. `stream-loop` drives the
+ * multi-turn orchestration; this module produces ONE streaming response
+ * (`stream`) from `{ model, messages, tools }` and the reasoning mapping.
  *
  * It is constructed by the Harness shell with the session and the tool
  * registry. Per ADR-0015 it consumes a ready `{ prompt, tools }` surface and
- * hosts no capability-injection mechanism (no onion stacks).
+ * hosts no capability-injection mechanism (no onion stacks). The non-streaming
+ * `generate` path was removed with the CLI (`runLoop`) — the web is the only
+ * interface and uses the streaming loop.
  */
-
-/** Shape of the LLM call the loop makes each turn. */
-export type LlmCall = (args: {
-  model: any;
-  messages: any[];
-  tools: any;
-}) => Promise<any>;
 
 /** The model-facing catalog built from registered tools (no execute). */
 export type ToolCatalog = Record<string, ToolDef>;
@@ -55,14 +50,6 @@ export function reasoningProviderOptions(
   return undefined;
 }
 
-export interface LlmGenerateOpts {
-  model: any;
-  messages: any[];
-  /** Injectable LLM call. Defaults to Vercel AI SDK `generateText`. Swapping it
-   *  lets tests drive the loop without a real provider/API key. */
-  llmCall?: LlmCall;
-}
-
 export interface LlmStreamOpts {
   model: any;
   messages: any[];
@@ -79,11 +66,6 @@ export interface Llm {
   /** Build the model-facing tool catalog from the current tool registry. */
   buildToolDefs(): ToolCatalog;
   /**
-   * Run ONE non-streaming LLM response. Returns the raw SDK result plus the
-   * llm context (for trace orchestration).
-   */
-  generate(opts: LlmGenerateOpts): Promise<{ result: any; ctx: Ctx }>;
-  /**
    * Run ONE streaming LLM response. Returns the StreamTextResult plus the llm
    * context and the applied reasoning options.
    */
@@ -98,20 +80,12 @@ export interface LlmDeps {
 }
 
 /**
- * Build the LLM module. The Harness shell constructs one and owns it; `loop`
- * and `stream-loop` consume its interface and never touch the AI SDK.
+ * Build the LLM module. The Harness shell constructs one and owns it;
+ * `stream-loop` consumes its interface and never touches the AI SDK.
  */
 export function createLlm(deps: LlmDeps): Llm {
   return {
     buildToolDefs: () => buildToolDefs(deps.getTools()),
-
-    async generate({ model, messages, llmCall }) {
-      const call: LlmCall = llmCall ?? ((a: any) => generateText(a));
-      const ctx: Ctx = { session: deps.session, state: {}, messages };
-      const tools = buildToolDefs(deps.getTools());
-      const result = await call({ model, messages: ctx.messages as any[], tools: tools as any });
-      return { result, ctx };
-    },
 
     async stream({ model, messages, messageId, protocol, reasoningLevel, streamTextCall }) {
       const llm = streamTextCall ?? streamText;

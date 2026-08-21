@@ -1,12 +1,9 @@
 export { Harness } from './harness.js';
-export { runLoop } from './loop.js';
 export {
   createLlm,
   buildToolDefs,
   reasoningProviderOptions,
   type Llm,
-  type LlmCall,
-  type LlmGenerateOpts,
   type LlmStreamOpts,
   type ToolCatalog,
 } from './llm.js';

@@ -20,8 +20,8 @@ import type { ProviderProtocol, ReasoningLevel } from './config.js';
  *     model) and streams the tool-result part.
  *
  * Read-classified (`auto`) tools execute inline and their results stream in
- * the same segment. The CLI's `runLoop` (generateText, interactive levels) is
- * untouched.
+ * the same segment. (The CLI's non-streaming `runLoop` was removed with the
+ * CLI — this streaming loop is the only agent loop.)
  */
 
 export interface PendingApproval {

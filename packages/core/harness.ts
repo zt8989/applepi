@@ -1,4 +1,3 @@
-import { runLoop } from './loop.js';
 import { createLlm, type Llm } from './llm.js';
 import { SessionStore, slugWorkspace, type SessionMessage } from './session.js';
 import {
@@ -7,12 +6,6 @@ import {
   type SecurityPolicy,
 } from './security.js';
 import type { Ctx, SessionContext, SlashHandler, ToolSpec } from './types.js';
-import type { LlmCall } from './llm.js';
-
-export interface RunOpts {
-  maxTurns?: number;
-  llmCall?: LlmCall;
-}
 
 export interface HarnessOptions {
   /** Workspace slug override (defaults to slugWorkspace(process.cwd())). */
@@ -26,13 +19,13 @@ export interface HarnessOptions {
 }
 
 /**
- * The Harness shell (ADR-0015): wires the core deep modules — `llm`, `loop`,
- * `session`, `config`, `security`, `trace` — into a runnable agent and owns
- * the shared in-memory state. It hosts NO capability-injection mechanism:
- * tools are registered directly (`registerTool`) by whoever assembled the
- * active bundle/plugin set, the flat system prompt is assembled by the app
- * (bundle fragments → app interface fragments → plugin tail) and handed to
- * `run`/`runLoop`, and tool execution goes straight to `executeTool` (the
+ * The Harness shell (ADR-0015): wires the core deep modules — `llm`,
+ * `stream-loop`, `session`, `config`, `security`, `trace` — into a runnable
+ * agent and owns the shared in-memory state. It hosts NO capability-injection
+ * mechanism: tools are registered directly (`registerTool`) by whoever
+ * assembled the active bundle/plugin set, the flat system prompt is assembled
+ * by the app (bundle fragments → app interface fragments → plugin tail) and
+ * handed to `llm`, and tool execution goes straight to `executeTool` (the
  * security seam). Slash commands are plain registered handlers (no `api`).
  */
 export class Harness {
@@ -164,36 +157,5 @@ export class Harness {
     } catch (e: any) {
       ctx.toolResult = `ERROR: ${e?.message ?? e}`;
     }
-  }
-
-  // ---- run --------------------------------------------------------------------
-
-  /**
-   * Run a full session turn. `input` is the user turn (persisted); `prompt` is
-   * the app-assembled flat system prompt (persisted by the app at session
-   * start / `/reload`, not on ordinary turns). The tool seam (ADR-0015) runs
-   * inside `runLoop` via `executeTool`.
-   */
-  async run(input: string, prompt: string, model: any, opts: RunOpts = {}): Promise<any[]> {
-    const messages: any[] = [{ role: 'system', content: prompt }];
-    messages.push(...this.session.history);
-
-    const userMsg = { role: 'user', content: input };
-    messages.push(userMsg);
-    await this.sessionStore?.appendMessage('user', input);
-
-    await runLoop(this, messages, {
-      model,
-      maxTurns: opts.maxTurns,
-      llmCall: opts.llmCall,
-      onMessage: this.sessionStore
-        ? (role, content) => this.sessionStore!.appendMessage(role, content)
-        : undefined,
-    });
-
-    // Persist only conversation turns; the system prompt is re-assembled by
-    // the app on each turn.
-    this.session.history = messages.filter((m) => m.role !== 'system');
-    return messages;
   }
 }

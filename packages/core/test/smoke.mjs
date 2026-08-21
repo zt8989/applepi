@@ -1,7 +1,8 @@
 // Smoke test for @applepi/core (ADR-0015) — no API key required.
 // Validates the Harness shell after the split core: direct tool registration,
-// the tool seam (executeTool: known/unknown/throwing), slash commands (the
-// core-owned /level), and the CLI run() path with a fake LLM.
+// the tool seam (executeTool: known/unknown/throwing), and slash commands (the
+// core-owned /level). The loop mechanics now live in `stream-loop.mjs` (the
+// web-only streaming loop); session persistence lives in `session.mjs`.
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -9,7 +10,6 @@ import path from 'node:path';
 import {
   Harness,
   SessionStore,
-  runLoop,
   getPermissionLevel,
 } from '../dist/index.js';
 
@@ -67,58 +67,7 @@ const stubTool = {
   ok('tool seam: known/unknown/throwing');
 }
 
-// 3. runLoop: the fake LLM returns a tool call, the seam executes it, the
-//    result feeds back to the model, and the loop advances to the next turn.
-{
-  const h = new Harness();
-  h.registerTool(stubTool);
-  let turn = 0;
-  let done = false;
-  const fakeLLM = async () => {
-    turn++;
-    if (turn === 1) {
-      return { toolCalls: [{ toolCallId: 'c1', toolName: 'stub', args: {} }] };
-    }
-    done = true;
-    return { text: 'done' };
-  };
-  const messages = [{ role: 'user', content: 'run' }];
-  await runLoop(h, messages, { model: null, llmCall: fakeLLM, maxTurns: 4 });
-  const toolMsg = messages.find((m) => m.role === 'tool');
-  assert.ok(toolMsg, 'tool result message present');
-  assert.equal(toolMsg.content[0].result, 'stub-ok');
-  assert.ok(done, 'loop advanced to the next turn (did not crash)');
-  ok('runLoop: tool seam executes + result fed back + next turn');
-}
-
-// 4. run(): persists the user turn, threads history, keeps system out of history.
-{
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'applepi-smoke-'));
-  try {
-    const h = new Harness();
-    h.registerTool(stubTool);
-    const store = new SessionStore({ baseDir: dir });
-    await store.create();
-    h.attachSession(store);
-    const fakeLLM = async () => ({ text: 'hello back' });
-    const messages = await h.run('hi', 'SYSTEM_PROMPT', null, { llmCall: fakeLLM });
-    assert.equal(messages[0].role, 'system');
-    assert.equal(messages[0].content, 'SYSTEM_PROMPT');
-    assert.ok(messages.some((m) => m.role === 'user' && m.content === 'hi'));
-    // System prompt is NOT part of the persisted conversation history.
-    assert.ok(!h.session.history.some((m) => m.role === 'system'));
-    // Persisted lines: user + assistant (system not persisted by run()).
-    const loaded = await store.load();
-    const roles = loaded.messages.map((m) => m.role);
-    assert.ok(roles.includes('user') && roles.includes('assistant'));
-    assert.equal(roles.includes('system'), false);
-    ok('run(): persists user turn, excludes system from history');
-  } finally {
-    await fs.rm(dir, { recursive: true, force: true });
-  }
-}
-
-// 5. /level (core-registered): validates, writes level/set + scratch, restores.
+// 3. /level (core-registered): validates, writes level/set + scratch, restores.
 {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'applepi-smoke-'));
   try {
@@ -144,7 +93,7 @@ const stubTool = {
   }
 }
 
-// 6. unregisterTool.
+// 4. unregisterTool.
 {
   const h = new Harness();
   h.registerTool(stubTool);

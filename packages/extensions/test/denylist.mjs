@@ -1,10 +1,10 @@
 // Denylist tests for @applepi/extensions (ADR-0009 Q9=a): the denylist floor
 // moved INTO the bash tool — no middleware, no registration convention. These
-// drive the tool through the seam (`harness.executeTool`) and through the
-// loop, asserting the floor fires at every level.
+// drive the tool through the seam (`harness.executeTool`), asserting the floor
+// fires at every level and that a blocked command never executes.
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { Harness, runLoop } from '@applepi/core';
+import { Harness } from '@applepi/core';
 import { bashTool } from '../dist/index.js';
 
 let passed = 0;
@@ -19,7 +19,7 @@ function boot() {
   return harness;
 }
 
-/** Drive one bash call through the tool seam (as runLoop does). */
+/** Drive one bash call through the tool seam (as `stream-loop` does). */
 async function callBash(harness, command) {
   const ctx = { session: harness.session, state: {}, toolName: 'bash', toolArgs: { command } };
   await harness.executeTool(ctx);
@@ -34,29 +34,18 @@ async function callBash(harness, command) {
   ok('denylist blocks `rm -rf /` at workspace');
 }
 
-// 2. Closed loop: model issues dangerous bash -> BLOCKED returned to model,
-//    command never executes (sentinel survives).
+// 2. A blocked command never executes: the denylist returns BLOCKED to the
+//    caller and the targeted sentinel file survives (closed-loop, seam-level).
 {
   const harness = boot();
   const fs = await import('node:fs');
   const sentinel = fileURLToPath(new URL('./_deny_sentinel.txt', import.meta.url));
   fs.writeFileSync(sentinel, 'i exist');
-  let turn = 0;
-  const fakeLLM = async () => {
-    turn++;
-    if (turn === 1) {
-      return { toolCalls: [{ toolCallId: 'c1', toolName: 'bash', args: { command: `rm -rf ${sentinel}` } }] };
-    }
-    return { text: 'OK, I will not run that.' };
-  };
-  const messages = [{ role: 'user', content: 'delete the sentinel file' }];
   try {
-    await runLoop(harness, messages, { model: null, llmCall: fakeLLM, maxTurns: 4 });
-    const toolMsg = messages.find((m) => m.role === 'tool');
-    assert.ok(toolMsg, 'tool result message present');
-    assert.match(toolMsg.content[0].result, /BLOCKED/);
+    const res = await callBash(harness, `rm -rf ${sentinel}`);
+    assert.match(res, /BLOCKED/, `blocked: ${res}`);
     assert.ok(fs.existsSync(sentinel), 'command never executed (sentinel survives)');
-    ok('closed loop: denylist blocks model command, BLOCKED returned, no execution');
+    ok('closed loop: denylist blocks command, BLOCKED returned, no execution');
   } finally {
     fs.unlinkSync(sentinel);
   }
