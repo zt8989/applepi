@@ -70,10 +70,10 @@ core 不兜底——这是信任扩展边界的直接推论（P5）。
 
 - 依据：Q12=a / Q16（撤销中间件）、ADR-0009。
 - 后果：安全强度 = 每个工具的自决程度；模型没有任何改级别的工具（防自我提权），
-  级别只能由用户通过 `/level`（CLI）或权限胶囊（web）切换。强制机制（级别/ctx
-  注入/工具自决 + `/level`）在 core `security` 模块（工具执行缝）；权限**声明段**
-  在 bundle（base/standard 各自声明贴合自身工具集、按级别分档的提示词片段，
-  ADR-0015），core 不写提示词文案。
+  级别只能由用户通过权限胶囊（web）切换（core 的 `/level` 语义，原 CLI 命令已删）。
+  强制机制（级别/ctx 注入/工具自决 + `/level`）在 core `security` 模块（工具执行缝）；
+  权限**声明段**在 bundle（base/standard 各自声明贴合自身工具集、按级别分档的提示词
+  片段，ADR-0015），core 不写提示词文案。
 - 判据：不要用"挂一个特权中间件"或"放在核心/特权目录"来假装安全；安全必须
   体现在级别模型与工具自决上。
 
@@ -90,7 +90,7 @@ core 不兜底——这是信任扩展边界的直接推论（P5）。
 ## P6. UI 无关的核心（UI-Agnostic Core）
 
 **持久化、配置解析、slash 命令语义、流式 loop、工具批准、trace 埋点都是核心
-能力；CLI 与 Web 只是核心的两个接口。**
+能力；Web 是核心的（唯一）接口。**（CLI 已于 2026-08-21 删除。）
 
 - 依据：ADR-0002（SessionStore 归 core）、ADR-0004（配置解析归 core）、
   ADR-0011（流式 loop + 批准状态机归 core）、ADR-0012（Langfuse trace 埋点归 core）。
@@ -98,8 +98,8 @@ core 不兜底——这是信任扩展边界的直接推论（P5）。
   `resolveLlmConfig` / `trace`，不重写业务逻辑；批准卡片、工作区选择器、会话动作只是
   core 能力的 HTTP 适配。**core 不清算任何 UI 概念**（「活跃会话高亮」「会话树」等
   属于 web 层，不在 core）。
-- 判据：新功能若只能被 CLI 用、无法被其它界面复用，或反过来把 UI 概念塞进 core，
-  都说明放错了层。
+- 判据：新功能若无法被界面（web）复用，或反过来把 UI 概念塞进 core，都说明
+  放错了层。
 
 ## P7. 不可变审计日志（Immutable, Append-Only Audit）
 
@@ -189,16 +189,16 @@ app 选 bundle、叠加接口片段与插件，拼成 spec 交给 core `llm`。*
 - 判据：为 loop 新增「内存态」「续跑索引」等非文件状态前先三思——它破坏
   了「jsonl 是权威状态」的不变量。
 
-## P14. 可观测性归核心，双端共享（Observability in Core）
+## P14. 可观测性归核心（Observability in Core）
 
-**trace 埋点位于 core，而非每个界面各自埋；CLI 与 Web 自动获得同样的追踪。**
+**trace 埋点位于 core，而非界面各自埋；web（唯一界面）自动获得追踪。**
 
 core 的 `trace.ts` 在每轮、每次 LLM 调用、每次工具执行处打点，目标 Langfuse
 Cloud（未配置则 no-op）。界面只负责把 trace id 透传给前端展示，不负责采集。
 
 - 依据：ADR-0012（round 2 将 Langfuse 从自建改为云端、并把埋点下沉到 core）。
-- 后果：新增界面不必重新埋点；追踪维度（token usage、工具 span）由 core 统一定义。
-- 判据：在 web / agent 层写 LLM 调用埋点，说明该埋点本应归 core。
+- 后果：界面不必重新埋点；追踪维度（token usage、工具 span）由 core 统一定义。
+- 判据：在 web 层写 LLM 调用埋点，说明该埋点本应归 core。
 
 ## P15. UI 复刻要有显式产品增量（Faithful Replication, Explicit Deltas）
 

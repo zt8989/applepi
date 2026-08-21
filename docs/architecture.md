@@ -20,11 +20,11 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  apps/agent  (@applepi/agent)                               │
-│  REPL 主入口 · main.ts 选 bundle + 扁平提示词 + 插件加载器    │
-│  extensions/ 本地 *.ext.ts（插件）· scripts/ 六个检查        │
+│  apps/web  (@applepi/web)  —— 唯一界面（App）               │
+│  每 (workspace, mode) 缓存 Harness · 扁平提示词组装          │
+│  mode 列表 · 会话动作 · 批准卡片（接口层，非 bundle）         │
 └───────────────▲─────────────────────────────────────────────┘
-                │ 依赖：agent → bundle（→extensions/core）
+                │ 依赖：web → bundle（→extensions/core）
 ┌───────────────┴─────────────────────────────────────────────┐
 │  packages/bundle  (@applepi/bundle)                         │
 │  base / standard 能力包：纯声明 (env) => ({ prompt, tools }) │
@@ -37,14 +37,16 @@
                 │ 依赖：extensions → core（单向）
 ┌───────────────┴─────────────────────────────────────────────┐
 │  packages/core  (@applepi/core)  —— 深模块 + 薄 Harness 壳   │
-│  llm · loop · session · config · security · trace           │
+│  llm(stream) · loop(stream-loop) · session · config ·       │
+│  security · trace                                           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-依赖方向（ADR-0003，ADR-0015）：`@applepi/agent → @applepi/bundle → @applepi/core` 与
-`@applepi/bundle → @applepi/extensions → @applepi/core`。Web 界面 `@applepi/web` 也只依赖
+依赖方向（ADR-0003，ADR-0015）：`@applepi/web → @applepi/bundle → @applepi/core` 与
+`@applepi/bundle → @applepi/extensions → @applepi/core`。Web 界面 `@applepi/web` 依赖
 core + bundle（驱动 Harness + SessionStore + `runLoopStreamSegment` + bundle 装配），
-能力集由 bundle/能力工厂在运行时装配（详见 §3、§9）。
+能力集由 bundle/能力工厂在运行时装配（详见 §3、§9）。CLI（`apps/agent`）与非流式
+loop 已删除——web 是**唯一**界面。
 跨包引用一律用包名（`@applepi/core` 等），解析到各包 `dist/`。
 
 ### 1.5 模块划分（ADR-0015）
@@ -53,13 +55,13 @@ core 按单职责拆成深模块，由薄 **Harness 壳** 组装：
 
 | 模块 | 职责 | 说明 |
 |---|---|---|
-| `llm` | LLM 交互面：工具目录 + 单段模型响应 | `llm.ts`：`buildToolDefs` / `reasoningProviderOptions` / `Llm.generate` / `Llm.stream`，隐藏 AI SDK（`generateText`/`streamText`），消耗 app 已组装的 `{ prompt, tools }` + history 产出/流式一段响应（ADR-0015）。 |
-| `loop` | 多回合编排 + 暂停/批准/恢复 | `loop.ts`（非流式）+ `stream-loop.ts`（流式），经 `harness.llm` 取模型调用，不再直接碰 SDK。 |
+| `llm` | LLM 交互面：工具目录 + 单段**流式**响应 | `llm.ts`：`buildToolDefs` / `reasoningProviderOptions` / `Llm.stream`，隐藏 AI SDK（`streamText`），消耗 app 已组装的 `{ prompt, tools }` + history 流式一段响应（ADR-0015）。非流式 `generate` 随 CLI 移除。 |
+| `loop` | 多回合编排 + 暂停/批准/恢复 | `stream-loop.ts`（`runLoopStreamSegment`，流式，唯一 agent loop），经 `harness.llm` 取模型调用、`harness.executeTool` 执行工具。非流式 `loop.ts`/`runLoop` 已随 CLI 删除。 |
 | `session` | jsonl 持久化 + resume + 追加生命周期事件原语 | `session.ts`（`create`/`appendEvent`/`appendMessage`/`load`/`lastEvent`/`list`）。 |
 | `config` | settings.json / provider / reasoning | `config.ts`。 |
 | `security` | 权限级别强制（工具执行缝） | `security.ts`：只保留强制机制（三值级别模型/`level/set` 事件 + lastEvent 恢复/ctx 注入/工具自决 + core 自注册 `/level`）；权限**声明段**按 ADR-0015 移入 bundle（§7）。 |
 | `trace` | 可观测埋点 | `trace.ts`。 |
-| `Harness`（壳） | 组装以上模块 + 生命周期 | `harness.ts`：owns `llm`，`registerTool`/`unregisterTool`/`getTools`/`buildToolDefs`、`registerSlashCommand`/`getSlashCommand`、`attachSession`/`restoreSecurity`/`resume`、`executeTool`（工具执行缝）、`run`（CLI 单回合，接收 app 组装的扁平提示词）。无洋葱、无 `emit`、无扩展加载器。 |
+| `Harness`（壳） | 组装以上模块 + 生命周期 | `harness.ts`：owns `llm`，`registerTool`/`unregisterTool`/`getTools`/`buildToolDefs`、`registerSlashCommand`/`getSlashCommand`、`attachSession`/`restoreSecurity`/`resume`、`executeTool`（工具执行缝）。无洋葱、无 `emit`、无扩展加载器、无 `run`（CLI 单回合，已删）。 |
 
 ### 1.6 ADR-0015 最终形态（扁平 system_prompt + bundle/mode/app）
 
@@ -75,8 +77,8 @@ ADR-0015 定义本系统的**最终形态（已实现）**。四个核心概念�
   并在所选 bundle 之上叠加自带接口片段（如 web 的「Workspace」环境片段）。接口轴
   （web/tui）× 能力轴（base/standard）正交。
 - **Plugin（插件）** — 外部追加型能力：尾部追加 prompt 片段 + 注册新工具/技能，
-  不可重排/删除 base/standard 内部。app 层加载器（`apps/agent/plugins.ts`）扫描
-  `extensions/` 下的 `*.ext.ts`。
+  不可重排/删除 base/standard 内部（ADR-0015 概念）。原 app 层插件加载器
+  （`apps/agent/plugins.ts`）随 CLI 删除；web 当前未挂插件目录。
 
 **扁平 system_prompt**：单一扁平缓冲区，`bundle 片段 → app 接口片段 → plugin 尾部
 片段` 三层顺序拼接（下层不可改写上层）；无块栈、无 prompt 中间件/洋葱。由会话
@@ -84,29 +86,29 @@ spec（`{ prompt片段, tools }`）一次性拼装（`@applepi/bundle` 的
 `assembleFlatPrompt`），每轮重建 = 重读同一份 spec + 当前级别（bundle 权限声明段按
 级别分档）。
 
-**模式选择**：仅新建会话时选（web 新对话下拉 / CLI `--mode`），非热切换、非事件；
+**模式选择**：仅新建会话时选（web 新对话下拉），非热切换、非事件；
 记入 `session.config.mode`（并在会话 jsonl 记一次 `mode` 事件行以便恢复时重建），
 会话内不可变。恢复时按 `lastEvent('mode')` 重建匹配的 spec。
 
 **core 收敛**：`registerExtension` / `SetupFn` / `HarnessApi` / `OnionBus` /
 `HookStack` / 洋葱中间件 / `emit` 事件族 / `system_prompt` 事件族 / `PromptBag` /
-`buildSystemPrompt` 已从 core 移除。`registerExtension` 仅作为 app 层插件加载器形态
-残存（`apps/agent/plugins.ts`，加载 `{ prompt?, tools? }` 插件）。
+`buildSystemPrompt` 已从 core 移除。`registerExtension`/插件加载器的残存形态
+（`apps/agent/plugins.ts`）已随 CLI 一并删除——能力装配完全落在 `@applepi/bundle` +
+web 装配。
 
 ## 2. 核心运行时（`@applepi/core`）
 
 核心是一组**单职责深模块**（ADR-0015 §1.5），由薄 Harness 壳组装；按 ADR-0005
 不含工具，ADR-0009 把安全强制机制收归内置。core 的模块组成：
 
-1. **`llm`**（ADR-0015 新增）— **LLM 交互面**：工具目录 + 单段模型响应。封装
-   `generateText`/`streamText`、`reasoningProviderOptions`（推理等级映射）、
-   `buildToolDefs`；`loop`/`stream-loop` 经 `harness.llm.generate` / `harness.llm.stream`
-   取模型调用，不再直接依赖 AI SDK。消耗 app 已组装的 `{ prompt, tools }` 与 history
-   产出一段响应（ADR-0015）。
-2. **`loop`** — 内置 agent loop，两个变体：CLI 的 `runLoop`（`generateText`，
-   一轮跑完，§5）；web 的 `runLoopStreamSegment`（`streamText`，token 级分段流 +
-   暂停/恢复状态机，§9.1）。两者都经 `llm` 模块发起模型调用，工具经
-   `harness.executeTool`（工具执行缝）执行。
+1. **`llm`**（ADR-0015 新增）— **LLM 交互面**：工具目录 + 单段**流式**响应。封装
+   `streamText`、`reasoningProviderOptions`（推理等级映射）、`buildToolDefs`；
+   `stream-loop` 经 `harness.llm.stream` 取模型调用，不再直接依赖 AI SDK。消耗 app
+   已组装的 `{ prompt, tools }` 与 history 产出一段流式响应（ADR-0015）。非流式
+   `generate`/`generateText` 已随 CLI 移除。
+2. **`loop`** — 内置 agent loop（唯一，流式）：`runLoopStreamSegment`（`streamText`，
+   token 级分段流 + 暂停/恢复状态机，§9.1）。经 `llm` 模块发起模型调用，工具经
+   `harness.executeTool`（工具执行缝）执行。非流式 `runLoop`（§5 旧 CLI loop）已删除。
 3. **`session`** — 会话持久化（jsonl，同时充当流式 loop 的暂停点状态，§6）。
 4. **`config`** — LLM 配置解析：settings.json + .env，见 §10。
 5. **`security`** — 权限级别强制机制（三值级别模型 + `level/set` 事件与恢复 +
@@ -116,8 +118,8 @@ spec（`{ prompt片段, tools }`）一次性拼装（`@applepi/bundle` 的
 7. **`Harness`（壳）** — 组装以上模块 + 生命周期；owns `llm`，提供
    `registerTool`/`unregisterTool`/`getTools`/`buildToolDefs`、
    `registerSlashCommand`/`getSlashCommand`、`attachSession`/`restoreSecurity`/
-   `resume`、`executeTool`（工具执行缝）、`run`（CLI 单回合，接收 app 组装的扁平
-   提示词）；无洋葱、无 `emit` 事件总线、无扩展加载器（ADR-0015 已移除）。
+   `resume`、`executeTool`（工具执行缝）；无洋葱、无 `emit` 事件总线、无扩展加载器、
+   无 `run`（CLI 单回合，已删）。
 
 > 为什么核心无工具：核心的消费方（未来的 web UI 等）不应被迫继承 shell 访问、
 > 文件编辑和安全策略（ADR-0005 的问题陈述）；ADR-0015 强化为「core 只关心 LLM
@@ -137,11 +139,10 @@ spec（`{ prompt片段, tools }`）一次性拼装（`@applepi/bundle` 的
   `capabilities` 声明 id 清单，app 用 `getCapability(id)` 解析、注册工具并每轮把
   `prompt(env, session)` 片段并入扁平提示词（如 skills 把已加载技能渲染成片段）。
   尚无工厂的 id（web/plan/goal/...）被跳过——声明可多于实现。
-- **Plugin（插件）** — `apps/agent/plugins.ts` 的 `loadPlugins(dir)`：扫描
-  `extensions/` 下 `*.ext.ts`，默认导出为 `{ prompt?, tools? }` 声明对象或
-  `(env, session) => { prompt?, tools? }` producer。插件**只追加**：工具注册到
-  Harness、prompt 片段并入尾部，不可重排/删除 bundle 内部。`/reload` = 撤销
-  插件工具 + 重扫 + 重建提示词（bundle/mode 不可变）。
+- **Plugin（插件）** — ADR-0015 定义的外部追加型能力（尾部追加 prompt 片段 + 注册
+  新工具/技能，不可重排/删除 bundle 内部）。原 `apps/agent/plugins.ts` 加载器
+  （`loadPlugins(dir)` 扫描 `extensions/` 下 `*.ext.ts`）随 CLI 删除；web 当前未挂插件
+  目录。
 
 **装配流程（app 每轮）**：选取 mode → `makeBundleSpec(mode, { cwd, workspace, level })`
 → `enableBundleSpec`（注册 bundle + capability 工具）→ 加载插件 → 用
@@ -171,30 +172,34 @@ bundle 片段 → app 接口片段 → plugin 尾部片段
 - 系统消息持久化：新会话 / `/reload` 时 app 写一条 `system` 消息行到 jsonl；
   会话内每轮直接用新拼的提示词（replay 时最新 system 替换 message[0]，见 §8）。
 
-## 5. 内置 Agent Loop
+## 5. 内置 Agent Loop（流式，唯一）
+
+core 只提供一个 agent loop：`runLoopStreamSegment`（`streamText`，token 级分段流 +
+暂停/恢复状态机，§9.1 / ADR-0011）。CLI 的非流式 `runLoop` 已随 CLI 删除。
 
 ```
-loop:
+loop（分段流）:
   messages = [ system(扁平提示词), ...history ]
   for each turn:
-    resp = harness.llm.generate({ model, messages, tools })   # llm 深模块（ADR-0015）
-    if resp has toolCall:
-      result = harness.executeTool(toolCall)          # 工具执行缝（安全缝：ctx 带级别）
-      append tool result to messages
-      continue
-    else:
-      return resp.text
+    resp = harness.llm.stream({ model, messages, tools })   # llm 深模块（ADR-0015）
+    merge parts into the data stream（text / reasoning / tool-call）
+    for each toolCall:
+      if classifyApproval(...) === 'ask': pause + persist approval; end segment
+      else: harness.executeTool(toolCall)     # 工具执行缝（安全缝：ctx 带级别）
+      stream the tool-result back
+    continue until the model stops calling tools or maxTurns
 ```
 
-- **Provider 抽象**：经 **Vercel AI SDK**（`generateText` / `streamText` +
-  provider 适配器），由 `llm` 模块封装（ADR-0015：`Llm.generate` /
-  `Llm.stream`），不自己写多模型适配，`loop` 也不直接接触 SDK。
-- **工具暴露给模型**：扩展注册的工具经 `llm.buildToolDefs()` 生成
-  `{ description, parameters }` 目录，并入 `generateText({ tools })`（无 execute——
-  执行由 loop 自行驱动，以便工具缝包裹）。
+- **Provider 抽象**：经 **Vercel AI SDK**（`streamText` + provider 适配器），由 `llm`
+  模块封装（`Llm.stream`），不自己写多模型适配，`stream-loop` 也不直接接触 SDK。
+- **工具暴露给模型**：经 `llm.buildToolDefs()` 生成 `{ description, parameters }` 目录，
+  并入 `streamText({ tools })`（无 execute——执行由 loop 自行驱动，工具经执行缝包裹）。
+- **暂停 / 批准 / 恢复（ADR-0011）**：`ask` 工具暂停并持久化 `tool/approval-pending`；
+  `executeApprovedTool` 续跑（approve 执行 / deny 回填拒绝），**不重跑 LLM**——jsonl 即
+  loop 状态（见 §9.1 / P13）。
 - **系统提示词注入**：每轮 `messages[0]` 由 app 用 `assembleFlatPrompt` 组装的扁平
-  提示词（bundle 片段 + 能力片段 + app 接口片段 + 插件尾，ADR-0015）提供——重建 =
-  重读同一份 spec，无动态中间件。系统消息行只在会话启动 / `/reload` 时持久化一次
+  提示词（bundle 片段 + 能力片段 + app 接口片段；插件尾已随 CLI 的加载器删除）提供——
+  重建 = 重读同一份 spec，无动态中间件。系统消息行只在会话启动时持久化一次
   （app 层 `appendMessage('system', ...)`）；会话内每轮直接用新拼的提示词
   （ADR-0002 replay 语义：最新 system 替换 message[0]）。
 
@@ -211,7 +216,7 @@ api.registerTool({
 });
 ```
 
-核心在注册时把 `ToolSpec` 转成 AI SDK `tool()`，并入 `generateText({ tools })`。
+核心在注册时把 `ToolSpec` 转成 AI SDK `tool()`，并入 `streamText({ tools })`。
 
 ## 7. 安全模型（Permission Levels, ADR-0007 + ADR-0009）
 
@@ -248,40 +253,38 @@ api.registerTool({
   - 行内**不含** `session_id` / `workspace`：会话与工作区身份由文件路径承载，
     行不再自包含（旧 ADR-0002 的"每行可独立审计"语义已放弃）。
 - **SessionStore 归核心**：`create` / `appendEvent` / `appendMessage` /
-  `load`（replay 变换） / `lastEvent` / `list`。CLI 与 web UI 都驱动同一套核心方法。
+  `load`（replay 变换） / `lastEvent` / `list`。web UI 驱动同一套核心方法。
   ADR-0015 移除 `emit` 事件总线后，事件（`level/set`、`reasoning/set`、`title/set`、
   `mode`、`tool/approval-pending`、`reload/start|end` 等）由 app / 工具直接
   `store.appendEvent` 写入 jsonl——`appendEvent` 就是存储原语，不再有 core 内置事件处理器。
 - **Replay（只读）**：读取时过滤 message 行；若存在 `reload` 事件，最新重建的
   system 消息替换 `message[0]`；原 jsonl 永不被改写。
-- **Resume / Reload**：`/resume <id>` 切换活动会话并继续追加；`/reload`（app 层）=
-  撤销插件层工具 + 重扫 `extensions/` + 重建扁平提示词并持久化新 system 消息
-  （bundle/mode 与 `session.scratch` + `session.history` 不变，无 new Harness）。
+- **Resume**：`/resume <id>` 切换活动会话并继续追加。CLI 的 `/reload`（app 层插件
+  重载）已随 CLI 删除；`reload/start|end` 事件与 `SessionStore` 的 replay 规则作为
+  存储/读取原语保留。
 - **系统提示词（ADR-0015 扁平模型，supersedes ADR-0008/0010）**：单一扁平缓冲区 =
   `bundle 片段 → app 接口片段 → plugin 尾部片段` 顺序拼接；无块栈、无 PromptBag、
   无提示词中间件。重建 = 每轮用当前 env（级别/工作区）重读同一份 spec
-  （`assembleFlatPrompt`）。系统消息行只在会话启动 / `/reload` 时由 app
-  `appendMessage('system', ...)` 持久化。
-- **Slash 命令（核心能力，非 CLI 专属）**：`/level`（core 自注册）/ `/reload` `/resume <id>` `/new`
-  `/sessions` `/config` `/help` `/exit`。
+  （`assembleFlatPrompt`）。系统消息行只在会话启动时由 app `appendMessage('system', ...)`
+  持久化。
+- **Slash 命令（核心能力）**：`/level`（core 自注册）；`/config` `/new` `/sessions`
+  等由界面驱动同一套核心方法。
 
-## 9. 界面：CLI 与 Web 双接口
+## 9. 界面：Web（唯一）
 
-Harness 现在有两个界面，共享同一个 core（Harness + SessionStore + `runLoopStreamSegment`
-+ SecurityPolicy + trace）。CLI 是本地 REPL 主入口；Web 是个人本地界面（无鉴权），
-把同样的 core 能力通过 HTTP 暴露给浏览器。
+CLI（`apps/agent`）已于 2026-08-21 删除——**Web 是唯一界面**，驱动同一个 core
+（Harness + SessionStore + `runLoopStreamSegment` + SecurityPolicy + trace）并通过
+HTTP 暴露给浏览器（无鉴权）。
 
-- **CLI（`apps/agent`）**（§5）— REPL，用 `runLoop`（`generateText`，一轮跑完）驱动。
-- **Web（`apps/web`，`@applepi/web`）** — Next.js App Router（默认端口 3000，`pnpm dev:web`）
+- **Web（`apps/web`，`@applepi/web`）** — Next.js App Router（默认端口 3010，`pnpm dev`）
   + assistant-ui 0.15 primitives（`ExternalStoreRuntime` 适配器）+ Tailwind v4 +
   Vercel AI SDK v4 数据流（`createDataStreamResponse` + `processDataStream`）。
 
 ### 9.1 流式 loop（streaming loop, ADR-0011）
 
-core 新增 `runLoopStreamSegment`：`streamText` 变体，token 级分段流 + **暂停/恢复
-状态机**。与 CLI 的 `runLoop`（`generateText`）并存——CLI 一次性跑完一轮；web 分段流，
-遇到需批准的 `ask` 工具暂停、批准后从 jsonl 持久化的暂停点续跑（**不重跑 LLM**，
-jsonl 即 loop 状态，见 P13）。
+core 的 `runLoopStreamSegment`：`streamText` 变体，token 级分段流 + **暂停/恢复
+状态机**。web 分段流，遇到需批准的 `ask` 工具暂停、批准后从 jsonl 持久化的暂停点续跑
+（**不重跑 LLM**，jsonl 即 loop 状态，见 P13）。
 
 ### 9.2 工具批准（tool approval, ADR-0011）
 
@@ -291,12 +294,12 @@ web 会话对工具执行采用**前端批准**：
 - `ask` 工具暂停并持久化 `tool/approval-pending` 事件；`POST /api/chat/approve`
   从暂停点续跑；
 - 读类（`memory_read` / `skill_load` / `view` / bash 只读命令）自动执行，写/执行类须批准；
-- **拒绝 = 工具结果回填模型**（模型可自愈）。CLI 语义不变。
+- **拒绝 = 工具结果回填模型**（模型可自愈）。
 
 ### 9.3 工作区选择器与会话动作
 
 - 页面可选择已有工作区或手动添加（`GET|POST /api/workspaces`，manifest 记录
-  slug↔path；CLI 建的 workspace 经 `unslugWorkspace` 反解回填真实路径，避免 slug
+  slug↔path；历史 CLI 建的 workspace 经 `unslugWorkspace` 反解回填真实路径，避免 slug
   被 `path.resolve` 污染 cwd）；
 - `session.config.workspace` 决定工具 cwd 与 project root（`workspaceRoot(ctx)`）；
   切换后 resume 该工作区最近会话（无则新建）；
@@ -306,12 +309,12 @@ web 会话对工具执行采用**前端批准**：
 - 会话动作 API（`PATCH /api/session`）：rename / pin / unpin / archive / unarchive /
   notify / level；`GET /api/session?format=jsonl` 导出；级别切换走 core
   `applyPermissionLevel`（写 `level/set`，扁平提示词下一轮自带上新级别，无重建），
-  与 CLI `/level` 同语义。
+  与 core `/level` 同语义。
 
 ### 9.4 可观测性（Langfuse trace, ADR-0012）
 
 埋点位于 **core 层**（`trace.ts`）：每轮一条 trace + 每条 LLM 调用一个 generation
-（带 token usage）+ 每工具一个 span；CLI 与 web 双端自动受益，目标 **Langfuse
+（带 token usage）+ 每工具一个 span；**web（唯一界面）自动受益**，目标 **Langfuse
 Cloud**（`~/.applepi/.env` 的 `LANGFUSE_BASE_URL` / `PUBLIC_KEY` / `SECRET_KEY`），
 未配置则为 no-op（见 P14）。
 
@@ -353,26 +356,23 @@ applepi/
 ├── pnpm-workspace.yaml     # packages: ["packages/*", "apps/*"]
 ├── tsconfig.base.json      # 共享编译配置
 ├── packages/
-│   ├── core/               # @applepi/core：深模块 llm·loop·session·config·security·trace + Harness 壳（无工具、无洋葱）
+│   ├── core/               # @applepi/core：深模块 llm(stream)·loop(stream-loop)·session·config·security·trace + Harness 壳（无工具、无洋葱）
 │   ├── bundle/             # @applepi/bundle：base / standard 能力包，纯声明 (env)=>({prompt,tools}) + app 侧装配助手
 │   └── extensions/         # @applepi/extensions：参考工具 bash/sre + 能力工厂 memory/skills
 ├── apps/
-│   ├── agent/              # @applepi/agent：REPL 主入口（--mode）+ 插件加载器 + extensions/*.ext.ts + scripts/check-*
-│   └── web/                # @applepi/web：Next.js 界面（assistant-ui + Tailwind v4），§9
+│   └── web/                # @applepi/web：唯一界面，Next.js（assistant-ui + Tailwind v4），§9
 ├── docs/
 │   ├── README.md           # Wiki 首页
 │   ├── architecture.md     # 本文档
 │   ├── design-principles.md
-│   ├── adr/                # ADR-0001 ~ 0015
+│   ├── adr/                # ADR-0001 ~ 0016
 │   └── agents/             # agent 协作约定
 └── CONTEXT.md              # 术语表 + 已锁定决策（单一事实来源）
 ```
 
-- **构建策略**：build-first，跑 agent / web / check 前先构建依赖包（`pnpm -r build`
-  拓扑序自动处理）。
-- **验证**：`pnpm verify` = build + 各包测试 + 六个 key-free 检查脚本
-  （`check-ext` / `check-session` / `check-skills` / `check-memory` /
-  `check-denylist` / `check-security`；`check-soft-isolation` 已随洋葱移除删除）。
+- **构建策略**：build-first，跑 web / test 前先构建依赖包（`pnpm -r build` 拓扑序自动处理）。
+- **验证**：`pnpm verify` = build + 各包测试（core / extensions / bundle）。CLI 的六个
+  key-free 检查脚本与 `check-soft-isolation` 已随 CLI / 洋葱一并删除。
 
 ## 12. 已移除：MCP
 
