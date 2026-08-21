@@ -2,15 +2,15 @@ import { baseBundle } from './base.js';
 import { standardBundle } from './standard.js';
 import type { Bundle, BundleEnv, BundleSpec } from './types.js';
 
-export { baseBundle, BASE_PROMPT, basePermissionFragment } from './base.js';
-export {
-  standardBundle,
-  STANDARD_PROMPT,
-  STANDARD_CAPABILITIES,
-  standardPermissionFragment,
-} from './standard.js';
+export { baseBundle, BASE_PROMPT } from './base.js';
+export { standardBundle, STANDARD_PROMPT, STANDARD_CAPABILITIES } from './standard.js';
 export type { Bundle, BundleEnv, BundleSpec } from './types.js';
-export { bundleEnv, enableBundleSpec, assembleFlatPrompt } from './assemble.js';
+export {
+  bundleEnv,
+  enableBundleSpec,
+  assembleFlatPrompt,
+  permissionFragment,
+} from './assemble.js';
 export type { FlatPromptLayers } from './assemble.js';
 
 /**

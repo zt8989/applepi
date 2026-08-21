@@ -93,14 +93,25 @@ set. Core security enforces levels at the tool seam but does not write the
 prompt text. (Re-scopes ADR-0009's core-owned「Permission Level」section into
 the bundles; enforcement stays core.)
 
+> **Revision note (deepen-architecture #01, softened)** — the declaration is
+> no longer authored per-bundle as a fixed string. `base` and `standard` share
+> a single assembly-time `permissionFragment` (`packages/bundle/src/assemble.ts`)
+> that renders `## Permission & Capability` from the **actually resolved tool
+> set** (`spec.tools` ∪ tools of capabilities that have a factory,
+> `enableBundleSpec`-equivalent), so the prompt can never claim tools that are
+> not wired. The "own prompt" clause is also softened: both bundles now share
+> the same minimal persona string. Unwired declared capability ids are echoed
+> via `console.warn` by `enableBundleSpec` instead of being silently skipped.
+
 ### Bundles, modes, apps, plugins
 
 - **Bundle** — a self-contained capability unit. `base` = exactly `bash` +
   `str_replace_editor` (two tools, minimal prompt; **no** memory/skills/plan/
   goal/subagent). `standard` = a self-contained full set (its own bash/sre
   reusing shared tool implementations, plus memory/skills/web/plan/goal/
-  subagent/workflow/todo/ask_user; its own prompt). **Siblings — `standard`
-  does not inherit `base`.** No `extends` concept anywhere.
+  subagent/workflow/todo/ask_user; its own prompt — *softened by the revision
+  note above: both bundles share the minimal persona*). **Siblings —
+  `standard` does not inherit `base`.** No `extends` concept anywhere.
 - **Mode** — a bundle hosted by an app. `base`/`standard` are both bundle and
   mode; **mode is not a separate concept** beyond "the bundle a session runs
   under."
