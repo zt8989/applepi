@@ -12,13 +12,20 @@ export {
   executeApprovedTool,
   classifyApproval,
   pendingToolCalls,
-  type PendingApproval,
   type StreamLoopOpts,
   type StreamFinishReason,
   type StreamSegmentResult,
 } from './stream-loop.js';
 export { getTracer, flushTraces, resetTracer, modelLabel } from './trace.js';
 export type { Tracer, TraceHandle, SpanHandle } from './trace.js';
+export {
+  toText,
+  mergeToolResults,
+  pendingApproval,
+  type MessagePart,
+  type ThreadMessage,
+  type PendingApproval,
+} from './message.js';
 export {
   SessionStore,
   slugWorkspace,

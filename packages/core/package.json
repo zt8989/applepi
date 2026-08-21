@@ -9,11 +9,15 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./message": {
+      "types": "./dist/message.d.ts",
+      "import": "./dist/message.js"
     }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.json && node test/smoke.mjs && node test/session.mjs && node test/config.mjs && node test/stream-loop.mjs"
+    "test": "tsc -p tsconfig.json && node test/smoke.mjs && node test/session.mjs && node test/config.mjs && node test/stream-loop.mjs && node test/message.mjs"
   },
   "dependencies": {
     "ai": "^4.0.0",

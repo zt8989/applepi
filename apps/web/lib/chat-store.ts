@@ -8,6 +8,7 @@ import {
   type ExternalStoreAdapter,
   type ThreadMessageLike,
 } from '@assistant-ui/react';
+import { toText, mergeToolResults, pendingApproval } from '@applepi/core/message';
 import type {
   ApproveRequestBody,
   ChatRequestBody,
@@ -108,13 +109,6 @@ export interface ChatStore {
   addReference: (path: string) => void;
   removeReference: (path: string) => void;
   send: (text: string) => Promise<void>;
-}
-
-function toText(message: { content: string | readonly { type: string; text?: string }[] }): string {
-  if (typeof message.content === 'string') return message.content;
-  return message.content
-    .map((p) => (p.type === 'text' ? p.text ?? '' : ''))
-    .join('');
 }
 
 export function useChatStore(): ChatStore {
@@ -644,7 +638,7 @@ export function useChatStore(): ChatStore {
 
   const onNew = useCallback(
     async (message: { content: string | readonly { type: string; text?: string }[] }) => {
-      const text = toText(message).trim();
+      const text = toText(message.content as any).trim();
       if (text) await send(text);
     },
     [send],
@@ -692,71 +686,29 @@ export function useChatStore(): ChatStore {
         if (typeof data.level === 'string') setLevelState(data.level);
         if (typeof data.reasoning === 'string') setReasoningState(data.reasoning);
         if (typeof data.title === 'string') setSessionTitle(data.title);
+        // Pure contract consumption (deepen #03): fold tool messages into the
+        // owning assistant message's tool-call parts, then re-surface an
+        // outstanding approval — both are core pure functions, not hand-rolled
+        // React-side merges.
         const msgs = data.messages as { role: string; content: any }[];
+        const merged = mergeToolResults(msgs as any);
         const out: ThreadMessageLike[] = [];
         let lastAssistantId: string | null = null;
-        for (const m of msgs) {
+        for (const m of merged) {
           if (m.role === 'system') continue;
           if (m.role === 'user') {
-            const text = typeof m.content === 'string' ? m.content : (m.content ?? [])
-              .map((p: any) => (p.type === 'text' ? p.text : ''))
-              .join('');
-            out.push({ role: 'user', id: genId(), content: [{ type: 'text', text }] });
+            out.push({ role: 'user', id: genId(), content: [{ type: 'text', text: toText(m.content) }] });
           } else if (m.role === 'assistant') {
             const id = genId();
             lastAssistantId = id;
-            const parts = (m.content ?? []).map((p: any) => {
-              if (p.type === 'text') return { type: 'text', text: p.text };
-              if (p.type === 'tool-call') {
-                return {
-                  type: 'tool-call',
-                  toolCallId: p.toolCallId,
-                  toolName: p.toolName,
-                  args: p.args ?? {},
-                };
-              }
-              return p;
-            });
-            out.push({ role: 'assistant', id, content: parts });
-          } else if (m.role === 'tool') {
-            // Merge tool results into the owning assistant message's tool-call
-            // part (rebuild the message immutably — parts are readonly).
-            for (const p of m.content ?? []) {
-              if (p.type !== 'tool-result') continue;
-              const holder = [...out].reverse().find(
-                (x) =>
-                  x.role === 'assistant' &&
-                  (x.content as any[]).some(
-                    (c) => c.type === 'tool-call' && c.toolCallId === p.toolCallId && !c.result,
-                  ),
-              );
-              if (!holder) continue;
-              const hIdx = out.indexOf(holder);
-              out[hIdx] = {
-                ...holder,
-                content: (holder.content as any[]).map((c) =>
-                  c.type === 'tool-call' && c.toolCallId === p.toolCallId
-                    ? { ...c, result: p.result, isError: /^(ERROR|BLOCKED)/.test(String(p.result)) }
-                    : c,
-                ),
-              };
-            }
+            out.push({ role: 'assistant', id, content: (m.content as any[]).map((p: any) => ({ ...p })) });
           }
         }
         assistantIdRef.current = lastAssistantId;
         commit(out);
-        // Re-surface an outstanding approval (tool-call part without a result).
-        const pendingCall = [...out]
-          .reverse()
-          .flatMap((m) => (m.role === 'assistant' ? (m.content as any[]) : []))
-          .find((p) => p.type === 'tool-call' && p.result === undefined);
-        if (pendingCall) {
-          setPending({
-            toolCallId: pendingCall.toolCallId,
-            toolName: pendingCall.toolName,
-            args: pendingCall.args ?? {},
-          });
-        }
+        // Re-surface an outstanding approval (deepen #03: core pure resolver).
+        const p = pendingApproval(merged);
+        if (p) setPending({ toolCallId: p.toolCallId, toolName: p.toolName, args: p.args });
       } catch (e: any) {
         setError(e?.message ?? String(e));
       }

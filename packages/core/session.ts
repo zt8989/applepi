@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { toText } from './message.js';
 import type { ReasoningLevel, PermissionLevel } from './config.js';
 
 /** Slug a cwd absolute path into a filesystem-safe workspace token. */
@@ -61,16 +62,9 @@ export interface SessionSummary {
   notify: boolean;
 }
 
-/** Extract plain text from a message's `content` (string or parts array). */
+/** Extract plain text from a message's `content` via the shared contract. */
 function messageText(content: any): string {
-  if (typeof content === 'string') return content.trim();
-  if (Array.isArray(content)) {
-    return content
-      .map((p: any) => (p?.type === 'text' ? p.text : ''))
-      .join('')
-      .trim();
-  }
-  return '';
+  return toText(content).trim();
 }
 
 /**

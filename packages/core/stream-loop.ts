@@ -2,6 +2,7 @@ import { formatDataStreamPart, type DataStreamWriter } from 'ai';
 import type { Harness } from './harness.js';
 import type { SessionStore } from './session.js';
 import type { ApprovalMode } from './types.js';
+import type { MessagePart, ThreadMessage } from './message.js';
 import { getTracer, modelLabel, type Tracer, type TraceHandle } from './trace.js';
 import type { ProviderProtocol, ReasoningLevel } from './config.js';
 
@@ -145,7 +146,7 @@ export async function runLoopStreamSegment(
       gen?.end(text, usage);
 
       const toolCalls: any[] = (await r.toolCalls) ?? [];
-      const assistantParts: any[] = [];
+      const assistantParts: MessagePart[] = [];
       if (reasoning && reasoning.trim()) assistantParts.push({ type: 'reasoning', text: reasoning });
       if (text) assistantParts.push({ type: 'text', text });
       for (const tc of toolCalls) {
@@ -224,7 +225,10 @@ export async function executeApprovedTool(
   }
   span?.end({ result: res });
   streamToolResult(opts.writer, tc.toolCallId, res);
-  const toolMsg = { role: 'tool', content: [{ type: 'tool-result', toolCallId: tc.toolCallId, toolName: tc.toolName, result: res }] };
+  const toolMsg: ThreadMessage = {
+    role: 'tool',
+    content: [{ type: 'tool-result', toolCallId: tc.toolCallId, toolName: tc.toolName, result: res }],
+  };
   messages.push(toolMsg);
   await opts.store?.appendMessage('tool', toolMsg.content);
 }
