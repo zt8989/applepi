@@ -12,9 +12,10 @@ import { tmpdir } from 'node:os';
 import {
   Harness,
   SessionStore,
-  PERMISSION_SCRATCH_KEY,
   DEFAULT_PERMISSION_LEVEL,
   restorePermissionLevel,
+  resolvePermissionLevel,
+  getPermissionLevel,
   type PermissionLevel,
 } from '@applepi/core';
 import {
@@ -71,10 +72,10 @@ function fail(msg: string): never {
 
 // --- 1. default level = workspace; the bundle's flat prompt declares it -----
 {
-  const level = await restorePermissionLevel(store, harness.session.scratch);
+  const level = await restorePermissionLevel(store, harness.session);
   if (level !== DEFAULT_PERMISSION_LEVEL) fail(`default level is ${level}, want workspace`);
-  if (harness.session.scratch[PERMISSION_SCRATCH_KEY] !== 'workspace') {
-    fail('default scratch level is not workspace');
+  if (getPermissionLevel({ session: harness.session }) !== 'workspace') {
+    fail('default session.config level is not workspace');
   }
   const sys = systemPrompt();
   if (!sys.toLowerCase().includes('permission level: workspace')) fail('prompt lacks "Permission level: WORKSPACE" (bundle declaration)');
@@ -123,19 +124,16 @@ function fail(msg: string): never {
   console.log('--- fullaccess: write anywhere ok, denylist floor still blocks rm -rf');
 }
 
-// --- 5. /level persists an event + restores; tools are NOT unloaded ---------
+// --- 5. /level persists an override + restores; tools are NOT unloaded ------
 {
   const before = harness.getTools().map((t) => t.name).sort();
-  const ev = await store.lastEvent('level/set');
-  if (!ev || ev.payload?.level !== 'fullaccess') fail('level/set event not persisted');
-  const fresh: Record<string, any> = {};
-  const restored = await restorePermissionLevel(store, fresh);
-  if (restored !== 'fullaccess' || fresh[PERMISSION_SCRATCH_KEY] !== 'fullaccess') {
-    fail('lastEvent did not restore fullaccess');
-  }
+  const cfg = await store.loadConfig();
+  if (cfg.permissionLevel !== 'fullaccess') fail('level override not persisted to config file');
+  const restored = await restorePermissionLevel(store, harness.session);
+  if (restored !== 'fullaccess') fail('config file did not restore fullaccess');
   const store2 = new SessionStore({ workspace: `${WS}-2` });
   await store2.create();
-  const restored2 = await restorePermissionLevel(store2, {});
+  const restored2 = await resolvePermissionLevel(store2);
   if (restored2 !== 'workspace') fail('empty session did not default to workspace');
 
   // Level is a change in permission SIZE, not a tool unload (ADR-0009 Q14
@@ -151,7 +149,7 @@ function fail(msg: string): never {
   // ADR-0015): after a level change the assembled prompt reflects it.
   const sys = systemPrompt();
   if (!sys.toLowerCase().includes('permission level: workspace')) fail('prompt did not re-declare the new level');
-  console.log('--- level/set persisted; tool set unchanged across levels; flat prompt re-declares level');
+  console.log('--- level override persisted; tool set unchanged across levels; flat prompt re-declares level');
 }
 
 // cleanup — best-effort: a failed cleanup must not fail the verification.

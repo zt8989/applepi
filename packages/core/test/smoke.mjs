@@ -118,11 +118,11 @@ const stubTool = {
   }
 }
 
-// 5. /level (core-registered): validates, writes level/set + scratch, restores.
+// 5. /level (core-registered): validates, persists override + restore.
 {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'applepi-smoke-'));
   try {
-    const h = new Harness();
+    const h = new Harness({ baseDir: dir });
     const store = new SessionStore({ baseDir: dir });
     await store.create();
     h.attachSession(store);
@@ -134,11 +134,13 @@ const stubTool = {
     const msg = await cmd('fullaccess');
     assert.match(msg, /fullaccess/);
     assert.equal(getPermissionLevel({ session: h.session }), 'fullaccess');
-    const ev = await store.lastEvent('level/set');
-    assert.equal(ev.payload.level, 'fullaccess');
+    // The override is persisted to the config file (ADR-0016), not a level/set event.
+    const cfg = await store.loadConfig();
+    assert.equal(cfg.permissionLevel, 'fullaccess');
+    await store.appendEvent('someone/set', { x: 1 }); // sanity: events still work
     await assert.rejects(() => cmd('bogus'), /must be one of/);
     assert.equal(h.getSlashCommand('nope'), undefined);
-    ok('/level: validate + persist + restore + unknown command');
+    ok('/level: validate + persist override + restore + unknown command');
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

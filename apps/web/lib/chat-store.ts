@@ -81,7 +81,7 @@ export interface ChatStore {
   setMode: (mode: string) => void;
   /** Current effective reasoning level for this session. */
   reasoning: string;
-  /** Set the reasoning level: writes the session `reasoning/set` event (or
+  /** Set the reasoning level: writes the session-config override (or
    *  remembers it for the first message when no session exists yet). */
   setReasoning: (level: string) => Promise<void>;
   /** Global default reasoning level (settings.json.lastUsedLevel). */

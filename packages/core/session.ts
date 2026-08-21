@@ -2,8 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { ReasoningLevel } from './config.js';
-import type { PermissionLevel } from './security.js';
+import type { ReasoningLevel, PermissionLevel } from './config.js';
 
 /** Slug a cwd absolute path into a filesystem-safe workspace token. */
 export function slugWorkspace(cwd: string): string {

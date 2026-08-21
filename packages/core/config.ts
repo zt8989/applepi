@@ -19,9 +19,6 @@ import dotenv from 'dotenv';
  * display/grouping label only — the SDK factory is selected by `protocol`.
  */
 
-import type { PermissionLevel } from './security.js';
-import { PERMISSION_LEVELS, DEFAULT_PERMISSION_LEVEL } from './security.js';
-
 export type ProviderProtocol =
   | 'openai-completions'
   | 'openai-responses'
@@ -32,6 +29,16 @@ export const PROVIDER_PROTOCOLS: readonly ProviderProtocol[] = [
   'openai-responses',
   'anthropic-messages',
 ] as const;
+
+/**
+ * Permission level — the three-value security level (ADR-0009). Lives here (not
+ * in security.ts) so `config` can own the `general.permissionLevel` slot and
+ * `resolveSessionConfig` cascade without a config↔security import cycle. The
+ * security module imports these and owns the enforcement semantics.
+ */
+export const PERMISSION_LEVELS = ['readonly', 'workspace', 'fullaccess'] as const;
+export type PermissionLevel = (typeof PERMISSION_LEVELS)[number];
+export const DEFAULT_PERMISSION_LEVEL: PermissionLevel = 'workspace';
 
 /**
  * Reasoning level — how much thinking effort the LLM applies. Orthogonal to

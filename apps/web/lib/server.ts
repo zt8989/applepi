@@ -8,6 +8,8 @@ import {
   SessionStore,
   slugWorkspace,
   resolveLlmConfig,
+  resolveSessionConfig,
+  mergedProviders,
   loadSettings,
   saveSettings,
   loadDotenv,
@@ -230,26 +232,22 @@ export async function saveLastUsedLevel(level: ReasoningLevel): Promise<void> {
 }
 
 /**
- * Resolve the effective reasoning level for a session: session `reasoning/set`
- * event override ?? global `lastUsedLevel` default ?? DEFAULT_REASONING_LEVEL.
+ * Resolve the effective reasoning level for a session via the unified cascade
+ * (ADR-0016): `session.config.reasoningLevel` override ?? `general.reasoningLevel`
+ * ?? DEFAULT_REASONING_LEVEL. Reads the persisted config file + settings general.
  */
 export async function sessionReasoningLevel(
   workspace: string,
   sessionId: string,
 ): Promise<ReasoningLevel> {
   const store = new SessionStore({ workspace: workspaceToSlug(workspace), sessionId });
-  let ev;
-  try {
-    ev = await store.lastEvent('reasoning/set');
-  } catch {
-    ev = null;
-  }
-  const override = ev?.payload?.level as ReasoningLevel;
-  if (override && (REASONING_LEVELS as readonly string[]).includes(override)) {
-    return override;
-  }
-  const settings = await loadSettings().catch(() => ({ general: undefined } as any));
-  return (settings.general?.reasoningLevel as ReasoningLevel) ?? DEFAULT_REASONING_LEVEL;
+  const overrides = await store.loadConfig();
+  const settings = await loadSettings().catch(() => ({ providers: {}, general: undefined } as any));
+  return resolveSessionConfig(
+    { reasoningLevel: overrides.reasoningLevel },
+    settings.general,
+    mergedProviders(settings),
+  ).reasoningLevel;
 }
 
 /** Whether the "open config file" action is available on this platform (Q4/Q9). */
@@ -658,7 +656,8 @@ export async function applySessionAction(
       }
       const store = new SessionStore({ workspace: workspaceToSlug(workspace), sessionId });
       await store.create(sessionId);
-      await store.appendEvent('reasoning/set', { level: reasoning });
+      const overrides = await store.loadConfig();
+      await store.saveConfig({ ...overrides, reasoningLevel: reasoning as ReasoningLevel });
       return { ok: true };
     }
     default:

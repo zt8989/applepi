@@ -54,9 +54,10 @@ const missing = await read.execute(
 );
 ok('missing key returns not-found', /not found/.test(missing));
 
-// readonly blocks the write (self-determination, ADR-0009).
+// readonly blocks the write (self-determination, ADR-0009; level now lives in
+// session.config.permissionLevel — ADR-0016).
 const rctx = {
-  session: { history: [], config: {}, scratch: { __permissionLevel: 'readonly' } },
+  session: { history: [], config: { permissionLevel: 'readonly' }, scratch: {} },
 };
 const blocked = await write.execute({ key: 'k', value: 'v' }, rctx);
 ok('memory_write blocked at readonly', /BLOCKED/.test(blocked));
