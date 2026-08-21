@@ -2,6 +2,8 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import type { ReasoningLevel } from './config.js';
+import type { PermissionLevel } from './security.js';
 
 /** Slug a cwd absolute path into a filesystem-safe workspace token. */
 export function slugWorkspace(cwd: string): string {
@@ -47,6 +49,27 @@ export interface LoadedSession {
   messages: SessionMessage[];
 }
 
+/**
+ * The unified session-scoped configuration (ADR-0016), persisted in a sibling
+ * `<session_id>.config.json>` next to the jsonl. **Override-only (diff mode)**:
+ * the file holds only values explicitly set for this session (model /
+ * reasoningLevel / permissionLevel) plus the build-time identity fields
+ * (workspace / mode). Absent fields are not written, so a `general` default
+ * from settings.json can propagate to any session that has not overridden it.
+ */
+export interface SessionConfig {
+  /** Tool working root (absolute path) — identity, build-time immutable. */
+  workspace?: string;
+  /** The bundle/mode the session runs under — identity, build-time immutable. */
+  mode?: string;
+  /** Session model override (providerId + modelId). */
+  model?: { providerId: string; modelId: string };
+  /** Session reasoning-level override. */
+  reasoningLevel?: ReasoningLevel;
+  /** Session permission-level override. */
+  permissionLevel?: PermissionLevel;
+}
+
 type AppendableLine =
   | { kind: 'event'; event: string; payload: any; ts?: string }
   | { kind: 'message'; role: string; content: any; ts?: string };
@@ -75,6 +98,46 @@ export class SessionStore {
   filePath(id: string = this.sessionId ?? ''): string {
     if (!id) throw new Error('SessionStore: no session id (call create() first)');
     return path.join(this.baseDir(), `${id}.jsonl`);
+  }
+
+  /** The sibling session-config file path (ADR-0016). */
+  configPath(id: string = this.sessionId ?? ''): string {
+    if (!id) throw new Error('SessionStore: no session id (call create() first)');
+    return path.join(this.baseDir(), `${id}.config.json`);
+  }
+
+  /**
+   * Read the session config (ADR-0016). Missing or corrupt file → `{}` (no
+   * overrides, no fail-fast — it is not required config; P11 applies to the
+   * global settings.json, not this per-session override file).
+   */
+  async loadConfig(): Promise<SessionConfig> {
+    if (!this.sessionId) throw new Error('SessionStore: no session id (call create() first)');
+    let raw: string;
+    try {
+      raw = await fs.readFile(this.configPath(), 'utf8');
+    } catch {
+      return {};
+    }
+    try {
+      return JSON.parse(raw) as SessionConfig;
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Persist the session config (ADR-0016). Atomic full rewrite (write a temp
+   * sibling, then rename) so a crash never leaves a half-written file. The
+   * jsonl is untouched — config and audit/messages live in separate files.
+   */
+  async saveConfig(config: SessionConfig): Promise<void> {
+    if (!this.sessionId) throw new Error('SessionStore: no session id (call create() first)');
+    await fs.mkdir(this.baseDir(), { recursive: true });
+    const file = this.configPath();
+    const tmp = `${file}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify(config, null, 2) + '\n', 'utf8');
+    await fs.rename(tmp, file);
   }
 
   /** Open (create if needed) a session and return its id. */

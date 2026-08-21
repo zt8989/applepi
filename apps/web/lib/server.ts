@@ -282,20 +282,15 @@ export function getHarness(workspace: string, mode: string): Harness {
 }
 
 /**
- * The mode a session runs under: the `mode` event line recorded ONCE at
- * session creation, else 'standard' (ADR-0015: mode is build-time, immutable;
- * resume re-reads it to rebuild the matching spec). Sessions created before
- * modes existed default to 'standard' (the old base+memory+skills behavior).
+ * The mode a session runs under: the persisted `session.config.mode` identity,
+ * else 'standard' (ADR-0015: mode is build-time, immutable; resume re-reads it
+ * to rebuild the matching spec). Sessions created before modes existed default
+ * to 'standard' (the old base+memory+skills behavior).
  */
 export async function sessionMode(workspace: string, sessionId: string): Promise<string> {
   const store = new SessionStore({ workspace: workspaceToSlug(workspace), sessionId });
-  let ev;
-  try {
-    ev = await store.lastEvent('mode');
-  } catch {
-    ev = null;
-  }
-  return ev?.payload?.mode === 'base' ? 'base' : 'standard';
+  const config = await store.loadConfig();
+  return config.mode === 'base' ? 'base' : 'standard';
 }
 
 /**
@@ -356,18 +351,21 @@ export async function bindSession(
     }
   }
 
-  harness.session.config.workspace = toolRoot;
-  harness.session.config.mode = mode;
   let store: SessionStore;
   if (sessionId) {
+    // Resume: harness.resume() reloads the persisted identity (workspace/mode)
+    // into session.config from the config file (ADR-0016).
     store = await harness.resume(sessionId);
   } else {
     store = new SessionStore({ workspace: slug });
     await store.create();
     harness.sessionStore = store;
     harness.session.history = [];
-    // Record the build-time mode once (ADR-0015) — resume re-reads it.
-    await store.appendEvent('mode', { mode });
+    // Brand-new session: write the build-time identity once into the config
+    // file (ADR-0016) — workspace (absolute, self-contained) + mode. Resume
+    // re-reads this file, not an event.
+    harness.session.config = { workspace: toolRoot, mode };
+    await store.saveConfig(harness.session.config);
   }
   await harness.restoreSecurity(store);
   return store;

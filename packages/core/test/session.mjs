@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   SessionStore,
+  Harness,
   slugWorkspace,
 } from '../dist/index.js';
 
@@ -129,6 +130,72 @@ const ws = 'test-ws-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8
   assert.ok(ids.includes('sess-a'), `has sess-a: ${ids}`);
   assert.ok(ids.includes('sess-d'), `has sess-d: ${ids}`);
   ok('list(): enumerates session ids from the workspace dir');
+}
+
+// 8. loadConfig() on a session with no config file returns {} (no fail-fast).
+{
+  const s = new SessionStore({ baseDir: tmpRoot, workspace: ws, sessionId: 'sess-empty-cfg' });
+  await s.create();
+  const cfg = await s.loadConfig();
+  assert.deepEqual(cfg, {});
+  ok('loadConfig(): missing config file -> {} (no fail-fast)');
+}
+
+// 9. saveConfig() writes a sibling <id>.config.json atomically; loadConfig reads it back.
+{
+  const s = new SessionStore({ baseDir: tmpRoot, workspace: ws, sessionId: 'sess-cfg' });
+  await s.create();
+  await s.saveConfig({ workspace: '/Users/x/repo', mode: 'base' });
+  const file = s.configPath();
+  assert.ok(file.endsWith('sess-cfg.config.json'), 'sibling config file path');
+  const onDisk = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.equal(onDisk.workspace, '/Users/x/repo');
+  assert.equal(onDisk.mode, 'base');
+  const cfg = await s.loadConfig();
+  assert.deepEqual(cfg, { workspace: '/Users/x/repo', mode: 'base' });
+  ok('saveConfig/loadConfig: atomic sibling config file round-trip');
+}
+
+// 10. loadConfig() tolerates a corrupt config file -> {}.
+{
+  const s = new SessionStore({ baseDir: tmpRoot, workspace: ws, sessionId: 'sess-badcfg' });
+  await s.create();
+  await fs.writeFile(s.configPath(), '{ not valid json', 'utf8');
+  const cfg = await s.loadConfig();
+  assert.deepEqual(cfg, {});
+  ok('loadConfig(): corrupt config file -> {}');
+}
+
+// 11. saveConfig overwrites (full rewrite), jsonl untouched.
+{
+  const s = new SessionStore({ baseDir: tmpRoot, workspace: ws, sessionId: 'sess-cfg2' });
+  await s.create();
+  await s.appendMessage('user', 'hello');
+  await s.saveConfig({ workspace: '/a', mode: 'base' });
+  await s.saveConfig({ workspace: '/b', mode: 'standard', reasoningLevel: 'high' });
+  const cfg = await s.loadConfig();
+  assert.deepEqual(cfg, { workspace: '/b', mode: 'standard', reasoningLevel: 'high' });
+  const raw = await fs.readFile(s.filePath(), 'utf8');
+  assert.match(raw, /hello/, 'jsonl still holds the message');
+  ok('saveConfig: full rewrite overwrites prior config, jsonl untouched');
+}
+
+// 12. Harness.resume() restores the persisted identity into session.config.
+//    The wiring (config file -> in-memory session.config) is the core of the
+//    ticket's resume story: a resumed session picks up workspace/mode from the
+//    sibling config file, self-contained (no manifest/event dependency).
+{
+  const id = 'sess-resume-id';
+  const s = new SessionStore({ baseDir: tmpRoot, workspace: ws, sessionId: id });
+  await s.create();
+  await s.appendMessage('user', 'hello');
+  await s.saveConfig({ workspace: '/Users/x/repo', mode: 'base' });
+
+  const h = new Harness({ workspace: ws, baseDir: tmpRoot });
+  await h.resume(id);
+  assert.deepEqual(h.session.config, { workspace: '/Users/x/repo', mode: 'base' });
+  assert.equal(h.session.history.length, 1, 'history restored');
+  ok('Harness.resume(): restores session.config identity from the config file');
 }
 
 await fs.rm(tmpRoot, { recursive: true, force: true });

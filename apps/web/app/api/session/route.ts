@@ -48,9 +48,9 @@ export async function GET(req: Request) {
     reasoningEvent && typeof reasoningEvent.payload?.level === 'string'
       ? reasoningEvent.payload.level
       : undefined;
-  const modeFromEvent = (await store.lastEvent('mode').catch(() => null))?.payload?.mode ?? 'standard';
+  // Mode: `sessionMode` reads the persisted config identity (ADR-0016).
   const title = await sessionTitle(store.workspace, session);
-  return Response.json({ messages: loaded.messages, level, reasoning, mode: modeFromEvent, title });
+  return Response.json({ messages: loaded.messages, level, reasoning, mode, title });
 }
 
 export async function PATCH(req: Request) {
