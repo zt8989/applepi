@@ -15,21 +15,17 @@
  * flat-prompt step they lower into declarative tool specs + prompt fragments.
  */
 
-import type { PermissionLevel } from '@applepi/core';
+import type { CapabilityEnv } from '@applepi/extensions';
 
-export interface BundleEnv {
-  /** Process/project working directory (project root). Defaults to cwd. */
-  cwd: string;
-  /** Selected workspace path (web); defaults to `cwd`. */
-  workspace?: string;
-  /**
-   * Current permission level — the bundle renders its own level-aware
-   * permission/capability declaration (ADR-0015: declaration → bundles; core
-   * security only enforces). The app passes the live level when it re-reads
-   * the spec each turn.
-   */
-  level?: PermissionLevel;
-}
+/**
+ * The environment a bundle's fragments render against. Merged with the
+ * extension side's `CapabilityEnv` (deepen #05): the two were field-for-field
+ * duplicates; `BundleEnv` is now that single shared type, so a bundle spec's
+ * fragments and the capability fragments it aggregates always render against
+ * the same env shape. (Permission-declaration duplication was already removed
+ * by deepen #01's shared `permissionFragment`.)
+ */
+export type BundleEnv = CapabilityEnv;
 
 /** The assembled capability of one bundle for one session. */
 export interface BundleSpec {
