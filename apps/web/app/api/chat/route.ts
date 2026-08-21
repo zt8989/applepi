@@ -12,7 +12,7 @@ import {
   buildSystemPrompt,
   buildTurnMessages,
   getHarness,
-  getModel,
+  getSessionModel,
   sessionMode,
   sessionReasoningLevel,
 } from '@/lib/server';
@@ -75,8 +75,7 @@ export async function POST(req: Request) {
   messages.push({ role: 'user', content: body.message });
   await store.appendMessage('user', body.message);
 
-  const model = await getModel();
-  const { protocol } = await resolveLlmConfig();
+  const { model, protocol } = await getSessionModel(body.workspace, store.sessionId ?? undefined);
   return createDataStreamResponse({
     async execute(writer) {
       writer.writeData({ type: 'session', sessionId: store.sessionId });

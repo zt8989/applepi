@@ -110,6 +110,7 @@ function ModelsPanel() {
   const [available, setAvailable] = useState<{ id: string; displayName: string }[]>([]);
   const [lastUsed, setLastUsed] = useState<{ providerId: string; modelId: string } | undefined>();
   const [lastUsedLevel, setLastUsedLevel] = useState('medium');
+  const [defaultPermissionLevel, setDefaultPermissionLevel] = useState('workspace');
   const [editing, setEditing] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -121,6 +122,7 @@ function ModelsPanel() {
       setAvailable(d.availableBuiltins ?? []);
       setLastUsed(d.lastUsedModel);
       setLastUsedLevel(d.lastUsedLevel ?? 'medium');
+      setDefaultPermissionLevel(d.defaultPermissionLevel ?? 'workspace');
     } catch (e: any) {
       setErr(e?.message ?? String(e));
     }
@@ -136,6 +138,15 @@ function ModelsPanel() {
       body: JSON.stringify({ level }),
     });
     setLastUsedLevel(level);
+  };
+
+  const saveDefaultPermission = async (level: string) => {
+    await fetchJson('/api/config/general', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ permissionLevel: level }),
+    });
+    setDefaultPermissionLevel(level);
   };
 
   const saveAll = async (nextUser: ProviderMap) => {
@@ -168,6 +179,34 @@ function ModelsPanel() {
                   onClick={() => void saveReasoningLevel(l)}
                   className={`rounded-full border px-2.5 py-1 text-xs ${
                     lastUsedLevel === l
+                      ? 'border-neutral-900 bg-neutral-900 font-medium text-white'
+                      : 'border-neutral-200 text-neutral-600 hover:bg-neutral-50'
+                  }`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Global default permission level (ADR-0016 通用设置) */}
+      <div className="rounded-xl border border-neutral-200 px-4 py-3">
+        <div className="flex items-center justify-between">
+          <div className="text-sm">
+            <div className="font-medium text-neutral-900">默认权限级别</div>
+            <div className="mt-0.5 text-xs text-neutral-400">新会话的默认安全级别，可在会话内单独覆盖</div>
+          </div>
+          <div className="flex items-center gap-1">
+            {(['readonly', 'workspace', 'fullaccess'] as const).map((l) => {
+              const label = { readonly: '只读', workspace: '工作区', fullaccess: '完全访问' }[l];
+              return (
+                <button
+                  key={l}
+                  onClick={() => void saveDefaultPermission(l)}
+                  className={`rounded-full border px-2.5 py-1 text-xs ${
+                    defaultPermissionLevel === l
                       ? 'border-neutral-900 bg-neutral-900 font-medium text-white'
                       : 'border-neutral-200 text-neutral-600 hover:bg-neutral-50'
                   }`}

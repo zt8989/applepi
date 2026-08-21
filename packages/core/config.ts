@@ -44,9 +44,9 @@ export const DEFAULT_PERMISSION_LEVEL: PermissionLevel = 'workspace';
  * Reasoning level — how much thinking effort the LLM applies. Orthogonal to
  * the permission level (which governs tool/security boundaries): this only
  * tunes the model request. `off` sends no reasoning parameter; `low/medium/
- * high` map to provider-specific params (see stream-loop.ts). Stored as a
- * global default (`settings.json.lastUsedLevel`) + per-session override
- * (`reasoning/set` event).
+ * high` map to provider-specific params (see stream-loop.ts). Global default in
+ * `settings.json.general.reasoningLevel` + per-session override in
+ * `session.config.reasoningLevel` (ADR-0016).
  */
 export type ReasoningLevel = 'off' | 'low' | 'medium' | 'high';
 
