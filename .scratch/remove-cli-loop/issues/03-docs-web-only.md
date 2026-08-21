@@ -1,0 +1,11 @@
+# 03 — 文档对齐为 web-only
+
+**What to build:** 所有架构 / 设计原则 / 上下文文档描述一个 **web 唯一**的产品：没有 CLI 界面、没有非流式 loop。曾描述 CLI REPL、其 slash 命令、非流式 loop（非流式模型调用面与 CLI turn 便捷方法）、应用包清单、依赖图、验证脚本套件的段落，更新到删除后的状态；「UI 无关的核心」原则改写为「web 是唯一接口」。
+
+**Blocked by:** 02 — 从 core 移除非流式 loop（runLoop）
+
+**Status:** ready-for-agent
+
+- [ ] 文档不再描述 CLI 界面或被删的非流式 loop（过时路径 / 术语消除）
+- [ ] 应用包清单与依赖图、验证脚本套件描述与删除后的目录树一致
+- [ ] 「UI 无关的核心（UI-agnostic core）」原则改写，明确 web 是唯一接口（移除“CLI 只是其中一个接口”表述）
