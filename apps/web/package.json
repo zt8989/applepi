@@ -7,7 +7,8 @@
     "dev": "next dev -p 3010",
     "build": "next build",
     "start": "next start -p 3010",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx test/display.test.ts"
   },
   "dependencies": {
     "@applepi/bundle": "workspace:*",

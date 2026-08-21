@@ -7,6 +7,14 @@ import {
   type ThreadMessageLike,
 } from '@assistant-ui/react';
 import type { ChatStore } from '@/lib/chat-store';
+import {
+  LEVEL_META,
+  type LevelIcon,
+  REASONING_META,
+  REASONING_KEYS,
+  estimateUsage,
+  formatTokens,
+} from '@/lib/display';
 import { ApprovalContext, ToolCallCard } from './approval-tool';
 import { Sidebar } from './sidebar';
 import { ComposerFooter } from './composer-footer';
@@ -91,20 +99,12 @@ function MessageRow({ message }: { message: ThreadMessageLike }) {
   );
 }
 
-const LEVEL_META: Record<string, { label: string; desc: string; icon: React.ComponentType<{ className?: string }> }> = {
-  readonly: { label: 'Read Only', desc: '可读任意位置，禁止所有写入', icon: ReadOnlyIcon },
-  workspace: { label: 'Workspace Write', desc: '可写限定在工作区内（默认）', icon: WorkspaceWriteIcon },
-  fullaccess: { label: 'Full access', desc: '读写任意位置（仍受危险命令黑名单约束）', icon: FullAccessIcon },
+/** Level icons are React components, kept with the components that render them. */
+const LEVEL_ICONS: Record<string, LevelIcon> = {
+  readonly: ReadOnlyIcon,
+  workspace: WorkspaceWriteIcon,
+  fullaccess: FullAccessIcon,
 };
-
-/** Reasoning level display labels (打字机级模型思考强度). */
-const REASONING_META: Record<string, { label: string }> = {
-  off: { label: '关闭' },
-  low: { label: '低' },
-  medium: { label: '中' },
-  high: { label: '高' },
-};
-const REASONING_KEYS = Object.keys(REASONING_META);
 
 function PermissionToolbarDropdown({
   level,
@@ -126,7 +126,7 @@ function PermissionToolbarDropdown({
   }, [open]);
 
   const meta = LEVEL_META[level] ?? LEVEL_META.workspace;
-  const Icon = meta.icon;
+  const Icon = LEVEL_ICONS[level] ?? ReadOnlyIcon;
 
   return (
     <div ref={ref} className="relative">
@@ -143,7 +143,7 @@ function PermissionToolbarDropdown({
       {open && (
         <div className="absolute bottom-full left-0 z-30 mb-2 w-64 overflow-hidden rounded-xl border border-neutral-200 bg-white py-1 shadow-lg">
           {Object.entries(LEVEL_META).map(([key, v]) => {
-            const ItemIcon = v.icon;
+            const ItemIcon = LEVEL_ICONS[key] ?? ReadOnlyIcon;
             return (
               <button
                 key={key}
@@ -169,45 +169,6 @@ function PermissionToolbarDropdown({
       )}
     </div>
   );
-}
-
-function textOf(message: ThreadMessageLike): string {
-  if (typeof message.content === 'string') return message.content;
-  return (message.content as any[])
-    .map((p) => (p.type === 'text' ? p.text ?? '' : JSON.stringify(p)))
-    .join(' ');
-}
-
-function contextLimit(model: string): number {
-  const m = model.toLowerCase();
-  if (m.includes('claude')) return 200_000;
-  if (m.includes('32k')) return 32_768;
-  if (m.includes('128k') || m.includes('gpt-4o')) return 128_000;
-  return 128_000;
-}
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}K`;
-  return String(n);
-}
-
-function estimateUsage(messages: ThreadMessageLike[], model: string) {
-  const limit = contextLimit(model);
-  const systemTokens = 1_000;
-  const toolTokens = messages.reduce((sum, m) => {
-    const content = Array.isArray(m.content) ? m.content : [];
-    return (
-      sum +
-      content
-        .filter((p: any) => p.type === 'tool-call' || p.type === 'tool-result')
-        .reduce((s: number, p: any) => s + Math.ceil(JSON.stringify(p).length / 4), 0)
-    );
-  }, 0);
-  const messageTokens = messages.reduce((sum, m) => sum + Math.ceil(textOf(m).length / 4), 0);
-  const tokens = Math.min(limit, systemTokens + toolTokens + messageTokens);
-  const percent = Math.max(1, Math.min(100, Math.round((tokens / limit) * 100)));
-  return { tokens, limit, percent, systemTokens, toolTokens, messageTokens };
 }
 
 function useOutsideClick(ref: React.RefObject<HTMLDivElement | null>, onClose: () => void, active: boolean) {

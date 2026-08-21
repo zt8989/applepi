@@ -1,6 +1,7 @@
 'use client';
 
 import type { ChatStore } from '@/lib/chat-store';
+import { MODES } from '@/lib/display';
 import { WorkspaceDropdown, WorkspacePillTrigger } from './workspace-dropdown';
 
 /**
@@ -10,11 +11,6 @@ import { WorkspaceDropdown, WorkspacePillTrigger } from './workspace-dropdown';
  * Permission selection now lives in the composer toolbar, next to the "+"
  * button.
  */
-
-const MODES: { id: string; label: string; desc: string }[] = [
-  { id: 'standard', label: 'standard', desc: '全量能力（工具 + 记忆 + 技能）' },
-  { id: 'base', label: 'base', desc: '极简：仅 bash 与文件编辑' },
-];
 
 /** A base/standard bundle picker for the new session (ADR-0015 mode selection). */
 function ModeChip({ store }: { store: ChatStore }) {

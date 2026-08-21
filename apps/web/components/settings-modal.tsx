@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { Modal } from './modal';
 import { ChevronIcon, SettingsIcon, PlusIcon } from './icons';
 import type { ProviderConfig, ProviderProtocol, ModelEntry } from '@applepi/core';
+import { REASONING_META, REASONING_KEYS } from '@/lib/display';
 
 type ProviderMap = Record<string, ProviderConfig & { apiKey?: string }>;
 
@@ -171,8 +172,8 @@ function ModelsPanel() {
             <div className="mt-0.5 text-xs text-neutral-400">新会话的默认思考强度，可在会话内单独覆盖</div>
           </div>
           <div className="flex items-center gap-1">
-            {(['off', 'low', 'medium', 'high'] as const).map((l) => {
-              const label = { off: '关闭', low: '低', medium: '中', high: '高' }[l];
+            {REASONING_KEYS.map((l) => {
+              const label = REASONING_META[l].label;
               return (
                 <button
                   key={l}
