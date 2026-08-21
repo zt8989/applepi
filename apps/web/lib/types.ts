@@ -11,6 +11,8 @@ export interface ChatRequestBody {
   message: string;
   /** Optional permission level for a brand-new session (no sessionId yet). */
   level?: string;
+  /** Optional pre-chosen reasoning level for a brand-new session. */
+  reasoning?: string;
 }
 
 export interface ApproveRequestBody {

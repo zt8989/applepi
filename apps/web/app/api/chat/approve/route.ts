@@ -2,9 +2,16 @@ import { createDataStreamResponse } from 'ai';
 import {
   executeApprovedTool,
   pendingToolCalls,
+  resolveLlmConfig,
   runLoopStreamSegment,
 } from '@applepi/core';
-import { bindSession, buildTurnMessages, getHarness, getModel } from '@/lib/server';
+import {
+  bindSession,
+  buildTurnMessages,
+  getHarness,
+  getModel,
+  sessionReasoningLevel,
+} from '@/lib/server';
 import type { ApproveRequestBody } from '@/lib/types';
 
 export const runtime = 'nodejs';
@@ -41,6 +48,8 @@ export async function POST(req: Request) {
 
   const messages = await buildTurnMessages(harness);
   const model = await getModel();
+  const { protocol } = await resolveLlmConfig();
+  const reasoningLevel = await sessionReasoningLevel(body.workspace, body.sessionId);
 
   return createDataStreamResponse({
     async execute(writer) {
@@ -73,6 +82,8 @@ export async function POST(req: Request) {
         store,
         writer,
         messageId: body.messageId,
+        protocol,
+        reasoningLevel,
       });
     },
     onError: (e) => `approve error: ${(e as Error)?.message ?? String(e)}`,

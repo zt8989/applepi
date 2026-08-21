@@ -13,6 +13,9 @@ export type {
   StreamFinishReason,
   StreamSegmentResult,
 } from './stream-loop.js';
+export {
+  reasoningProviderOptions,
+} from './stream-loop.js';
 export { getTracer, flushTraces, resetTracer, modelLabel } from './trace.js';
 export type { Tracer, TraceHandle, SpanHandle } from './trace.js';
 export {
@@ -20,12 +23,17 @@ export {
   slugWorkspace,
 } from './session.js';
 export {
-  DEFAULT_LLM_SETTINGS,
-  SUPPORTED_PROVIDERS,
+  BUILTIN_PROVIDERS,
+  PROVIDER_PROTOCOLS,
+  REASONING_LEVELS,
+  DEFAULT_REASONING_LEVEL,
   loadSettings,
+  saveSettings,
   loadDotenv,
+  writeDotenvKey,
   resolveApiKey,
   resolveLlmConfig,
+  providerSecretName,
 } from './config.js';
 export {
   PERMISSION_SCRATCH_KEY,
@@ -46,7 +54,10 @@ export type {
 export type {
   LlmSettings,
   ResolvedLlmConfig,
-  SupportedProvider,
+  ProviderConfig,
+  ProviderProtocol,
+  ReasoningLevel,
+  ModelEntry,
 } from './config.js';
 export type {
   HookStack,

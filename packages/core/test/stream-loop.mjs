@@ -16,6 +16,7 @@ import {
   executeApprovedTool,
   classifyApproval,
   pendingToolCalls,
+  reasoningProviderOptions,
 } from '../dist/index.js';
 import { baseExtension } from '../../extensions/dist/index.js';
 
@@ -26,6 +27,8 @@ function ok(name) {
 }
 
 const ws = 'test-ws-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+// Inject a temp root so the store never touches ~/.applepi (sandbox-safe).
+const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'applepi-stream-test-'));
 
 // Captured stream lines (formatted protocol lines, e.g. `9:{...}`).
 function makeWriter() {
@@ -68,7 +71,7 @@ function fakeStreamText(turns, opts) {
 
 // ---- harness + tools -------------------------------------------------------
 
-const store = new SessionStore({ workspace: ws, sessionId: 'sess-stream' });
+const store = new SessionStore({ baseDir: tmpRoot, workspace: ws, sessionId: 'sess-stream' });
 await store.create();
 
 const harness = new Harness({ workspace: ws });
@@ -218,12 +221,33 @@ harness.attachSession(store);
 
 // 7. Persisted assistant/tool message lines replay into a usable history.
 {
-  const s2 = new SessionStore({ workspace: ws, sessionId: 'sess-stream' });
+  const s2 = new SessionStore({ baseDir: tmpRoot, workspace: ws, sessionId: 'sess-stream' });
   const loaded = await s2.load();
   const roles = loaded.messages.map((m) => m.role);
   assert.ok(roles.includes('assistant') && roles.includes('tool'));
   ok('session jsonl: assistant + tool lines persisted for replay');
 }
 
-await fs.rm(path.join(os.homedir(), '.applepi', 'sessions', ws), { recursive: true, force: true });
+// 8. reasoningProviderOptions: off/unsupported thread nothing; openai ↔ effort;
+//    anthropic ↔ thinking budget scaled by level.
+{
+  assert.equal(reasoningProviderOptions('openai-completions', 'off'), undefined);
+  assert.equal(reasoningProviderOptions('openai-responses', undefined), undefined);
+  assert.equal(reasoningProviderOptions('some-other', 'high'), undefined);
+  assert.deepEqual(reasoningProviderOptions('openai-completions', 'low'), {
+    openai: { reasoningEffort: 'low' },
+  });
+  assert.deepEqual(reasoningProviderOptions('openai-responses', 'high'), {
+    openai: { reasoningEffort: 'high' },
+  });
+  assert.deepEqual(reasoningProviderOptions('anthropic-messages', 'medium'), {
+    anthropic: { thinking: { type: 'enabled', budgetTokens: 2048 } },
+  });
+  assert.deepEqual(reasoningProviderOptions('anthropic-messages', 'high'), {
+    anthropic: { thinking: { type: 'enabled', budgetTokens: 4096 } },
+  });
+  ok('reasoningProviderOptions: off/unknown skip, openai→effort, anthropic→thinking budget');
+}
+
+await fs.rm(tmpRoot, { recursive: true, force: true });
 console.log(`stream-loop: ${passed} checks passed`);

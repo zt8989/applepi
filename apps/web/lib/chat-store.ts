@@ -73,6 +73,16 @@ export interface ChatStore {
   sessionTitle: string | null;
   level: string;
   setLevel: (level: string) => Promise<void>;
+  /** Current effective reasoning level for this session. */
+  reasoning: string;
+  /** Set the reasoning level: writes the session `reasoning/set` event (or
+   *  remembers it for the first message when no session exists yet). */
+  setReasoning: (level: string) => Promise<void>;
+  /** Global default reasoning level (settings.json.lastUsedLevel). */
+  globalReasoning: string;
+  /** Solve: cumulative real prompt+completion tokens streamed this session. */
+  usage: number;
+  resetUsage: () => void;
   llm: LlmConfig | null;
   refreshLlm: () => Promise<void>;
   pending: PendingApprovalInfo | null;
@@ -106,6 +116,9 @@ export function useChatStore(): ChatStore {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionTitle, setSessionTitle] = useState<string | null>(null);
   const [level, setLevelState] = useState('workspace');
+  const [reasoning, setReasoningState] = useState('medium');
+  const [globalReasoning, setGlobalReasoning] = useState('medium');
+  const [usage, setUsage] = useState(0);
   const [llm, setLlm] = useState<LlmConfig | null>(null);
   const [messages, setMessages] = useState<ThreadMessageLike[]>([]);
   const [isRunning, setIsRunning] = useState(false);
@@ -159,8 +172,9 @@ export function useChatStore(): ChatStore {
     try {
       const res = await fetch('/api/config');
       if (!res.ok) return;
-      const data = (await res.json()) as LlmConfig;
+      const data = (await res.json()) as LlmConfig & { reasoningLevel?: string };
       setLlm(data);
+      if (typeof data.reasoningLevel === 'string') setGlobalReasoning(data.reasoningLevel);
     } catch {
       // keep the last known config
     }
@@ -329,6 +343,20 @@ export function useChatStore(): ChatStore {
     [sessionAction],
   );
 
+  const setReasoning = useCallback(
+    async (l: string) => {
+      if (!sessionIdRef.current) {
+        setReasoningState(l); // no session yet: remember for the first message
+        return;
+      }
+      await sessionAction(sessionIdRef.current, { action: 'reasoning', reasoning: l });
+      setReasoningState(l);
+    },
+    [sessionAction],
+  );
+
+  const resetUsage = useCallback(() => setUsage(0), []);
+
   // ---- stream handling -----------------------------------------------------
 
   const appendText = useCallback(
@@ -343,6 +371,24 @@ export function useChatStore(): ChatStore {
         lastText.text += delta;
       } else {
         parts.push({ type: 'text', text: delta });
+      }
+      commit(msgs.map((m, i) => (i === idx ? { ...m, content: parts } : m)));
+    },
+    [commit],
+  );
+
+  const appendReasoning = useCallback(
+    (assistantId: string, delta: string) => {
+      const msgs = messagesRef.current;
+      const idx = msgs.findIndex((m) => m.id === assistantId);
+      if (idx === -1) return;
+      const msg = msgs[idx];
+      const parts = [...(msg.content as any[])];
+      const last = [...parts].reverse().find((p) => p.type === 'reasoning');
+      if (last) {
+        last.text += delta;
+      } else {
+        parts.push({ type: 'reasoning', text: delta });
       }
       commit(msgs.map((m, i) => (i === idx ? { ...m, content: parts } : m)));
     },
@@ -435,6 +481,11 @@ export function useChatStore(): ChatStore {
     levelRef.current = level;
   }, [level]);
 
+  const reasoningRef = useRef(reasoning);
+  useEffect(() => {
+    reasoningRef.current = reasoning;
+  }, [reasoning]);
+
   const workspacesRef = useRef(workspaces);
   useEffect(() => {
     workspacesRef.current = workspaces;
@@ -459,10 +510,20 @@ export function useChatStore(): ChatStore {
         await processDataStream({
           stream: res.body,
           onTextPart: (text) => appendText(assistantId, text),
+          onReasoningPart: (delta) => appendReasoning(assistantId, delta),
           onToolCallPart: (part) => appendToolCall(assistantId, part),
           onToolResultPart: (part) => attachToolResult(assistantId, part.toolCallId, part.result),
           onDataPart: handleData,
-          onFinishMessagePart: () => setIsRunning(false),
+          onFinishMessagePart: (part) => {
+            // Real token usage arrives on the finish part (sendUsage: true).
+            const u = (part as any)?.usage as
+              | { promptTokens?: number; completionTokens?: number }
+              | undefined;
+            if (u && typeof u.promptTokens === 'number' && typeof u.completionTokens === 'number') {
+              setUsage((n) => n + u.promptTokens! + u.completionTokens!);
+            }
+            setIsRunning(false);
+          },
           onErrorPart: (err) => setError(String(err)),
         });
       } catch (e: any) {
@@ -473,7 +534,7 @@ export function useChatStore(): ChatStore {
         abortRef.current = null;
       }
     },
-    [appendText, appendToolCall, attachToolResult, handleData],
+    [appendText, appendReasoning, appendToolCall, attachToolResult, handleData],
   );
 
   const addReference = useCallback((p: string) => {
@@ -510,6 +571,8 @@ export function useChatStore(): ChatStore {
       setError(null);
       setIsRunning(true);
       setReferences([]);
+      // A brand-new session starts a fresh usage tally.
+      if (!sessionIdRef.current) setUsage(0);
       const body: ChatRequestBody = {
         workspace: workspaceRef.current,
         sessionId: sessionIdRef.current ?? undefined,
@@ -517,6 +580,8 @@ export function useChatStore(): ChatStore {
         message: full,
         // Pre-chosen permission level for a brand-new session.
         level: sessionIdRef.current ? undefined : levelRef.current,
+        // Pre-chosen reasoning level for a brand-new session.
+        reasoning: sessionIdRef.current ? undefined : reasoningRef.current,
       };
       await runSegment('/api/chat', body, assistantId);
       await refreshWorkspaces();
@@ -572,6 +637,7 @@ export function useChatStore(): ChatStore {
         }
         const data = await res.json();
         if (typeof data.level === 'string') setLevelState(data.level);
+        if (typeof data.reasoning === 'string') setReasoningState(data.reasoning);
         if (typeof data.title === 'string') setSessionTitle(data.title);
         const msgs = data.messages as { role: string; content: any }[];
         const out: ThreadMessageLike[] = [];
@@ -714,6 +780,11 @@ export function useChatStore(): ChatStore {
     sessionTitle,
     level,
     setLevel,
+    reasoning,
+    setReasoning,
+    globalReasoning,
+    usage,
+    resetUsage,
     llm,
     refreshLlm,
     pending,

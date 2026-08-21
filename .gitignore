@@ -21,3 +21,6 @@ _deny_sentinel.txt
 _empty_ext_dir/
 harness-memory.json
 .next/
+
+# vision-toolkit session temp
+.dsh-vision-toolkit/

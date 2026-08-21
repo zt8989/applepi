@@ -34,6 +34,11 @@ export type SessionLine = SessionEvent | SessionMessage;
 export interface SessionStoreOptions {
   workspace?: string;
   sessionId?: string;
+  /**
+   * Override the on-disk root for this store. Defaults to `~/.applepi/sessions`.
+   * Tests inject a temp dir so they never touch the real user config.
+   */
+  baseDir?: string;
 }
 
 export interface LoadedSession {
@@ -54,14 +59,17 @@ type AppendableLine =
 export class SessionStore {
   readonly workspace: string;
   sessionId: string | null = null;
+  private readonly root: string;
 
   constructor(opts: SessionStoreOptions = {}) {
     this.workspace = opts.workspace ?? slugWorkspace(process.cwd());
     this.sessionId = opts.sessionId ?? null;
+    // Default root: ~/.applepi/sessions. Overridable for tests (ADR-0014 era).
+    this.root = opts.baseDir ?? path.join(os.homedir(), '.applepi', 'sessions');
   }
 
   private baseDir(): string {
-    return path.join(os.homedir(), '.applepi', 'sessions', this.workspace);
+    return path.join(this.root, this.workspace);
   }
 
   filePath(id: string = this.sessionId ?? ''): string {

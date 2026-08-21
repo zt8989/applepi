@@ -1,7 +1,8 @@
-// Plain-node unit test for the core LLM config primitives (ADR-0004). No API key.
-// Covers: loadSettings (missing → throw / parse / invalid JSON), loadDotenv (parse
-// rules), resolveApiKey (lookup-by-name), resolveLlmConfig (placeholder+secret,
-// direct key, fail-fast). All runs use an injected temp baseDir, self-cleaned.
+// Plain-node unit test for the core LLM config primitives (ADR-0014 multi-provider
+// registry). No API key. Covers: loadSettings (missing -> throw / parse / invalid
+// JSON / protocol validation), loadDotenv (parse rules), resolveApiKey
+// (lookup-by-name), resolveLlmConfig (placeholder+secret, direct key, fail-fast,
+// lastUsedModel resolution, baseURL pass-through). All runs use a temp baseDir.
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -23,20 +24,47 @@ const base = await fs.mkdtemp(path.join(os.tmpdir(), 'applepi-config-test-'));
 const settingsFile = path.join(base, 'settings.json');
 const envFile = path.join(base, '.env');
 
-// 1. loadSettings: missing file -> throws (fail fast, ADR-0004 amendment).
+function reg(providers, lastUsedModel) {
+  return JSON.stringify({ providers, ...(lastUsedModel ? { lastUsedModel } : {}) });
+}
+
+// 1. loadSettings: missing file -> throws (fail fast).
 {
   await assert.rejects(() => loadSettings(base), /settings\.json not found/);
   ok('loadSettings: missing file -> throws (fail fast)');
 }
 
-// 2. loadSettings: valid JSON parsed (partial fields fall back).
+// 2. loadSettings: valid registry parsed; provider label + default catalog.
 {
-  await fs.writeFile(settingsFile, JSON.stringify({ provider: 'anthropic', model: 'claude-3-5-sonnet-latest' }));
+  await fs.writeFile(
+    settingsFile,
+    reg({ anthropic: { displayName: 'Anthropic', protocol: 'anthropic-messages', apiKeyRef: 'PROVIDER_ANTHROPIC_API_KEY' } }),
+  );
   const s = await loadSettings(base);
-  assert.equal(s.provider, 'anthropic');
-  assert.equal(s.model, 'claude-3-5-sonnet-latest');
-  assert.equal(s.apiKey, 'ANTHROPIC_API_KEY', 'default apiKey follows provider');
-  ok('loadSettings: parses JSON, apiKey default follows provider');
+  assert.equal(s.providers.anthropic.displayName, 'Anthropic');
+  assert.equal(s.providers.anthropic.protocol, 'anthropic-messages');
+  ok('loadSettings: parses registry, protocol + displayName');
+}
+
+// 2b. loadSettings: a builtin-enabled entry may omit displayName/protocol/baseURL;
+//     missing fields fall back to the code preset (ADR-0014 minimal-enabled form).
+{
+  await fs.writeFile(settingsFile, reg({ deepseek: { apiKeyRef: 'PROVIDER_DEEPSEEK_API_KEY' } }));
+  const s = await loadSettings(base);
+  assert.equal(s.providers.deepseek.displayName, 'DeepSeek', 'displayName from preset');
+  assert.equal(s.providers.deepseek.protocol, 'openai-completions', 'protocol from preset');
+  assert.equal(s.providers.deepseek.baseURL, 'https://api.deepseek.com/v1', 'baseURL from preset');
+  assert.equal(s.providers.deepseek.apiKeyRef, 'PROVIDER_DEEPSEEK_API_KEY', 'explicit apiKeyRef kept');
+  assert.equal(s.providers.deepseek.builtin, true, 'marked builtin');
+  ok('loadSettings: minimal builtin entry falls back to preset for displayName/protocol/baseURL');
+}
+
+// 2c. loadSettings: a custom (non-builtin) provider still requires protocol.
+{
+  await fs.writeFile(settingsFile, reg({ acme: { apiKeyRef: 'PROVIDER_ACME_API_KEY' } }));
+  await assert.rejects(() => loadSettings(base), /missing a "protocol" field/);
+  ok('loadSettings: custom provider without protocol -> throws');
+  await fs.unlink(settingsFile);
 }
 
 // 3. loadSettings: malformed JSON -> throws.
@@ -47,7 +75,23 @@ const envFile = path.join(base, '.env');
   await fs.unlink(settingsFile);
 }
 
-// 4. loadDotenv: parses KEY=VALUE, comments, export prefix, quotes.
+// 4. loadSettings: legacy flat shape (no `providers`) -> throws (no in-code migration, ADR-0014).
+{
+  await fs.writeFile(settingsFile, JSON.stringify({ provider: 'openai', model: 'gpt-4o-mini' }));
+  await assert.rejects(() => loadSettings(base), /provider registry/);
+  ok('loadSettings: legacy flat shape -> throws (migration is operator-run)');
+  await fs.unlink(settingsFile);
+}
+
+// 5. loadSettings: unsupported protocol -> throws.
+{
+  await fs.writeFile(settingsFile, reg({ x: { displayName: 'X', protocol: 'groq', apiKeyRef: 'K' } }));
+  await assert.rejects(() => loadSettings(base), /unsupported protocol/);
+  ok('loadSettings: unsupported protocol -> throws');
+  await fs.unlink(settingsFile);
+}
+
+// 6. loadDotenv: parses KEY=VALUE, comments, export prefix, quotes.
 {
   await fs.writeFile(
     envFile,
@@ -67,74 +111,141 @@ const envFile = path.join(base, '.env');
   ok('loadDotenv: parses comments/export/quotes');
 }
 
-// 5. loadDotenv: missing file -> {}.
+// 7. loadDotenv: missing file -> {}.
 {
   await fs.unlink(envFile);
   assert.deepEqual(await loadDotenv(base), {});
   ok('loadDotenv: missing file -> {}');
 }
 
-// 6. resolveApiKey: lookup-by-name, miss -> use the ref itself.
+// 8. resolveApiKey: lookup-by-name, miss -> use the ref itself.
 {
   assert.equal(resolveApiKey('OPENAI_API_KEY', { OPENAI_API_KEY: 'sk-secret' }), 'sk-secret');
   assert.equal(resolveApiKey('sk-direct-789', {}), 'sk-direct-789', 'miss -> ref treated as real key');
   ok('resolveApiKey: hit uses secret, miss uses the ref value');
 }
 
-// 7. resolveLlmConfig: placeholder + .env secret -> real key.
+// 9. resolveLlmConfig: placeholder + .env secret -> real key, lastUsedModel drives model.
 {
-  await fs.writeFile(settingsFile, JSON.stringify({ provider: 'openai', model: 'gpt-4o-mini', apiKey: 'OPENAI_API_KEY' }));
-  await fs.writeFile(envFile, 'OPENAI_API_KEY=sk-from-env');
-  const cfg = await resolveLlmConfig(base);
-  assert.equal(cfg.provider, 'openai');
-  assert.equal(cfg.apiKey, 'sk-from-env');
-  ok('resolveLlmConfig: placeholder resolves through .env');
-}
-
-// 8. resolveLlmConfig: direct real key in settings (no .env hit) -> key itself.
-{
-  await fs.writeFile(envFile, 'OTHER_VAR=1');
-  await fs.writeFile(settingsFile, JSON.stringify({ provider: 'openai', model: 'gpt-4o-mini', apiKey: 'sk-direct-in-settings' }));
-  const cfg = await resolveLlmConfig(base);
-  assert.equal(cfg.apiKey, 'sk-direct-in-settings');
-  ok('resolveLlmConfig: .env miss -> settings value treated as real key');
-}
-
-// 9. resolveLlmConfig: unusable key -> fail fast with guidance.
-{
-  await fs.writeFile(envFile, 'OTHER_VAR=1');
-  await fs.writeFile(settingsFile, JSON.stringify({ provider: 'openai', model: 'gpt-4o-mini', apiKey: '' }));
-  await assert.rejects(() => resolveLlmConfig(base), /no usable apiKey/);
-  ok('resolveLlmConfig: empty/unusable key -> throws with guidance');
-}
-
-// 10. resolveLlmConfig: unsupported provider -> throws.
-{
-  await fs.writeFile(settingsFile, JSON.stringify({ provider: 'groq', model: 'x', apiKey: 'k' }));
-  await assert.rejects(() => resolveLlmConfig(base), /unsupported LLM provider/);
-  ok('resolveLlmConfig: unsupported provider -> throws');
-}
-
-// 11. baseURL: parsed from settings and passed through; absent -> undefined.
-{
-  await fs.writeFile(envFile, 'OPENAI_API_KEY=sk-base-url');
   await fs.writeFile(
     settingsFile,
-    JSON.stringify({ provider: 'openai', model: 'gpt-4o-mini', apiKey: 'OPENAI_API_KEY', baseURL: 'https://gateway.example.com/v1' }),
+    reg(
+      { openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'PROVIDER_OPENAI_API_KEY' } },
+      { providerId: 'openai', modelId: 'gpt-4o-mini' },
+    ),
   );
-  const s = await loadSettings(base);
-  assert.equal(s.baseURL, 'https://gateway.example.com/v1');
+  await fs.writeFile(envFile, 'PROVIDER_OPENAI_API_KEY=sk-from-env');
+  const cfg = await resolveLlmConfig(base);
+  assert.equal(cfg.provider, 'OpenAI');
+  assert.equal(cfg.protocol, 'openai-completions');
+  assert.equal(cfg.model, 'gpt-4o-mini');
+  assert.equal(cfg.apiKey, 'sk-from-env');
+  ok('resolveLlmConfig: lastUsedModel model + placeholder resolves through .env');
+}
+
+// 10. resolveLlmConfig: direct real key in settings (no .env hit) -> key itself.
+{
+  await fs.writeFile(envFile, 'OTHER_VAR=1');
+  await fs.writeFile(
+    settingsFile,
+    reg({ openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'sk-direct-in-settings' } },
+      { providerId: 'openai', modelId: 'gpt-4o-mini' }),
+  );
+  const cfg = await resolveLlmConfig(base);
+  assert.equal(cfg.apiKey, 'sk-direct-in-settings');
+  ok('resolveLlmConfig: .env miss -> apiKeyRef treated as real key');
+}
+
+// 11. resolveLlmConfig: apiKeyRef missing from .env -> ref itself returned (SDK
+//     will surface auth error); empty apiKeyRef is backfilled to the derived name
+//     so it never silently resolves to a usable key. We assert no early throw and
+//     that the returned key equals the derived ref.
+{
+  await fs.writeFile(envFile, 'OTHER_VAR=1');
+  await fs.writeFile(
+    settingsFile,
+    reg({ openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'PROVIDER_OPENAI_API_KEY' } },
+      { providerId: 'openai', modelId: 'gpt-4o-mini' }),
+  );
+  const cfg = await resolveLlmConfig(base);
+  assert.equal(cfg.apiKey, 'PROVIDER_OPENAI_API_KEY', 'missing .env key -> ref passed through to SDK');
+  ok('resolveLlmConfig: missing .env key -> ref passed through (no silent usable key)');
+}
+
+// 12. baseURL: parsed from settings and passed through; absent -> undefined.
+{
+  await fs.writeFile(envFile, 'PROVIDER_OPENAI_API_KEY=sk-base-url');
+  await fs.writeFile(
+    settingsFile,
+    reg(
+      { openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'PROVIDER_OPENAI_API_KEY', baseURL: 'https://gateway.example.com/v1' } },
+      { providerId: 'openai', modelId: 'gpt-4o-mini' },
+    ),
+  );
   const cfg = await resolveLlmConfig(base);
   assert.equal(cfg.baseURL, 'https://gateway.example.com/v1');
   ok('baseURL: parsed from settings and passed through');
 }
 
-// 12. baseURL: absent from settings -> undefined (SDK default used).
+// 13. resolveLlmConfig: lastUsedModel pointing at missing provider -> falls back to
+//     the first *usable* provider (user ∪ builtin; builtin presets win on spread order).
 {
-  await fs.writeFile(settingsFile, JSON.stringify({ provider: 'openai', model: 'gpt-4o-mini', apiKey: 'OPENAI_API_KEY' }));
+  await fs.writeFile(envFile, 'PROVIDER_OPENAI_API_KEY=sk-fb');
+  await fs.writeFile(
+    settingsFile,
+    reg(
+      { openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'PROVIDER_OPENAI_API_KEY' } },
+      { providerId: 'ghost', modelId: 'nope' },
+    ),
+  );
   const cfg = await resolveLlmConfig(base);
-  assert.equal(cfg.baseURL, undefined);
-  ok('baseURL: absent -> undefined');
+  // merged = { ...BUILTIN_PROVIDERS, ...user } -> deepseek is first.
+  assert.equal(cfg.provider, 'DeepSeek');
+  ok('resolveLlmConfig: dangling lastUsedModel -> first usable provider fallback (builtin included)');
+}
+
+// 14. loadSettings: parses lastUsedLevel; invalid value dropped; absent -> undefined.
+{
+  await fs.writeFile(
+    settingsFile,
+    JSON.stringify({
+      providers: { openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'PROVIDER_OPENAI_API_KEY' } },
+      lastUsedLevel: 'high',
+    }),
+  );
+  const s = await loadSettings(base);
+  assert.equal(s.lastUsedLevel, 'high');
+  await fs.writeFile(
+    settingsFile,
+    JSON.stringify({
+      providers: { openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'PROVIDER_OPENAI_API_KEY' } },
+      lastUsedLevel: 'extreme',
+    }),
+  );
+  const s2 = await loadSettings(base);
+  assert.equal(s2.lastUsedLevel, undefined);
+  await fs.writeFile(settingsFile, reg({}));
+  const s3 = await loadSettings(base);
+  assert.equal(s3.lastUsedLevel, undefined);
+  ok('loadSettings: parses lastUsedLevel, drops invalid/absent');
+}
+
+// 15. resolveLlmConfig: reasoningLevel defaults to medium when absent.
+{
+  await fs.writeFile(settingsFile, reg({}));
+  await fs.writeFile(envFile, 'PROVIDER_DEEPSEEK_API_KEY=sk-fb');
+  const cfg = await resolveLlmConfig(base);
+  assert.equal(cfg.reasoningLevel, 'medium');
+  await fs.writeFile(
+    settingsFile,
+    JSON.stringify({
+      providers: { openai: { displayName: 'OpenAI', protocol: 'openai-completions', apiKeyRef: 'PROVIDER_OPENAI_API_KEY' } },
+      lastUsedLevel: 'low',
+    }),
+  );
+  const cfg2 = await resolveLlmConfig(base);
+  assert.equal(cfg2.reasoningLevel, 'low');
+  ok('resolveLlmConfig: reasoningLevel defaults to medium, honors lastUsedLevel');
 }
 
 await fs.rm(base, { recursive: true, force: true });

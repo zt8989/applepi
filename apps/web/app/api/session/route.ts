@@ -41,8 +41,13 @@ export async function GET(req: Request) {
   const store = await bindSession(harness, workspace, session);
   const loaded = await store.load();
   const level = getPermissionLevel({ session: harness.session });
+  const reasoningEvent = await store.lastEvent('reasoning/set').catch(() => null);
+  const reasoning =
+    reasoningEvent && typeof reasoningEvent.payload?.level === 'string'
+      ? reasoningEvent.payload.level
+      : undefined;
   const title = await sessionTitle(store.workspace, session);
-  return Response.json({ messages: loaded.messages, level, title });
+  return Response.json({ messages: loaded.messages, level, reasoning, title });
 }
 
 export async function PATCH(req: Request) {

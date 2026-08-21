@@ -3,6 +3,7 @@ import type { Harness } from './harness.js';
 import type { SessionStore } from './session.js';
 import type { ApprovalMode } from './types.js';
 import { getTracer, modelLabel, type Tracer, type TraceHandle } from './trace.js';
+import type { ProviderProtocol, ReasoningLevel } from './config.js';
 
 /**
  * Streaming loop + approval state machine (ADR-0011).
@@ -39,12 +40,38 @@ export interface StreamLoopOpts {
    * client merges all parts of one user turn into a single assistant message.
    */
   messageId: string;
+  /** Provider protocol — selects how `reasoningLevel` maps to request params. */
+  protocol?: ProviderProtocol;
+  /** Effective reasoning level for this run (session override ?? global default). */
+  reasoningLevel?: ReasoningLevel;
   /** Persist/emit a pending approval. Default: `tool/approval-pending` event. */
   onPending?: (p: PendingApproval) => void | Promise<void>;
   /** Test seam: the streamText call used per LLM turn. */
   streamTextCall?: typeof streamText;
   /** Override the Langfuse tracer (defaults to the env-configured one). */
   trace?: Tracer | null;
+}
+
+/**
+ * Reasoning level → providerOptions mapping.
+ * - `off` threads nothing (model default / no thinking).
+ * - openai (both completions & responses): `reasoningEffort`.
+ * - anthropic: extended thinking with a scaled `budgetTokens`.
+ * - unknown protocol: nothing (silent ignore, no error).
+ */
+export function reasoningProviderOptions(
+  protocol: ProviderProtocol | undefined,
+  level: ReasoningLevel | undefined,
+): Record<string, Record<string, import('ai').JSONValue>> | undefined {
+  if (!level || level === 'off') return undefined;
+  if (protocol === 'openai-completions' || protocol === 'openai-responses') {
+    return { openai: { reasoningEffort: level } };
+  }
+  if (protocol === 'anthropic-messages') {
+    const budgetTokens = { low: 1024, medium: 2048, high: 4096 }[level] ?? 2048;
+    return { anthropic: { thinking: { type: 'enabled', budgetTokens } } };
+  }
+  return undefined;
 }
 
 export type StreamFinishReason = 'stop' | 'tool-calls' | 'max-turns' | 'error';
@@ -119,6 +146,7 @@ export async function runLoopStreamSegment(
 
       const llmCtx: any = { session: harness.session, state: {}, messages };
       let result: any;
+      const reasoningOpts = reasoningProviderOptions(opts.protocol, opts.reasoningLevel);
       await harness.bus.run('llm', llmCtx, async () => {
         result = llm({
           model: opts.model,
@@ -126,22 +154,27 @@ export async function runLoopStreamSegment(
           // no `execute`: we run tools ourselves through the onion stack.
           tools: toolDefs as any,
           experimental_generateMessageId: () => opts.messageId,
+          ...(reasoningOpts ? { providerOptions: reasoningOpts } : {}),
         });
       });
       const r: any = result;
       const gen = traceHandle?.generation('llm', { messages: llmCtx.messages }, { model: modelLabel(opts.model) });
       r.mergeIntoDataStream(opts.writer, {
         sendUsage: true,
-        sendReasoning: false,
+        sendReasoning: true,
       });
       // Await stream completion (mergeIntoDataStream is async). `text`,
-      // `usage` and `toolCalls` are Promises on a StreamTextResult.
+      // `usage` and `toolCalls` are Promises on a StreamTextResult. `reasoning`
+      // carries the full concatenated thinking text (streamed live to the
+      // client as reasoning parts; captured here for persistence).
       const text = (await r.text) as string;
       const usage = await r.usage;
+      const reasoning = (await r.reasoning) as string | undefined;
       gen?.end(text, usage);
 
       const toolCalls: any[] = (await r.toolCalls) ?? [];
       const assistantParts: any[] = [];
+      if (reasoning && reasoning.trim()) assistantParts.push({ type: 'reasoning', text: reasoning });
       if (text) assistantParts.push({ type: 'text', text });
       for (const tc of toolCalls) {
         assistantParts.push({

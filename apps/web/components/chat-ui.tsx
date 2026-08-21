@@ -21,10 +21,34 @@ import {
   WorkspaceWriteIcon,
 } from './icons';
 
+function ThinkingBlock({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mb-1 overflow-hidden rounded-lg border border-neutral-100 bg-stone-50/60 text-[13px]">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full cursor-pointer items-center gap-1.5 px-2.5 py-1.5 text-neutral-500 hover:bg-neutral-50"
+      >
+        <ChevronIcon className={`h-3 w-3 shrink-0 text-neutral-400 transition-transform ${open ? 'rotate-90' : ''}`} />
+        <span className="text-xs">思考过程</span>
+      </button>
+      {open && (
+        <div className="max-h-64 overflow-y-auto whitespace-pre-wrap border-t border-neutral-100 px-3 py-2 text-xs leading-relaxed text-neutral-500">
+          {text}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AssistantParts({ parts }: { parts: any[] }) {
   return (
     <div className="flex flex-col gap-1">
       {parts.map((p, i) => {
+        if (p.type === 'reasoning') {
+          return <ThinkingBlock key={i} text={p.text ?? ''} />;
+        }
         if (p.type === 'text') {
           return (
             <ReactMarkdown
@@ -72,6 +96,15 @@ const LEVEL_META: Record<string, { label: string; desc: string; icon: React.Comp
   workspace: { label: 'Workspace Write', desc: '可写限定在工作区内（默认）', icon: WorkspaceWriteIcon },
   fullaccess: { label: 'Full access', desc: '读写任意位置（仍受危险命令黑名单约束）', icon: FullAccessIcon },
 };
+
+/** Reasoning level display labels (打字机级模型思考强度). */
+const REASONING_META: Record<string, { label: string }> = {
+  off: { label: '关闭' },
+  low: { label: '低' },
+  medium: { label: '中' },
+  high: { label: '高' },
+};
+const REASONING_KEYS = Object.keys(REASONING_META);
 
 function PermissionToolbarDropdown({
   level,
@@ -177,88 +210,229 @@ function estimateUsage(messages: ThreadMessageLike[], model: string) {
   return { tokens, limit, percent, systemTokens, toolTokens, messageTokens };
 }
 
-function ModelPicker({ store }: { store: ChatStore }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
+function useOutsideClick(ref: React.RefObject<HTMLDivElement | null>, onClose: () => void, active: boolean) {
   useEffect(() => {
-    if (!open) return;
+    if (!active) return;
     const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
     };
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
+  }, [ref, onClose, active]);
+}
+
+/**
+ * Merged composer chip: 模型名 + 思考等级 in one element. Clicking opens a
+ * popover with the reasoning-level picker (4 options) and the provider-grouped
+ * model list. The separate usage ring (UsageRing) owns the usage detail.
+ */
+function ModelChip({ store }: { store: ChatStore }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const [groups, setGroups] = useState<{ name: string; id: string; models: { id: string; displayName: string }[] }[]>([]);
+  const [lastUsed, setLastUsed] = useState<{ providerId: string; modelId: string } | undefined>();
+
+  useOutsideClick(ref, () => setOpen(false), open);
+
+  useEffect(() => {
+    if (!open) return;
+    (async () => {
+      try {
+        const d = await (await fetch('/api/config/providers')).json();
+        const all: Record<string, any> = { ...d.builtins, ...d.user };
+        const g = Object.entries(all).map(([id, p]) => ({
+          id,
+          name: p.displayName,
+          models: (p.models ?? []).map((m: any) => ({ id: m.id, displayName: m.displayName || m.id })),
+        }));
+        setGroups(g);
+        setLastUsed(d.lastUsedModel);
+      } catch {
+        /* ignore */
+      }
+    })();
   }, [open]);
 
-  const model = store.llm?.model ?? '默认模型';
-  const usage = estimateUsage(store.messages, model);
+  const modelLabel = (() => {
+    const lu = lastUsed;
+    if (lu) {
+      const g = groups.find((x) => x.id === lu.providerId);
+      const m = g?.models.find((x) => x.id === lu.modelId);
+      if (m) return m.displayName;
+    }
+    return store.llm?.model ?? '默认模型';
+  })();
+  const levelLabel = REASONING_META[store.reasoning]?.label ?? REASONING_META.medium.label;
+
+  const selectModel = async (providerId: string, modelId: string) => {
+    setLastUsed({ providerId, modelId });
+    try {
+      await fetch('/api/config/last-used', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ providerId, modelId }),
+      });
+      await store.refreshLlm();
+    } catch {
+      /* ignore */
+    } finally {
+      setOpen(false);
+    }
+  };
+
+  const selectLevel = (level: string) => {
+    void store.setReasoning(level);
+    setOpen(false);
+  };
 
   return (
     <div ref={ref} className="relative">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex cursor-pointer items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-2.5 py-1 text-xs text-neutral-600 hover:bg-neutral-50"
-        title="模型与用量"
+        className="flex max-w-[240px] cursor-pointer items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-2.5 py-1 text-xs text-neutral-600 hover:bg-neutral-50"
+        title="模型与思考等级"
       >
-        <span className="max-w-[120px] truncate">{model}</span>
-        <span className="text-neutral-400">High</span>
-        <ChevronIcon className={`h-3 w-3 text-neutral-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+        <span className="truncate text-neutral-800">{modelLabel}</span>
+        <span className="shrink-0 text-neutral-400">{levelLabel}</span>
+        <ChevronIcon className={`h-3 w-3 shrink-0 text-neutral-400 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && (
-        <div className="absolute bottom-full right-0 z-30 mb-2 w-72 overflow-hidden rounded-xl border border-neutral-200 bg-white py-2 shadow-lg">
-          <div className="flex items-center justify-between px-4 py-2">
-            <span className="text-sm text-neutral-900">模型</span>
-            <span className="flex items-center gap-1 text-sm text-neutral-500">
-              {model} <span className="text-neutral-300">&gt;</span>
-            </span>
-          </div>
-          <div className="flex items-center justify-between px-4 py-2">
-            <span className="text-sm text-neutral-900">推理等级</span>
-            <span className="flex items-center gap-1 text-sm text-neutral-500">
-              High <span className="text-neutral-300">&gt;</span>
-            </span>
-          </div>
-          <div className="mx-4 my-1.5 h-px bg-neutral-100" />
-          <div className="px-4 py-2">
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-neutral-900">上下文已用 {usage.percent}%</span>
-              <span className="text-neutral-500">
-                ~{formatTokens(usage.tokens)} / {formatTokens(usage.limit)}
-              </span>
-            </div>
-            <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-neutral-100">
-              <div
-                className="h-full rounded-full bg-blue-500 transition-all"
-                style={{ width: `${usage.percent}%` }}
-              />
-            </div>
-            <div className="mt-3 space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <span className="flex items-center gap-2 text-neutral-600">
-                  <span className="h-2 w-2 rounded-sm bg-neutral-400" />
-                  系统提示词
-                </span>
-                <span className="text-neutral-500">~{formatTokens(usage.systemTokens)}</span>
-              </div>
-              <div className="flex items-center justify-between text-xs">
-                <span className="flex items-center gap-2 text-neutral-600">
-                  <span className="h-2 w-2 rounded-sm bg-purple-500" />
-                  工具
-                </span>
-                <span className="text-neutral-500">~{formatTokens(usage.toolTokens)}</span>
-              </div>
-              <div className="flex items-center justify-between text-xs">
-                <span className="flex items-center gap-2 text-neutral-600">
-                  <span className="h-2 w-2 rounded-sm bg-blue-500" />
-                  对话消息
-                </span>
-                <span className="text-neutral-500">~{formatTokens(usage.messageTokens)}</span>
-              </div>
+        <div className="absolute bottom-full right-0 z-30 mb-2 max-h-[26rem] w-80 overflow-y-auto rounded-xl border border-neutral-200 bg-white py-2 shadow-lg">
+          {/* Reasoning level */}
+          <div className="px-4 pb-2">
+            <div className="mb-1.5 text-xs font-medium text-neutral-400">推理等级</div>
+            <div className="grid grid-cols-4 gap-1">
+              {REASONING_KEYS.map((key) => {
+                const active = store.reasoning === key;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => selectLevel(key)}
+                    className={`rounded-full border px-2 py-1 text-xs ${
+                      active
+                        ? 'border-neutral-900 bg-neutral-900 font-medium text-white'
+                        : 'border-neutral-200 text-neutral-600 hover:bg-neutral-50'
+                    }`}
+                  >
+                    {REASONING_META[key].label}
+                  </button>
+                );
+              })}
             </div>
           </div>
+          <div className="mx-4 my-1 h-px bg-neutral-100" />
+
+          {/* Model grouped list */}
+          {groups.length === 0 && <div className="px-4 py-2 text-sm text-neutral-400">无可用提供方</div>}
+          {groups.map((g) => (
+            <div key={g.id} className="mb-1">
+              <div className="px-4 py-1 text-xs font-medium text-neutral-400">{g.name}</div>
+              {g.models.length === 0 && (
+                <button
+                  onClick={() => selectModel(g.id, '')}
+                  className="flex w-full items-center px-4 py-1.5 text-left text-sm text-neutral-500 hover:bg-neutral-50"
+                >
+                  自定义模型 ID…
+                </button>
+              )}
+              {g.models.map((m) => {
+                const active = lastUsed?.providerId === g.id && lastUsed?.modelId === m.id;
+                return (
+                  <button
+                    key={m.id}
+                    onClick={() => selectModel(g.id, m.id)}
+                    className={`flex w-full items-center px-4 py-1.5 text-left text-sm hover:bg-neutral-50 ${
+                      active ? 'bg-neutral-100 font-medium text-neutral-900' : 'text-neutral-700'
+                    }`}
+                  >
+                    <span className="flex-1 truncate">{m.displayName}</span>
+                    {active && <span className="ml-2 h-2 w-2 rounded-full bg-neutral-400" />}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Circular context-usage ring, clickable to open the usage detail panel. */
+function UsageRing({ store }: { store: ChatStore }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useOutsideClick(ref, () => setOpen(false), open);
+
+  const usage = estimateUsage(store.messages, store.llm?.model ?? '');
+  const pct = usage.percent;
+  const R = 8;
+  const C = 2 * Math.PI * R;
+  const active = pct >= 90;
+
+  return (
+    <div ref={ref} className="relative flex items-center">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        title="用量详情"
+        className="flex cursor-pointer items-center gap-1 rounded-full border border-neutral-200 bg-white px-1.5 py-1 text-neutral-600 hover:bg-neutral-50"
+      >
+        <svg width="20" height="20" viewBox="0 0 20 20" className="-rotate-90">
+          <circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" className="text-neutral-100" strokeWidth="2" />
+          <circle
+            cx="10"
+            cy="10"
+            r="8"
+            fill="none"
+            stroke={active ? 'var(--color-red-500,#ef4444)' : 'var(--color-blue-500,#3b82f6)'}
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeDasharray={C}
+            strokeDashoffset={C * (1 - pct / 100)}
+          />
+        </svg>
+        <span className="hidden text-[11px] tabular-nums text-neutral-500 sm:inline">{usage.percent}%</span>
+      </button>
+      {open && <UsageDetailPanel store={store} usage={usage} onClose={() => setOpen(false)} />}
+    </div>
+  );
+}
+
+function UsageDetailPanel({
+  store,
+  usage,
+  onClose,
+}: {
+  store: ChatStore;
+  usage: ReturnType<typeof estimateUsage>;
+  onClose: () => void;
+}) {
+  return (
+    <div className="absolute bottom-full right-0 z-30 mb-2 w-72 rounded-xl border border-neutral-200 bg-white p-4 shadow-lg">
+      <div className="flex items-center justify-between text-sm">
+        <span className="text-neutral-900">上下文已用 {usage.percent}%</span>
+        <span className="text-neutral-500">~{formatTokens(usage.tokens)} / {formatTokens(usage.limit)}</span>
+      </div>
+      <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-neutral-100">
+        <div
+          className={`h-full rounded-full transition-all ${usage.percent >= 90 ? 'bg-red-500' : 'bg-blue-500'}`}
+          style={{ width: `${usage.percent}%` }}
+        />
+      </div>
+      <div className="mt-3 flex items-center justify-between border-t border-neutral-100 pt-2 text-sm">
+        <span className="text-neutral-600">本次会话消耗</span>
+        <span className="tabular-nums font-medium text-neutral-900">{formatTokens(store.usage)}</span>
+      </div>
+      <button
+        type="button"
+        onClick={onClose}
+        className="mt-2 w-full rounded-full border border-neutral-200 px-3 py-1 text-xs text-neutral-500 hover:bg-neutral-50"
+      >
+        关闭
+      </button>
     </div>
   );
 }
@@ -400,7 +574,8 @@ function Composer({ store }: { store: ChatStore }) {
           <PermissionToolbarDropdown level={store.level} onChange={(l) => void store.setLevel(l)} />
         </div>
         <div className="flex items-center gap-1">
-          <ModelPicker store={store} />
+          <ModelChip store={store} />
+          <UsageRing store={store} />
           <button
             type="button"
             title="语音输入（暂未支持）"

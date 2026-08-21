@@ -15,6 +15,7 @@ import {
   SettingsIcon,
 } from './icons';
 import { Modal } from './modal';
+import { useSettings } from './settings-provider';
 
 /**
  * Open the native macOS folder picker (POST /api/pick-folder) and return the
@@ -629,17 +630,24 @@ export function Sidebar({ store, onNavigate }: { store: ChatStore; onNavigate?: 
           collapsed ? 'px-1' : 'px-3'
         }`}
       >
-        <button
-          type="button"
-          onClick={() => goto(() => router.push('/settings'))}
-          className={`flex items-center gap-2 rounded-lg text-left text-sm font-medium text-neutral-600 hover:bg-neutral-50 hover:text-neutral-900 ${
-            collapsed ? 'justify-center p-2' : 'px-2 py-1.5'
-          }`}
-        >
-          <SettingsIcon className="h-4 w-4" />
-          {!collapsed && '设置'}
-        </button>
+        <SettingsTrigger collapsed={collapsed} />
       </div>
     </div>
+  );
+}
+
+function SettingsTrigger({ collapsed }: { collapsed: boolean }) {
+  const { open } = useSettings();
+  return (
+    <button
+      type="button"
+      onClick={open}
+      className={`flex items-center gap-2 rounded-lg text-left text-sm font-medium text-neutral-600 hover:bg-neutral-50 hover:text-neutral-900 ${
+        collapsed ? 'justify-center p-2' : 'px-2 py-1.5'
+      }`}
+    >
+      <SettingsIcon className="h-4 w-4" />
+      {!collapsed && '设置'}
+    </button>
   );
 }

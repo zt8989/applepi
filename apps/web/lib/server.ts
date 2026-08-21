@@ -8,9 +8,21 @@ import {
   SessionStore,
   slugWorkspace,
   resolveLlmConfig,
+  loadSettings,
+  saveSettings,
+  loadDotenv,
+  writeDotenvKey,
+  BUILTIN_PROVIDERS,
+  providerSecretName,
   PERMISSION_SCRATCH_KEY,
   PERMISSION_LEVELS,
+  REASONING_LEVELS,
+  DEFAULT_REASONING_LEVEL,
   type ResolvedLlmConfig,
+  type ProviderConfig,
+  type ProviderProtocol,
+  type ModelEntry,
+  type ReasoningLevel,
 } from '@applepi/core';
 import {
   baseExtension,
@@ -62,10 +74,17 @@ export function workspaceToSlug(workspace: string): string {
 
 function buildModel(cfg: ResolvedLlmConfig): any {
   const providerSettings = { apiKey: cfg.apiKey, ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}) };
-  if (cfg.provider === 'anthropic') {
-    return createAnthropic(providerSettings)(cfg.model);
+  switch (cfg.protocol) {
+    case 'anthropic-messages':
+      return createAnthropic(providerSettings)(cfg.model);
+    case 'openai-responses':
+      // AI SDK v4 openai provider defaults to the responses API; explicit chat
+      // would need compatibility(...) — we keep responses as the named protocol.
+      return createOpenAI(providerSettings)(cfg.model);
+    case 'openai-completions':
+    default:
+      return createOpenAI(providerSettings)(cfg.model);
   }
-  return createOpenAI(providerSettings)(cfg.model);
 }
 
 let modelPromise: Promise<any> | null = null;
@@ -75,6 +94,167 @@ export function getModel(): Promise<any> {
     modelPromise = resolveLlmConfig().then(buildModel);
   }
   return modelPromise;
+}
+
+/** Invalidate the cached model so the next turn rebuilds from settings (Q11). */
+export function invalidateModel(): void {
+  modelPromise = null;
+}
+
+const APPLEPI_DIR = () => path.join(os.homedir(), '.applepi');
+
+/**
+ * Providers for the settings UI (ADR-0014). Returns:
+ *  - `user`: every provider persisted in settings.json (a user-enabled or
+ *    overridden builtin, or a custom provider) — i.e. the ones already shown.
+ *  - `availableBuiltins`: builtin presets the user has NOT yet enabled (for the
+ *    "add provider" picker). Only enabled builtins appear in `user`, so the UI
+ *    shows a provider only once it has been filled in / added.
+ *  - `lastUsedModel`: global default model.
+ *  - `lastUsedLevel`: global default reasoning level.
+ */
+export async function getProviders(): Promise<{
+  user: Record<string, ProviderConfig>;
+  availableBuiltins: { id: string; displayName: string }[];
+  lastUsedModel?: { providerId: string; modelId: string };
+  lastUsedLevel?: ReasoningLevel;
+}> {
+  const settings = await loadSettings().catch(() => ({ providers: {}, lastUsedModel: undefined } as any));
+  const user: Record<string, ProviderConfig> = {};
+  for (const [id, pc] of Object.entries(settings.providers)) {
+    user[id] = pc as ProviderConfig;
+  }
+  const availableBuiltins = Object.entries(BUILTIN_PROVIDERS)
+    .filter(([id]) => !(id in user))
+    .map(([id, p]) => ({ id, displayName: p.displayName }));
+  return { user, availableBuiltins, lastUsedModel: settings.lastUsedModel, lastUsedLevel: settings.lastUsedLevel };
+}
+
+/**
+ * Persist provider config. Writes settings.json (ref-only) and, for any
+ * provider whose body carries a real key (apiKeyRef === derived name AND a
+ * `apiKey` field present), writes the real key into .env. Then invalidates
+ * the cached model.
+ */
+export async function saveProviders(payload: {
+  providers: Record<string, ProviderConfig & { apiKey?: string }>;
+  lastUsedModel?: { providerId: string; modelId: string };
+}): Promise<void> {
+  const secrets = await loadDotenv();
+  // The payload is the full desired provider set (the UI sends every enabled
+  // provider). Anything absent from it is deleted — do NOT merge with the
+  // existing settings, or removed providers would silently reappear.
+  const out: Record<string, ProviderConfig> = {};
+  for (const [id, p] of Object.entries(payload.providers)) {
+    const ref = p.apiKeyRef || providerSecretName(id);
+    // Real key supplied in this save → write to .env under the derived name.
+    if (typeof p.apiKey === 'string' && p.apiKey) {
+      await writeDotenvKey(ref, p.apiKey);
+    }
+    // Persist to settings.json. For a builtin preset, store ONLY the user
+    // overrides (typically just apiKeyRef / a custom model catalog); displayName,
+    // protocol and baseURL fall back to the code preset at load time. A custom
+    // provider keeps everything it declared.
+    const { apiKey: _omit, ...rest } = p;
+    if (id in BUILTIN_PROVIDERS) {
+      // Minimal enabled entry: apiKeyRef (+ optional model catalog) only.
+      // loadSettings back-fills displayName/protocol/baseURL from the preset,
+      // so those fields are intentionally omitted here.
+      const stored: Record<string, unknown> = { apiKeyRef: ref };
+      if (Array.isArray(rest.models) && rest.models.length) stored.models = rest.models;
+      out[id] = stored as unknown as ProviderConfig;
+    } else {
+      out[id] = { ...rest, apiKeyRef: ref };
+    }
+  }
+  await saveSettings({ providers: out, lastUsedModel: payload.lastUsedModel });
+  invalidateModel();
+}
+
+/** Fetch available models from an openai-compatible /models endpoint (Q7). */
+export async function listModels(providerId: string): Promise<ModelEntry[]> {
+  const settings = await loadSettings().catch(() => ({ providers: {} } as any));
+  const pc: ProviderConfig | undefined = settings.providers[providerId] ?? BUILTIN_PROVIDERS[providerId];
+  if (!pc) {
+    const err = new Error(`provider not found: ${providerId}`) as Error & { status?: number };
+    err.status = 400;
+    throw err;
+  }
+  if (pc.protocol === 'anthropic-messages') {
+    throw new Error('anthropic-messages 协议不提供模型列表端点，请手动添加模型');
+  }
+  const base = pc.baseURL || 'https://api.openai.com/v1';
+  const secrets = await loadDotenv();
+  const apiKey = secrets[pc.apiKeyRef] || pc.apiKeyRef;
+  const res = await fetch(`${base.replace(/\/$/, '')}/models`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (!res.ok) throw new Error(`获取模型失败: HTTP ${res.status}`);
+  const json = (await res.json()) as any;
+  const ids: string[] = (json.data || [])
+    .map((m: any) => m.id as string)
+    .filter(Boolean)
+    .sort();
+  return ids.map((id) => ({ id, displayName: id }));
+}
+
+/** Persist last-used model (global default, ADR-0014 Q10/Q13). */
+export async function saveLastUsed(providerId: string, modelId: string): Promise<void> {
+  const settings = await loadSettings();
+  settings.lastUsedModel = { providerId, modelId };
+  await saveSettings(settings);
+  invalidateModel();
+}
+
+/** Persist the global default reasoning level (settings.json.lastUsedLevel). */
+export async function saveLastUsedLevel(level: ReasoningLevel): Promise<void> {
+  if (!(REASONING_LEVELS as readonly string[]).includes(level)) {
+    throw new Error(`level must be one of: ${REASONING_LEVELS.join('|')}`);
+  }
+  const settings = await loadSettings();
+  settings.lastUsedLevel = level;
+  await saveSettings(settings);
+}
+
+/**
+ * Resolve the effective reasoning level for a session: session `reasoning/set`
+ * event override ?? global `lastUsedLevel` default ?? DEFAULT_REASONING_LEVEL.
+ */
+export async function sessionReasoningLevel(
+  workspace: string,
+  sessionId: string,
+): Promise<ReasoningLevel> {
+  const store = new SessionStore({ workspace: workspaceToSlug(workspace), sessionId });
+  let ev;
+  try {
+    ev = await store.lastEvent('reasoning/set');
+  } catch {
+    ev = null;
+  }
+  const override = ev?.payload?.level as ReasoningLevel;
+  if (override && (REASONING_LEVELS as readonly string[]).includes(override)) {
+    return override;
+  }
+  const settings = await loadSettings().catch(() => ({ lastUsedLevel: undefined } as any));
+  return (settings.lastUsedLevel as ReasoningLevel) ?? DEFAULT_REASONING_LEVEL;
+}
+
+/** Whether the "open config file" action is available on this platform (Q4/Q9). */
+export function configFileHidden(): boolean {
+  return process.platform !== 'darwin' && process.platform !== 'linux';
+}
+
+/** Open settings.json in the OS default editor (Q4/Q9); non-desktop → hidden. */
+export async function openConfigFile(): Promise<{ hidden: boolean }> {
+  if (configFileHidden()) return { hidden: true };
+  const file = path.join(APPLEPI_DIR(), 'settings.json');
+  const cmd = process.platform === 'darwin' ? `open "${file}"` : `xdg-open "${file}"`;
+  try {
+    await execAsync(cmd, { timeout: 10000 });
+    return { hidden: false };
+  } catch {
+    return { hidden: true };
+  }
 }
 
 const harnessCache = new Map<string, Harness>();
@@ -347,11 +527,12 @@ export async function removeWorkspace(slug: string): Promise<void> {
 }
 
 export interface SessionActionRequest {
-  action: 'rename' | 'pin' | 'unpin' | 'archive' | 'unarchive' | 'notify' | 'level';
+  action: 'rename' | 'pin' | 'unpin' | 'archive' | 'unarchive' | 'notify' | 'level' | 'reasoning';
   title?: string;
   pinned?: boolean;
   enabled?: boolean;
   level?: string;
+  reasoning?: string;
 }
 
 const ARCHIVE_DIR = (slug: string) => path.join(SESSIONS_DIR(), slug, '.archive');
@@ -414,6 +595,16 @@ export async function applySessionAction(
       harness.session.scratch[PERMISSION_SCRATCH_KEY] = level;
       await bound.appendEvent('level/set', { level });
       await harness.emit('system_prompt/permission', { level });
+      return { ok: true };
+    }
+    case 'reasoning': {
+      const reasoning = String(req.reasoning ?? '');
+      if (!(REASONING_LEVELS as readonly string[]).includes(reasoning as any)) {
+        throw new Error(`reasoning must be one of: ${REASONING_LEVELS.join('|')}`);
+      }
+      const store = new SessionStore({ workspace: workspaceToSlug(workspace), sessionId });
+      await store.create(sessionId);
+      await store.appendEvent('reasoning/set', { level: reasoning });
       return { ok: true };
     }
     default:
