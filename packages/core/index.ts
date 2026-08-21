@@ -80,4 +80,5 @@ export type {
   SessionStoreOptions,
   LoadedSession,
   SessionConfig,
+  SessionSummary,
 } from './session.js';

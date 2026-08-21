@@ -48,6 +48,31 @@ export interface LoadedSession {
   messages: SessionMessage[];
 }
 
+/** Session display metadata for listing (deepen #02). */
+export interface SessionSummary {
+  id: string;
+  /** Last `title/set` event, else the first user message (truncated). */
+  title: string;
+  /** File mtime (ISO). */
+  ts: string;
+  /** Last `pin/set` event payload (default false). */
+  pinned: boolean;
+  /** Last `notify/set` event payload (default false). */
+  notify: boolean;
+}
+
+/** Extract plain text from a message's `content` (string or parts array). */
+function messageText(content: any): string {
+  if (typeof content === 'string') return content.trim();
+  if (Array.isArray(content)) {
+    return content
+      .map((p: any) => (p?.type === 'text' ? p.text : ''))
+      .join('')
+      .trim();
+  }
+  return '';
+}
+
 /**
  * The unified session-scoped configuration (ADR-0016), persisted in a sibling
  * `<session_id>.config.json>` next to the jsonl. **Override-only (diff mode)**:
@@ -221,6 +246,98 @@ export class SessionStore {
       if (l.kind === 'event' && l.event === name) return l;
     }
     return null;
+  }
+
+  /**
+   * Scan display metadata (title/pinned/notify) from the jsonl in one pass
+   * (deepen #02). Last `title/set` wins; else the first user message text
+   * (truncated at 40 chars); else no title (callers default it).
+   */
+  private async scanMeta(id: string): Promise<{ title?: string; pinned?: boolean; notify?: boolean }> {
+    let raw: string;
+    try {
+      raw = await fs.readFile(this.filePath(id), 'utf8');
+    } catch {
+      return {}; // fresh session with no lines yet
+    }
+    let title: string | undefined;
+    let firstUser: string | undefined;
+    let pinned: boolean | undefined;
+    let notify: boolean | undefined;
+    for (const line of raw.split('\n').map((l) => l.trim()).filter(Boolean)) {
+      let l: SessionLine;
+      try {
+        l = JSON.parse(line);
+      } catch {
+        continue; // skip malformed lines
+      }
+      if (l.kind === 'event') {
+        if (l.event === 'title/set' && typeof l.payload?.title === 'string') {
+          title = l.payload.title;
+        } else if (l.event === 'pin/set') {
+          pinned = l.payload?.pinned === true;
+        } else if (l.event === 'notify/set') {
+          notify = l.payload?.enabled === true;
+        }
+      } else if (l.kind === 'message' && l.role === 'user' && firstUser === undefined) {
+        const text = messageText(l.content);
+        if (text) firstUser = text.length > 40 ? text.slice(0, 40) + '…' : text;
+      }
+    }
+    return { title: title ?? firstUser, pinned, notify };
+  }
+
+  /** Display title for a session id: last `title/set`, else first user message (truncated). */
+  async title(id: string = this.sessionId ?? ''): Promise<string> {
+    const meta = await this.scanMeta(id);
+    return meta.title ?? 'New Chat';
+  }
+
+  /** Whether the session is pinned (last `pin/set`, default false). */
+  async pinned(id: string = this.sessionId ?? ''): Promise<boolean> {
+    const meta = await this.scanMeta(id);
+    return meta.pinned ?? false;
+  }
+
+  /** Whether session notifications are on (last `notify/set`, default false). */
+  async notify(id: string = this.sessionId ?? ''): Promise<boolean> {
+    const meta = await this.scanMeta(id);
+    return meta.notify ?? false;
+  }
+
+  /** List this workspace's sessions with display metadata, newest mtime first. */
+  async listSessions(): Promise<SessionSummary[]> {
+    let names: string[];
+    try {
+      names = await fs.readdir(this.baseDir());
+    } catch {
+      return [];
+    }
+    const ids = names
+      .filter((f) => f.endsWith('.jsonl'))
+      .map((f) => f.replace(/\.jsonl$/, ''));
+    const withMtime: { id: string; mtimeMs: number }[] = [];
+    for (const id of ids) {
+      try {
+        const st = await fs.stat(this.filePath(id));
+        withMtime.push({ id, mtimeMs: st.mtimeMs });
+      } catch {
+        // skip unreadable session file
+      }
+    }
+    withMtime.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    const out: SessionSummary[] = [];
+    for (const { id, mtimeMs } of withMtime) {
+      const meta = await this.scanMeta(id);
+      out.push({
+        id,
+        title: meta.title ?? 'New Chat',
+        ts: new Date(mtimeMs).toISOString(),
+        pinned: meta.pinned ?? false,
+        notify: meta.notify ?? false,
+      });
+    }
+    return out;
   }
 
   /** List session ids in this workspace (filenames without extension). */

@@ -198,5 +198,62 @@ const ws = 'test-ws-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8
   ok('Harness.resume(): restores session.config identity from the config file');
 }
 
+// 13. Display metadata primitives (deepen #02): title() from title/set event,
+//    pinned()/notify() from pin/set + notify/set, defaults when absent.
+{
+  const id = 'sess-meta';
+  const s = new SessionStore({ baseDir: tmpRoot, workspace: ws, sessionId: id });
+  await s.create();
+  await s.appendMessage('user', 'fix the login bug');
+  await s.appendEvent('title/set', { title: 'My explicit title' });
+  await s.appendEvent('pin/set', { pinned: true });
+  await s.appendEvent('notify/set', { enabled: true });
+
+  assert.equal(await s.title(), 'My explicit title', 'title/set wins over user message');
+  assert.equal(await s.pinned(), true, 'pin/set true');
+  assert.equal(await s.notify(), true, 'notify/set true');
+
+  const empty = new SessionStore({ baseDir: tmpRoot, workspace: ws, sessionId: 'sess-nometa' });
+  await empty.create();
+  assert.equal(await empty.title(), 'New Chat', 'no meta -> default title');
+  assert.equal(await empty.pinned(), false, 'no pin/set -> false');
+  assert.equal(await empty.notify(), false, 'no notify/set -> false');
+  ok('display primitives: title/pinned/notify with event defaults');
+}
+
+// 14. title() falls back to the first user message (truncated at 40 chars)
+//    with a parts-array content shape.
+{
+  const id = 'sess-title-fallback';
+  const s = new SessionStore({ baseDir: tmpRoot, workspace: ws, sessionId: id });
+  await s.create();
+  const long = 'x'.repeat(60);
+  await s.appendMessage('user', [{ type: 'text', text: long }]);
+  assert.equal(s.title ? await s.title() : '', 'x'.repeat(40) + '…', 'truncated first-user fallback');
+  const s2 = new SessionStore({ baseDir: tmpRoot, workspace: ws, sessionId: 'sess-title-fallback2' });
+  await s2.create();
+  await s2.appendMessage('user', [{ type: 'text', text: 'short msg' }]);
+  assert.equal(await s2.title(), 'short msg', 'short first-user fallback');
+  ok('title(): first user message fallback + 40-char truncation');
+}
+
+// 15. listSessions() returns display metadata rows sorted newest-mtime-first.
+{
+  const s = new SessionStore({ baseDir: tmpRoot, workspace: ws });
+  const rows = await s.listSessions();
+  const ids = rows.map((r) => r.id);
+  assert.ok(ids.includes('sess-meta'), 'listSessions includes sess-meta');
+  assert.ok(ids.includes('sess-title-fallback'), 'listSessions includes new sessions');
+  const mtime = rows.map((r) => Date.parse(r.ts));
+  for (let i = 1; i < mtime.length; i++) {
+    assert.ok(mtime[i - 1] >= mtime[i], `rows sorted by mtime desc: ${ids}`);
+  }
+  const meta = rows.find((r) => r.id === 'sess-meta');
+  assert.equal(meta.title, 'My explicit title');
+  assert.equal(meta.pinned, true);
+  assert.equal(meta.notify, true);
+  ok(`listSessions(): ${rows.length} rows, mtime-desc, metadata resolved`);
+}
+
 await fs.rm(tmpRoot, { recursive: true, force: true });
 console.log(`\n${passed} session checks passed.`);

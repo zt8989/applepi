@@ -494,63 +494,24 @@ export interface WorkspaceInfo {
 
 /**
  * Derive a session's display title: last `title/set` event wins, else the
- * first user message text (truncated), else "New Chat".
+ * first user message text (truncated), else "New Chat". Delegates to the core
+ * `SessionStore.title` primitive (deepen #02) — no server-side jsonl parsing.
  */
 export async function sessionTitle(
   workspace: string,
   id: string,
 ): Promise<string> {
-  const store = new SessionStore({ workspace, sessionId: id });
-  let raw = '';
-  try {
-    raw = await fs.readFile(store.filePath(), 'utf8');
-  } catch {
-    return 'New Chat';
-  }
-  let title: string | undefined;
-  for (const line of raw.split('\n').map((l) => l.trim()).filter(Boolean)) {
-    try {
-      const l = JSON.parse(line);
-      if (l.kind === 'event' && l.event === 'title/set' && typeof l.payload?.title === 'string') {
-        title = l.payload.title;
-      } else if (l.kind === 'message' && l.role === 'user' && title === undefined) {
-        let text = '';
-        if (typeof l.content === 'string') text = l.content;
-        else if (Array.isArray(l.content)) {
-          text = l.content
-            .map((p: any) => (p?.type === 'text' ? p.text : ''))
-            .join('')
-            .trim();
-        }
-        if (text) title = text.length > 40 ? text.slice(0, 40) + '…' : text;
-      }
-    } catch {
-      // skip malformed lines
-    }
-  }
-  return title ?? 'New Chat';
+  return new SessionStore({ workspace, sessionId: id }).title();
 }
 
-/** Read `pin/set` (last wins) from a session file. */
+/** Read `pin/set` (last wins) via the core primitive (deepen #02). */
 export async function sessionPinned(workspace: string, id: string): Promise<boolean> {
-  const store = new SessionStore({ workspace, sessionId: id });
-  try {
-    const ev = await store.lastEvent('pin/set');
-    return ev?.payload?.pinned === true;
-  } catch {
-    return false;
-  }
+  return new SessionStore({ workspace, sessionId: id }).pinned();
 }
 
-/** Read `notify/set` (last wins) from a session file. */
+/** Read `notify/set` (last wins) via the core primitive (deepen #02). */
 export async function sessionNotify(workspace: string, id: string): Promise<boolean> {
-  const store = new SessionStore({ workspace, sessionId: id });
-  try {
-    const ev = await store.lastEvent('notify/set');
-    return ev?.payload?.enabled === true;
-  } catch {
-    return false;
-  }
+  return new SessionStore({ workspace, sessionId: id }).notify();
 }
 
 /**
@@ -560,6 +521,8 @@ export async function sessionNotify(workspace: string, id: string): Promise<bool
  * subdirectory. This keeps stale / test directories (e.g. `test-ws-*`) out of
  * the UI. Each manifest entry still resolves its sessions by slug; sessions
  * without a recorded path are skipped. The display name is the path basename.
+ * Session rows come from the core `SessionStore.listSessions` primitive
+ * (deepen #02) — no server-side jsonl parses.
  */
 export async function listWorkspaces(): Promise<WorkspaceInfo[]> {
   const manifest = await readManifest();
@@ -570,30 +533,8 @@ export async function listWorkspaces(): Promise<WorkspaceInfo[]> {
     if (!entry) continue; // manifest entries are always path-backed
     const wsPath = entryPath(entry);
     const nameOverride = entryName(entry);
-    const dir = path.join(SESSIONS_DIR(), slug);
-    let files: { id: string; ts: number }[] = [];
-    try {
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      for (const e of entries) {
-        if (!e.isFile() || !e.name.endsWith('.jsonl')) continue;
-        const id = e.name.replace(/\.jsonl$/, '');
-        const st = await fs.stat(path.join(dir, e.name));
-        files.push({ id, ts: st.mtimeMs });
-      }
-    } catch {
-      // skip unreadable workspace (e.g. sessions dir missing)
-    }
-    files.sort((a, b) => b.ts - a.ts);
-    const sessions: SessionInfo[] = [];
-    for (const f of files) {
-      sessions.push({
-        id: f.id,
-        title: await sessionTitle(slug, f.id),
-        ts: new Date(f.ts).toISOString(),
-        pinned: await sessionPinned(slug, f.id),
-        notify: await sessionNotify(slug, f.id),
-      });
-    }
+    const store = new SessionStore({ workspace: slug });
+    const sessions = await store.listSessions();
     out.push({ slug, path: wsPath, name: nameOverride ?? path.basename(wsPath), sessions });
   }
   return out;
