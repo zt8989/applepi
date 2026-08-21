@@ -12,7 +12,7 @@ import {
   buildSystemPrompt,
   buildTurnMessages,
   getHarness,
-  getModel,
+  getSessionModel,
   sessionMode,
   sessionReasoningLevel,
 } from '@/lib/server';
@@ -47,15 +47,16 @@ export async function POST(req: Request) {
   }
 
   // Reasoning level: a brand-new session may carry a pre-chosen level (picked
-  // in the composer before the first message) → persist as `reasoning/set`;
-  // otherwise resolve session override ?? global default.
+  // in the composer before the first message) → persist as a session-config
+  // override; otherwise resolve via the cascade (override ?? general ?? medium).
   let reasoningLevel: ReasoningLevel;
   const preChosen =
     isNew && body.reasoning && (REASONING_LEVELS as readonly string[]).includes(body.reasoning)
       ? (body.reasoning as ReasoningLevel)
       : undefined;
   if (preChosen) {
-    await store.appendEvent('reasoning/set', { level: preChosen });
+    const overrides = await store.loadConfig();
+    await store.saveConfig({ ...overrides, reasoningLevel: preChosen });
     reasoningLevel = preChosen;
   } else {
     const sessionId = body.sessionId ?? store.sessionId;
@@ -74,8 +75,7 @@ export async function POST(req: Request) {
   messages.push({ role: 'user', content: body.message });
   await store.appendMessage('user', body.message);
 
-  const model = await getModel();
-  const { protocol } = await resolveLlmConfig();
+  const { model, protocol } = await getSessionModel(body.workspace, store.sessionId ?? undefined);
   return createDataStreamResponse({
     async execute(writer) {
       writer.writeData({ type: 'session', sessionId: store.sessionId });

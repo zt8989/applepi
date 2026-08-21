@@ -28,19 +28,21 @@ export {
   PROVIDER_PROTOCOLS,
   REASONING_LEVELS,
   DEFAULT_REASONING_LEVEL,
+  PERMISSION_LEVELS,
+  DEFAULT_PERMISSION_LEVEL,
   loadSettings,
   saveSettings,
   loadDotenv,
   writeDotenvKey,
   resolveApiKey,
   resolveLlmConfig,
+  resolveSessionConfig,
+  mergedProviders,
   providerSecretName,
 } from './config.js';
 export {
-  PERMISSION_SCRATCH_KEY,
-  PERMISSION_LEVELS,
-  DEFAULT_PERMISSION_LEVEL,
   getPermissionLevel,
+  resolvePermissionLevel,
   restorePermissionLevel,
   applyPermissionLevel,
   projectRoot,
@@ -50,14 +52,16 @@ export {
 } from './security.js';
 export type {
   SecurityPolicy,
-  PermissionLevel,
 } from './security.js';
 export type {
   LlmSettings,
+  GeneralConfig,
   ResolvedLlmConfig,
+  ResolvedSessionConfig,
   ProviderConfig,
   ProviderProtocol,
   ReasoningLevel,
+  PermissionLevel,
   ModelEntry,
 } from './config.js';
 export type {
@@ -75,4 +79,5 @@ export type {
   SessionMessage,
   SessionStoreOptions,
   LoadedSession,
+  SessionConfig,
 } from './session.js';

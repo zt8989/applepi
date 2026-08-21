@@ -9,7 +9,7 @@ import {
   bindSession,
   buildTurnMessages,
   getHarness,
-  getModel,
+  getSessionModel,
   sessionMode,
   sessionReasoningLevel,
 } from '@/lib/server';
@@ -49,8 +49,7 @@ export async function POST(req: Request) {
   }
 
   const messages = await buildTurnMessages(harness);
-  const model = await getModel();
-  const { protocol } = await resolveLlmConfig();
+  const { model, protocol } = await getSessionModel(body.workspace, body.sessionId);
   const reasoningLevel = await sessionReasoningLevel(body.workspace, body.sessionId);
 
   return createDataStreamResponse({

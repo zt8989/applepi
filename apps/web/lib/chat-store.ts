@@ -81,9 +81,14 @@ export interface ChatStore {
   setMode: (mode: string) => void;
   /** Current effective reasoning level for this session. */
   reasoning: string;
-  /** Set the reasoning level: writes the session `reasoning/set` event (or
+  /** Set the reasoning level: writes the session-config override (or
    *  remembers it for the first message when no session exists yet). */
   setReasoning: (level: string) => Promise<void>;
+  /** Set the model: writes a per-session override (or the global default when
+   *  no session exists yet). */
+  setModel: (providerId: string, modelId: string) => Promise<void>;
+  /** Increment to force the composer model picker open (empty-model UX). */
+  modelPickerTick: number;
   /** Global default reasoning level (settings.json.lastUsedLevel). */
   globalReasoning: string;
   /** Solve: cumulative real prompt+completion tokens streamed this session. */
@@ -133,6 +138,7 @@ export function useChatStore(): ChatStore {
   const [error, setError] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<WorkspaceNode[]>([]);
   const [references, setReferences] = useState<string[]>([]);
+  const [modelPickerTick, setModelPickerTick] = useState(0);
 
   const messagesRef = useRef<ThreadMessageLike[]>(messages);
   const assistantIdRef = useRef<string | null>(null);
@@ -373,6 +379,23 @@ export function useChatStore(): ChatStore {
     localStorage.setItem(MODE_KEY, m); // preference for future new sessions
   }, []);
 
+  const setModel = useCallback(
+    async (providerId: string, modelId: string) => {
+      if (!sessionIdRef.current) {
+        // No session yet: set the global model default via the settings path.
+        await fetch('/api/config/last-used', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ providerId, modelId }),
+        });
+      } else {
+        await sessionAction(sessionIdRef.current, { action: 'model', model: { providerId, modelId } });
+      }
+      await refreshLlm();
+    },
+    [sessionAction, refreshLlm],
+  );
+
   const resetUsage = useCallback(() => setUsage(0), []);
 
   // ---- stream handling -----------------------------------------------------
@@ -551,8 +574,13 @@ export function useChatStore(): ChatStore {
         });
       } catch (e: any) {
         if (e?.name === 'AbortError') return;
-        setError(e?.message ?? String(e));
+        const msg = e?.message ?? String(e);
+        setError(msg);
         setIsRunning(false);
+        // Empty-model UX (ADR-0016): an unresolvable model forces the picker.
+        if (/no usable|no providers|no model|model"/i.test(msg)) {
+          setModelPickerTick((n) => n + 1);
+        }
       } finally {
         abortRef.current = null;
       }
@@ -809,6 +837,8 @@ export function useChatStore(): ChatStore {
     setMode,
     reasoning,
     setReasoning,
+    setModel,
+    modelPickerTick,
     globalReasoning,
     usage,
     resetUsage,

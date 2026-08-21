@@ -2,65 +2,94 @@ import { realpath } from 'node:fs/promises';
 import path from 'node:path';
 import type { SessionContext } from './types.js';
 import type { SessionStore } from './session.js';
+import {
+  DEFAULT_PERMISSION_LEVEL,
+  PERMISSION_LEVELS,
+  loadSettings,
+  type PermissionLevel,
+} from './config.js';
 
 /**
- * Security (ADR-0009, re-scoped by ADR-0015) — the permission-enforcement seam
- * of the split core. The default policy owns the **level skeleton**: the
- * three-value level model, the `level/set` event + `lastEvent` restore, and
- * the user-only `/level` command (registered by the Harness shell). It has NO
- * prompt text and NO runtime interception middleware — the "gate" is a
- * level-context guarantee: every tool `execute` reads the current level via
+ * Security (ADR-0009, re-scoped by ADR-0015/0016) — the permission-enforcement
+ * seam of the split core. The default policy owns the **level skeleton**: the
+ * three-value level model and its storage. Per ADR-0016 the level lives in
+ * `session.config.permissionLevel` (the `level/set` jsonl event and the scratch
+ * slot are gone): the session override, else the `general.permissionLevel`
+ * global default, else `workspace`. The effective level is resolved at boot /
+ * `/resume` / `/level` and written into `session.config`, so the hot per-tool
+ * read (`getPermissionLevel`) is a sync in-memory lookup. It has NO prompt text
+ * and NO runtime interception middleware — the "gate" is a level-context
+ * guarantee: every tool `execute` reads the current level via
  * `getPermissionLevel(ctx)` and self-determines its behavior. The permission
  * DECLARATION fragment is owned by each bundle (`packages/bundle`).
  */
 
-export const PERMISSION_SCRATCH_KEY = '__permissionLevel';
-export const PERMISSION_LEVELS = ['readonly', 'workspace', 'fullaccess'] as const;
-export type PermissionLevel = (typeof PERMISSION_LEVELS)[number];
-export const DEFAULT_PERMISSION_LEVEL: PermissionLevel = 'workspace';
-
 /** Read the live permission level from a tool-call context (default: workspace). */
 export function getPermissionLevel(ctx: { session: SessionContext }): PermissionLevel {
-  const l = ctx.session.scratch[PERMISSION_SCRATCH_KEY] as PermissionLevel | undefined;
+  const l = ctx.session.config?.permissionLevel as PermissionLevel | undefined;
   return l && (PERMISSION_LEVELS as readonly string[]).includes(l)
     ? l
     : DEFAULT_PERMISSION_LEVEL;
 }
 
 /**
- * Restore the session's permission level from the LAST `level/set` event in
- * the session jsonl, falling back to `workspace`. Call after boot and
- * `/resume` (ADR-0007 Q3/Q11, moved to core by ADR-0009).
+ * Resolve the effective level for a session: persisted override
+ * (`session.config.permissionLevel`) ?? `general.permissionLevel` global default
+ * ?? `workspace`. Missing/invalid override falls through to the global default.
+ * Asynchronous — reads the settings.json `general` block. Call after boot and
+ * `/resume` (ADR-0007 Q3/Q11, moved to core by ADR-0009, re-homed by ADR-0016).
+ */
+export async function resolvePermissionLevel(store: Pick<SessionStore, 'loadConfig'>): Promise<PermissionLevel> {
+  const overrides = await store.loadConfig();
+  const sessionLevel = overrides.permissionLevel;
+  if (sessionLevel && (PERMISSION_LEVELS as readonly string[]).includes(sessionLevel)) {
+    return sessionLevel;
+  }
+  try {
+    return (await loadSettings()).general?.permissionLevel ?? DEFAULT_PERMISSION_LEVEL;
+  } catch {
+    return DEFAULT_PERMISSION_LEVEL;
+  }
+}
+
+/**
+ * Restore the session's permission level into `session.config.permissionLevel`.
+ * Resolves the effective level (per the cascade above) and writes it into the
+ * in-memory session config so `getPermissionLevel` stays a sync read. The
+ * resolved value is NOT persisted to the config file — only the user-set
+ * override is (applyPermissionLevel), preserving override-only diff semantics.
  */
 export async function restorePermissionLevel(
-  store: Pick<SessionStore, 'lastEvent'>,
-  scratch: Record<string, any>,
+  store: Pick<SessionStore, 'loadConfig'>,
+  session: SessionContext,
 ): Promise<PermissionLevel> {
-  const ev = await store.lastEvent('level/set');
-  const level = (ev?.payload?.level as PermissionLevel | undefined) ?? DEFAULT_PERMISSION_LEVEL;
-  scratch[PERMISSION_SCRATCH_KEY] = level;
+  const level = await resolvePermissionLevel(store);
+  session.config = { ...session.config, permissionLevel: level };
   return level;
 }
 
 /**
- * Validate and apply a permission-level change: write the level into the
- * session scratch and record a `level/set` lifecycle event (ADR-0009). Shared
- * by the core `/level` slash command and the web level session action. The
- * flat prompt needs no rebuild — it is re-read each turn and reflects the new
- * level (ADR-0015: `level/set` is an ordinary state record, not a
- * prompt-rebuild trigger). Throws on an invalid level.
+ * Validate and apply a permission-level change: write the level into
+ * `session.config.permissionLevel` AND persist it as an override in the config
+ * file (ADR-0016 — was a `level/set` event). Shared by the core `/level` slash
+ * command and the web level session action. The flat prompt needs no rebuild —
+ * it is re-read each turn and reflects the new level. Throws on an invalid
+ * level.
  */
 export async function applyPermissionLevel(
   session: SessionContext,
-  store: Pick<SessionStore, 'appendEvent'> | null,
+  store: Pick<SessionStore, 'loadConfig' | 'saveConfig'> | null,
   level: string,
 ): Promise<string> {
   const l = level.trim().toLowerCase() as PermissionLevel;
   if (!(PERMISSION_LEVELS as readonly string[]).includes(l)) {
     throw new Error(`level must be one of: ${PERMISSION_LEVELS.join('|')}`);
   }
-  session.scratch[PERMISSION_SCRATCH_KEY] = l;
-  await store?.appendEvent('level/set', { level: l });
+  session.config = { ...session.config, permissionLevel: l };
+  if (store) {
+    const overrides = await store.loadConfig();
+    await store.saveConfig({ ...overrides, permissionLevel: l });
+  }
   return `[level] ${l} (tools self-determine per call)`;
 }
 
@@ -115,12 +144,12 @@ export interface SecurityPolicy {
    * Restore policy state (e.g. the permission level) from the session store.
    * Called on boot, `/resume`, and `/new` — after a SessionStore is attached.
    */
-  restore(store: Pick<SessionStore, 'lastEvent'>, session: SessionContext): Promise<void>;
+  restore(store: SessionStore, session: SessionContext): Promise<void>;
 }
 
 /** The built-in default policy (ADR-0009 Q10=a: full level skeleton). */
 export const defaultSecurityPolicy: SecurityPolicy = {
   async restore(store, session) {
-    await restorePermissionLevel(store, session.scratch);
+    await restorePermissionLevel(store, session);
   },
 };

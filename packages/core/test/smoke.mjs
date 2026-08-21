@@ -1,8 +1,9 @@
-// Smoke test for @applepi/core (ADR-0015) — no API key required.
+// Smoke test for @applepi/core (ADR-0015 + ADR-0016) — no API key required.
 // Validates the Harness shell after the split core: direct tool registration,
-// the tool seam (executeTool: known/unknown/throwing), and slash commands (the
-// core-owned /level). The loop mechanics now live in `stream-loop.mjs` (the
-// web-only streaming loop); session persistence lives in `session.mjs`.
+// the tool seam (executeTool: known/unknown/throwing), slash commands (the
+// core-owned /level, which persists to the config file per ADR-0016), and the
+// web-only streaming loop (stream-loop.mjs). Session persistence lives in
+// `session.mjs`.
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -67,11 +68,11 @@ const stubTool = {
   ok('tool seam: known/unknown/throwing');
 }
 
-// 3. /level (core-registered): validates, writes level/set + scratch, restores.
+// 3. /level (core-registered, ADR-0016): validates, persists override to config + restore.
 {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'applepi-smoke-'));
   try {
-    const h = new Harness();
+    const h = new Harness({ baseDir: dir });
     const store = new SessionStore({ baseDir: dir });
     await store.create();
     h.attachSession(store);
@@ -83,11 +84,13 @@ const stubTool = {
     const msg = await cmd('fullaccess');
     assert.match(msg, /fullaccess/);
     assert.equal(getPermissionLevel({ session: h.session }), 'fullaccess');
-    const ev = await store.lastEvent('level/set');
-    assert.equal(ev.payload.level, 'fullaccess');
+    // The override is persisted to the config file (ADR-0016), not a level/set event.
+    const cfg = await store.loadConfig();
+    assert.equal(cfg.permissionLevel, 'fullaccess');
+    await store.appendEvent('someone/set', { x: 1 }); // sanity: events still work
     await assert.rejects(() => cmd('bogus'), /must be one of/);
     assert.equal(h.getSlashCommand('nope'), undefined);
-    ok('/level: validate + persist + restore + unknown command');
+    ok('/level: validate + persist override + restore + unknown command');
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

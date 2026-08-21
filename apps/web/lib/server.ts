@@ -8,6 +8,9 @@ import {
   SessionStore,
   slugWorkspace,
   resolveLlmConfig,
+  resolveSessionConfig,
+  mergedProviders,
+  resolveApiKey,
   loadSettings,
   saveSettings,
   loadDotenv,
@@ -23,6 +26,8 @@ import {
   type ProviderProtocol,
   type ModelEntry,
   type ReasoningLevel,
+  type PermissionLevel,
+  type GeneralConfig,
 } from '@applepi/core';
 import {
   makeBundleSpec,
@@ -88,18 +93,38 @@ function buildModel(cfg: ResolvedLlmConfig): any {
   }
 }
 
-let modelPromise: Promise<any> | null = null;
-/** Lazily resolve the provider model (cached; fails fast on bad config). */
-export function getModel(): Promise<any> {
-  if (!modelPromise) {
-    modelPromise = resolveLlmConfig().then(buildModel);
-  }
-  return modelPromise;
-}
-
-/** Invalidate the cached model so the next turn rebuilds from settings (Q11). */
-export function invalidateModel(): void {
-  modelPromise = null;
+/**
+ * Resolve the model instance for a session via the unified cascade (ADR-0016):
+ * `session.config.model` override ?? `general.model` ?? dynamic default (first
+ * usable provider's first model). Builds the SDK model. Throws when no model
+ * resolves (empty registry / no general) — callers surface the picker.
+ */
+export async function getSessionModel(
+  workspace: string,
+  sessionId: string | undefined,
+): Promise<{ model: any; protocol: ProviderProtocol }> {
+  const settings = await loadSettings();
+  const providers = mergedProviders(settings);
+  const overrides = sessionId
+    ? await new SessionStore({ workspace: workspaceToSlug(workspace), sessionId }).loadConfig()
+    : {};
+  const resolved = resolveSessionConfig(
+    overrides,
+    settings.general,
+    providers,
+  );
+  const pc = providers[resolved.model.providerId];
+  const secrets = await loadDotenv();
+  const apiKey = resolveApiKey(pc.apiKeyRef, secrets);
+  const cfg: ResolvedLlmConfig = {
+    provider: pc.displayName,
+    protocol: pc.protocol,
+    model: resolved.model.modelId,
+    apiKey,
+    baseURL: pc.baseURL,
+    reasoningLevel: resolved.reasoningLevel,
+  };
+  return { model: buildModel(cfg), protocol: pc.protocol };
 }
 
 const APPLEPI_DIR = () => path.join(os.homedir(), '.applepi');
@@ -119,8 +144,9 @@ export async function getProviders(): Promise<{
   availableBuiltins: { id: string; displayName: string }[];
   lastUsedModel?: { providerId: string; modelId: string };
   lastUsedLevel?: ReasoningLevel;
+  defaultPermissionLevel?: PermissionLevel;
 }> {
-  const settings = await loadSettings().catch(() => ({ providers: {}, lastUsedModel: undefined } as any));
+  const settings = await loadSettings().catch(() => ({ providers: {} } as any));
   const user: Record<string, ProviderConfig> = {};
   for (const [id, pc] of Object.entries(settings.providers)) {
     user[id] = pc as ProviderConfig;
@@ -128,7 +154,53 @@ export async function getProviders(): Promise<{
   const availableBuiltins = Object.entries(BUILTIN_PROVIDERS)
     .filter(([id]) => !(id in user))
     .map(([id, p]) => ({ id, displayName: p.displayName }));
-  return { user, availableBuiltins, lastUsedModel: settings.lastUsedModel, lastUsedLevel: settings.lastUsedLevel };
+  // Client-facing keys stay `lastUsedModel`/`lastUsedLevel`; they now source
+  // from the `general` block (ADR-0016) instead of top-level legacy fields.
+  return {
+    user,
+    availableBuiltins,
+    lastUsedModel: settings.general?.model,
+    lastUsedLevel: settings.general?.reasoningLevel,
+    defaultPermissionLevel: settings.general?.permissionLevel,
+  };
+}
+
+/** The current global default slots (ADR-0016), for the 设置-通用设置 page. */
+export async function getGeneralDefaults(): Promise<GeneralConfig> {
+  const settings = await loadSettings().catch(() => ({ general: undefined } as any));
+  return settings.general ?? {};
+}
+
+/**
+ * Persist the global default slots (ADR-0016 通用设置): model / reasoningLevel /
+ * permissionLevel. Only the settings page writes these — the composer chip and
+ * permission capsule write session overrides, never the global defaults.
+ */
+export async function saveGeneralDefaults(body: {
+  model?: { providerId: string; modelId: string };
+  reasoningLevel?: string;
+  permissionLevel?: string;
+}): Promise<void> {
+  if (body.reasoningLevel !== undefined && !(REASONING_LEVELS as readonly string[]).includes(body.reasoningLevel)) {
+    throw new Error(`reasoningLevel must be one of: ${REASONING_LEVELS.join('|')}`);
+  }
+  if (body.permissionLevel !== undefined && !(PERMISSION_LEVELS as readonly string[]).includes(body.permissionLevel)) {
+    throw new Error(`permissionLevel must be one of: ${PERMISSION_LEVELS.join('|')}`);
+  }
+  if (body.model !== undefined && (typeof body.model.providerId !== 'string' || typeof body.model.modelId !== 'string')) {
+    throw new Error('model requires providerId + modelId');
+  }
+  const settings = await loadSettings();
+  settings.general = {
+    ...(body.model !== undefined ? { model: body.model } : {}),
+    ...(body.reasoningLevel !== undefined
+      ? { reasoningLevel: body.reasoningLevel as ReasoningLevel }
+      : {}),
+    ...(body.permissionLevel !== undefined
+      ? { permissionLevel: body.permissionLevel as PermissionLevel }
+      : {}),
+  };
+  await saveSettings(settings);
 }
 
 /**
@@ -168,8 +240,12 @@ export async function saveProviders(payload: {
       out[id] = { ...rest, apiKeyRef: ref };
     }
   }
-  await saveSettings({ providers: out, lastUsedModel: payload.lastUsedModel });
-  invalidateModel();
+  // The client sends `lastUsedModel`; store it under the `general` block
+  // (ADR-0016) as the global default model.
+  await saveSettings({
+    providers: out,
+    ...(payload.lastUsedModel ? { general: { model: payload.lastUsedModel } } : {}),
+  });
 }
 
 /** Fetch available models from an openai-compatible /models endpoint (Q7). */
@@ -199,45 +275,40 @@ export async function listModels(providerId: string): Promise<ModelEntry[]> {
   return ids.map((id) => ({ id, displayName: id }));
 }
 
-/** Persist last-used model (global default, ADR-0014 Q10/Q13). */
+/** Persist the global default model (settings.json.general.model, ADR-0016). */
 export async function saveLastUsed(providerId: string, modelId: string): Promise<void> {
   const settings = await loadSettings();
-  settings.lastUsedModel = { providerId, modelId };
+  settings.general = { ...settings.general, model: { providerId, modelId } };
   await saveSettings(settings);
-  invalidateModel();
 }
 
-/** Persist the global default reasoning level (settings.json.lastUsedLevel). */
+/** Persist the global default reasoning level (settings.json.general.reasoningLevel). */
 export async function saveLastUsedLevel(level: ReasoningLevel): Promise<void> {
   if (!(REASONING_LEVELS as readonly string[]).includes(level)) {
     throw new Error(`level must be one of: ${REASONING_LEVELS.join('|')}`);
   }
   const settings = await loadSettings();
-  settings.lastUsedLevel = level;
+  settings.general = { ...settings.general, reasoningLevel: level };
   await saveSettings(settings);
 }
 
 /**
- * Resolve the effective reasoning level for a session: session `reasoning/set`
- * event override ?? global `lastUsedLevel` default ?? DEFAULT_REASONING_LEVEL.
+ * Resolve the effective reasoning level for a session via the unified cascade
+ * (ADR-0016): `session.config.reasoningLevel` override ?? `general.reasoningLevel`
+ * ?? DEFAULT_REASONING_LEVEL. Reads the persisted config file + settings general.
  */
 export async function sessionReasoningLevel(
   workspace: string,
   sessionId: string,
 ): Promise<ReasoningLevel> {
   const store = new SessionStore({ workspace: workspaceToSlug(workspace), sessionId });
-  let ev;
-  try {
-    ev = await store.lastEvent('reasoning/set');
-  } catch {
-    ev = null;
-  }
-  const override = ev?.payload?.level as ReasoningLevel;
-  if (override && (REASONING_LEVELS as readonly string[]).includes(override)) {
-    return override;
-  }
-  const settings = await loadSettings().catch(() => ({ lastUsedLevel: undefined } as any));
-  return (settings.lastUsedLevel as ReasoningLevel) ?? DEFAULT_REASONING_LEVEL;
+  const overrides = await store.loadConfig();
+  const settings = await loadSettings().catch(() => ({ providers: {}, general: undefined } as any));
+  return resolveSessionConfig(
+    { reasoningLevel: overrides.reasoningLevel },
+    settings.general,
+    mergedProviders(settings),
+  ).reasoningLevel;
 }
 
 /** Whether the "open config file" action is available on this platform (Q4/Q9). */
@@ -282,20 +353,15 @@ export function getHarness(workspace: string, mode: string): Harness {
 }
 
 /**
- * The mode a session runs under: the `mode` event line recorded ONCE at
- * session creation, else 'standard' (ADR-0015: mode is build-time, immutable;
- * resume re-reads it to rebuild the matching spec). Sessions created before
- * modes existed default to 'standard' (the old base+memory+skills behavior).
+ * The mode a session runs under: the persisted `session.config.mode` identity,
+ * else 'standard' (ADR-0015: mode is build-time, immutable; resume re-reads it
+ * to rebuild the matching spec). Sessions created before modes existed default
+ * to 'standard' (the old base+memory+skills behavior).
  */
 export async function sessionMode(workspace: string, sessionId: string): Promise<string> {
   const store = new SessionStore({ workspace: workspaceToSlug(workspace), sessionId });
-  let ev;
-  try {
-    ev = await store.lastEvent('mode');
-  } catch {
-    ev = null;
-  }
-  return ev?.payload?.mode === 'base' ? 'base' : 'standard';
+  const config = await store.loadConfig();
+  return config.mode === 'base' ? 'base' : 'standard';
 }
 
 /**
@@ -356,18 +422,21 @@ export async function bindSession(
     }
   }
 
-  harness.session.config.workspace = toolRoot;
-  harness.session.config.mode = mode;
   let store: SessionStore;
   if (sessionId) {
+    // Resume: harness.resume() reloads the persisted identity (workspace/mode)
+    // into session.config from the config file (ADR-0016).
     store = await harness.resume(sessionId);
   } else {
     store = new SessionStore({ workspace: slug });
     await store.create();
     harness.sessionStore = store;
     harness.session.history = [];
-    // Record the build-time mode once (ADR-0015) — resume re-reads it.
-    await store.appendEvent('mode', { mode });
+    // Brand-new session: write the build-time identity once into the config
+    // file (ADR-0016) — workspace (absolute, self-contained) + mode. Resume
+    // re-reads this file, not an event.
+    harness.session.config = { workspace: toolRoot, mode };
+    await store.saveConfig(harness.session.config);
   }
   await harness.restoreSecurity(store);
   return store;
@@ -572,20 +641,21 @@ export async function removeWorkspace(slug: string): Promise<void> {
 }
 
 export interface SessionActionRequest {
-  action: 'rename' | 'pin' | 'unpin' | 'archive' | 'unarchive' | 'notify' | 'level' | 'reasoning';
+  action: 'rename' | 'pin' | 'unpin' | 'archive' | 'unarchive' | 'notify' | 'level' | 'reasoning' | 'model';
   title?: string;
   pinned?: boolean;
   enabled?: boolean;
   level?: string;
   reasoning?: string;
+  model?: { providerId: string; modelId: string };
 }
 
 const ARCHIVE_DIR = (slug: string) => path.join(SESSIONS_DIR(), slug, '.archive');
 
 /**
  * Apply a session action. Most are lightweight event writes (rename/pin/
- * notify) or file moves (archive/unarchive); `level` restores the harness,
- * writes `level/set` (ADR-0009) and rebuilds the system prompt.
+ * notify) or file moves (archive/unarchive); `level`/`reasoning`/`model`
+ * persist session-config overrides (ADR-0016, <id>.config.json).
  */
 export async function applySessionAction(
   workspace: string,
@@ -648,7 +718,19 @@ export async function applySessionAction(
       }
       const store = new SessionStore({ workspace: workspaceToSlug(workspace), sessionId });
       await store.create(sessionId);
-      await store.appendEvent('reasoning/set', { level: reasoning });
+      const overrides = await store.loadConfig();
+      await store.saveConfig({ ...overrides, reasoningLevel: reasoning as ReasoningLevel });
+      return { ok: true };
+    }
+    case 'model': {
+      const m = req.model;
+      if (!m || typeof m.providerId !== 'string' || typeof m.modelId !== 'string') {
+        throw new Error('model requires providerId + modelId');
+      }
+      const store = new SessionStore({ workspace: workspaceToSlug(workspace), sessionId });
+      await store.create(sessionId);
+      const overrides = await store.loadConfig();
+      await store.saveConfig({ ...overrides, model: { providerId: m.providerId, modelId: m.modelId } });
       return { ok: true };
     }
     default:

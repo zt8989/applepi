@@ -234,6 +234,12 @@ function ModelChip({ store }: { store: ChatStore }) {
 
   useOutsideClick(ref, () => setOpen(false), open);
 
+  // Empty-model UX (ADR-0016): force the picker open when no model resolved.
+  const pickerTick = store.modelPickerTick ?? 0;
+  useEffect(() => {
+    if (pickerTick > 0) setOpen(true);
+  }, [pickerTick]);
+
   useEffect(() => {
     if (!open) return;
     (async () => {
@@ -267,12 +273,7 @@ function ModelChip({ store }: { store: ChatStore }) {
   const selectModel = async (providerId: string, modelId: string) => {
     setLastUsed({ providerId, modelId });
     try {
-      await fetch('/api/config/last-used', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ providerId, modelId }),
-      });
-      await store.refreshLlm();
+      await store.setModel(providerId, modelId);
     } catch {
       /* ignore */
     } finally {

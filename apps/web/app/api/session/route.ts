@@ -43,14 +43,12 @@ export async function GET(req: Request) {
   const store = await bindSession(harness, workspace, session, mode);
   const loaded = await store.load();
   const level = getPermissionLevel({ session: harness.session });
-  const reasoningEvent = await store.lastEvent('reasoning/set').catch(() => null);
-  const reasoning =
-    reasoningEvent && typeof reasoningEvent.payload?.level === 'string'
-      ? reasoningEvent.payload.level
-      : undefined;
-  const modeFromEvent = (await store.lastEvent('mode').catch(() => null))?.payload?.mode ?? 'standard';
+  // Reasoning override read from the persisted session config (ADR-0016).
+  const config = await store.loadConfig();
+  const reasoning = config.reasoningLevel;
+  // Mode: `sessionMode` reads the persisted config identity (ADR-0016).
   const title = await sessionTitle(store.workspace, session);
-  return Response.json({ messages: loaded.messages, level, reasoning, mode: modeFromEvent, title });
+  return Response.json({ messages: loaded.messages, level, reasoning, mode, title });
 }
 
 export async function PATCH(req: Request) {

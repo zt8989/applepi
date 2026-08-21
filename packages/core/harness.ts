@@ -11,6 +11,13 @@ export interface HarnessOptions {
   /** Workspace slug override (defaults to slugWorkspace(process.cwd())). */
   workspace?: string;
   /**
+   * Override the on-disk session root for the stores this harness creates.
+   * Defaults to `~/.applepi/sessions` (SessionStore default). Tests inject a
+   * temp dir so resume() never touches the real user config (ADR-0016 era —
+   * same seam SessionStore already exposes).
+   */
+  baseDir?: string;
+  /**
    * The security policy. Defaults to `defaultSecurityPolicy` (ADR-0009 Q7=b):
    * core always ships a working policy; supplying your own replaces it and
    * means self-responsibility for the level skeleton.
@@ -31,6 +38,7 @@ export interface HarnessOptions {
 export class Harness {
   readonly workspace: string;
   readonly securityPolicy: SecurityPolicy;
+  private readonly baseDir?: string;
   /**
    * The LLM-interaction deep module (ADR-0015): tool catalog + one model
    * response (generate/stream). `loop` consumes it; the harness shell owns it.
@@ -44,6 +52,7 @@ export class Harness {
   constructor(opts: HarnessOptions = {}) {
     this.workspace = opts.workspace ?? slugWorkspace(process.cwd());
     this.securityPolicy = opts.securityPolicy ?? defaultSecurityPolicy;
+    this.baseDir = opts.baseDir;
     this.llm = createLlm({
       session: this.session,
       getTools: () => [...this.tools.values()],
@@ -128,7 +137,7 @@ export class Harness {
   /** Switch the active session to `id`; load its history (replay). Missing → new. */
   async resume(id: string): Promise<SessionStore> {
     const ws = this.sessionStore?.workspace ?? this.workspace;
-    const store = new SessionStore({ workspace: ws, sessionId: id });
+    const store = new SessionStore({ workspace: ws, sessionId: id, baseDir: this.baseDir });
     let loaded: { messages: SessionMessage[] };
     try {
       loaded = await store.load();
@@ -140,6 +149,9 @@ export class Harness {
     // Drop the system prompt (re-assembled by the app per turn); keep the
     // conversation turns.
     this.session.history = (loaded.messages ?? []).filter((m) => m.role !== 'system');
+    // Restore the persisted session config (ADR-0016: workspace/mode identity,
+    // resumed from the config file — self-contained, no manifest dependency).
+    this.session.config = await store.loadConfig();
     return store;
   }
 
