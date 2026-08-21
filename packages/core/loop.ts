@@ -1,13 +1,20 @@
-import { generateText } from 'ai';
 import type { Harness } from './harness.js';
 import { getTracer, modelLabel, type Tracer, type TraceHandle } from './trace.js';
+import type { LlmCall } from './llm.js';
+import type { Ctx } from './types.js';
 
-/** Shape of the LLM call the loop makes each turn. */
-export type LlmCall = (args: {
-  model: any;
-  messages: any[];
-  tools: any;
-}) => Promise<any>;
+/**
+ * The `loop` deep module (ADR-0015): drives the multi-turn orchestration —
+ * user input → call the LLM (via the `llm` module) → execute tool calls
+ * through the `tool` seam → feed results back → repeat until the model stops
+ * calling tools or maxTurns is reached — including pause / approval / resume
+ * (see `stream-loop.ts`). It depends on the `llm` module for the model call
+ * and knows no AI-SDK detail.
+ *
+ * We run our own execution (not the AI SDK's) so the tool seam (the security
+ * seam: a level-carrying ctx handed to `harness.executeTool`) wraps every
+ * tool call.
+ */
 
 export interface LoopOpts {
   model: any;
@@ -23,11 +30,12 @@ export interface LoopOpts {
   trace?: Tracer | null;
 }
 
+export { type LlmCall } from './llm.js';
+
 /**
  * The agent loop: call the LLM, collect tool calls, execute each through the
- * `tool` onion stack, feed results back, repeat until the model stops calling
- * tools or maxTurns is reached. We run our own execution (not the AI SDK's)
- * so the denylist / hook middleware wrap every tool call.
+ * tool seam (`harness.executeTool`, ADR-0015), feed results back, repeat until
+ * the model stops calling tools or maxTurns is reached.
  */
 export async function runLoop(
   harness: Harness,
@@ -35,7 +43,6 @@ export async function runLoop(
   opts: LoopOpts,
 ): Promise<any[]> {
   const maxTurns = opts.maxTurns ?? 8;
-  const callLLM: LlmCall = opts.llmCall ?? ((a) => generateText(a));
   const tracer = opts.trace !== undefined ? opts.trace : await getTracer();
   const traceHandle = tracer?.session('agent-turn', harness.sessionStore?.sessionId ?? harness.workspace, {
     input: [...messages].reverse().find((m: any) => m?.role === 'user')?.content,
@@ -43,20 +50,14 @@ export async function runLoop(
   let turn = 0;
   while (turn < maxTurns) {
     turn++;
-    const toolDefs = harness.buildToolDefs();
 
-    const llmCtx: any = { session: harness.session, state: {}, messages };
-    let result: any;
-    await harness.bus.run('llm', llmCtx, async () => {
-      result = await callLLM({
-        model: opts.model,
-        messages: llmCtx.messages,
-        // no `execute`: SDK returns toolCalls, we run them ourselves
-        tools: toolDefs as any,
-      });
+    const { result, ctx } = await harness.llm.generate({
+      model: opts.model,
+      messages,
+      llmCall: opts.llmCall,
     });
     const r: any = result;
-    const gen = traceHandle?.generation('llm', { messages: llmCtx.messages }, { model: modelLabel(opts.model) });
+    const gen = traceHandle?.generation('llm', { messages: ctx.messages }, { model: modelLabel(opts.model) });
     gen?.end(r?.text ?? '', r?.usage);
 
     const toolCalls: any[] = r?.toolCalls ?? [];
@@ -80,20 +81,16 @@ export async function runLoop(
     const toolMessages: any[] = [];
     for (const tc of toolCalls) {
       const span = traceHandle?.span('tool', { name: tc.toolName, args: tc.args });
-      const tctx: any = {
+      const tctx: Ctx = {
         session: harness.session,
         state: {},
         toolName: tc.toolName,
         toolArgs: tc.args,
       };
-      await harness.bus.run('tool', tctx, async () => {
-        await harness.executeTool(tctx);
-      });
-      let res = tctx.toolResult ?? '';
-      if (tctx.state?.__vetoed && !res) res = 'BLOCKED: vetoed by middleware';
-      if (tctx.error) {
-        res = `ERROR: ${(tctx.error as Error)?.message ?? String(tctx.error)}`;
-      }
+      // Security seam (ADR-0015): the ctx carries the current level via
+      // session.scratch; the tool self-determines. No onion stack.
+      await harness.executeTool(tctx);
+      const res = tctx.toolResult ?? '';
       span?.end({ result: res });
       toolMessages.push({
         role: 'tool',

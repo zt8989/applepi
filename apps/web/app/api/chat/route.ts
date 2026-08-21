@@ -1,17 +1,19 @@
 import { createDataStreamResponse } from 'ai';
 import {
   PERMISSION_LEVELS,
-  PERMISSION_SCRATCH_KEY,
   REASONING_LEVELS,
+  applyPermissionLevel,
   resolveLlmConfig,
   runLoopStreamSegment,
   type ReasoningLevel,
 } from '@applepi/core';
 import {
   bindSession,
+  buildSystemPrompt,
   buildTurnMessages,
   getHarness,
   getModel,
+  sessionMode,
   sessionReasoningLevel,
 } from '@/lib/server';
 import type { ChatRequestBody } from '@/lib/types';
@@ -29,15 +31,19 @@ export async function POST(req: Request) {
   if (!body.workspace || !body.messageId || !body.message) {
     return new Response('missing workspace/messageId/message', { status: 400 });
   }
-  const harness = getHarness(body.workspace);
-  const store = await bindSession(harness, body.workspace, body.sessionId);
+  // Mode (ADR-0015): chosen ONCE at session creation — a new session takes the
+  // body's `mode` (default standard); a resumed session re-reads the recorded
+  // `mode` event and rebuilds the matching spec (tools are immutable per mode).
+  const isNew = !body.sessionId;
+  const mode = isNew ? (body.mode === 'base' ? 'base' : 'standard') : await sessionMode(body.workspace, body.sessionId!);
+  const harness = getHarness(body.workspace, mode);
+  const store = await bindSession(harness, body.workspace, body.sessionId, mode);
 
   // A brand-new session may carry a pre-chosen permission level (picked in
-  // the composer footer before the first message): persist it like /level.
-  if (!body.sessionId && body.level && (PERMISSION_LEVELS as readonly string[]).includes(body.level as any)) {
-    harness.session.scratch[PERMISSION_SCRATCH_KEY] = body.level;
-    await store.appendEvent('level/set', { level: body.level });
-    await harness.emit('system_prompt/permission', { level: body.level });
+  // the composer footer before the first message): the flat prompt re-reads
+  // the level each turn, so no rebuild event is needed (ADR-0015).
+  if (isNew && body.level && (PERMISSION_LEVELS as readonly string[]).includes(body.level as any)) {
+    await applyPermissionLevel(harness.session, store, body.level);
   }
 
   // Reasoning level: a brand-new session may carry a pre-chosen level (picked
@@ -45,7 +51,7 @@ export async function POST(req: Request) {
   // otherwise resolve session override ?? global default.
   let reasoningLevel: ReasoningLevel;
   const preChosen =
-    !body.sessionId && body.reasoning && (REASONING_LEVELS as readonly string[]).includes(body.reasoning)
+    isNew && body.reasoning && (REASONING_LEVELS as readonly string[]).includes(body.reasoning)
       ? (body.reasoning as ReasoningLevel)
       : undefined;
   if (preChosen) {
@@ -56,6 +62,12 @@ export async function POST(req: Request) {
     reasoningLevel = sessionId
       ? await sessionReasoningLevel(body.workspace, sessionId)
       : ((await resolveLlmConfig()).reasoningLevel);
+  }
+
+  // A brand-new session persists its initial flat system prompt once, AFTER
+  // the pre-chosen level/reasoning so the replay record matches the first turn.
+  if (isNew) {
+    await store.appendMessage('system', buildSystemPrompt(harness));
   }
 
   const messages = await buildTurnMessages(harness);

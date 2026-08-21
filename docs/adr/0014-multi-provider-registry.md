@@ -2,6 +2,7 @@
 
 - **Status**: Confirmed (2026-08-20, via /grill-with-docs — settings modal + model config feature)
 - **Supersedes**: ADR-0004's single `{ provider, model, apiKey, baseURL? }` settings shape (the *file location* and secret-separation intent of ADR-0004 are preserved).
+- **Re-scoped by ADR-0016 (2026-08-21)**: the `lastUsedModel` global-only single record (and Q13 "no per-session model variant") is superseded by a `general` block of global defaults + per-session overrides in `session.config`. The multi-provider registry, `protocol`-selects-factory, builtin presets, and no-in-code-migration principles all stand.
 
 ## Context
 

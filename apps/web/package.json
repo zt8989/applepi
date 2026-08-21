@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@applepi/bundle": "workspace:*",
     "@applepi/core": "workspace:*",
     "@applepi/extensions": "workspace:*",
     "@assistant-ui/react": "^0.15.15",

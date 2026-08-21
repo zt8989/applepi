@@ -1,14 +1,16 @@
-// Smoke test for @harness/core — no API key required.
-// Validates the onion bus + tool execution + soft isolation + loader, all
-// WITHOUT depending on any concrete tool (reference tools and the denylist
-// moved to @applepi/extensions, ADR-0005; their tests live in
-// packages/extensions/test/{tools,denylist}.mjs).
+// Smoke test for @applepi/core (ADR-0015) — no API key required.
+// Validates the Harness shell after the split core: direct tool registration,
+// the tool seam (executeTool: known/unknown/throwing), slash commands (the
+// core-owned /level), and the CLI run() path with a fake LLM.
 import assert from 'node:assert/strict';
-import { fileURLToPath } from 'node:url';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   Harness,
-  OnionBus,
+  SessionStore,
   runLoop,
+  getPermissionLevel,
 } from '../dist/index.js';
 
 let passed = 0;
@@ -17,123 +19,140 @@ function ok(name) {
   console.log(`  ok - ${name}`);
 }
 
-// A concrete tool is not needed here: soft-isolation is a bus/loop property,
-// exercised through a minimal stub instead of a reference tool.
 const stubTool = {
   name: 'stub',
-  description: 'no-op stub used by soft-isolation tests',
+  description: 'no-op stub',
   parameters: { safeParse: () => ({ success: true }) },
   async execute() {
     return 'stub-ok';
   },
 };
 
-// 1. Onion order: outer runs before/after inner.
+// 1. registerTool + duplicate guard + buildToolDefs/getTools surface.
 {
-  const bus = new OnionBus();
-  const order = [];
-  bus.use('tool', async (ctx, next) => {
-    order.push('outer-in');
-    await next();
-    order.push('outer-out');
-  }, { priority: 10 });
-  bus.use('tool', async (ctx, next) => {
-    order.push('inner-in');
-    await next();
-    order.push('inner-out');
-  }, { priority: 1 });
-  await bus.run('tool', { state: {} }, async () => { order.push('final'); });
-  assert.deepEqual(order, ['outer-in', 'inner-in', 'final', 'inner-out', 'outer-out']);
-  ok('onion order (outer wraps inner)');
+  const h = new Harness();
+  h.registerTool(stubTool);
+  assert.throws(() => h.registerTool({ ...stubTool, name: 'stub' }), /already registered/);
+  assert.deepEqual(h.getTools().map((t) => t.name), ['stub']);
+  assert.equal(h.getTool('stub').name, 'stub');
+  assert.equal(h.getTool('nope'), undefined);
+  const defs = h.buildToolDefs();
+  assert.equal(defs.stub.description, stubTool.description);
+  ok('registerTool + duplicate guard + buildToolDefs');
 }
 
-// 2. Veto: returning without next() skips inner + final.
+// 2. Tool seam: known tool executes; unknown tool -> ERROR; throwing tool caught.
 {
-  const bus = new OnionBus();
-  let innerRan = false;
-  let finalRan = false;
-  bus.use('tool', async (ctx, next) => {
-    ctx.toolResult = 'VETOED';
-    return; // no next()
-  }, { priority: 10 });
-  bus.use('tool', async (ctx, next) => { innerRan = true; await next(); }, { priority: 1 });
-  await bus.run('tool', { state: {} }, async () => { finalRan = true; });
-  assert.equal(innerRan, false);
-  assert.equal(finalRan, false);
-  ok('veto skips inner + final');
-}
-
-// 3. Soft isolation: a throwing middleware is caught, inner still runs.
-{
-  const bus = new OnionBus();
-  const harness = new Harness();
-  harness.registerExtension((api) => api.registerTool(stubTool));
-  bus.use('tool', async (ctx, next) => { throw new Error('boom'); }, { priority: 5 });
-  const ctx = { session: harness.session, state: {}, toolName: 'stub', toolArgs: {} };
-  await bus.run('tool', ctx, async () => { await harness.executeTool(ctx); });
-  assert.ok(ctx.error, 'ctx.error captured');
+  const h = new Harness();
+  h.registerTool(stubTool);
+  const ctx = { session: h.session, state: {}, toolName: 'stub', toolArgs: {} };
+  await h.executeTool(ctx);
   assert.equal(ctx.toolResult, 'stub-ok');
-  ok('soft isolation: error captured, tool still executed');
+
+  const missing = { session: h.session, state: {}, toolName: 'missing', toolArgs: {} };
+  await h.executeTool(missing);
+  assert.match(missing.toolResult, /^ERROR: unknown tool/);
+
+  h.registerTool({
+    name: 'boom',
+    description: '',
+    parameters: {},
+    async execute() {
+      throw new Error('kapow');
+    },
+  });
+  const bx = { session: h.session, state: {}, toolName: 'boom', toolArgs: {} };
+  await h.executeTool(bx);
+  assert.match(bx.toolResult, /^ERROR: kapow/);
+  ok('tool seam: known/unknown/throwing');
 }
 
-// 4. Auto-discovery: a *.ext.mjs in a scanned dir is registered without loader edits (T02).
+// 3. runLoop: the fake LLM returns a tool call, the seam executes it, the
+//    result feeds back to the model, and the loop advances to the next turn.
 {
-  const harness = new Harness();
-  // fileURLToPath (not .pathname): .pathname yields a `/C:/...` root-relative
-  // path on Windows, which fs.readdir fails to resolve.
-  const fxDir = fileURLToPath(new URL('./fixtures/', import.meta.url));
-  const loaded = await harness.loadExtensionsFromDir(fxDir);
-  assert.ok(loaded.includes('echo.ext.mjs'), `fixture discovered: ${loaded}`);
-  const names = harness.api.getTools().map((t) => t.name);
-  assert.ok(names.includes('echo'), `echo tool registered: ${names}`);
-  ok('auto-discovery registers tool from scanned dir (Q12/Q14)');
-}
-
-// 5. Discovery set tracks the directory: adding/removing files changes the tool set.
-{
-  const harness = new Harness();
-  const tmp = fileURLToPath(new URL('./_empty_ext_dir/', import.meta.url));
-  await import('node:fs').then((fs) => fs.mkdirSync(tmp, { recursive: true }));
-  const loaded = await harness.loadExtensionsFromDir(tmp);
-  assert.equal(loaded.length, 0, 'empty dir yields no extensions');
-  assert.ok(!harness.api.getTools().map((t) => t.name).includes('echo'));
-  await import('node:fs').then((fs) => fs.rmSync(tmp, { recursive: true, force: true }));
-  ok('discovery set tracks directory contents (add/remove files)');
-}
-
-// 6. Soft isolation full-loop demo (T07): a misbehaving tool-stack middleware
-//    throws (post-next phase), the bus catches it (sets ctx.error), the loop
-//    converts it to an ERROR tool result delivered to the model, and the loop
-//    advances to the next turn instead of crashing.
-{
-  const harness = new Harness();
-  harness.registerExtension((api) => api.registerTool(stubTool));
-  // priority 5: throws AFTER delegating.
-  harness.registerExtension((api) =>
-    api.use('tool', async (ctx, next) => {
-      await next();
-      throw new Error('middleware exploded');
-    }, { priority: 5 }),
-  );
+  const h = new Harness();
+  h.registerTool(stubTool);
   let turn = 0;
-  let secondTurnRan = false;
+  let done = false;
   const fakeLLM = async () => {
     turn++;
     if (turn === 1) {
       return { toolCalls: [{ toolCallId: 'c1', toolName: 'stub', args: {} }] };
     }
-    secondTurnRan = true;
-    return { text: 'recovered' };
+    done = true;
+    return { text: 'done' };
   };
-  const messages = [{ role: 'user', content: 'run something' }];
-  await harness.bus.run('session', { session: harness.session, state: {}, messages }, async () => {
-    await runLoop(harness, messages, { model: null, llmCall: fakeLLM, maxTurns: 4 });
-  });
+  const messages = [{ role: 'user', content: 'run' }];
+  await runLoop(h, messages, { model: null, llmCall: fakeLLM, maxTurns: 4 });
   const toolMsg = messages.find((m) => m.role === 'tool');
   assert.ok(toolMsg, 'tool result message present');
-  assert.match(toolMsg.content[0].result, /^ERROR: middleware exploded/, 'ERROR delivered to model');
-  assert.ok(secondTurnRan, 'loop continued to the next turn (did not crash)');
-  ok('soft isolation: misbehaving middleware -> ERROR to model, loop continues');
+  assert.equal(toolMsg.content[0].result, 'stub-ok');
+  assert.ok(done, 'loop advanced to the next turn (did not crash)');
+  ok('runLoop: tool seam executes + result fed back + next turn');
+}
+
+// 4. run(): persists the user turn, threads history, keeps system out of history.
+{
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'applepi-smoke-'));
+  try {
+    const h = new Harness();
+    h.registerTool(stubTool);
+    const store = new SessionStore({ baseDir: dir });
+    await store.create();
+    h.attachSession(store);
+    const fakeLLM = async () => ({ text: 'hello back' });
+    const messages = await h.run('hi', 'SYSTEM_PROMPT', null, { llmCall: fakeLLM });
+    assert.equal(messages[0].role, 'system');
+    assert.equal(messages[0].content, 'SYSTEM_PROMPT');
+    assert.ok(messages.some((m) => m.role === 'user' && m.content === 'hi'));
+    // System prompt is NOT part of the persisted conversation history.
+    assert.ok(!h.session.history.some((m) => m.role === 'system'));
+    // Persisted lines: user + assistant (system not persisted by run()).
+    const loaded = await store.load();
+    const roles = loaded.messages.map((m) => m.role);
+    assert.ok(roles.includes('user') && roles.includes('assistant'));
+    assert.equal(roles.includes('system'), false);
+    ok('run(): persists user turn, excludes system from history');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
+// 5. /level (core-registered): validates, writes level/set + scratch, restores.
+{
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'applepi-smoke-'));
+  try {
+    const h = new Harness();
+    const store = new SessionStore({ baseDir: dir });
+    await store.create();
+    h.attachSession(store);
+    await h.restoreSecurity(store);
+    assert.equal(getPermissionLevel({ session: h.session }), 'workspace', 'default workspace');
+
+    const cmd = h.getSlashCommand('level');
+    assert.ok(cmd, 'level command registered by core');
+    const msg = await cmd('fullaccess');
+    assert.match(msg, /fullaccess/);
+    assert.equal(getPermissionLevel({ session: h.session }), 'fullaccess');
+    const ev = await store.lastEvent('level/set');
+    assert.equal(ev.payload.level, 'fullaccess');
+    await assert.rejects(() => cmd('bogus'), /must be one of/);
+    assert.equal(h.getSlashCommand('nope'), undefined);
+    ok('/level: validate + persist + restore + unknown command');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
+// 6. unregisterTool.
+{
+  const h = new Harness();
+  h.registerTool(stubTool);
+  h.unregisterTool('stub');
+  assert.equal(h.getTool('stub'), undefined);
+  // unregistering a non-existent tool is a no-op
+  h.unregisterTool('nope');
+  ok('unregisterTool');
 }
 
 console.log(`\n${passed} smoke checks passed.`);

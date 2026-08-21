@@ -10,6 +10,7 @@ import {
   buildTurnMessages,
   getHarness,
   getModel,
+  sessionMode,
   sessionReasoningLevel,
 } from '@/lib/server';
 import type { ApproveRequestBody } from '@/lib/types';
@@ -32,8 +33,9 @@ export async function POST(req: Request) {
     return new Response('decision must be approve|deny', { status: 400 });
   }
 
-  const harness = getHarness(body.workspace);
-  const store = await bindSession(harness, body.workspace, body.sessionId);
+  const mode = await sessionMode(body.workspace, body.sessionId);
+  const harness = getHarness(body.workspace, mode);
+  const store = await bindSession(harness, body.workspace, body.sessionId, mode);
 
   const pending = await store.lastEvent('tool/approval-pending');
   if (!pending) {

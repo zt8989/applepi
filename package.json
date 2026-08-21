@@ -15,8 +15,7 @@
     "check-memory": "pnpm --filter @applepi/agent check-memory",
     "check-skills": "pnpm --filter @applepi/agent check-skills",
     "check-session": "pnpm --filter @applepi/agent check-session",
-    "check-soft-isolation": "pnpm --filter @applepi/agent check-soft-isolation",
-    "verify": "pnpm -r build && pnpm -r test && pnpm run check-ext && pnpm run check-denylist && pnpm run check-security && pnpm run check-memory && pnpm run check-skills && pnpm run check-session && pnpm run check-soft-isolation"
+    "verify": "pnpm -r build && pnpm -r test && pnpm run check-ext && pnpm run check-denylist && pnpm run check-security && pnpm run check-memory && pnpm run check-skills && pnpm run check-session"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

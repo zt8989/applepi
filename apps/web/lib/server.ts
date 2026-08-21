@@ -14,10 +14,10 @@ import {
   writeDotenvKey,
   BUILTIN_PROVIDERS,
   providerSecretName,
-  PERMISSION_SCRATCH_KEY,
   PERMISSION_LEVELS,
   REASONING_LEVELS,
   DEFAULT_REASONING_LEVEL,
+  applyPermissionLevel,
   type ResolvedLlmConfig,
   type ProviderConfig,
   type ProviderProtocol,
@@ -25,18 +25,19 @@ import {
   type ReasoningLevel,
 } from '@applepi/core';
 import {
-  baseExtension,
-  createMemoryExtension,
-  createSkillsExtension,
-} from '@applepi/extensions';
+  makeBundleSpec,
+  bundleEnv,
+  enableBundleSpec,
+  assembleFlatPrompt,
+} from '@applepi/bundle';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
 
 /**
- * Server-side wiring for the web interface (ADR-0011): one Harness per
- * workspace (baseExtension + memory + skills reference extensions), one
- * provider model from ~/.applepi (ADR-0004), sessions mapped 1:1 to the core
- * SessionStore jsonl.
+ * Server-side wiring for the web interface (ADR-0011 + ADR-0015): one Harness
+ * per (workspace, mode) pair (the bundle's tool registry is immutable per
+ * session — chosen once at creation, ADR-0015), one provider model from
+ * ~/.applepi (ADR-0004), sessions mapped 1:1 to the core SessionStore jsonl.
  */
 
 const SESSIONS_DIR = () => path.join(os.homedir(), '.applepi', 'sessions');
@@ -259,32 +260,76 @@ export async function openConfigFile(): Promise<{ hidden: boolean }> {
 
 const harnessCache = new Map<string, Harness>();
 
-/** One wired Harness per workspace slug (cached for the server's lifetime). */
-export function getHarness(workspace: string): Harness {
+/**
+ * One wired Harness per (workspace, mode) pair, cached for the server's
+ * lifetime. The tool registry is determined by the session's bundle/mode,
+ * which is immutable per session (ADR-0015: chosen once at creation).
+ */
+export function getHarness(workspace: string, mode: string): Harness {
   const slug = workspaceToSlug(workspace);
-  let h = harnessCache.get(slug);
+  const key = `${slug}:${mode}`;
+  let h = harnessCache.get(key);
   if (!h) {
     h = new Harness({ workspace: slug });
-    h.registerExtension(baseExtension);
-    h.registerExtension(createMemoryExtension());
-    h.registerExtension(createSkillsExtension());
-    // attachSession registers the skill event middleware once; the store is
-    // replaced per request via bindSession.
-    h.attachSession(new SessionStore({ workspace: slug }));
-    harnessCache.set(slug, h);
+    const spec = makeBundleSpec(mode, { cwd: process.cwd() });
+    if (!spec) throw new Error(`unknown mode: ${mode}`);
+    // Enable the bundle's tools + its declared capabilities' tools (memory /
+    // skills) via the @applepi/extensions capability registry.
+    enableBundleSpec(h, spec);
+    harnessCache.set(key, h);
   }
   return h;
 }
 
 /**
- * Point the harness at a session (resume existing or create new) and restore
- * its permission level. Sets `session.config.workspace` so the reference
- * tools scope to the selected workspace.
+ * The mode a session runs under: the `mode` event line recorded ONCE at
+ * session creation, else 'standard' (ADR-0015: mode is build-time, immutable;
+ * resume re-reads it to rebuild the matching spec). Sessions created before
+ * modes existed default to 'standard' (the old base+memory+skills behavior).
+ */
+export async function sessionMode(workspace: string, sessionId: string): Promise<string> {
+  const store = new SessionStore({ workspace: workspaceToSlug(workspace), sessionId });
+  let ev;
+  try {
+    ev = await store.lastEvent('mode');
+  } catch {
+    ev = null;
+  }
+  return ev?.payload?.mode === 'base' ? 'base' : 'standard';
+}
+
+/**
+ * The web app-interface fragments (ADR-0015 app layer): working-directory
+ * guidance, overlaid between the bundle fragments and any plugin tail.
+ */
+function appInterface(harness: Harness): string[] {
+  const root = harness.session.config.workspace ?? process.cwd();
+  return [
+    'You are running in the applepi web app. Use the selected workspace as the working directory for file operations.',
+    `Workspace: ${root}`,
+  ];
+}
+
+/** Assemble the flat system prompt for the session's mode at the current level. */
+export function buildSystemPrompt(harness: Harness): string {
+  const mode = (harness.session.config.mode as string) ?? 'standard';
+  const spec = makeBundleSpec(mode, bundleEnv(harness));
+  if (!spec) throw new Error(`unknown mode: ${mode}`);
+  return assembleFlatPrompt(harness, spec, { app: appInterface(harness) });
+}
+
+/**
+ * Point the harness at a session (resume existing or create new), record its
+ * mode, and restore its permission level. Sets `session.config.workspace` so
+ * the reference tools scope to the selected workspace. The initial system
+ * message is NOT persisted here — callers doing brand-new-session setup (the
+ * chat route, after applying pre-chosen level/reasoning) persist it.
  */
 export async function bindSession(
   harness: Harness,
   workspace: string,
   sessionId?: string,
+  mode: string = 'standard',
 ): Promise<SessionStore> {
   const slug = workspaceToSlug(workspace);
   // Tool working root: prefer the real path; resolve bare slugs (stale
@@ -312,6 +357,7 @@ export async function bindSession(
   }
 
   harness.session.config.workspace = toolRoot;
+  harness.session.config.mode = mode;
   let store: SessionStore;
   if (sessionId) {
     store = await harness.resume(sessionId);
@@ -320,17 +366,16 @@ export async function bindSession(
     await store.create();
     harness.sessionStore = store;
     harness.session.history = [];
-    // Persist the initial system prompt once (single persist path, ADR-0010).
-    await harness.emit('system_prompt');
+    // Record the build-time mode once (ADR-0015) — resume re-reads it.
+    await store.appendEvent('mode', { mode });
   }
   await harness.restoreSecurity(store);
   return store;
 }
 
-/** system prompt (freshly rebuilt) + session history. */
+/** system prompt (fresh flat assembly, current level) + session history. */
 export async function buildTurnMessages(harness: Harness): Promise<any[]> {
-  const built = await harness.buildSystemPrompt();
-  return [{ role: 'system', content: built.prompt }, ...harness.session.history];
+  return [{ role: 'system', content: buildSystemPrompt(harness) }, ...harness.session.history];
 }
 
 /**
@@ -590,11 +635,10 @@ export async function applySessionAction(
       if (!(PERMISSION_LEVELS as readonly string[]).includes(level as any)) {
         throw new Error(`level must be one of: ${PERMISSION_LEVELS.join('|')}`);
       }
-      const harness = getHarness(workspace);
-      const bound = await bindSession(harness, workspace, sessionId);
-      harness.session.scratch[PERMISSION_SCRATCH_KEY] = level;
-      await bound.appendEvent('level/set', { level });
-      await harness.emit('system_prompt/permission', { level });
+      const mode = await sessionMode(workspace, sessionId);
+      const harness = getHarness(workspace, mode);
+      const bound = await bindSession(harness, workspace, sessionId, mode);
+      await applyPermissionLevel(harness.session, bound, level);
       return { ok: true };
     }
     case 'reasoning': {

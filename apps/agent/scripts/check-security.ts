@@ -1,8 +1,9 @@
-// Key-free verification of the ADR-0009 security model in the real agent
-// context: tool self-determination (bash whitelist, sre view-only, path
-// scoping), the denylist floor at every level, the core SecurityPolicy
-// (level/set event + prompt rebuild WITHOUT unloading tools), and extension
-// reload (unload + re-inject + useEffect cleanup). Run:
+// Key-free verification of the ADR-0009 security model under ADR-0015 wiring:
+// tool self-determination (bash whitelist, sre view-only, path scoping), the
+// denylist floor at every level, the level skeleton (`/level` slash command,
+// level/set event + lastEvent restore, empty-session default, flat-prompt
+// level declaration from the bundle), and the invariant that a level change
+// does NOT change the registered tool set. Run:
 //   pnpm --filter agent check-security
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -16,15 +17,21 @@ import {
   restorePermissionLevel,
   type PermissionLevel,
 } from '@applepi/core';
-import { baseExtension, createMemoryExtension } from '@applepi/extensions';
+import {
+  makeBundleSpec,
+  bundleEnv,
+  enableBundleSpec,
+  assembleFlatPrompt,
+} from '@applepi/bundle';
 
 const WS = 'check-security-tmp';
 const DIR = path.join(os.homedir(), '.applepi', 'sessions', WS);
 
 const harness = new Harness();
-harness.registerExtension(baseExtension);
-// memory_write self-blocking is verified here too (ADR-0009 Q4/Q5).
-harness.registerExtension(createMemoryExtension({ filePath: path.join(tmpdir(), 'sec-check-memory.json') }));
+// Same wiring as main.ts: enable the standard bundle (bash + sre + memory +
+// skills tools all registered, ADR-0015).
+const spec = makeBundleSpec('standard', { cwd: process.cwd() })!;
+enableBundleSpec(harness, spec);
 const store = new SessionStore({ workspace: WS });
 await store.create();
 harness.attachSession(store);
@@ -36,18 +43,25 @@ const outerFile = path.join(tmpdir(), 'sec-check-outer.txt');
 const existingFile = path.join(process.cwd(), '.sec-check-existing.txt');
 await fs.writeFile(existingFile, 'hello sec', 'utf8');
 
-/** Drive one tool call through the `tool` onion stack (as runLoop does). */
+/** Drive one tool call through the tool seam (as runLoop does, ADR-0015). */
 async function callTool(toolName: string, args: any): Promise<string> {
   const tctx: any = { session: harness.session, state: {}, toolName, toolArgs: args };
-  await harness.bus.run('tool', tctx, async () => {
-    await harness.executeTool(tctx);
-  });
+  await harness.executeTool(tctx);
   return String(tctx.toolResult ?? '');
 }
 
 async function setLevel(level: PermissionLevel): Promise<void> {
-  const cmd = harness.api.getSlashCommand('level')!;
-  await cmd(level, harness.api); // exercises the real /level handler
+  const cmd = harness.getSlashCommand('level')!;
+  await cmd(level); // exercises the real core /level handler
+}
+
+/** Assemble the flat prompt for the standard bundle at the CURRENT level. */
+function systemPrompt(): string {
+  return assembleFlatPrompt(
+    harness,
+    makeBundleSpec('standard', bundleEnv(harness))!,
+    { app: [] },
+  );
 }
 
 function fail(msg: string): never {
@@ -55,17 +69,15 @@ function fail(msg: string): never {
   process.exit(1);
 }
 
-// --- 1. default level = workspace; prompt carries the declaration -----------
+// --- 1. default level = workspace; the bundle's flat prompt declares it -----
 {
   const level = await restorePermissionLevel(store, harness.session.scratch);
   if (level !== DEFAULT_PERMISSION_LEVEL) fail(`default level is ${level}, want workspace`);
   if (harness.session.scratch[PERMISSION_SCRATCH_KEY] !== 'workspace') {
     fail('default scratch level is not workspace');
   }
-  const built = await harness.buildSystemPrompt();
-  const sys = built.prompt;
-  if (!sys.includes('Permission Level: workspace')) fail('prompt lacks Permission Level: workspace');
-  if (!built.sections.includes('permission')) fail('permission section not reported in build sections');
+  const sys = systemPrompt();
+  if (!sys.toLowerCase().includes('permission level: workspace')) fail('prompt lacks "Permission level: WORKSPACE" (bundle declaration)');
 }
 
 // --- 2. readonly: tool self-determination -----------------------------------
@@ -111,9 +123,9 @@ function fail(msg: string): never {
   console.log('--- fullaccess: write anywhere ok, denylist floor still blocks rm -rf');
 }
 
-// --- 5. /level persists an event + rebuilds the prompt; tools are NOT unloaded
+// --- 5. /level persists an event + restores; tools are NOT unloaded ---------
 {
-  const before = harness.api.getTools().map((t) => t.name).sort();
+  const before = harness.getTools().map((t) => t.name).sort();
   const ev = await store.lastEvent('level/set');
   if (!ev || ev.payload?.level !== 'fullaccess') fail('level/set event not persisted');
   const fresh: Record<string, any> = {};
@@ -129,58 +141,17 @@ function fail(msg: string): never {
   // Level is a change in permission SIZE, not a tool unload (ADR-0009 Q14
   // amendment): the registered tool set is identical across level switches.
   await setLevel('readonly');
-  const after = harness.api.getTools().map((t) => t.name).sort();
+  const after = harness.getTools().map((t) => t.name).sort();
   if (JSON.stringify(before) !== JSON.stringify(after)) {
     fail(`level switch changed the tool set: ${before} -> ${after}`);
   }
   await setLevel('workspace');
-  console.log('--- level/set persisted; prompt rebuilt; tool set unchanged across levels');
-}
 
-// --- 6. extension reload: unload + re-inject + useEffect cleanup -----------
-{
-  const extDir = path.join(tmpdir(), `sec-check-ext-${Date.now()}`);
-  await fs.mkdir(extDir, { recursive: true });
-  const extFile = path.join(extDir, 'probe.ext.mjs');
-  await fs.writeFile(
-    extFile,
-    `
-export default (api) => {
-  api.useEffect(() => {
-    return () => { globalThis.__secCheckCleaned = true; };
-  });
-  api.registerTool({
-    name: 'reload_probe',
-    description: 'probe tool for reload verification',
-    parameters: {},
-    execute: () => 'probe-ok',
-  });
-};
-`,
-    'utf8',
-  );
-
-  const loaded = await harness.loadExtensionsFromDir(extDir);
-  if (!loaded.includes('probe.ext.mjs')) fail(`probe extension not loaded: ${loaded}`);
-  if (!harness.api.getTools().some((t) => t.name === 'reload_probe')) {
-    fail('reload_probe tool not registered');
-  }
-  const probeRes = await callTool('reload_probe', {});
-  if (probeRes !== 'probe-ok') fail(`probe tool call failed: ${probeRes}`);
-
-  // Remove the file, reload into the now-empty dir: tool must be unloaded and
-  // the useEffect cleanup must have run.
-  await fs.rm(extFile, { force: true });
-  const reloaded = await harness.reloadExtensions(extDir);
-  if (reloaded.length !== 0) fail(`reload should find no extensions: ${reloaded}`);
-  if (harness.api.getTools().some((t) => t.name === 'reload_probe')) {
-    fail('reload_probe still registered after reload');
-  }
-  if ((globalThis as any).__secCheckCleaned !== true) {
-    fail('useEffect cleanup was not invoked on reload');
-  }
-  await fs.rm(extDir, { recursive: true, force: true }).catch(() => {});
-  console.log('--- reload: registrations revoked, useEffect cleanup ran');
+  // The flat prompt re-declares the level on the next turn (no rebuild event,
+  // ADR-0015): after a level change the assembled prompt reflects it.
+  const sys = systemPrompt();
+  if (!sys.toLowerCase().includes('permission level: workspace')) fail('prompt did not re-declare the new level');
+  console.log('--- level/set persisted; tool set unchanged across levels; flat prompt re-declares level');
 }
 
 // cleanup — best-effort: a failed cleanup must not fail the verification.
@@ -190,4 +161,4 @@ for (const f of [innerFile, outerFile, existingFile]) {
 await fs.rm(DIR, { recursive: true, force: true }).catch(() => {});
 await fs.rm(path.join(os.homedir(), '.applepi', 'sessions', `${WS}-2`), { recursive: true, force: true }).catch(() => {});
 
-console.log('OK: security model verified (self-determination, denylist floor, level skeleton, reload lifecycle)');
+console.log('OK: security model verified (self-determination, denylist floor, level skeleton, flat declaration)');

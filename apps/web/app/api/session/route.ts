@@ -3,6 +3,7 @@ import {
   bindSession,
   getHarness,
   readSessionFile,
+  sessionMode,
   sessionTitle,
   type SessionActionRequest,
 } from '@/lib/server';
@@ -37,8 +38,9 @@ export async function GET(req: Request) {
     });
   }
 
-  const harness = getHarness(workspace);
-  const store = await bindSession(harness, workspace, session);
+  const mode = await sessionMode(workspace, session);
+  const harness = getHarness(workspace, mode);
+  const store = await bindSession(harness, workspace, session, mode);
   const loaded = await store.load();
   const level = getPermissionLevel({ session: harness.session });
   const reasoningEvent = await store.lastEvent('reasoning/set').catch(() => null);
@@ -46,8 +48,9 @@ export async function GET(req: Request) {
     reasoningEvent && typeof reasoningEvent.payload?.level === 'string'
       ? reasoningEvent.payload.level
       : undefined;
+  const modeFromEvent = (await store.lastEvent('mode').catch(() => null))?.payload?.mode ?? 'standard';
   const title = await sessionTitle(store.workspace, session);
-  return Response.json({ messages: loaded.messages, level, reasoning, title });
+  return Response.json({ messages: loaded.messages, level, reasoning, mode: modeFromEvent, title });
 }
 
 export async function PATCH(req: Request) {

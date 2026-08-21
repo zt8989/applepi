@@ -1,6 +1,12 @@
 # WorkBuddy project data (not a temp cache — keep out of git)
 .workbuddy/
 
+# pnpm store accidentally created inside the workspace (should live outside the repo)
+.pnpm-store/
+
+# ZCode session working data
+.zcode/
+
 # git worktrees
 .worktrees/
 

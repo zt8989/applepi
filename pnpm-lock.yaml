@@ -26,6 +26,9 @@ importers:
       '@ai-sdk/openai':
         specifier: ^1.0.0
         version: 1.3.24(zod@3.25.76)
+      '@applepi/bundle':
+        specifier: workspace:*
+        version: link:../../packages/bundle
       '@applepi/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -47,6 +50,9 @@ importers:
       '@ai-sdk/openai':
         specifier: ^1.3.24
         version: 1.3.24(zod@4.4.3)
+      '@applepi/bundle':
+        specifier: workspace:*
+        version: link:../../packages/bundle
       '@applepi/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -90,6 +96,18 @@ importers:
       typescript:
         specifier: ^5.5.0
         version: 5.9.3
+
+  packages/bundle:
+    dependencies:
+      '@applepi/core':
+        specifier: workspace:*
+        version: link:../core
+      '@applepi/extensions':
+        specifier: workspace:*
+        version: link:../extensions
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
 
   packages/core:
     dependencies:

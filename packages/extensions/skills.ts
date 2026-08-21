@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { SetupFn, HarnessApi, Ctx } from '@applepi/core';
+import type { Capability } from './capability.js';
+import type { Ctx, ToolSpec } from '@applepi/core';
 
 export interface SkillsOptions {
   /** Marker key in session.scratch holding the loaded skills map. */
@@ -11,18 +12,17 @@ export interface SkillsOptions {
 const DEFAULT_SCRATCH_KEY = '__skills';
 
 /**
- * Skills reference extension (spec §9.2). Provides a `skill_load` tool that
- * stashes a markdown instruction blob into the session scratch bag, plus a
- * `skills` system-prompt block on the `prompt/skills` stack (ADR-0010) that
- * surfaces every loaded skill's content. The system prompt is (re)built at
- * session start and on `/reload`; loading a skill emits
- * `system_prompt/skills` so the harness rebuilds all blocks.
+ * Skills capability (ADR-0015). A `skill_load` tool stashes a markdown
+ * instruction blob into the session scratch bag; the capability's `prompt()`
+ * surfaces every loaded skill as a flat fragment. The system prompt is
+ * re-read each turn, so loading a skill does NOT emit any rebuild event — the
+ * next turn's assembly naturally includes it (ADR-0015 flat model).
  */
-export function createSkillsExtension(options: SkillsOptions = {}): SetupFn {
+export function createSkills(options: SkillsOptions = {}): Capability {
   const key = options.scratchKey ?? DEFAULT_SCRATCH_KEY;
 
-  return (api: HarnessApi) => {
-    api.registerTool({
+  const tools: ToolSpec[] = [
+    {
       name: 'skill_load',
       description:
         'Load a skill (a markdown instruction blob) so its guidance is contributed to the system prompt. Pass `content` directly, or `path` to load a markdown file. Loaded skills persist in the session scratch until the session ends or `/reload`.',
@@ -52,29 +52,19 @@ export function createSkillsExtension(options: SkillsOptions = {}): SetupFn {
         const skills = (ctx.session.scratch[key] as Record<string, string>) ?? {};
         skills[args.name] = content;
         ctx.session.scratch[key] = skills;
-        // Block event = semantic trigger; rebuilds ALL blocks (rebuild-all,
-        // ADR-0010 Q9=a/Q12=a). Persisting happens in the core handler.
-        await api.emit('system_prompt/skills', { name: args.name });
-        return `loaded skill "${args.name}" (${content.length} chars) — system prompt rebuilt`;
+        return `loaded skill "${args.name}" (${content.length} chars) — its instructions are now part of the system prompt`;
       },
-    });
+    },
+  ];
 
-    // Block: every loaded skill becomes the `skills` block (ADR-0010).
-    // Contributes only when there is content; `sections` then includes
-    // 'skills' (build-time truth).
-    api.use('prompt/skills', async (ctx, next) => {
-      const skills = ctx.session.scratch[key] as Record<string, string> | undefined;
-      if (skills && Object.keys(skills).length > 0) {
-        ctx.prompt!.set('skills', [
-          Object.entries(skills)
-            .map(([name, content]) => `[Skill: ${name}]\n${content}`)
-            .join('\n\n'),
-        ]);
-      }
-      await next();
-    });
+  return {
+    id: 'skills',
+    prompt: (_env, session) => {
+      const skills = (session.scratch[key] as Record<string, string> | undefined) ?? {};
+      return Object.entries(skills).map(
+        ([name, content]) => `[Skill: ${name}]\n${content}`,
+      );
+    },
+    tools,
   };
 }
-
-/** Default skills extension (in-session scratch key). */
-export const skillsExtension = createSkillsExtension();

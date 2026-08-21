@@ -1,27 +1,35 @@
-import type { SetupFn } from '@applepi/core';
 import { z } from 'zod';
+import type { ToolSpec } from '@applepi/core';
+import type { PluginSpec } from '../plugins.js';
 
 /**
- * Sample extension — drop this file into <app>/extensions/ and it is
- * auto-discovered by the loader (Q12/Q14: local `extensions/` directory scan)
- * with NO change to harness or loader code.
- *
- * Pull-mode contract (Q9): the loader calls `setup(api)`; we register a tool
- * via `api.registerTool(...)`. The harness does the rest.
+ * Sample plugin — drop a file into <app>/extensions/ and the app-layer loader
+ * (apps/agent/plugins.ts, ADR-0015) discovers it with NO change to core or
+ * loader code. A plugin is append-only: it registers tools and appends prompt
+ * fragments at the tail of the flat system prompt. The default export is a
+ * plain declarative `{ prompt?, tools? }` object.
  */
-const setup: SetupFn = (api) => {
-  api.registerTool({
+
+const tools: ToolSpec[] = [
+  {
     name: 'hello',
     description:
-      'Return a friendly greeting. Use to confirm that an auto-discovered extension is wired in.',
+      'Return a friendly greeting. Use to confirm that a discovered plugin is wired in.',
     parameters: z.object({
       name: z.string().optional().describe('Who to greet (defaults to "world")'),
     }),
     execute: async (args) => {
       const who = String(args.name ?? 'world').trim() || 'world';
-      return `Hello, ${who}! (served by an auto-discovered extension)`;
+      return `Hello, ${who}! (served by a discovered plugin)`;
     },
-  });
+  },
+];
+
+const plugin: PluginSpec = {
+  tools,
+  prompt: [
+    'A greeting plugin is loaded: you may use the `hello` tool to greet the user.',
+  ],
 };
 
-export default setup;
+export default plugin;

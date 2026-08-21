@@ -1,21 +1,21 @@
 // Key-free verification that a real *.ext.ts in <app>/extensions/ is
-// auto-discovered and its tool registered. Run with tsx:
+// discovered by the app-layer plugin loader (ADR-0015) and its tool is ready.
+// Run with tsx:
 //   pnpm --filter agent check-ext
-import { Harness } from '@applepi/core';
 import { fileURLToPath } from 'node:url';
+import { loadPlugins } from '../plugins.js';
 
-const harness = new Harness();
 // fileURLToPath (not .pathname): .pathname yields a `/C:/...` root-relative
 // path on Windows, which fs.readdir cannot resolve.
 const extDir = fileURLToPath(new URL('../extensions/', import.meta.url));
-const loaded = await harness.loadExtensionsFromDir(extDir);
+const plugins = await loadPlugins(extDir);
 
-console.log('loaded extensions:', loaded);
-const tools = harness.api.getTools().map((t) => t.name);
-console.log('registered tools:', tools);
+const names = plugins.flatMap((p) => (p.tools ?? []).map((t) => t.name));
+console.log('loaded plugins:', plugins.map((p) => p.name ?? '(unnamed)'));
+console.log('plugin tools:', names);
 
-if (!tools.includes('hello')) {
-  console.error('FAIL: hello tool not auto-discovered');
+if (!names.includes('hello')) {
+  console.error('FAIL: hello tool not discovered by the plugin loader');
   process.exit(1);
 }
-console.log('OK: extension auto-discovery works (tsx runtime)');
+console.log('OK: plugin loader discovers hello.ext.ts (tsx runtime)');

@@ -18,7 +18,7 @@ import {
   pendingToolCalls,
   reasoningProviderOptions,
 } from '../dist/index.js';
-import { baseExtension } from '../../extensions/dist/index.js';
+import { bashTool } from '../../extensions/dist/index.js';
 
 let passed = 0;
 function ok(name) {
@@ -75,22 +75,22 @@ const store = new SessionStore({ baseDir: tmpRoot, workspace: ws, sessionId: 'se
 await store.create();
 
 const harness = new Harness({ workspace: ws });
-harness.registerExtension(baseExtension);
-harness.registerExtension((api) => {
-  api.registerTool({
-    name: 'read_thing',
-    description: 'read something',
-    parameters: z.object({ key: z.string() }),
-    approval: 'auto',
-    execute: (args) => `read(${args.key})`,
-  });
-  api.registerTool({
-    name: 'write_thing',
-    description: 'write something',
-    parameters: z.object({ key: z.string() }),
-    approval: 'ask',
-    execute: (args) => `wrote(${args.key})`,
-  });
+// Tools are registered directly on the harness shell (ADR-0015: no extension
+// bus; the app assembles the tool set from bundles/capabilities/plugins).
+harness.registerTool(bashTool);
+harness.registerTool({
+  name: 'read_thing',
+  description: 'read something',
+  parameters: z.object({ key: z.string() }),
+  approval: 'auto',
+  execute: (args) => `read(${args.key})`,
+});
+harness.registerTool({
+  name: 'write_thing',
+  description: 'write something',
+  parameters: z.object({ key: z.string() }),
+  approval: 'ask',
+  execute: (args) => `wrote(${args.key})`,
 });
 harness.attachSession(store);
 

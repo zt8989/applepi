@@ -1,38 +1,49 @@
-// End-to-end check for the skills reference extension, driven without a real
-// LLM/API key. Loads the skills extension onto a real Harness and asserts that
-// loaded skills are contributed to the `skills` system-prompt block
-// (ADR-0010: prompt/base|permission|skills block stacks; sections = non-empty
-// block names).
+// End-to-end check for the skills capability (ADR-0015), driven without a real
+// LLM/API key. Enables the `standard` bundle (which resolves the `skills`
+// capability), loads a skill through the tool seam, and asserts the flat
+// system prompt (re-assembled per turn) surfaces the loaded skill — no rebuild
+// events, no block stacks.
 import { Harness } from '@applepi/core';
-import { baseExtension, createSkillsExtension } from '@applepi/extensions';
+import {
+  makeBundleSpec,
+  bundleEnv,
+  enableBundleSpec,
+  assembleFlatPrompt,
+} from '@applepi/bundle';
 
 const harness = new Harness();
-
-// baseExtension (reference tools + outermost denylist) + skills extension
-// (same wiring as main.ts, ADR-0005).
-harness.registerExtension(baseExtension);
-harness.registerExtension(createSkillsExtension());
+const spec = makeBundleSpec('standard', { cwd: process.cwd() })!;
+enableBundleSpec(harness, spec);
 
 const SKILL_CONTENT =
   'Always answer in a friendly, polite tone and start with "Hi there!".';
 
-// Before any skill is loaded the section contributes nothing.
-const empty = await harness.buildSystemPrompt();
-console.log('--- system prompt (empty scratch):', JSON.stringify(empty));
+// Re-assemble the flat prompt for this turn (what main.ts does each turn).
+function prompt(): string {
+  return assembleFlatPrompt(harness, makeBundleSpec('standard', bundleEnv(harness))!, { app: [] });
+}
 
-// Simulate a `skill_load` writing into the session scratch bag.
-harness.session.scratch.__skills = { polite: SKILL_CONTENT };
+// Before any skill is loaded the capability contributes nothing.
+const empty = prompt();
+console.log('--- system prompt head (empty scratch):', JSON.stringify(empty.slice(0, 120)));
 
-const built = await harness.buildSystemPrompt();
-console.log('--- system prompt (with skill):', built.prompt.slice(0, 220));
+// skill_load through the tool seam (as runLoop does).
+const ctx: any = {
+  session: harness.session,
+  state: {},
+  toolName: 'skill_load',
+  toolArgs: { name: 'polite', content: SKILL_CONTENT },
+};
+await harness.executeTool(ctx);
+
+const built = prompt();
+console.log('--- system prompt (with skill) contains skill:', built.includes('[Skill: polite]'));
 
 const okInjected =
-  built.prompt.includes(SKILL_CONTENT) && built.prompt.includes('[Skill: polite]');
-const okEmpty = !empty.prompt.includes(SKILL_CONTENT);
-const okSections =
-  !empty.sections.includes('skills') && built.sections.includes('skills');
+  built.includes(SKILL_CONTENT) && built.includes('[Skill: polite]');
+const okEmpty = !empty.includes(SKILL_CONTENT);
 
-if (okInjected && okEmpty && okSections) {
+if (okInjected && okEmpty) {
   console.log('check-skills: OK');
 } else {
   console.error('check-skills: FAIL');

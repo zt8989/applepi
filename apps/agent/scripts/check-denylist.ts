@@ -1,7 +1,7 @@
 // Key-free verification of the denylist floor (ADR-0009 Q9=a): since the
 // denylist moved INTO the bash tool, this drives real tool calls through the
-// `tool` stack and asserts the floor fires at EVERY level. A fake LLM stands
-// in for a provider so no API key is needed. Run:
+// tool seam (`harness.executeTool`) and asserts the floor fires at EVERY
+// level. A fake LLM stands in for a provider so no API key is needed. Run:
 //   pnpm --filter agent check-denylist
 import { Harness, runLoop } from '@applepi/core';
 import { bashTool } from '@applepi/extensions';
@@ -11,14 +11,12 @@ import { join } from 'node:path';
 import assert from 'node:assert/strict';
 
 const harness = new Harness();
-harness.registerExtension((api) => api.registerTool(bashTool));
+harness.registerTool(bashTool);
 
-/** Drive one bash call through the `tool` onion stack (as runLoop does). */
+/** Drive one bash call through the tool seam (as runLoop does, ADR-0015). */
 async function callBash(command: string): Promise<string> {
   const tctx: any = { session: harness.session, state: {}, toolName: 'bash', toolArgs: { command } };
-  await harness.bus.run('tool', tctx, async () => {
-    await harness.executeTool(tctx);
-  });
+  await harness.executeTool(tctx);
   return String(tctx.toolResult ?? '');
 }
 
@@ -49,9 +47,7 @@ async function callBash(command: string): Promise<string> {
   };
 
   const messages: any[] = [{ role: 'user', content: 'delete the sentinel file' }];
-  await harness.bus.run('session', { session: harness.session, state: {}, messages }, async () => {
-    await runLoop(harness, messages, { model: null, llmCall: fakeLLM, maxTurns: 4 });
-  });
+  await runLoop(harness, messages, { model: null, llmCall: fakeLLM, maxTurns: 4 });
 
   const toolMsg = messages.find((m) => m.role === 'tool');
   assert.ok(toolMsg, 'tool result message present');
@@ -63,8 +59,8 @@ async function callBash(command: string): Promise<string> {
 // 3. The floor fires at fullaccess too (level is the size of permission, not
 //    an exemption from the floor).
 {
-  const levelHandler = harness.api.getSlashCommand('level')!;
-  await levelHandler('fullaccess', harness.api);
+  const levelHandler = harness.getSlashCommand('level')!;
+  await levelHandler('fullaccess');
   const res = await callBash('rm -rf /tmp/denylist-nonexistent-xyz');
   assert.match(res, /BLOCKED/, `fullaccess still blocks rm -rf: ${res}`);
 }

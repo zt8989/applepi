@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type { SetupFn, HarnessApi, Ctx } from '@applepi/core';
+import type { Capability } from './capability.js';
+import type { Ctx, ToolSpec } from '@applepi/core';
 import { getPermissionLevel } from '@applepi/core';
 
 export interface MemoryOptions {
@@ -10,12 +11,13 @@ export interface MemoryOptions {
 }
 
 /**
- * Memory reference extension (Q8/A: same-process registration, no child
- * process bridge). Registers `memory_write` / `memory_read` tools that persist
- * a key/value store to a local JSON file and mirror it into the session
- * `scratch` bag so values are readable in-session without a file round-trip.
+ * Memory capability (ADR-0015). Registers `memory_write` / `memory_read` tools
+ * that persist a key/value store to a local JSON file and mirror it into the
+ * session `scratch` bag so values are readable in-session without a file
+ * round-trip. A declarative capability (not a SetupFn): the app resolves the
+ * bundle's `memory` id here, registers the tools, and appends the fragment.
  */
-export function createMemoryExtension(options: MemoryOptions = {}): SetupFn {
+export function createMemory(options: MemoryOptions = {}): Capability {
   const filePath =
     options.filePath ?? path.resolve(process.cwd(), 'harness-memory.json');
 
@@ -32,8 +34,8 @@ export function createMemoryExtension(options: MemoryOptions = {}): SetupFn {
     await fs.writeFile(filePath, JSON.stringify(store, null, 2), 'utf8');
   }
 
-  return (api: HarnessApi) => {
-    api.registerTool({
+  const tools: ToolSpec[] = [
+    {
       name: 'memory_write',
       description:
         'Persist a key/value pair to durable local memory (JSON file). Survives across tool calls and sessions. Use it to remember facts the agent will need later.',
@@ -56,9 +58,8 @@ export function createMemoryExtension(options: MemoryOptions = {}): SetupFn {
         ctx.session.scratch['__memory'] = store;
         return `wrote memory["${args.key}"] = ${args.value}`;
       },
-    });
-
-    api.registerTool({
+    },
+    {
       name: 'memory_read',
       description:
         'Read a value previously stored via memory_write. Returns the stored value, or a "not found" notice if the key is absent.',
@@ -82,9 +83,14 @@ export function createMemoryExtension(options: MemoryOptions = {}): SetupFn {
         }
         return `memory["${args.key}"] not found`;
       },
-    });
+    },
+  ];
+
+  return {
+    id: 'memory',
+    prompt: () => [
+      'Memory is available (durable JSON store): keep long-lived facts with memory_write and recall them with memory_read.',
+    ],
+    tools,
   };
 }
-
-/** Default memory extension writing to ./harness-memory.json. */
-export const memoryExtension = createMemoryExtension();

@@ -1,4 +1,4 @@
-import { streamText, formatDataStreamPart, type DataStreamWriter } from 'ai';
+import { formatDataStreamPart, type DataStreamWriter } from 'ai';
 import type { Harness } from './harness.js';
 import type { SessionStore } from './session.js';
 import type { ApprovalMode } from './types.js';
@@ -6,7 +6,8 @@ import { getTracer, modelLabel, type Tracer, type TraceHandle } from './trace.js
 import type { ProviderProtocol, ReasoningLevel } from './config.js';
 
 /**
- * Streaming loop + approval state machine (ADR-0011).
+ * The streaming `loop` deep module (ADR-0015) + approval state machine
+ * (ADR-0011).
  *
  * The web interface drives the harness over short-lived, segmented streams:
  *   - `runLoopStreamSegment` runs the agent loop (streamText, token-level)
@@ -15,8 +16,8 @@ import type { ProviderProtocol, ReasoningLevel } from './config.js';
  *     and the stream ends. No LLM call is repeated on resume — the jsonl
  *     message log IS the loop state.
  *   - `executeApprovedTool` resumes a paused call (approve = run it through
- *     the tool onion stack; deny = feed a refusal back to the model) and
- *     streams the tool-result part.
+ *     the tool seam, `harness.executeTool`; deny = feed a refusal back to the
+ *     model) and streams the tool-result part.
  *
  * Read-classified (`auto`) tools execute inline and their results stream in
  * the same segment. The CLI's `runLoop` (generateText, interactive levels) is
@@ -47,31 +48,9 @@ export interface StreamLoopOpts {
   /** Persist/emit a pending approval. Default: `tool/approval-pending` event. */
   onPending?: (p: PendingApproval) => void | Promise<void>;
   /** Test seam: the streamText call used per LLM turn. */
-  streamTextCall?: typeof streamText;
+  streamTextCall?: typeof import('ai').streamText;
   /** Override the Langfuse tracer (defaults to the env-configured one). */
   trace?: Tracer | null;
-}
-
-/**
- * Reasoning level → providerOptions mapping.
- * - `off` threads nothing (model default / no thinking).
- * - openai (both completions & responses): `reasoningEffort`.
- * - anthropic: extended thinking with a scaled `budgetTokens`.
- * - unknown protocol: nothing (silent ignore, no error).
- */
-export function reasoningProviderOptions(
-  protocol: ProviderProtocol | undefined,
-  level: ReasoningLevel | undefined,
-): Record<string, Record<string, import('ai').JSONValue>> | undefined {
-  if (!level || level === 'off') return undefined;
-  if (protocol === 'openai-completions' || protocol === 'openai-responses') {
-    return { openai: { reasoningEffort: level } };
-  }
-  if (protocol === 'anthropic-messages') {
-    const budgetTokens = { low: 1024, medium: 2048, high: 4096 }[level] ?? 2048;
-    return { anthropic: { thinking: { type: 'enabled', budgetTokens } } };
-  }
-  return undefined;
 }
 
 export type StreamFinishReason = 'stop' | 'tool-calls' | 'max-turns' | 'error';
@@ -133,7 +112,6 @@ export async function runLoopStreamSegment(
   opts: StreamLoopOpts,
 ): Promise<StreamSegmentResult> {
   const maxTurns = opts.maxTurns ?? 8;
-  const llm = opts.streamTextCall ?? streamText;
   const tracer = opts.trace !== undefined ? opts.trace : await getTracer();
   const traceHandle = tracer?.session('agent-turn', opts.store?.sessionId ?? harness.workspace, {
     input: [...messages].reverse().find((m: any) => m?.role === 'user')?.content,
@@ -142,23 +120,17 @@ export async function runLoopStreamSegment(
   try {
     while (turn < maxTurns) {
       turn++;
-      const toolDefs = harness.buildToolDefs();
 
-      const llmCtx: any = { session: harness.session, state: {}, messages };
-      let result: any;
-      const reasoningOpts = reasoningProviderOptions(opts.protocol, opts.reasoningLevel);
-      await harness.bus.run('llm', llmCtx, async () => {
-        result = llm({
-          model: opts.model,
-          messages: llmCtx.messages,
-          // no `execute`: we run tools ourselves through the onion stack.
-          tools: toolDefs as any,
-          experimental_generateMessageId: () => opts.messageId,
-          ...(reasoningOpts ? { providerOptions: reasoningOpts } : {}),
-        });
+      const { result, ctx } = await harness.llm.stream({
+        model: opts.model,
+        messages,
+        messageId: opts.messageId,
+        protocol: opts.protocol,
+        reasoningLevel: opts.reasoningLevel,
+        streamTextCall: opts.streamTextCall,
       });
       const r: any = result;
-      const gen = traceHandle?.generation('llm', { messages: llmCtx.messages }, { model: modelLabel(opts.model) });
+      const gen = traceHandle?.generation('llm', { messages: ctx.messages }, { model: modelLabel(opts.model) });
       r.mergeIntoDataStream(opts.writer, {
         sendUsage: true,
         sendReasoning: true,
@@ -245,12 +217,10 @@ export async function executeApprovedTool(
       toolName: tc.toolName,
       toolArgs: tc.args,
     };
-    await harness.bus.run('tool', tctx, async () => {
-      await harness.executeTool(tctx);
-    });
+    // Security seam (ADR-0015): the ctx carries the current level; the tool
+    // self-determines. No onion stack.
+    await harness.executeTool(tctx);
     res = tctx.toolResult ?? '';
-    if (tctx.state?.__vetoed && !res) res = 'BLOCKED: vetoed by middleware';
-    if (tctx.error) res = `ERROR: ${(tctx.error as Error)?.message ?? String(tctx.error)}`;
   }
   span?.end({ result: res });
   streamToolResult(opts.writer, tc.toolCallId, res);

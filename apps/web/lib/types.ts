@@ -13,6 +13,8 @@ export interface ChatRequestBody {
   level?: string;
   /** Optional pre-chosen reasoning level for a brand-new session. */
   reasoning?: string;
+  /** Bundle/mode for a brand-new session (ADR-0015): 'base' | 'standard'. */
+  mode?: string;
 }
 
 export interface ApproveRequestBody {

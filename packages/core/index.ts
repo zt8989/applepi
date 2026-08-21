@@ -1,20 +1,24 @@
-export { OnionBus } from './bus.js';
 export { Harness } from './harness.js';
 export { runLoop } from './loop.js';
+export {
+  createLlm,
+  buildToolDefs,
+  reasoningProviderOptions,
+  type Llm,
+  type LlmCall,
+  type LlmGenerateOpts,
+  type LlmStreamOpts,
+  type ToolCatalog,
+} from './llm.js';
 export {
   runLoopStreamSegment,
   executeApprovedTool,
   classifyApproval,
   pendingToolCalls,
-} from './stream-loop.js';
-export type {
-  PendingApproval,
-  StreamLoopOpts,
-  StreamFinishReason,
-  StreamSegmentResult,
-} from './stream-loop.js';
-export {
-  reasoningProviderOptions,
+  type PendingApproval,
+  type StreamLoopOpts,
+  type StreamFinishReason,
+  type StreamSegmentResult,
 } from './stream-loop.js';
 export { getTracer, flushTraces, resetTracer, modelLabel } from './trace.js';
 export type { Tracer, TraceHandle, SpanHandle } from './trace.js';
@@ -41,10 +45,10 @@ export {
   DEFAULT_PERMISSION_LEVEL,
   getPermissionLevel,
   restorePermissionLevel,
+  applyPermissionLevel,
   projectRoot,
   workspaceRoot,
   isInsideProjectRoot,
-  buildPermissionSection,
   defaultSecurityPolicy,
 } from './security.js';
 export type {
@@ -60,16 +64,12 @@ export type {
   ModelEntry,
 } from './config.js';
 export type {
-  HookStack,
   ToolSpec,
   ToolDef,
   ApprovalMode,
   SlashHandler,
-  Middleware,
   Ctx,
   SessionContext,
-  HarnessApi,
-  SetupFn,
   LanguageModelV1,
 } from './types.js';
 export type {

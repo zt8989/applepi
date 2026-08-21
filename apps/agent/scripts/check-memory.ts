@@ -1,25 +1,18 @@
-// End-to-end check for the memory reference extension, driven without a real
+// End-to-end check for the memory capability (ADR-0015), driven without a real
 // LLM/API key by injecting a fake `llmCall` into runLoop. Reproduces the real
-// Harness + onion bus + built-in loop, and loads the memory extension from the
-// local extensions/ directory via the auto-discovery loader (T02 + T04 joint).
+// Harness + the `standard` bundle (which resolves the `memory` capability via
+// @applepi/extensions) + the built-in loop.
 import { Harness, runLoop } from '@applepi/core';
-import { baseExtension } from '@applepi/extensions';
+import { makeBundleSpec, enableBundleSpec } from '@applepi/bundle';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
+// Same wiring as main.ts (ADR-0015): enable the standard bundle — its tools
+// (bash + str_replace_editor) plus each declared capability's tools (memory →
+// memory_read/memory_write, skills → skill_load).
 const harness = new Harness();
-
-// baseExtension (reference tools + outermost denylist), same wiring as main.ts
-// (ADR-0005).
-harness.registerExtension(baseExtension);
-
-// Memory extension arrives via the local loader (no manual registration).
-// fileURLToPath (not .pathname): .pathname yields a `/C:/...` root-relative
-// path on Windows, which fs.readdir cannot resolve.
-const extDir = fileURLToPath(new URL('../extensions/', import.meta.url));
-const loaded = await harness.loadExtensionsFromDir(extDir);
-console.error(`[check-memory] auto-discovered: ${loaded.join(', ') || '(none)'}`);
+const spec = makeBundleSpec('standard', { cwd: process.cwd() })!;
+enableBundleSpec(harness, spec);
 
 const MEM_FILE = path.resolve('harness-memory.json');
 await fs.rm(MEM_FILE, { force: true }).catch(() => {});

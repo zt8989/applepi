@@ -1,49 +1,61 @@
 # 设计原则（Design Principles）
 
-> 从已锁定的设计决策（Q1–Q16 + ADR-0001~0012）中提炼的指导原则。
+> 从已锁定的设计决策（Q1–Q16 + ADR-0001~0015）中提炼的指导原则。
 > 新增功能或修改架构时，应逐条对照；违反任何一条都需要走 grill 流程重新确认。
+> **2026-08-21 注**：ADR-0015（扁平 system_prompt + bundle/mode/app + core 深模块
+> 拆分）已重塑 P1/P2/P3/P8/P12 并完成实现；洋葱/扩展注入机制已从 core 移除，
+> 当前实现即为 ADR-0015 最终形态（见 architecture §1/§3/§4）。
 
 ## P1. 极简核心（Minimal Core）
 
-**核心运行时只保留骨架，不含任何具体能力。**
+**核心运行时只保留骨架，不含任何具体能力；core 的脊柱是「LLM 交互面」（system_prompt
++ tools），其余都是周边基础设施。**
 
-`@applepi/core` 仅包含：洋葱事件总线、加载器、内置 agent loop、会话存储、
-LLM 配置解析。**不含工具**——`bash`、`str_replace_editor`、权限级别系统
-（含 denylist 底线）全部在 `@applepi/extensions`（ADR-0005/0007）。
+ADR-0015 把 core 拆成单职责深模块：`llm`（LLM 交互面：工具目录 + 单段模型响应）、
+`loop`（多回合编排）、`session`（持久化）、`config`（LLM 配置）、`security`（权限
+强制）、`trace`（可观测），由薄 **Harness 壳** 组装。**不含工具**——`bash`、
+`str_replace_editor`、skills、memory 全部在 `@applepi/extensions`（ADR-0005/0007），
+能力集由 app/bundle 层装配。core 的 `llm` 只接受现成的 `{ prompt片段, tools }` 与
+history 产出一段响应；`registerExtension`/洋葱这类通用能力注入机制**已移出 core**
+（仅作为 app 层插件加载器/bundle 生产者形态残存）。
 
-- 依据：Q5（极简落点）、ADR-0005。
-- 后果：核心的消费方（如未来 web UI）不会被迫继承 shell 访问与安全策略。
+- 依据：Q5（极简落点）、ADR-0005；ADR-0015（core 只关心 system_prompt + tools）。
+- 后果：核心的消费方（如 web UI）不会被迫继承 shell 访问与安全策略。
 - 判据：往 core 里加任何"有主见"的能力（一个工具、一条安全策略、一种后端），
-  都是违反本原则的信号。
+  或把能力装配逻辑（bundle/onion）塞进 core，都是违反本原则的信号。
 
-## P2. 能力全部经扩展注入（Capability Injection）
+## P2. 能力由 app/bundle 层装配，core 只收现成 spec（Capability Assembly Outside Core）
 
-**一切增量能力（工具、skills、memory、安全层）都是 extension，运行时经
-`setup(api)` 注入；核心不预知任何扩展的存在。**
+**一切具体能力（工具、skills、memory）都不进 core；能力集由 core 之外的
+bundle/app 层装配，core 的 `llm` 只接受现成的 `{ prompt片段, tools }`。**
 
-- 依据：Q2（extension = 能力载体）。
-- 后果：核心对能力无感知；扩展的注册顺序与组合决定最终行为。系统提示词
-  段落（base 之外的 skills、权限声明）同样是扩展经各自块栈
-  （`prompt/base` / `prompt/permission` / `prompt/skills`）注入的能力，核心只
-  提供 PromptBag 机制与固定装配顺序、不含任何段落（ADR-0010）。
-- 判据：新增能力时，先问"能不能做成扩展"，答案永远应该是"能"。
+- 依据：ADR-0015（core 只关心 LLM 交互——system_prompt + tools）。
+- 现状（已实现）：能力由 `packages/bundle`（`base`/`standard` 纯声明
+  `(env)=>({prompt,tools})`）+ `@applepi/extensions` 能力工厂（memory/skills）+ app
+  层插件加载器装配，core 不再持有通用能力注入机制（`registerExtension`/`HarnessApi`/
+  洋葱已移除）。
+- 后果：core 对能力无感知；会话在 app 里选一个 bundle（base 或 standard），叠加
+  接口片段与插件，拼成 spec 交给 `llm`。系统提示词 = 扁平缓冲区
+  `bundle 片段 → app 接口片段 → plugin 尾部片段` 顺序拼接（ADR-0015）。
+- 判据：新增能力时，先问"能不能做成 bundle/扩展"，答案永远应该是"能"；把能力
+  或装配逻辑写进 core 的 `llm`/`loop`，即放错了层。
 
-## P3. 洋葱模型（Onion Hooks）
+## P3. 洋葱让位于扁平装配 + 单一职责循环（Onion Yields to Flat Assembly）
 
-**横切逻辑用中间件栈（session / llm / tool / prompt/base / prompt/permission /
-prompt/skills）表达，观察、否决、改写三种权力内建于同一机制；priority 高 =
-外层（先进入）。**
+**横切逻辑从洋葱中间件栈收敛为「深模块 + 单一职责」：提示词用扁平片段顺序拼装，
+多回合编排归 `loop`，模型调用归 `llm`。**
 
-- 依据：Q15（洋葱模型取代离散事件表）、Q7（权力级别 iii）、ADR-0008
-  （系统提示词构建成为栈）、ADR-0010（拆分为三个块栈，supersedes ADR-0008）。
-- 后果：同一套 `Middleware` 签名覆盖全部横切场景；排序即权力（栈内）。
-  系统提示词由三个 `prompt/*` 块栈构建：中间件用 `ctx.prompt.set(block, ...)`
-  写入自己的块（PromptBag，只走 set），harness 按 base → permission → skills
-  固定顺序拼装，sections 取构建期非空块列表（ADR-0010）。**洋葱栈 ≠ 事件
-  发布**：`emit(event)` 是发布事件的入口（触发 core 内置处理器或写审计行），
-  不是第 7 个栈——两者正交。
-- 判据：需要新生命周期事件时，优先挂在既有栈上；**确有独立生命周期**
-  （如提示词构建）才允许新增栈——新增栈是例外而非默认。
+- 现状（已实现）：洋葱栈与 `prompt/*` 块栈已随 ADR-0015 移除（无会话/llm/tool
+  洋葱、无 prompt 中间件、无 `PromptBag`、无洋葱排序协商）。
+- 系统提示词是扁平装配：`bundle 片段 → app 接口片段 → plugin 尾部片段` 三层顺序
+  拼接（下层不可改写上层），每轮重读同一份 spec；`loop`/`llm` 各自是深模块，
+  `loop` 只编排多回合，`llm` 只经 `harness.llm.generate/stream` 取模型响应，
+  工具经 `harness.executeTool`（工具执行缝）执行。
+- 依据：ADR-0008/0010（历史洋葱）、ADR-0015（扁平 + 深模块，supersedes 前两者）。
+- 后果：排序是结构性的、不需协商；新增横切能力优先落进对应深模块或 bundle，
+  而不是再挂一个洋葱栈。
+- 判据：需要新生命周期横切时，先问「属于 `llm` 还是 `loop`；或作为 bundle 片段
+  注入」；**新增洋葱栈/`prompt/*` 块栈即违反 ADR-0015，应避免。**
 
 ## P4. 安全是级别模型 + 工具自决，不是特权中间件（Convention over Mechanism）
 
@@ -58,7 +70,10 @@ core 不兜底——这是信任扩展边界的直接推论（P5）。
 
 - 依据：Q12=a / Q16（撤销中间件）、ADR-0009。
 - 后果：安全强度 = 每个工具的自决程度；模型没有任何改级别的工具（防自我提权），
-  级别只能由用户通过 `/level`（CLI）或权限胶囊（web）切换。
+  级别只能由用户通过 `/level`（CLI）或权限胶囊（web）切换。强制机制（级别/ctx
+  注入/工具自决 + `/level`）在 core `security` 模块（工具执行缝）；权限**声明段**
+  在 bundle（base/standard 各自声明贴合自身工具集、按级别分档的提示词片段，
+  ADR-0015），core 不写提示词文案。
 - 判据：不要用"挂一个特权中间件"或"放在核心/特权目录"来假装安全；安全必须
   体现在级别模型与工具自决上。
 
@@ -67,8 +82,8 @@ core 不兜底——这是信任扩展边界的直接推论（P5）。
 **本地运行的代码 = 等价授信；安全层防的是模型犯错，不是防扩展。**
 
 - 依据：Q1（单机 agent）、Q6（零进程隔离）、Q4/Q16（命令过滤）。
-- 后果：零进程隔离，坏扩展能拖垮 loop——由总线软隔离（每层 `try/catch`、
-  tool 栈异常转 `ERROR` 结果）兜底。
+- 后果：零进程隔离，坏扩展/坏工具能抛错——由 `harness.executeTool` 的 try/catch
+  把工具抛错兜成 `ERROR` 结果回填模型，不拖死整个 loop。
 - 判据：为扩展增加"安装时授信"类机制前先三思——它防的威胁模型在本项目中
   不存在。
 
@@ -92,8 +107,10 @@ core 不兜底——这是信任扩展边界的直接推论（P5）。
 
 - 依据：ADR-0002（jsonl 单文件、事件/消息两行型、replay 只读变换）、
   ADR-0006（行结构精简：`type`+`phase` 合并为 `event` 字段、行内去掉
-  `session_id`/`workspace` 冗余身份字段）、ADR-0008 演进（所有事件经
-  `emit(event)` 单一入口发布，`appendEvent` 收敛为存储原语）。
+  `session_id`/`workspace` 冗余身份字段）。ADR-0015 移除 `emit` 事件总线和
+  `system_prompt` 事件族后，事件（`level/set`、`reasoning/set`、`mode`、
+  `reload/start|end` 等）由 app / 工具直接 `store.appendEvent` 写入 jsonl——
+  `appendEvent` 是存储原语，不存在 core 内置事件处理器。
 - 后果：坏掉的 reload 只靠读文件即可诊断；原始记录永不因视图变换被改写。
   行结构精简只影响"行内携带什么信息"，不影响 append-only 属性——文件路径
   仍是会话身份的权威位置（ADR-0006 的取舍：行不再自包含）。
@@ -101,21 +118,21 @@ core 不兜底——这是信任扩展边界的直接推论（P5）。
 
 ## P8. 依赖单向（One-Way Dependency）
 
-**agent → extensions → core，跨包只用包名 import；构建采用 build-first。**
+**agent → bundle → extensions → core，跨包只用包名 import；构建采用 build-first。**
 
-- 依据：ADR-0003（Q3/Q4）。
-- 后果：core 可以被独立消费；扩展只依赖核心契约；agent 只组装。
-- 判据：core 反向依赖 extensions 或 extensions 反向依赖 agent，即违规。
+- 依据：ADR-0003（Q3/Q4）；ADR-0015（新增 `packages/bundle`，上游装配能力）。
+- 后果：core 可以被独立消费；扩展只依赖核心契约；bundle/agent 只组装。
+- 判据：core 反向依赖 extensions/bundle，或 extensions 反向依赖 agent，即违规。
 
 ## P9. 可替换的参考实现（Replaceable Reference）
 
 **内置工具是参考实现（reference tool），不是核心承诺。**
 
 `bashTool` / `strReplaceEditorTool` 由 `@applepi/extensions` 提供，是可替换的
-默认能力；扩展可以注册同名工具覆盖行为（按洋葱/注册语义决定）。
+默认能力；bundle（`base`/`standard`）引用这些共享工具实现，app 也可以替换注册。
 
-- 依据：ADR-0005（Q2/Q6）、CONTEXT.md 术语表。
-- 后果：能力集可组合、可裁剪；默认能力集由 `baseExtension` 一行还原。
+- 依据：ADR-0005（Q2/Q6）、ADR-0015（`baseExtension` → `base` bundle）、CONTEXT.md 术语表。
+- 后果：能力集可组合、可裁剪；默认能力集由 `base` / `standard` bundle 声明还原。
 - 判据：把参考工具当"神圣不可动"的 API 使用，就误解了它的定位。
 
 ## P10. 单一事实来源（Single Source of Truth）
@@ -123,8 +140,11 @@ core 不兜底——这是信任扩展边界的直接推论（P5）。
 **每类事实只有一个权威位置：决策在 ADR、术语在 CONTEXT.md、LLM 配置在
 settings.json、会话记录在 jsonl。**
 
-- 依据：ADR-0004（Q3=b：settings.json 唯一来源，process.env 不再读）。
-- 后果：没有多份互相打架的文档/配置；改配置只需动一处。
+- 依据：ADR-0004（Q3=b：settings.json 唯一来源，process.env 不再读）；ADR-0016
+  将「单一事实来源」延伸到双层配置——全局默认只在 `settings.json.general`，
+  会话覆盖只在 `<id>.config.json>`（`session.config`）。
+- 后果：没有多份互相打架的文档/配置；改配置只需动一处；一个设置的生效值 =
+  唯一的会话覆盖 ?? 唯一的全局默认 ?? 内置默认（cascade 单一公式，归 core）。
 - 判据：发现同一事实被写了两遍（spec 重复 ADR、env 重复 settings），
   删除旧的那份——本 Wiki 的建立正是此原则的实例。
 
@@ -140,19 +160,20 @@ settings.json、会话记录在 jsonl。**
 
 ## P12. 通用机制优先于专用方法（Generic over Bespoke）
 
-**能力面用通用机制表达，不为单个场景开专用 API；具体行为用注册/处理器
-注入，而不是把每个动作做成一个方法。**
+**能力面用通用机制表达，不为单个场景开专用 API；具体行为用装配/声明注入，而不是把每个动作做成一个方法。**
 
-- 依据：ADR-0008 及其演进——系统提示词贡献从专用 `addSystemPromptContributor`
-  收敛为 `system_prompt` 洋葱栈（ADR-0008），再演进为三个 `prompt/*` 块栈 +
-  PromptBag.set（ADR-0010）；事件发布从 `emitSystemPrompt()` / `appendEvent()`
-  收敛为单一 `emit(event, payload)` 入口 + core 内置处理器（2026-08-19 讨论）。
-- 后果：`HarnessApi` 表面小而稳定——registerTool / use /
-  registerSlashCommand / emit，没有逐事件、逐能力的方法；新能力按「栈中间件 +
-  事件处理器」两种原语表达。扩展面对统一契约，core 的处理器/中间件是内置
-  事实而非 API 承诺。
-- 判据：为某个具体事件或能力新增专用方法前先问「能不能用既有栈或 emit +
-  处理器表达」；答案是"能"就应收敛——专用方法每多一个，通用机制就贬值一分。
+系统提示词经历了收敛与再收敛：`addSystemPromptContributor` → `system_prompt`
+洋葱栈（ADR-0008）→ 三个 `prompt/*` 块栈 + PromptBag（ADR-0010）→ **ADR-0015 扁平
+spec**。每个 bundle 用**纯声明** `(env)=>({ prompt片段, tools })` 表达自身能力；
+app 选 bundle、叠加接口片段与插件，拼成 spec 交给 core `llm`。**插件只能尾部追加**
+（append-only），不能重排/删除 base/standard 内部——这是通用机制对"定制能力"的
+边界。
+
+- 后果：core 表面小而稳定；新能力 = 一个新 bundle/插件（声明 prompt 片段 +
+  工具），而非给 core 或 Harness 加专用方法。`emit` 事件族已随洋葱一并移出 core
+  （ADR-0015），提示词由 spec 驱动重建（每轮重读同一份 spec），无动态中间件。
+- 判据：为某个具体能力新增专用方法/bundle 片段前先问「能不能用已有的 bundle/spec/
+  声明表达」；答案是"能"就应收敛——专用方法每多一个，通用机制就贬值一分。
 
 ## P13. 循环状态即文件，批准不重跑 LLM（Durable Loop State）
 
@@ -208,4 +229,4 @@ web 壳复刻 base 风格（两栏、外层圆角白卡、线性图标、中性�
 
 ---
 
-*每条原则均对应一个或多个已锁定决策；标注（Q#）为 grill 轮次，ADR-XXXX 为决策记录。最后更新 2026-08-20，纳入 ADR-0011 / ADR-0012 对应的流式 loop、工具批准、双接口与可观测性。*
+*每条原则均对应一个或多个已锁定决策；标注（Q#）为 grill 轮次，ADR-XXXX 为决策记录。最后更新 2026-08-21，纳入 ADR-0015（扁平 system_prompt + bundle/mode/app + core 深模块拆分）对 P1/P2/P3/P8/P12 的重塑，及 ADR-0016（统一会话配置 + 全局/会话双层配置）对 P10 的延伸；ADR-0011/0012 的流式 loop、工具批准、双接口与可观测性此前已纳入。*

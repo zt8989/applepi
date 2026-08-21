@@ -33,6 +33,8 @@ import type {
 
 const genId = () => crypto.randomUUID();
 const WS_KEY = 'applepi.web.workspace';
+/** Bundle/mode preference for NEW sessions (ADR-0015), persisted client-side. */
+const MODE_KEY = 'applepi.web.mode';
 const sessionKey = (workspace: string) =>
   `applepi.web.session.${encodeURIComponent(workspace)}`;
 
@@ -73,6 +75,10 @@ export interface ChatStore {
   sessionTitle: string | null;
   level: string;
   setLevel: (level: string) => Promise<void>;
+  /** Bundle/mode for a brand-new session (ADR-0015): 'base' | 'standard'.
+   *  Chosen before the first message; immutable once the session exists. */
+  mode: string;
+  setMode: (mode: string) => void;
   /** Current effective reasoning level for this session. */
   reasoning: string;
   /** Set the reasoning level: writes the session `reasoning/set` event (or
@@ -116,6 +122,7 @@ export function useChatStore(): ChatStore {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionTitle, setSessionTitle] = useState<string | null>(null);
   const [level, setLevelState] = useState('workspace');
+  const [mode, setModeState] = useState('standard');
   const [reasoning, setReasoningState] = useState('medium');
   const [globalReasoning, setGlobalReasoning] = useState('medium');
   const [usage, setUsage] = useState(0);
@@ -140,6 +147,12 @@ export function useChatStore(): ChatStore {
   useEffect(() => {
     const saved = localStorage.getItem(WS_KEY);
     if (saved) setWorkspaceState(saved);
+  }, []);
+
+  // Restore the persisted bundle/mode preference for new sessions (ADR-0015).
+  useEffect(() => {
+    const saved = localStorage.getItem(MODE_KEY);
+    if (saved === 'base' || saved === 'standard') setModeState(saved);
   }, []);
 
   const commit = useCallback((next: ThreadMessageLike[]) => {
@@ -355,6 +368,11 @@ export function useChatStore(): ChatStore {
     [sessionAction],
   );
 
+  const setMode = useCallback((m: string) => {
+    setModeState(m);
+    localStorage.setItem(MODE_KEY, m); // preference for future new sessions
+  }, []);
+
   const resetUsage = useCallback(() => setUsage(0), []);
 
   // ---- stream handling -----------------------------------------------------
@@ -486,6 +504,11 @@ export function useChatStore(): ChatStore {
     reasoningRef.current = reasoning;
   }, [reasoning]);
 
+  const modeRef = useRef(mode);
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
   const workspacesRef = useRef(workspaces);
   useEffect(() => {
     workspacesRef.current = workspaces;
@@ -582,6 +605,8 @@ export function useChatStore(): ChatStore {
         level: sessionIdRef.current ? undefined : levelRef.current,
         // Pre-chosen reasoning level for a brand-new session.
         reasoning: sessionIdRef.current ? undefined : reasoningRef.current,
+        // Bundle/mode for a brand-new session (ADR-0015).
+        mode: sessionIdRef.current ? undefined : modeRef.current,
       };
       await runSegment('/api/chat', body, assistantId);
       await refreshWorkspaces();
@@ -780,6 +805,8 @@ export function useChatStore(): ChatStore {
     sessionTitle,
     level,
     setLevel,
+    mode,
+    setMode,
     reasoning,
     setReasoning,
     globalReasoning,
