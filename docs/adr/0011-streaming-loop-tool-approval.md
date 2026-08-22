@@ -1,5 +1,7 @@
 # ADR-0011: Streaming Loop + Tool Approval as a Pause/Resume State Machine
 
+> **修订注记（2026-08-22）**：实现文件已更名为 `packages/core/loop.ts`（文件名与模块名 `loop` 对齐）；正文沿用决策当时名称。
+
 ## Status
 
 Accepted — 2026-08-20, decided via `/grill-with-docs` (web interface design, rounds 1–3).

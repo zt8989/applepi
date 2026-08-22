@@ -24,7 +24,7 @@
   `loadMeta` / `saveMeta` / `updateMeta`。web UI 驱动同一套核心方法，不再手撕 jsonl。
 - **共享消息契约（deepen #03）**：`packages/core/message.ts` 定义跨 core→web 的消息形状
   （`ThreadMessage` / `MessagePart`，纯 leaf 模块，无 node/ai/react 运行时依赖）。
-  `stream-loop` 产出契约消息并持久化；web `hydrate` 通过 `mergeToolResults`（把 `tool`
+  `loop` 产出契约消息并持久化；web `hydrate` 通过 `mergeToolResults`（把 `tool`
   消息折叠进持有它的 assistant tool-call part）与 `toText`（唯一文本提取器）纯消费；
   `pendingApproval` 在刷新后重浮未决批准。流式路径的 isError 判定与核心同一来源
   （`isErrorResult` 导出）。

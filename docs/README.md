@@ -15,7 +15,7 @@
 ## 快速了解
 
 - **形态**：单机（本地）运行的 agent，不是给别人 embed 的框架。
-- **核心极简**：`@applepi/core` 只有深模块 `llm`（流式）/ `stream-loop` / `session` /
+- **核心极简**：`@applepi/core` 只有深模块 `llm`（流式）/ `loop` / `session` /
   `config` / `security` / `trace` 与薄 Harness 壳——**不含任何工具**（ADR-0005）、
   无洋葱/扩展机制（ADR-0015）。
 - **能力来自 bundle + capability**：`@applepi/bundle` 的 `base`/`standard` 纯声明能力包 +

@@ -19,7 +19,7 @@ loop（分段流）:
 ```
 
 - **Provider 抽象**：经 **Vercel AI SDK**（`streamText` + provider 适配器），由 `llm`
-  模块封装（`Llm.stream`），不自己写多模型适配，`stream-loop` 也不直接接触 SDK。
+  模块封装（`Llm.stream`），不自己写多模型适配，`loop` 也不直接接触 SDK。
 - **工具暴露给模型**：经 `llm.buildToolDefs()` 生成 `{ description, parameters }` 目录，
   并入 `streamText({ tools })`（无 execute——执行由 loop 自行驱动，工具经执行缝包裹）。
 - **暂停 / 批准 / 恢复（ADR-0011 + ADR-0018）**：`ask` 工具暂停——其 `tool_call`

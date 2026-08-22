@@ -1,6 +1,9 @@
 # ADR-0017: Shared Runtime Server + Web/TUI Clients
 
 > **修订注记（2026-08-22）**：`@applepi/extensions` 包已更名为 `@applepi/extension`（包名 = 核心概念名单数约定；正文沿用决策当时名称）。
+
+> **修订注记（2026-08-22）**：core 实现文件 `stream-loop.ts` 已更名为 `loop.ts`（文件名与模块名对齐；正文沿用决策当时名称）。
+
 ## Status
 
 Accepted — 2026-08-22, decided via `/grill-with-docs` (3 rounds). Design-recorded.

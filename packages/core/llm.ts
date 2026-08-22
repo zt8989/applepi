@@ -5,7 +5,7 @@ import type { Ctx, SessionContext, ToolDef, ToolSpec } from './types.js';
 /**
  * The LLM-interaction deep module (ADR-0015): the single place that owns the
  * model-facing surface — the tool catalog and one **streamed** LLM response
- * segment — while hiding the concrete AI SDK. `stream-loop` drives the
+ * segment — while hiding the concrete AI SDK. `loop` drives the
  * multi-turn orchestration; this module produces ONE streaming response
  * (`stream`) from `{ model, messages, tools }` and the reasoning mapping.
  *
@@ -81,7 +81,7 @@ export interface LlmDeps {
 
 /**
  * Build the LLM module. The Harness shell constructs one and owns it;
- * `stream-loop` consumes its interface and never touches the AI SDK.
+ * `loop` consumes its interface and never touches the AI SDK.
  */
 export function createLlm(deps: LlmDeps): Llm {
   return {

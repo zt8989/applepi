@@ -8,7 +8,7 @@ applepi/
 ├── pnpm-workspace.yaml     # packages: ["packages/*", "apps/*"]
 ├── tsconfig.base.json      # 共享编译配置
 ├── packages/
-│   ├── core/               # @applepi/core：深模块 llm(stream)·loop(stream-loop)·session·config·security·trace + Harness 壳（无工具、无洋葱）
+│   ├── core/               # @applepi/core：深模块 llm(stream)·loop·session·config·security·trace + Harness 壳（无工具、无洋葱）
 │   ├── bundle/             # @applepi/bundle：base / standard 能力包，纯声明 (env)=>({prompt,tools}) + app 侧装配助手
 │   └── extension/          # @applepi/extension：参考工具 bash/sre + 能力工厂 memory/skills
 ├── apps/

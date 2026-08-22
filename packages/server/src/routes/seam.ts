@@ -4,7 +4,7 @@ import { getSessionModel, sessionReasoningLevel } from '../server.js';
 /**
  * Request-level test seam (ADR-0017 §8): createApp accepts per-route seams so
  * route tests run without a browser AND without a real provider — an injected
- * model stub + a fake streamText, exactly like core's stream-loop tests.
+ * model stub + a fake streamText, exactly like core's loop tests.
  * Production callers (web shell delegate routes) never pass a seam.
  *
  * The streamText type is DERIVED from core's StreamLoopOpts (not imported from

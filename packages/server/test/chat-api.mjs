@@ -1,7 +1,7 @@
 // Request-level tests for /api/chat + /api/chat/approve on the shared server
 // (ADR-0017 ticket 03), via the streamTextCall injection seam: no browser, no
 // real provider — a scripted fake streamText drives the loop exactly like core
-// stream-loop.mjs. APPLEPI_SESSIONS_DIR keeps session files in tmp.
+// loop.mjs. APPLEPI_SESSIONS_DIR keeps session files in tmp.
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -25,7 +25,7 @@ const wsDir = path.join(tmpRoot, 'proj');
 await fs.mkdir(wsDir);
 process.env.APPLEPI_SESSIONS_DIR = path.join(tmpRoot, 'sessions');
 
-// Scripted fake streamText (same shape as core stream-loop.mjs).
+// Scripted fake streamText (same shape as core loop.mjs).
 function fakeStreamText(turns) {
   let n = 0;
   return function fakeLlm({ messages, tools }) {
@@ -67,7 +67,7 @@ const json = (body) => ({
 });
 
 // 1. Text-only turn: session part + streamed text. (finish part is emitted by
-//    the REAL mergeIntoDataStream — covered by core stream-loop tests; the
+//    the REAL mergeIntoDataStream — covered by core loop tests; the
 //    fake merge writes text/tool-calls only.)
 {
   const app2 = makeApp([{ text: 'hi there' }]);

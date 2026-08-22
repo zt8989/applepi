@@ -19,7 +19,7 @@ function boot() {
   return harness;
 }
 
-/** Drive one bash call through the tool seam (as `stream-loop` does). */
+/** Drive one bash call through the tool seam (as `loop` does). */
 async function callBash(harness, command) {
   const ctx = { session: harness.session, state: {}, toolName: 'bash', toolArgs: { command } };
   await harness.executeTool(ctx);

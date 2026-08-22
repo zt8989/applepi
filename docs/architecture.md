@@ -35,7 +35,7 @@
                 │ 依赖：extension → core（单向）
 ┌───────────────┴─────────────────────────────────────────┐
 │ packages/core  (@applepi/core)  —— 深模块 + 薄 Harness 壳 │
-│ llm(stream) · loop(stream-loop) · session · config ·     │
+│ llm(stream) · loop · session · config ·                  │
 │ security · trace                                         │
 └─────────────────────────────────────────────────────────┘
 ```

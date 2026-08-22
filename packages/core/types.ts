@@ -43,7 +43,7 @@ export type SlashHandler = (arg: string) => string | Promise<string>;
 
 /**
  * Per-request context threaded into tool `execute` (ADR-0015 security seam).
- * `loop`/`stream-loop` build one per tool call; the current permission level
+ * `loop` builds one per tool call; the current permission level
  * is read via `getPermissionLevel(ctx)` from `session.scratch`, so every tool
  * self-determines its behavior (ADR-0009 Q4/Q6).
  */

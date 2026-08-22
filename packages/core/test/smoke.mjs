@@ -2,7 +2,7 @@
 // Validates the Harness shell after the split core: direct tool registration,
 // the tool seam (executeTool: known/unknown/throwing), slash commands (the
 // core-owned /level, which persists to the config file per ADR-0016), and the
-// web-only streaming loop (stream-loop.mjs). Session persistence lives in
+// web-only streaming loop (loop.mjs). Session persistence lives in
 // `session.mjs`.
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';

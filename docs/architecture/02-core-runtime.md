@@ -7,7 +7,7 @@
 
 1. **`llm`**（ADR-0015 新增）— **LLM 交互面**：工具目录 + 单段**流式**响应。封装
    `streamText`、`reasoningProviderOptions`（推理等级映射）、`buildToolDefs`；
-   `stream-loop` 经 `harness.llm.stream` 取模型调用，不再直接依赖 AI SDK。消耗 app
+   `loop` 经 `harness.llm.stream` 取模型调用，不再直接依赖 AI SDK。消耗 app
    已组装的 `{ prompt, tools }` 与 history 产出一段流式响应（ADR-0015）。
 2. **`loop`** — 内置 agent loop（唯一，流式）：`runLoopStreamSegment`（`streamText`，
    token 级分段流 + 暂停/恢复状态机，[§9.1](09-server-web-tui.md#91-流式-loopstreaming-loopadr-0011)）。经 `llm` 模块发起模型调用，工具经

@@ -1,7 +1,7 @@
 /**
  * Shared message contract (deepen #03). One typed shape for the messages that
  * cross core → web:
- *   - `stream-loop` PRODUCES contract-conforming messages (assistant parts +
+ *   - `loop` PRODUCES contract-conforming messages (assistant parts +
  *     tool-result messages);
  *   - the session jsonl persists them as-is;
  *   - the web client CONSUMES the contract: `hydrate` no longer re-merges
@@ -67,7 +67,7 @@ export function isErrorResult(result: unknown): boolean {
 
 /**
  * Fold `role: 'tool'` messages into the owning assistant message's tool-call
- * parts (deepen #03). stream-loop persists tool results as separate tool
+ * parts (deepen #03). loop persists tool results as separate tool
  * messages (mirroring the SDK wire format); the UI wants ONE assistant
  * message whose tool-call parts carry their results. Pure fold over the
  * contract — no React, no id generation — so it is unit-testable in core.

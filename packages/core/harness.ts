@@ -27,7 +27,7 @@ export interface HarnessOptions {
 
 /**
  * The Harness shell (ADR-0015): wires the core deep modules — `llm`,
- * `stream-loop`, `session`, `config`, `security`, `trace` — into a runnable
+ * `loop`, `session`, `config`, `security`, `trace` — into a runnable
  * agent and owns the shared in-memory state. It hosts NO capability-injection
  * mechanism: tools are registered directly (`registerTool`) by whoever
  * assembled the active bundle/plugin set, the flat system prompt is assembled
