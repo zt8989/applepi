@@ -1,4 +1,4 @@
-// Denylist tests for @applepi/extensions (ADR-0009 Q9=a): the denylist floor
+// Denylist tests for @applepi/extension (ADR-0009 Q9=a): the denylist floor
 // moved INTO the bash tool — no middleware, no registration convention. These
 // drive the tool through the seam (`harness.executeTool`), asserting the floor
 // fires at every level and that a blocked command never executes.

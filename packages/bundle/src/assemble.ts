@@ -1,6 +1,6 @@
 import type { Harness } from '@applepi/core';
 import { getPermissionLevel } from '@applepi/core';
-import { getCapability } from '@applepi/extensions';
+import { getCapability } from '@applepi/extension';
 import type { BundleEnv, BundleSpec } from './types.js';
 
 /**
@@ -74,7 +74,7 @@ export function permissionFragment(env: BundleEnv, tools: string[]): string {
 
 /**
  * Register every tool a bundle spec (and each of its present capabilities)
- * contributes. `standard` resolves memory/skills via @applepi/extensions;
+ * contributes. `standard` resolves memory/skills via @applepi/extension;
  * capability ids without a factory yet are skipped — and warned about, so a
  * declared-but-unwired id is visible instead of silently absent.
  */

@@ -11,11 +11,11 @@
  * base and standard are SIBLINGS — standard does not inherit base, there is no
  * `extends`. `capabilities` names the non-declarable, app-assembled parts the
  * session should enable (memory/skills/plan/goal/subagent/...); today these
- * are wired via the @applepi/extensions capability factories, and in the
+ * are wired via the @applepi/extension capability factories, and in the
  * flat-prompt step they lower into declarative tool specs + prompt fragments.
  */
 
-import type { CapabilityEnv } from '@applepi/extensions';
+import type { CapabilityEnv } from '@applepi/extension';
 
 /**
  * The environment a bundle's fragments render against. Merged with the

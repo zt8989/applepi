@@ -1,4 +1,4 @@
-import { bashTool, strReplaceEditorTool } from '@applepi/extensions';
+import { bashTool, strReplaceEditorTool } from '@applepi/extension';
 import type { Bundle, BundleEnv, BundleSpec } from './types.js';
 
 /**

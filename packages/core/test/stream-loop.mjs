@@ -18,7 +18,7 @@ import {
   pendingToolCalls,
   reasoningProviderOptions,
 } from '../dist/index.js';
-import { bashTool } from '../../extensions/dist/index.js';
+import { bashTool } from '../../extension/dist/index.js';
 
 let passed = 0;
 function ok(name) {

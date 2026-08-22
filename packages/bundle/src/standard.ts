@@ -1,4 +1,4 @@
-import { bashTool, strReplaceEditorTool } from '@applepi/extensions';
+import { bashTool, strReplaceEditorTool } from '@applepi/extension';
 import type { Bundle, BundleEnv, BundleSpec } from './types.js';
 
 /**
@@ -6,7 +6,7 @@ import type { Bundle, BundleEnv, BundleSpec } from './types.js';
  *
  * Sibling to `base`: it does NOT inherit base and base does not contain it;
  * there is no `extends`. It reuses the shared reference tool implementations
- * (bash, str_replace_editor from @applepi/extensions) and declares the full
+ * (bash, str_replace_editor from @applepi/extension) and declares the full
  * capability complement — memory, skills, web, plan, goal, subagent, workflow,
  * todo, ask_user — as app-assembled capabilities (bridged to the existing
  * extension factories until the flat-prompt step lowers them into declarative
