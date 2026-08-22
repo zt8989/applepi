@@ -62,8 +62,10 @@ bundle/app 层装配，core 的 `llm` 只接受现成的 `{ prompt片段, tools 
 **安全由「级别模型 + 上下文注入 + 工具自决」表达，不是靠某个特权中间件或特权目录。**
 
 ADR-0009 撤销了 priority-1000 的 permissionMiddleware（运行时闸口退场）：core 内置
-SecurityPolicy 只保证两件事——① 级别模型（`readonly`/`workspace`/`fullaccess`）与
-`level/set` 事件恢复；② 每个工具 execute 的 ctx 都携带当前 level。工具**自行**按
+SecurityPolicy 只保证两件事——① 级别模型（`readonly`/`workspace`/`fullaccess`），级别
+存 `session.config.permissionLevel`（ADR-0016：会话覆盖写 `<id>.config.json>`，
+恢复读 config 文件级联生效，无 `level/set` 事件）；② 每个工具 execute 的 ctx 都携带
+当前 level。工具**自行**按
 level 约束行为（bash 只读白名单、sre view-only、denylist 8 条危险正则内嵌 bash 自身
 作为任何级别生效的底线）。「闸口」是**君子协定**（readonly 下不读 level 的工具仍全权），
 core 不兜底——这是信任扩展边界的直接推论（P5）。
@@ -72,8 +74,9 @@ core 不兜底——这是信任扩展边界的直接推论（P5）。
 - 后果：安全强度 = 每个工具的自决程度；模型没有任何改级别的工具（防自我提权），
   级别只能由用户通过权限胶囊（web）切换（core 的 `/level` 语义，原 CLI 命令已删）。
   强制机制（级别/ctx 注入/工具自决 + `/level`）在 core `security` 模块（工具执行缝）；
-  权限**声明段**在 bundle（base/standard 各自声明贴合自身工具集、按级别分档的提示词
-  片段，ADR-0015），core 不写提示词文案。
+  权限**声明段**在 bundle——base/standard 共用装配期 `permissionFragment`，由实际
+  注册工具实时生成「Tools available」清单、按级别分档（ADR-0015 + deepen #01 修订：
+  不再逐 bundle 手写、不声称未接线能力），core 不写提示词文案。
 - 判据：不要用"挂一个特权中间件"或"放在核心/特权目录"来假装安全；安全必须
   体现在级别模型与工具自决上。
 
@@ -108,9 +111,11 @@ core 不兜底——这是信任扩展边界的直接推论（P5）。
 - 依据：ADR-0002（jsonl 单文件、事件/消息两行型、replay 只读变换）、
   ADR-0006（行结构精简：`type`+`phase` 合并为 `event` 字段、行内去掉
   `session_id`/`workspace` 冗余身份字段）。ADR-0015 移除 `emit` 事件总线和
-  `system_prompt` 事件族后，事件（`level/set`、`reasoning/set`、`mode`、
-  `reload/start|end` 等）由 app / 工具直接 `store.appendEvent` 写入 jsonl——
-  `appendEvent` 是存储原语，不存在 core 内置事件处理器。
+  `system_prompt` 事件族后，事件由 app / 工具直接 `store.appendEvent` 写入 jsonl——
+  `appendEvent` 是存储原语，不存在 core 内置事件处理器。ADR-0016 进一步把配置类
+  状态（level/reasoning/mode/model）迁出 jsonl 进 `<id>.config.json>`——jsonl 只留
+  审计 + 消息 + 非配置类事件（`title/set`、`pin/set`、`notify/set`、
+  `tool/approval-pending`、`reload/start|end` 等）。
 - 后果：坏掉的 reload 只靠读文件即可诊断；原始记录永不因视图变换被改写。
   行结构精简只影响"行内携带什么信息"，不影响 append-only 属性——文件路径
   仍是会话身份的权威位置（ADR-0006 的取舍：行不再自包含）。
@@ -229,4 +234,4 @@ web 壳复刻 base 风格（两栏、外层圆角白卡、线性图标、中性�
 
 ---
 
-*每条原则均对应一个或多个已锁定决策；标注（Q#）为 grill 轮次，ADR-XXXX 为决策记录。最后更新 2026-08-21，纳入 ADR-0015（扁平 system_prompt + bundle/mode/app + core 深模块拆分）对 P1/P2/P3/P8/P12 的重塑，及 ADR-0016（统一会话配置 + 全局/会话双层配置）对 P10 的延伸；ADR-0011/0012 的流式 loop、工具批准、双接口与可观测性此前已纳入。*
+*每条原则均对应一个或多个已锁定决策；标注（Q#）为 grill 轮次，ADR-XXXX 为决策记录。最后更新 2026-08-22，纳入 ADR-0015（扁平 system_prompt + bundle/mode/app + core 深模块拆分）对 P1/P2/P3/P8/P12 的重塑，ADR-0016（统一会话配置 + 全局/会话双层配置）对 P10 的延伸与 P4/P7 级别存储迁移注记，及 deepen #01（共享 permissionFragment）对 P4 声明段描述的修订；ADR-0011/0012 的流式 loop、工具批准、双接口与可观测性此前已纳入。*

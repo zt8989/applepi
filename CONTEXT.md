@@ -9,7 +9,7 @@ Project: a minimal **single-machine agent harness**, organized as a **pnpm works
 - **Hook / middleware** — lifecycle interceptors on the onion stacks: `session`, `llm`, `tool`, and `system_prompt` (ADR-0008). Can observe, veto (skip `next()`), or rewrite `ctx`.
 - **Tool** — a capability registered via `api.registerTool({ name, description, parameters (zod), execute })`.
 - **Reference tool** — a concrete tool shipped by the `@applepi/extensions` package as a replaceable reference implementation (not core): `bash` and `str_replace_editor`.
-- **SecurityPolicy（安全策略）** — core 内置的安全机制（ADR-0009）：接口 + 默认实现。默认实现含三值级别模型（readonly/workspace/fullaccess）、`level/set` 事件 + lastEvent 恢复、提示词「Permission Level」段落、`/level`。**无运行时拦截中间件**（permissionMiddleware 已删，Q12=a）——「闸口」退化为 level 上下文保证：每个工具 execute 的 ctx 都带当前级别。可被消费者显式替换（替换即自负责）。取代旧的 **Security extension**（ADR-0007 的 `createPermissionExtension`，已随 ADR-0009 删除）。
+- **SecurityPolicy（安全策略）** — core 内置的安全机制（ADR-0009）：接口 + 默认实现。默认实现含三值级别模型（readonly/workspace/fullaccess）、提示词「Permission Level」段落、`/level`。**无运行时拦截中间件**（permissionMiddleware 已删，Q12=a）——「闸口」退化为 level 上下文保证：每个工具 execute 的 ctx 都带当前级别。可被消费者显式替换（替换即自负责）。取代旧的 **Security extension**（ADR-0007 的 `createPermissionExtension`，已随 ADR-0009 删除）。（ADR-0016 后级别存 `session.config.permissionLevel` + `general.permissionLevel`，恢复读 config 文件级联生效——`level/set` 事件与 lastEvent 恢复已删；提示词段落已随 ADR-0015 移入 bundle 共享 `permissionFragment`。）
 - **baseExtension** — (superseded by ADR-0015) the former default-capability `SetupFn`; its role is reframed as the **`base` bundle** in `packages/bundle`.
 
 ## Flat system prompt / bundle / mode / app (glossary — decided via /grill-with-docs, 2026-08-21, ADR-0015)
@@ -29,7 +29,7 @@ Project: a minimal **single-machine agent harness**, organized as a **pnpm works
 
 > ADR-0016 统一会话配置载体 + 全局/会话双层配置；re-scope ADR-0014 的 lastUsedModel
 > 语义、ADR-0009 的 level/set 存储、composer 的 reasoning/set 覆盖；**推翻 Q13**。
-> 设计已记录，实现待 ADR-0015 迁移推进。
+> **设计与实现均已完成**（2026-08-21，随 ADR-0015 迁移落地）。
 
 - **全局配置（global config）** — `~/.applepi/settings.json`：`providers` + 新的 `general` 块。实例级；单纯基础设施（providers/密钥）永不 session 化。
 - **General（通用设置）** — settings.json 的 `general: { model?, reasoningLevel?, permissionLevel? }` 块，全局默认的唯一出处（Q4/Q9=A）。顶层 `lastUsedModel`/`lastUsedLevel` 删除、无兼容读（Q17=A）。仅从「设置-通用设置」页修改；chip/胶囊**不**写它。
@@ -53,7 +53,7 @@ Project: a minimal **single-machine agent harness**, organized as a **pnpm works
 - **Workspace** — slug of the process cwd absolute path; the directory tier under `~/.applepi/sessions/<workspace>/`. Web 端工作区**发现仅读 `~/.applepi/sessions/.manifest.json`**（slug↔path，由 `addWorkspace` 写入），不再扫描 sessions 目录子目录（避免 test 残留污染列表）；**显示名取路径最后一段（basename）**，而选择/激活/工具 cwd 仍以完整路径为 key（ADR-0013）。
 - **SessionStore** — a **core-owned** class managing the append-only jsonl for a workspace: `create`, `appendEvent`, `appendMessage`, `load` (replay → LLM message array), `list` (for `/sessions`). Lives in the **core package** (`packages/core`), so any UI can drive it.
 - **Session store file** — single append-only jsonl at `~/.applepi/sessions/<workspace>/<session_id>.jsonl`. Each line is either an **event line** (`kind:"event"`) or a **message line** (`kind:"message"`); session/workspace identity lives in the file path, not in the lines (ADR-0006).
-- **Event（事件）** — `kind:"event"` line recording a lifecycle record in the merged `event` field, e.g. `level/set`, `reasoning/set`, `title/set`, `pin/set`, `notify/set`, `mode`, `tool/approval-pending`, `reload/start` / `reload/end`. （`system_prompt/*` 事件族与 `skill/start|end` 已随 ADR-0015 移除；`mcp` 已随 mcp 特性删除，Q11；`type`+`phase` 合并进 `event`，ADR-0006。）**ADR-0015 起无 `emit` 事件总线**：事件由 app / 工具直接 `SessionStore.appendEvent` 写入 jsonl——`appendEvent` 就是存储原语，不存在 core 内置事件处理器。（注：ADR-0016 设计将把 `level/set`、`reasoning/set` 等会话覆盖迁入 `<id>.config.json>`，另行实现。）
+- **Event（事件）** — `kind:"event"` line recording a lifecycle record in the merged `event` field, e.g. `title/set`, `pin/set`, `notify/set`, `tool/approval-pending`, `reload/start` / `reload/end`. （`system_prompt/*` 事件族与 `skill/start|end` 已随 ADR-0015 移除；`mcp` 已随 mcp 特性删除，Q11；`type`+`phase` 合并进 `event`，ADR-0006。）**ADR-0015 起无 `emit` 事件总线**：事件由 app / 工具直接 `SessionStore.appendEvent` 写入 jsonl——`appendEvent` 就是存储原语，不存在 core 内置事件处理器。（ADR-0016 已把 `level/set`、`reasoning/set`、`mode` 等配置类状态迁入 `<id>.config.json>`，实现完成 2026-08-21；jsonl 只留审计 + 消息 + 非配置类事件。）
 - **Message line** — `kind:"message"` line mirroring an LLM message (`role`: system|user|assistant|tool). The first system message is the flat system prompt (persisted at session start by the app; each turn uses a freshly-assembled prompt, ADR-0015).
 - **Resume** — `/resume <id>` (core `SessionStore.load`) switches the active session to `<id>` and continues appending to its jsonl. `<id>` absent → new session.
 - **Slash commands (core capability)** — registered via `Harness.registerSlashCommand(name, handler)`; core 自注册 `/level`，内置 `/config`, `/resume <id>`, `/new`, `/sessions` (list `~/.applepi/sessions/<workspace>/`), `/help`. Web drives the same core methods。（CLI REPL 及其 `/exit` 已删。）

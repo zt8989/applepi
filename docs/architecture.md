@@ -1,7 +1,7 @@
 # 架构（Architecture）
 
-> 状态：持续更新（初版 2026-08-18/19 经 `/grill-me` / `/grill-with-docs` 多轮访谈锁定；2026-08-20 纳入 web 双接口、流式 loop、工具批准、Langfuse 埋点，对应 ADR-0011 / ADR-0012；2026-08-21 纳入并实现 ADR-0015——core 深模块拆分 + 扁平 system_prompt + bundle/mode/app 重塑，见 §1.6）。
-> 本页是系统设计的权威入口，细节与决策依据见各 ADR（ADR-0001 ~ ADR-0015）。
+> 状态：持续更新（初版 2026-08-18/19 经 `/grill-me` / `/grill-with-docs` 多轮访谈锁定；2026-08-20 纳入 web 双接口、流式 loop、工具批准、Langfuse 埋点，对应 ADR-0011 / ADR-0012；2026-08-21 纳入并实现 ADR-0015——core 深模块拆分 + 扁平 system_prompt + bundle/mode/app 重塑，见 §1.6；2026-08-22 纳入 deepen #01–#05 修订与 ADR-0016 双层配置同步）。
+> 本页是系统设计的权威入口，细节与决策依据见各 ADR（ADR-0001 ~ ADR-0016）。
 
 ## 1. 概览
 
@@ -57,9 +57,9 @@ core 按单职责拆成深模块，由薄 **Harness 壳** 组装：
 |---|---|---|
 | `llm` | LLM 交互面：工具目录 + 单段**流式**响应 | `llm.ts`：`buildToolDefs` / `reasoningProviderOptions` / `Llm.stream`，隐藏 AI SDK（`streamText`），消耗 app 已组装的 `{ prompt, tools }` + history 流式一段响应（ADR-0015）。非流式 `generate` 随 CLI 移除。 |
 | `loop` | 多回合编排 + 暂停/批准/恢复 | `stream-loop.ts`（`runLoopStreamSegment`，流式，唯一 agent loop），经 `harness.llm` 取模型调用、`harness.executeTool` 执行工具。非流式 `loop.ts`/`runLoop` 已随 CLI 删除。 |
-| `session` | jsonl 持久化 + resume + 追加生命周期事件原语 | `session.ts`（`create`/`appendEvent`/`appendMessage`/`load`/`lastEvent`/`list`）。 |
+| `session` | jsonl 持久化 + resume + 追加生命周期事件原语 + 会话展示元数据 | `session.ts`（`create`/`appendEvent`/`appendMessage`/`load`/`lastEvent`/`list` + deepen #02 新增的 `title`/`pinned`/`notify`/`listSessions` 展示元数据原语）。 |
 | `config` | settings.json / provider / reasoning | `config.ts`。 |
-| `security` | 权限级别强制（工具执行缝） | `security.ts`：只保留强制机制（三值级别模型/`level/set` 事件 + lastEvent 恢复/ctx 注入/工具自决 + core 自注册 `/level`）；权限**声明段**按 ADR-0015 移入 bundle（§7）。 |
+| `security` | 权限级别强制（工具执行缝） | `security.ts`：只保留强制机制（三值级别模型，级别存 `session.config.permissionLevel`（ADR-0016，非 `level/set` 事件）/ctx 注入/工具自决 + core 自注册 `/level`）；权限**声明段**按 ADR-0015 移入 bundle（§7）。 |
 | `trace` | 可观测埋点 | `trace.ts`。 |
 | `Harness`（壳） | 组装以上模块 + 生命周期 | `harness.ts`：owns `llm`，`registerTool`/`unregisterTool`/`getTools`/`buildToolDefs`、`registerSlashCommand`/`getSlashCommand`、`attachSession`/`restoreSecurity`/`resume`、`executeTool`（工具执行缝）。无洋葱、无 `emit`、无扩展加载器、无 `run`（CLI 单回合，已删）。 |
 
@@ -70,7 +70,9 @@ ADR-0015 定义本系统的**最终形态（已实现）**。四个核心概念�
 - **Bundle（能力包）** — 自包含能力单元。`base` = 恰好 bash + str_replace_editor
   两个工具 + 极简提示词（无 memory/skills/plan/goal/subagent）；`standard` =
   自包含全集（复用共享工具实现 + memory/skills/web/plan/goal/subagent/workflow/
-  todo/ask_user 能力声明 + 自己的提示词）。**兄弟并列：standard 不继承 base，无 `extends`。**
+  todo/ask_user 能力声明；人格收敛为与 base 同串的 minimal 文本，权限/能力声明段
+  由共享 `permissionFragment` 按实际注册工具生成，deepen #01）。**兄弟并列：
+  standard 不继承 base，无 `extends`。**
 - **Mode（模式）** — 被 app 托管的 bundle（base/standard 既是 bundle 也是 mode）；
   mode 不是独立概念。
 - **App（应用）** — `web` / `tui`，是**接口**不是 bundle/mode；app 托管 mode 选择
@@ -87,8 +89,13 @@ spec（`{ prompt片段, tools }`）一次性拼装（`@applepi/bundle` 的
 级别分档）。
 
 **模式选择**：仅新建会话时选（web 新对话下拉），非热切换、非事件；
-记入 `session.config.mode`（并在会话 jsonl 记一次 `mode` 事件行以便恢复时重建），
-会话内不可变。恢复时按 `lastEvent('mode')` 重建匹配的 spec。
+作为构建期身份记入 `<id>.config.json>` 的 `session.config.mode`（ADR-0016；
+**不再是** jsonl 的 `mode` 事件行），会话内不可变。恢复时 `Harness.resume`
+（读 config 文件）与 web 的 `sessionMode` 从该文件重建匹配的 spec。
+**权限/能力声明段**：base/standard 共用同一装配期 `permissionFragment`
+（deepen #01）—— 由 `resolvedTools`（`spec.tools` ∪ 已落地 capability 工具）
+实时生成，提示词与实际注册面永不漂移；声明但无工厂的 capability id 在
+`enableBundleSpec` 打 `console.warn`。
 
 **core 收敛**：`registerExtension` / `SetupFn` / `HarnessApi` / `OnionBus` /
 `HookStack` / 洋葱中间件 / `emit` 事件族 / `system_prompt` 事件族 / `PromptBag` /
@@ -111,9 +118,10 @@ web 装配。
    `harness.executeTool`（工具执行缝）执行。非流式 `runLoop`（§5 旧 CLI loop）已删除。
 3. **`session`** — 会话持久化（jsonl，同时充当流式 loop 的暂停点状态，§6）。
 4. **`config`** — LLM 配置解析：settings.json + .env，见 §10。
-5. **`security`** — 权限级别强制机制（三值级别模型 + `level/set` 事件与恢复 +
-   上下文注入，工具 execute 读 level 自决，§7）。声明段在 bundle（base/standard 各自
-   按级别分档），core 只保留强制机制 + `/level` 命令。
+5. **`security`** — 权限级别强制机制（三值级别模型 + 上下文注入，工具 execute 读
+   level 自决，§7）。级别存 `session.config.permissionLevel`（ADR-0016，
+   覆盖写 `<id>.config.json>`，不再是 `level/set` 事件）。声明段在 bundle（base/standard
+   共用装配期 `permissionFragment`，由实际注册工具生成），core 只保留强制机制 + `/level` 命令。
 6. **`trace`** — 可观测性埋点（Langfuse Cloud，§9.4）。
 7. **`Harness`（壳）** — 组装以上模块 + 生命周期；owns `llm`，提供
    `registerTool`/`unregisterTool`/`getTools`/`buildToolDefs`、
@@ -163,14 +171,15 @@ bundle 片段 → app 接口片段 → plugin 尾部片段
 ```
 
 - 下层不可改写上层；顺序是声明的，不是协商的。
-- 权限声明段是 **bundle 自有片段**（`basePermissionFragment` /
-  `standardPermissionFragment`），按当前级别（readonly/workspace/fullaccess）分档
-  渲染；core 的 `security` 只强制、不写提示词文案。
+- 权限声明段是 **共享 `permissionFragment`**（deepen #01：base/standard 共用同一渲染器，
+  由 `resolvedTools` 实时生成「Tools available」清单），按当前级别
+  （readonly/workspace/fullaccess）分档渲染；core 的 `security` 只强制、不写提示词文案。
 - 重建 = 每轮用当前 env（级别、工作区）重读同一份 spec 重新拼接
-  （`assembleFlatPrompt`），因此 `level/set`、`reasoning/set` 只是普通状态记录，
-  不再是提示词重建触发器。
-- 系统消息持久化：新会话 / `/reload` 时 app 写一条 `system` 消息行到 jsonl；
-  会话内每轮直接用新拼的提示词（replay 时最新 system 替换 message[0]，见 §8）。
+  （`assembleFlatPrompt`），因此级别、工作区等状态变化**不是**提示词重建触发器
+  （级别存 `session.config.permissionLevel`，ADR-0016；无 `level/set`/`reasoning/set` 事件）。
+- 系统消息持久化：新会话时 app 写一条 `system` 消息行到 jsonl（在 pre-chosen
+  级别/推理等级写入之后）；会话内每轮直接用新拼的提示词（replay 时若存在 `reload`
+  事件，最新 system 替换 message[0]，`reload/start|end` 作为存储原语保留，见 §8）。
 
 ## 5. 内置 Agent Loop（流式，唯一）
 
@@ -205,14 +214,14 @@ loop（分段流）:
 
 ## 6. 工具与 Vercel AI SDK 映射
 
-扩展注册工具用 **zod**（而非裸 JSON Schema）：
+扩展/bundle 注册工具用 **zod**（而非裸 JSON Schema）：
 
 ```ts
-api.registerTool({
+harness.registerTool({
   name: "grep",
   description: "在文件中搜索正则",
   parameters: z.object({ pattern: z.string(), path: z.string() }),
-  execute: async (args) => runGrep(args),
+  execute: async (args, ctx) => runGrep(args),
 });
 ```
 
@@ -227,12 +236,16 @@ api.registerTool({
   每个工具 execute 读 `ctx` 中的 level 自行约束行为（bash 只读白名单、sre view-only 等）。
 - **denylist 底线**：原 8 条危险正则作为**任何级别下都生效的绝对底线**，内嵌于 bash 工具自身
   （`fullaccess` 也不允许 `rm -rf`、fork bomb 等）。
-- **提示词携带级别（ADR-0015 最终形态）**：权限**声明段**由 bundle 各自承载
-  （base/standard 的 `*PermissionFragment`，按当前级别分档渲染），app 每轮把它并入
-  扁平提示词；core 的 `security` 只保留强制机制，不再写任何提示词文案。级别变化是
-  普通状态记录（`level/set`），不触发提示词重建——下一轮拼接自然带上新级别。
-- **级别持久化**：`level/set` 事件写入会话 jsonl；当前级别 = 最后一个 `level/set` 事件的
-  `payload.level`，无则默认 `workspace`（`SessionStore.lastEvent` 读取，`restorePermissionLevel` 恢复）。
+- **提示词携带级别（ADR-0015 最终形态，deepen #01 修订）**：权限**声明段**由
+  `@applepi/bundle` 的共享 `permissionFragment` 承载（base/standard 共用同一渲染器，
+  由 `resolvedTools` 实时生成「Tools available」清单，按当前级别分档）——不再逐 bundle
+  手写、不再向模型声称未接线能力；app 每轮把它并入扁平提示词；core 的 `security`
+  只保留强制机制，不再写任何提示词文案。级别变化是普通状态记录，不触发提示词重建
+  ——下一轮拼接自然带上新级别。
+- **级别持久化（ADR-0016）**：级别存 `session.config.permissionLevel` —— 会话覆盖写
+  `<id>.config.json>`（`applyPermissionLevel`），全局默认读 `settings.json.general.permissionLevel`，
+  生效值 = 覆盖 ?? 全局 ?? `workspace`（`resolvePermissionLevel` 级联，恢复后写回内存
+  `session.config`）；**`level/set` jsonl 事件已删除**。
 - **只有用户能改级别**：`/level <readonly|workspace|fullaccess>` 是用户驱动的 slash 命令
   （`registerSlashCommand` 扩展点），模型没有改级别工具（防自我提权）。
 - **信任边界**：extension 同进程 = 等价授信；权限系统防的是**模型自主用工具犯错**，不是防扩展。
@@ -245,30 +258,41 @@ api.registerTool({
   `~/.applepi/sessions/<workspace>/<session_id>.jsonl`。
   每行是 `kind:"event"`（生命周期事件）或 `kind:"message"`（LLM 消息）。
 - **行结构（ADR-0006 精简后）**：
-  - 事件行：`{"kind":"event","event":"level/set","payload":{...},"ts":<ISO>}`
-    —— `event` 字段合并了类型与阶段（`reload/start|end` 等带相位；`level/set`、
-    `reasoning/set`、`title/set`、`mode` 等为原子事件）。`system_prompt/*` 事件族已随
-    ADR-0015 移除。
+  - 事件行：`{"kind":"event","event":"title/set","payload":{...},"ts":<ISO>}`
+    —— `event` 字段合并了类型与阶段（`reload/start|end` 等带相位；`title/set`、
+    `pin/set`、`notify/set`、`tool/approval-pending` 等为原子事件）。`system_prompt/*`
+    事件族已随 ADR-0015 移除；`level/set`、`reasoning/set`、`mode` 事件已随 ADR-0016
+    迁入 `<id>.config.json>`（会话覆盖），jsonl 只留审计 + 消息 + 非配置类事件。
   - 消息行：`{"kind":"message","role":"system|user|assistant|tool","content":...,"ts":<ISO>}`。
   - 行内**不含** `session_id` / `workspace`：会话与工作区身份由文件路径承载，
     行不再自包含（旧 ADR-0002 的"每行可独立审计"语义已放弃）。
 - **SessionStore 归核心**：`create` / `appendEvent` / `appendMessage` /
-  `load`（replay 变换） / `lastEvent` / `list`。web UI 驱动同一套核心方法。
-  ADR-0015 移除 `emit` 事件总线后，事件（`level/set`、`reasoning/set`、`title/set`、
-  `mode`、`tool/approval-pending`、`reload/start|end` 等）由 app / 工具直接
+  `load`（replay 变换） / `lastEvent` / `list`，以及 deepen #02 新增的展示元数据
+  原语 `title()` / `pinned()` / `notify()` / `listSessions()`（`SessionSummary` 数组，
+  含 title/pinned/notify + mtime 降序）。web UI 驱动同一套核心方法，不再手撕 jsonl。
+- **共享消息契约（deepen #03）**：`packages/core/message.ts` 定义跨 core→web 的消息形状
+  （`ThreadMessage` / `MessagePart`，纯 leaf 模块，无 node/ai/react 运行时依赖）。
+  `stream-loop` 产出契约消息并持久化；web `hydrate` 通过 `mergeToolResults`（把 `tool`
+  消息折叠进持有它的 assistant tool-call part）与 `toText`（唯一文本提取器）纯消费；
+  `pendingApproval` 在刷新后重浮未决批准。流式路径的 isError 判定与核心同一来源
+  （`isErrorResult` 导出）。
+  ADR-0015 移除 `emit` 事件总线后，事件（`title/set`、`pin/set`、`notify/set`、
+  `tool/approval-pending`、`reload/start|end` 等）由 app / 工具直接
   `store.appendEvent` 写入 jsonl——`appendEvent` 就是存储原语，不再有 core 内置事件处理器。
+  （ADR-0016 后 `level/set`、`reasoning/set`、`mode` 不再是事件，改走 `<id>.config.json>`。）
 - **Replay（只读）**：读取时过滤 message 行；若存在 `reload` 事件，最新重建的
   system 消息替换 `message[0]`；原 jsonl 永不被改写。
-- **Resume**：`/resume <id>` 切换活动会话并继续追加。CLI 的 `/reload`（app 层插件
-  重载）已随 CLI 删除；`reload/start|end` 事件与 `SessionStore` 的 replay 规则作为
-  存储/读取原语保留。
+- **Resume**：web 的 `openSession` → `GET /api/session` 水合 + `Harness.resume`
+  切换活动会话并继续追加（CLI 的 `/resume` `/reload` 已随 CLI 删除）；
+  `reload/start|end` 事件与 `SessionStore` 的 replay 规则作为存储/读取原语保留。
 - **系统提示词（ADR-0015 扁平模型，supersedes ADR-0008/0010）**：单一扁平缓冲区 =
   `bundle 片段 → app 接口片段 → plugin 尾部片段` 顺序拼接；无块栈、无 PromptBag、
   无提示词中间件。重建 = 每轮用当前 env（级别/工作区）重读同一份 spec
   （`assembleFlatPrompt`）。系统消息行只在会话启动时由 app `appendMessage('system', ...)`
-  持久化。
-- **Slash 命令（核心能力）**：`/level`（core 自注册）；`/config` `/new` `/sessions`
-  等由界面驱动同一套核心方法。
+  持久化（在 pre-chosen 级别/推理等级写入之后，见 §1.6）。
+- **Slash 命令（核心能力）**：core 自注册 `/level`（`registerSlashCommand` 扩展点）；
+  其余由 web 界面直接驱动同一套 core 方法（`SessionStore` / `applyPermissionLevel` /
+  `resolveLlmConfig`），不再有独立 REPL。
 
 ## 9. 界面：Web（唯一）
 
@@ -303,13 +327,15 @@ web 会话对工具执行采用**前端批准**：
   被 `path.resolve` 污染 cwd）；
 - `session.config.workspace` 决定工具 cwd 与 project root（`workspaceRoot(ctx)`）；
   切换后 resume 该工作区最近会话（无则新建）；
-- **mode（ADR-0015）**：会话按 mode（base/standard）缓存独立 Harness（工具集不可变）；
-  新会话在首条消息带上 `mode`，服务端记一次 `mode` 事件行；恢复时 `lastEvent('mode')`
-  重建匹配 spec；
+- **mode（ADR-0015 + ADR-0016）**：会话按 mode（base/standard）缓存独立 Harness
+  （工具集不可变）；新会话把 `mode` 作为构建期身份写一次 `<id>.config.json>`
+  （`bindSession` → `saveConfig({ workspace, mode })`，**不再是 `mode` 事件行**）；
+  恢复走 `sessionMode` / `Harness.resume` 读 config 文件重建匹配 spec；
 - 会话动作 API（`PATCH /api/session`）：rename / pin / unpin / archive / unarchive /
-  notify / level；`GET /api/session?format=jsonl` 导出；级别切换走 core
-  `applyPermissionLevel`（写 `level/set`，扁平提示词下一轮自带上新级别，无重建），
-  与 core `/level` 同语义。
+  notify / level / reasoning / model；`GET /api/session?format=jsonl` 导出；级别切换走
+  core `applyPermissionLevel`（写 `session.config.permissionLevel` 覆盖到
+  `<id>.config.json>`，ADR-0016；扁平提示词下一轮自带上新级别，无重建），
+  与 core `/level` 同语义；reasoning/model 同样写会话覆盖。
 
 ### 9.4 可观测性（Langfuse trace, ADR-0012）
 
@@ -336,17 +362,32 @@ Cloud**（`~/.applepi/.env` 的 `LANGFUSE_BASE_URL` / `PUBLIC_KEY` / `SECRET_KEY
 
 > 见 CONTEXT.md「Web 二期」段与 `apps/web`（`sidebar.tsx` / `chat-ui.tsx` / `chat-store.ts` / `app/api/files/route.ts`）。
 
+### 9.7 纯展示逻辑（deepen #04）
+
+组件只做渲染，纯逻辑与标签常量集中在 `apps/web/lib/display.ts`（无 React
+运行时依赖，可用 plain node 单测）：`estimateUsage` / `contextLimit` /
+`formatTokens` / `textOf`（含共享 `toText` 转发）与 `LEVEL_META` /
+`REASONING_META` / `MODES` 标签常量。`contextLimit` 与模型配置就近摆放；
+`chat-ui` / `composer-footer` / `settings-modal` / `sidebar` 只引用常量与渲染。
+
 ## 10. LLM 配置
 
-见 ADR-0004 完整决策。要点：
+见 ADR-0004 + ADR-0014（multi-provider registry）+ ADR-0016（双层配置）完整决策。要点：
 
 - `~/.applepi/settings.json` 是 **LLM 配置唯一来源**（不再读 process.env）：
-  `{ provider, model, apiKey, baseURL? }`。
-- `~/.applepi/.env` 存真实密钥（`dotenv.parse`，纯解析不污染环境变量）。
-- **解析规则**：`apiKey` 字段是密钥名，`realKey = dotenv[apiKey] ?? apiKey`。
+  multi-provider registry `{ providers, general? }`（ADR-0014）。**无 `active` 字段**
+  —— 每个 provider 的模型都可选。
+- **ProviderConfig**：`{ displayName, protocol, baseURL?, apiKeyRef, models? }`；
+  `protocol`（openai-completions / openai-responses / anthropic-messages）选 SDK 工厂。
+  `BUILTIN_PROVIDERS` 是只读预设目录；settings.json 只存 enabled + custom provider。
+- **general 块（ADR-0016）**：`{ model?, reasoningLevel?, permissionLevel? }` 为全局默认
+  （仅「设置-通用设置」页写）；生效值 = `session.config` 覆盖 ?? `general` ?? 内置默认
+  （`resolveSessionConfig` 级联，归 core）。
+- `~/.applepi/.env` 存真实密钥（`dotenv` 解析）；`realKey = dotenv[apiKeyRef] ?? apiKeyRef`。
 - 配置解析原语归核心（`loadSettings` / `loadDotenv` / `resolveApiKey` /
-  `resolveLlmConfig`），agent 负责组装 provider 实例。
-- `/config` 重新读配置并重建模型；`/reload` **不**触碰 provider。
+  `resolveLlmConfig` / `resolveSessionConfig` / `mergedProviders`），app 组装 provider 实例。
+- `/config` 重新读配置并重建模型；provider 保存后 web 调 `invalidateModel()` 清缓存模型
+  （`/reload` 不触碰 provider，且随 CLI 删除）。
 
 ## 11. 仓库布局
 
