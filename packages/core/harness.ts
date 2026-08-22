@@ -128,12 +128,6 @@ export class Harness {
     this.sessionStore = store;
   }
 
-  /** Enumerate sessions in the current workspace (delegates to core SessionStore). */
-  listSessions(): Promise<string[]> {
-    const ws = this.sessionStore?.workspace ?? this.workspace;
-    return new SessionStore({ workspace: ws }).list();
-  }
-
   /** Switch the active session to `id`; load its history (replay). Missing → new. */
   async resume(id: string): Promise<SessionStore> {
     const ws = this.sessionStore?.workspace ?? this.workspace;
