@@ -62,7 +62,6 @@ const json = (body, method = 'POST') => ({
   assert.equal(res.status, 200);
   const body = await res.json();
   ok('config: GET returns provider/model fields (empty-tolerant)', typeof body.provider === 'string' && typeof body.model === 'string');
-  ok('config: TRUE here', true);
 }
 
 // 3. /api/config/general: GET tolerant; PUT rejects invalid level before write.

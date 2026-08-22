@@ -3,9 +3,7 @@ import {
   PERMISSION_LEVELS,
   REASONING_LEVELS,
   applyPermissionLevel,
-  resolveLlmConfig,
   runLoopStreamSegment,
-  type ProviderProtocol,
   type ReasoningLevel,
   type StreamLoopOpts,
 } from '@applepi/core';
@@ -14,12 +12,10 @@ import {
   buildSystemPrompt,
   buildTurnMessages,
   getHarness,
-  getSessionModel,
   sessionMode,
   sessionReasoningLevel,
 } from '../server.js';
-import { DEFAULT_REASONING_LEVEL } from '@applepi/core';
-import type { ChatSeam } from './seam.js';
+import { resolveSeam, type ChatSeam } from './seam.js';
 
 /**
  * POST /api/chat — segment 1 of a turn: stream the loop until it finishes or
@@ -69,16 +65,9 @@ export async function handleChat(req: Request, seam?: ChatSeam): Promise<Respons
     await store.saveConfig({ ...overrides, reasoningLevel: preChosen });
     reasoningLevel = preChosen;
   } else {
-    const sessionId = body.sessionId ?? store.sessionId;
-    if (sessionId) {
-      reasoningLevel = await sessionReasoningLevel(body.workspace, sessionId);
-    } else {
-      try {
-        reasoningLevel = (await resolveLlmConfig()).reasoningLevel ?? DEFAULT_REASONING_LEVEL;
-      } catch {
-        reasoningLevel = DEFAULT_REASONING_LEVEL;
-      }
-    }
+    // bindSession always assigns a session id (create/new or resume), so the
+    // cascade resolution always has a session — no config-registry fallback.
+    reasoningLevel = await sessionReasoningLevel(body.workspace, body.sessionId ?? store.sessionId!);
   }
 
   // A brand-new session persists its initial flat system prompt once, AFTER
@@ -91,18 +80,18 @@ export async function handleChat(req: Request, seam?: ChatSeam): Promise<Respons
   messages.push({ role: 'user', content: body.message });
   await store.appendMessage('user', body.message);
 
-  const resolved = seam?.model
-    ? { model: seam.model, protocol: 'openai-completions' as ProviderProtocol }
-    : await getSessionModel(body.workspace, store.sessionId ?? undefined);
+  // The model/protocol come from the seam or the real cascade; the reasoning
+  // level is resolved above (pre-chosen override or the session cascade).
+  const { model, protocol } = await resolveSeam(seam, body.workspace, store.sessionId!);
   return createDataStreamResponse({
     async execute(writer) {
       writer.writeData({ type: 'session', sessionId: store.sessionId });
       const opts: StreamLoopOpts = {
-        model: resolved.model,
+        model,
         store,
         writer,
         messageId: body.messageId,
-        protocol: resolved.protocol,
+        protocol,
         reasoningLevel,
       };
       // Conditional assignment (a conditional spread of the generic streamText

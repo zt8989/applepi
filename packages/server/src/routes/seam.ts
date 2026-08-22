@@ -1,4 +1,5 @@
-import type { StreamLoopOpts } from '@applepi/core';
+import type { ProviderProtocol, ReasoningLevel, StreamLoopOpts } from '@applepi/core';
+import { getSessionModel, sessionReasoningLevel } from '../server.js';
 
 /**
  * Request-level test seam (ADR-0017 §8): createApp accepts per-route seams so
@@ -16,4 +17,31 @@ export interface ChatSeam {
   model?: any;
   /** Injected streamText (fake LLM). */
   streamTextCall?: StreamLoopOpts['streamTextCall'];
+}
+
+export interface ResolvedSeam {
+  model: any;
+  protocol: ProviderProtocol;
+  reasoningLevel: ReasoningLevel;
+}
+
+/**
+ * Resolve the model/protocol/reasoning trio for a segment: the seam's injected
+ * model (tests) or the real provider cascade. Shared by /api/chat and
+ * /api/chat/approve so both segments resolve identically.
+ */
+export async function resolveSeam(
+  seam: ChatSeam | undefined,
+  workspace: string,
+  sessionId: string,
+): Promise<ResolvedSeam> {
+  if (seam?.model) {
+    return { model: seam.model, protocol: 'openai-completions', reasoningLevel: 'medium' };
+  }
+  const resolved = await getSessionModel(workspace, sessionId);
+  return {
+    model: resolved.model,
+    protocol: resolved.protocol,
+    reasoningLevel: await sessionReasoningLevel(workspace, sessionId),
+  };
 }

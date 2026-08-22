@@ -89,7 +89,7 @@ const json = (body) => ({
   const s1 = await res.text();
   ok('chat: pause at ask_user with expectsAnswer', s1.includes('approval-pending') && s1.includes('"expectsAnswer":true'));
 
-  // Approve with an answer — answer feeds back as the tool result, no execute.
+  // Approve on an UNKNOWN session: no pending approval → 400.
   res = await app2.request('/api/chat/approve', json({
     workspace: wsDir,
     sessionId: 'sess-2',
@@ -98,7 +98,8 @@ const json = (body) => ({
     decision: 'approve',
     answer: 'port 3210',
   }));
-  assert.equal(res.status, 400, 'unknown session rejected before any answer flow'); // sessionId wrong — see below
+  assert.equal(res.status, 400, 'unknown session has no pending approval');
+  ok('approve: unknown session rejected (no pending)', true);
 }
 
 // 2b. The approve flow must run against the session the chat created.
@@ -146,7 +147,38 @@ const json = (body) => ({
   ok('deny: refusal fed back to the model', s2.includes('user denied'));
 }
 
-// 4. Validation paths stay loud.
+// 4. Multi-pending queue: two ask tools in one LLM turn — pausing at the
+//    first; approving it re-surfaces the SECOND as approval-pending; approving
+//    that continues the loop to the next turn.
+{
+  const app2 = makeApp([
+    {
+      toolCalls: [
+        { toolCallId: 'u1', toolName: 'ask_user', args: { question: 'q1?' } },
+        { toolCallId: 'u2', toolName: 'ask_user', args: { question: 'q2?' } },
+      ],
+    },
+    { text: 'all done' },
+  ]);
+  const res1 = await app2.request('/api/chat', json(chatBody({ messageId: 'm4', message: 'multi' })));
+  const s1 = await res1.text();
+  const sid = /\{"type":"session","sessionId":"([^"]+)"\}/.exec(s1)?.[1];
+
+  let res = await app2.request('/api/chat/approve', json({
+    workspace: wsDir, sessionId: sid, messageId: 'm4', toolCallId: 'u1', decision: 'approve', answer: 'a1',
+  }));
+  assert.equal(res.status, 200);
+  const s2 = await res.text();
+  ok('multi-pending: second ask_user re-surfaced after first approve', s2.includes('approval-pending') && s2.includes('"toolCallId":"u2"'));
+
+  res = await app2.request('/api/chat/approve', json({
+    workspace: wsDir, sessionId: sid, messageId: 'm4', toolCallId: 'u2', decision: 'approve', answer: 'a2',
+  }));
+  const s3 = await res.text();
+  ok('multi-pending: second approve continues the loop', s3.includes('0:"all done"'));
+}
+
+// 5. Validation paths stay loud.
 {
   const app2 = makeApp([{ text: 'x' }]);
   let r = await app2.request('/api/chat', json({ workspace: wsDir })); // no message

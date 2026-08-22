@@ -9,11 +9,9 @@ import {
   bindSession,
   buildTurnMessages,
   getHarness,
-  getSessionModel,
   sessionMode,
-  sessionReasoningLevel,
 } from '../server.js';
-import type { ChatSeam } from './seam.js';
+import { resolveSeam, type ChatSeam } from './seam.js';
 
 /**
  * POST /api/chat/approve — resume a paused turn (ADR-0011, pause/resume
@@ -54,12 +52,7 @@ export async function handleChatApprove(req: Request, seam?: ChatSeam): Promise<
   }
 
   const messages = await buildTurnMessages(harness);
-  const resolved = seam?.model
-    ? { model: seam.model, protocol: 'openai-completions' as const }
-    : await getSessionModel(body.workspace, body.sessionId);
-  const reasoningLevel = seam?.model
-    ? ('medium' as const)
-    : await sessionReasoningLevel(body.workspace, body.sessionId);
+  const { model, protocol, reasoningLevel } = await resolveSeam(seam, body.workspace, body.sessionId);
 
   return createDataStreamResponse({
     async execute(writer) {
@@ -93,11 +86,11 @@ export async function handleChatApprove(req: Request, seam?: ChatSeam): Promise<
         return;
       }
       const opts: StreamLoopOpts = {
-        model: resolved.model,
+        model,
         store,
         writer,
         messageId: body.messageId,
-        protocol: resolved.protocol,
+        protocol,
         reasoningLevel,
       };
       if (seam?.streamTextCall) opts.streamTextCall = seam.streamTextCall;
