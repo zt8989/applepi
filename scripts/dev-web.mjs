@@ -1,16 +1,19 @@
-// `pnpm dev` (ADR-0017): build the server (build-first convention), ensure the
-// shared server is running, then start the web shell against it. The web app
-// itself no longer owns a backend — it attaches like any other client.
+// `pnpm dev` (ADR-0017): build the server (build-first convention — dynamic
+// import so the build really runs first), ensure the shared server is
+// running, then start the web shell against it. The web app itself no longer
+// owns a backend — it attaches like any other client.
 import { spawn, spawnSync } from 'node:child_process';
-import { ensureServer } from '@applepi/server';
 
 const shell = process.platform === 'win32';
-const build = spawnSync('pnpm', ['--filter', '@applepi/server', 'build'], {
+// shell:true routes args through cmd — pass one command string to avoid
+// Node 24 DEP0190 (unescaped arg concatenation).
+const build = spawnSync('pnpm --filter @applepi/server build', {
   stdio: 'inherit',
   shell,
 });
 if (build.status !== 0) process.exit(build.status ?? 1);
 
+const { ensureServer } = await import('@applepi/server');
 const { url } = await ensureServer();
 console.log(`applepi server: ${url}`);
 

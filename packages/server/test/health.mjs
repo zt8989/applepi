@@ -39,14 +39,14 @@ function ok(name) {
   ok('startServer listens on 127.0.0.1 and answers health over HTTP');
 }
 
-// 4. Port config: APPLEPI_PORT honored, defaults otherwise.
+// 4. Port config: APPLEPI_PORT honored; invalid values fail fast (P11 spirit).
 {
   assert.equal(serverPort({}), DEFAULT_PORT);
   assert.equal(serverPort({ APPLEPI_PORT: '4321' }), 4321);
-  assert.equal(serverPort({ APPLEPI_PORT: 'abc' }), DEFAULT_PORT);
-  assert.equal(serverPort({ APPLEPI_PORT: '0' }), DEFAULT_PORT);
-  assert.equal(serverPort({ APPLEPI_PORT: '99999' }), DEFAULT_PORT);
-  ok('serverPort: APPLEPI_PORT override + invalid fallback to default');
+  for (const bad of ['abc', '0', '99999', '-1', '3.5']) {
+    assert.throws(() => serverPort({ APPLEPI_PORT: bad }), /APPLEPI_PORT/, `invalid ${bad} throws`);
+  }
+  ok('serverPort: APPLEPI_PORT override + invalid values fail fast');
 }
 
 console.log(`\nhealth: ${passed} checks passed`);

@@ -11,7 +11,7 @@ export function serverLogPath(env: NodeJS.ProcessEnv = process.env): string {
   return env.APPLEPI_LOG ?? path.join(os.homedir(), '.applepi', 'server.log');
 }
 
-export async function logServer(line: string, logPath: string = serverLogPath()): Promise<void> {
+export async function appendServerLog(line: string, logPath: string = serverLogPath()): Promise<void> {
   try {
     await appendFile(logPath, `${line}\n`, 'utf8');
   } catch {

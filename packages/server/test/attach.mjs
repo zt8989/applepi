@@ -75,8 +75,8 @@ ok('probeHealth false on dead port', !(await probeHealth(serverUrl(freePort))));
 }
 
 // 4. Busy port: a NON-health responder holds the port; our spawned child dies
-//    EADDRINUSE, the probe keeps failing (not { ok: true }), ensureServer
-//    gives up cleanly within the deadline.
+//    EADDRINUSE, the probe keeps failing (not { ok: true }), and ensureServer
+//    FAILS FAST on the child's exit instead of burning the whole deadline.
 {
   const http = await import('node:http');
   const blocker = http.createServer((req, res) => {
@@ -88,12 +88,12 @@ ok('probeHealth false on dead port', !(await probeHealth(serverUrl(freePort))));
   const t0 = Date.now();
   let threw = false;
   try {
-    await ensureServer({ timeoutMs: 2500, logPath: path.join(tmp, 'busy.log') });
+    await ensureServer({ timeoutMs: 8000, logPath: path.join(tmp, 'busy.log') });
   } catch (e) {
-    threw = /unreachable/.test(String(e.message));
+    threw = /spawn failed|unreachable/.test(String(e.message));
   }
-  ok('busy port: ensureServer rejects with unreachable error', threw);
-  ok('busy port: rejects within the deadline', Date.now() - t0 < 10000);
+  ok('busy port: ensureServer rejects with a spawn/unreachable error', threw);
+  ok('busy port: rejects FAST (child exit, not the full deadline)', Date.now() - t0 < 4000);
   await new Promise((r) => blocker.close(r));
   setPort(undefined);
 }

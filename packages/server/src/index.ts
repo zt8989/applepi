@@ -2,11 +2,11 @@ import { serve } from '@hono/node-server';
 import { pathToFileURL } from 'node:url';
 import { createApp } from './app.js';
 import { DEFAULT_PORT, serverPort } from './config.js';
-import { logServer } from './log.js';
+import { appendServerLog } from './log.js';
 
 export { DEFAULT_PORT, serverPort } from './config.js';
 export { createApp } from './app.js';
-export { serverLogPath, logServer } from './log.js';
+export { serverLogPath, appendServerLog } from './log.js';
 export { ensureServer, probeHealth, serverUrl, spawnServer } from './attach.js';
 
 export interface RunningServer {
@@ -24,7 +24,7 @@ export async function startServer(port: number = serverPort()): Promise<RunningS
   const server = serve(
     { fetch: app.fetch, hostname: '127.0.0.1', port },
     async (info) => {
-      await logServer(`listening 127.0.0.1:${info.port} pid=${process.pid} (${new Date().toISOString()})`);
+      await appendServerLog(`listening 127.0.0.1:${info.port} pid=${process.pid} (${new Date().toISOString()})`);
     },
   );
   await new Promise<void>((resolve, reject) => {
