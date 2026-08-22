@@ -4,7 +4,7 @@
 
 **Blocked by:** 01（服务端与 attach 函数存在）；建议在 02 之后收尾（TUI 成为第二个心跳源后一并验证）。
 
-**Status:** ready-for-agent
+**Status:** superseded —— 2026-08-22 按 /to-tickets 重拆为 9 张垂直切片（新 09），本票范围已并入；保留作历史。
 
 - [ ] 服务端记录客户端心跳（attach 注册 + 周期续命 API），无客户端 5 分钟自动退出；SIGINT 立即退
 - [ ] 客户端（web 壳 + TUI）统一心跳实现（共享 attach 函数），单客户端退出/覆盖场景正确

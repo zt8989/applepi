@@ -4,7 +4,7 @@
 
 **Blocked by:** 01（服务端抽取 + web 壳）。
 
-**Status:** ready-for-agent
+**Status:** superseded —— 2026-08-22 按 /to-tickets 重拆为 9 张垂直切片（新 06–08），本票范围已并入；保留作历史。
 
 - [ ] `apps/tui` 建包（Ink 5）：底部输入区（Enter 发送、Shift+Enter 换行）、消息流区、行内批准提示；`/exit` 退出
 - [ ] 启动即 ensure server（共享 attach 函数）并注册启动 cwd 到 manifest；该工作区作用域内 `/sessions` / `/resume` / `/new` 可用

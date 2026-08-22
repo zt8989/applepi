@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** superseded —— 2026-08-22 按 /to-tickets 重拆为 9 张垂直切片（新 01–05），本票范围已并入；保留作历史。
 
 - [ ] `packages/server` 建包：Hono app，`/api/health` 返回 ok；所有 agent 路由按现有契约迁移（请求/响应 body 与 data-stream 线格式不变）；`streamTextCall` 注入缝存在（测试用假 LLM）
 - [ ] harness 缓存与全部会话/工作区/配置操作自 `apps/web/lib/server.ts` 迁入，web 不再持有后端
