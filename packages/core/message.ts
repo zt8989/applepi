@@ -56,8 +56,10 @@ export function toText(content: string | MessagePart[] | null | undefined): stri
   return '';
 }
 
-/** True when a merged result text looks like a tool error report. */
-function looksError(result: unknown): boolean {
+/** True when a merged result text looks like a tool error report. Shared by
+ *  `mergeToolResults` and the streaming client (deepen #03 follow-up): one
+ *  predicate, no hand-rolled regexes on either side of the wire. */
+export function isErrorResult(result: unknown): boolean {
   return /^(ERROR|BLOCKED)/.test(String(result));
 }
 
@@ -97,7 +99,7 @@ export function mergeToolResults(messages: ThreadMessage[]): ThreadMessage[] {
           parts[idx] = {
             ...target,
             result: part.result,
-            isError: looksError(part.result),
+            isError: isErrorResult(part.result),
           };
         }
         out[i] = { ...holder, content: parts };

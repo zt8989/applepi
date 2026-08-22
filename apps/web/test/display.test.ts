@@ -12,10 +12,10 @@ import {
   contextLimit,
   formatTokens,
   estimateUsage,
-} from '../lib/display.ts';
+} from '../lib/display';
 
 let passed = 0;
-function ok(name) {
+function ok(name: string) {
   passed++;
   console.log(`  ok - ${name}`);
 }
@@ -41,7 +41,10 @@ function ok(name) {
 {
   assert.equal(textOf('plain'), 'plain');
   assert.equal(
-    textOf([{ type: 'text', text: 'hi' }, { type: 'tool-call', toolCallId: 't1', toolName: 'bash', args: {} }]),
+    textOf([
+      { type: 'text', text: 'hi' },
+      { type: 'tool-call', toolCallId: 't1', toolName: 'bash', args: {} } as any,
+    ]),
     'hi {"type":"tool-call","toolCallId":"t1","toolName":"bash","args":{}}',
   );
   ok('textOf: text parts plus JSON-serialized non-text parts');

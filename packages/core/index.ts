@@ -22,6 +22,7 @@ export {
   toText,
   mergeToolResults,
   pendingApproval,
+  isErrorResult,
   type MessagePart,
   type ThreadMessage,
   type PendingApproval,

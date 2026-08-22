@@ -8,7 +8,7 @@ import {
   type ExternalStoreAdapter,
   type ThreadMessageLike,
 } from '@assistant-ui/react';
-import { toText, mergeToolResults, pendingApproval } from '@applepi/core/message';
+import { toText, mergeToolResults, pendingApproval, isErrorResult } from '@applepi/core/message';
 import type {
   ApproveRequestBody,
   ChatRequestBody,
@@ -465,7 +465,7 @@ export function useChatStore(): ChatStore {
                 ...m,
                 content: (m.content as any[]).map((p) =>
                   p.type === 'tool-call' && p.toolCallId === toolCallId
-                    ? { ...p, result, isError: /^(ERROR|BLOCKED)/.test(String(result)) }
+                    ? { ...p, result, isError: isErrorResult(result) }
                     : p,
                 ),
               }

@@ -1,12 +1,14 @@
 // Plain-node unit test for the shared message contract (deepen #03).
 // Covers: toText (string + parts), mergeToolResults (tool -> owning
-// assistant tool-call part), pendingApproval (pause/resume re-surface).
+// assistant tool-call part), pendingApproval (pause/resume re-surface),
+// isErrorResult (shared error-result predicate).
 // Pure functions — no React, no AI SDK, no file I/O.
 import assert from 'node:assert/strict';
 import {
   toText,
   mergeToolResults,
   pendingApproval,
+  isErrorResult,
 } from '../dist/index.js';
 
 let passed = 0;
@@ -143,6 +145,19 @@ function ok(name) {
   const p = pendingApproval(msgs);
   assert.equal(p?.toolCallId, 'fresh', 'latest unresolved call wins');
   ok('pendingApproval: resolves against the newest assistant message');
+}
+
+// 8. isErrorResult (shared predicate, deepen #03 follow-up): ERROR/BLOCKED are
+//    errors, other results are not. Serves both core mergeToolResults and the
+//    streaming client's attachToolResult.
+{
+  assert.equal(isErrorResult('ERROR: boom'), true, 'ERROR prefix is an error');
+  assert.equal(isErrorResult('BLOCKED by denylist'), true, 'BLOCKED prefix is an error');
+  assert.equal(isErrorResult('file.txt'), false, 'plain result is not an error');
+  assert.equal(isErrorResult({ message: 'ERROR: nested' }), false, 'objects stringify without ERROR prefix');
+  assert.equal(isErrorResult(null), false, 'null is not an error');
+  assert.equal(isErrorResult(undefined), false, 'undefined is not an error');
+  ok('isErrorResult: ERROR/BLOCKED-prefixed results flagged, others not');
 }
 
 console.log(`\nmessage: ${passed} checks passed`);
