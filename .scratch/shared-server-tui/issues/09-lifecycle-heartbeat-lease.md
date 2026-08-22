@@ -4,10 +4,10 @@
 
 **Blocked by:** 05（web 客户端就位）, 06（TUI 作为第二个心跳源就位）。
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 服务端心跳注册/续命 API；无客户端 5 分钟自退；SIGINT 立即退
-- [ ] 客户端（web 壳 + TUI）统一心跳实现（attach 函数内）
-- [ ] 客户端断开 → 当前流式段中止（请求中断后无悬挂段）
-- [ ] 双客户端验证：一方退出服务端仍活；两方皆退 5 分钟自退
-- [ ] `pnpm -r verify` 绿
+- [x] 服务端心跳（`POST /api/heartbeat` 刷新租约）+ idle guard（`APPLEPI_IDLE_TIMEOUT_MS`，默认 5 分钟，0=禁用；退出路径同步写日志后 exit）；SIGINT 立即退（既有）
+- [x] 客户端统一心跳 `startHeartbeat(url, intervalMs)`（web 壳 dev-web.mjs + TUI 入口均接入；unref 不拖住客户端退出）
+- [x] 客户端断开 → 当前流式段中止（fetch abort → 服务端写失败即段结束，既有语义）
+- [x] 进程级测试（heartbeat.mjs 10 项）：app 级 refresh 钩子、短超时子进程保活/熄火、idle-exit 日志、**双客户端**——一方退出服务端仍活、双方退出才熄
+- [x] `pnpm -r verify` 绿（23 套件 EXIT 0）

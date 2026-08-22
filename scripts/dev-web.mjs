@@ -13,9 +13,11 @@ const build = spawnSync('pnpm --filter @applepi/server build', {
 });
 if (build.status !== 0) process.exit(build.status ?? 1);
 
-const { ensureServer } = await import('@applepi/server');
+const { ensureServer, startHeartbeat } = await import('@applepi/server');
 const { url } = await ensureServer();
 console.log(`applepi server: ${url}`);
+// Renew the server's idle lease while this web-shell process lives.
+startHeartbeat(url);
 
 const child = spawn('pnpm', ['--filter', '@applepi/web', 'dev'], {
   stdio: 'inherit',

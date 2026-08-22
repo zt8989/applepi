@@ -1,5 +1,5 @@
 import { render } from 'ink';
-import { ensureServer } from '@applepi/server';
+import { ensureServer, startHeartbeat } from '@applepi/server';
 import { App } from './app.js';
 
 // ADR-0017 attach: probe → spawn → attach (first starter boots the server).
@@ -10,4 +10,6 @@ if (!process.stdin.isTTY) {
   process.exit(0);
 }
 const { url } = await ensureServer();
+// Renew the server's idle lease while this TUI process lives (ticket 09).
+startHeartbeat(url);
 render(<App serverUrl={url} cwd={process.cwd()} />);

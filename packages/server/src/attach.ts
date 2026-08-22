@@ -64,6 +64,21 @@ export interface EnsureResult {
 }
 
 /**
+ * Client heartbeat loop (ADR-0017 §6): renew the server's idle lease so an
+ * attached client keeps the shared server alive. unref'd — clients may exit
+ * without dragging the timer. Returns stop() for cleanup.
+ */
+export function startHeartbeat(url: string, intervalMs = 30000): { stop: () => void } {
+  const id = setInterval(() => {
+    void fetch(`${url}/api/heartbeat`, { method: 'POST' }).catch(() => {
+      /* server gone: next ensure will spawn a fresh one */
+    });
+  }, intervalMs);
+  id.unref?.();
+  return { stop: () => clearInterval(id) };
+}
+
+/**
  * Ensure the shared server is reachable: probe; if absent, spawn it once and
  * keep probing until it answers (EADDRINUSE self-heal — a racing spawner's
  * server coming up answers the same probe). Fails fast when the spawned child

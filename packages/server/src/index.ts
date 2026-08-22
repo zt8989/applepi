@@ -2,12 +2,14 @@ import { serve } from '@hono/node-server';
 import { pathToFileURL } from 'node:url';
 import { createApp } from './app.js';
 import { DEFAULT_PORT, serverPort } from './config.js';
+import { createIdleGuard, idleTimeoutFromEnv } from './idle-guard.js';
 import { appendServerLog } from './log.js';
 
 export { DEFAULT_PORT, serverPort } from './config.js';
 export { createApp } from './app.js';
 export { serverLogPath, appendServerLog } from './log.js';
-export { ensureServer, probeHealth, serverUrl, spawnServer } from './attach.js';
+export { createIdleGuard, idleTimeoutFromEnv } from './idle-guard.js';
+export { ensureServer, probeHealth, serverUrl, spawnServer, startHeartbeat } from './attach.js';
 export {
   sessionsRoot,
   unslugWorkspace,
@@ -81,7 +83,8 @@ export interface RunningServer {
  * (ADR-0017 lifecycle). Port 0 picks a free port (tests).
  */
 export async function startServer(port: number = serverPort()): Promise<RunningServer> {
-  const app = createApp();
+  const idle = createIdleGuard({ timeoutMs: idleTimeoutFromEnv() });
+  const app = createApp({ refresh: idle.refresh });
   const server = serve(
     { fetch: app.fetch, hostname: '127.0.0.1', port },
     async (info) => {
