@@ -13,7 +13,7 @@
   },
   "scripts": {
     "build": "pnpm --filter @applepi/core build && tsc -p tsconfig.json",
-    "test": "pnpm --filter @applepi/core build && tsc -p tsconfig.json && node test/memory.mjs && node test/skills.mjs && node test/todo.mjs && node test/plan.mjs && node test/goal.mjs && node test/tools.mjs && node test/denylist.mjs"
+    "test": "pnpm --filter @applepi/core build && tsc -p tsconfig.json && node test/memory.mjs && node test/skills.mjs && node test/todo.mjs && node test/plan.mjs && node test/goal.mjs && node test/ask-user.mjs && node test/tools.mjs && node test/denylist.mjs"
   },
   "dependencies": {
     "@applepi/core": "workspace:*",

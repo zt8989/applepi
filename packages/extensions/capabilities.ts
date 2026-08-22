@@ -1,4 +1,5 @@
 import type { Capability } from './capability.js';
+import { createAskUser } from './ask-user.js';
 import { createGoal } from './goal.js';
 import { createMemory } from './memory.js';
 import { createPlan } from './plan.js';
@@ -8,8 +9,8 @@ import { createTodo } from './todo.js';
 /**
  * Ready-made capability registry (ADR-0015). The app resolves a bundle's
  * `capabilities` ids here. Ids without a factory yet (web / subagent /
- * workflow / ask_user) are simply absent — the app skips them, so a bundle may
- * declare more than is currently implemented.
+ * workflow) are simply absent — the app skips them, so a bundle may declare
+ * more than is currently implemented.
  */
 export const CAPABILITIES: Record<string, Capability> = {
   memory: createMemory(),
@@ -17,6 +18,7 @@ export const CAPABILITIES: Record<string, Capability> = {
   todo: createTodo(),
   plan: createPlan(),
   goal: createGoal(),
+  ask_user: createAskUser(),
 };
 
 /** Resolve a capability by id (undefined if no factory exists yet). */

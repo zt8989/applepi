@@ -7,5 +7,6 @@ export type { SkillsOptions } from './skills.js';
 export { createTodo } from './todo.js';
 export { createPlan } from './plan.js';
 export { createGoal } from './goal.js';
+export { createAskUser } from './ask-user.js';
 export type { Capability, CapabilityEnv } from './capability.js';
 export { CAPABILITIES, getCapability } from './capabilities.js';

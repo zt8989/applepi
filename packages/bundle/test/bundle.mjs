@@ -99,19 +99,19 @@ function freshHarness() {
 }
 
 // 6. (deepen #01 - a) Assembled prompt lists only real tools, no unwired
-//    capability names. standard's web/subagent/workflow/ask_user ids have no
-//    factory yet → they must NOT appear in the prompt.
+//    capability names. standard's web/subagent/workflow ids have no factory
+//    yet → they must NOT appear in the prompt.
 {
   const h = freshHarness();
   const spec = standardBundle.make(env);
   enableBundleSpec(h, spec);
   const prompt = assembleFlatPrompt(h, spec, { app: ['app fragment'] });
   // Landed tools are listed.
-  for (const tool of ['bash', 'str_replace_editor', 'memory_read', 'memory_write', 'skill_load', 'todo', 'plan', 'goal']) {
+  for (const tool of ['bash', 'str_replace_editor', 'memory_read', 'memory_write', 'skill_load', 'todo', 'plan', 'goal', 'ask_user']) {
     assert.ok(prompt.includes(tool), `assembled standard prompt lists landed tool: ${tool}`);
   }
   // Declared-but-unwired names are absent.
-  for (const unwired of ['web search', 'subagent', 'workflow', 'ralph', 'ask_user']) {
+  for (const unwired of ['web search', 'subagent', 'workflow', 'ralph']) {
     assert.ok(!prompt.includes(unwired), `assembled standard prompt does not claim unwired: ${unwired}`);
   }
   assert.ok(prompt.includes('## Permission & Capability'), 'shared permission section present');
@@ -148,7 +148,8 @@ function freshHarness() {
   }
   assert.ok(warns.length > 0, 'enableBundleSpec(standard) emitted at least one warn');
   assert.ok(warns.some((w) => w.includes('web')), 'warn names an unwired id (web)');
-  assert.ok(warns.some((w) => w.includes('ask_user')), 'warn names an unwired id (ask_user)');
+  assert.ok(warns.some((w) => w.includes('workflow')), 'warn names an unwired id (workflow)');
+  assert.ok(!warns.some((w) => w.includes('ask_user')), 'wired ask_user no longer warns');
   ok(`(c) enableBundleSpec warns on declared-but-unwired ids (${warns.length} warns)`);
 }
 
