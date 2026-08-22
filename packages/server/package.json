@@ -1,0 +1,24 @@
+{
+  "name": "@applepi/server",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "pnpm --filter @applepi/core build && tsc -p tsconfig.json && node test/health.mjs && node test/attach.mjs"
+  },
+  "dependencies": {
+    "@applepi/core": "workspace:*",
+    "@hono/node-server": "^2.1.1",
+    "hono": "^4.13.3"
+  }
+}
