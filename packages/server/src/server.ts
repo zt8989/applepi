@@ -310,12 +310,18 @@ export async function sessionReasoningLevel(
 ): Promise<ReasoningLevel> {
   const store = new SessionStore({ baseDir: SESSIONS_DIR(), workspace: workspaceToSlug(workspace), sessionId });
   const overrides = await store.loadConfig();
-  const settings = await loadSettings().catch(() => ({ providers: {}, general: undefined } as any));
-  return resolveSessionConfig(
-    { reasoningLevel: overrides.reasoningLevel },
-    settings.general,
-    mergedProviders(settings),
-  ).reasoningLevel;
+  try {
+    const settings = await loadSettings().catch(() => ({ providers: {}, general: undefined } as any));
+    return resolveSessionConfig(
+      { reasoningLevel: overrides.reasoningLevel },
+      settings.general,
+      mergedProviders(settings),
+    ).reasoningLevel;
+  } catch {
+    // Resilience: a missing/empty/malformed provider registry (e.g.
+    // `providers: []`) must not kill the turn — fall back to the default.
+    return DEFAULT_REASONING_LEVEL;
+  }
 }
 
 /** Whether the "open config file" action is available on this platform (Q4/Q9). */

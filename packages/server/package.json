@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "test": "tsc -p tsconfig.json && node test/health.mjs && node test/attach.mjs && node test/session-workspaces.mjs"
+    "test": "tsc -p tsconfig.json && node test/health.mjs && node test/attach.mjs && node test/session-workspaces.mjs && node test/chat-api.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^1.2.12",

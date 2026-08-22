@@ -1,0 +1,19 @@
+import type { StreamLoopOpts } from '@applepi/core';
+
+/**
+ * Request-level test seam (ADR-0017 §8): createApp accepts per-route seams so
+ * route tests run without a browser AND without a real provider — an injected
+ * model stub + a fake streamText, exactly like core's stream-loop tests.
+ * Production callers (web shell delegate routes) never pass a seam.
+ *
+ * The streamText type is DERIVED from core's StreamLoopOpts (not imported from
+ * 'ai' directly): pnpm installs a physically separate 'ai' copy per package,
+ * and two `typeof import('ai').streamText` declarations from different copies
+ * are unrelated types (TS2719). One source of truth keeps them identical.
+ */
+export interface ChatSeam {
+  /** Injected model (skips getSessionModel resolution). */
+  model?: any;
+  /** Injected streamText (fake LLM). */
+  streamTextCall?: StreamLoopOpts['streamTextCall'];
+}

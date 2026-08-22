@@ -52,6 +52,9 @@ export {
   handleWorkspacesPatch,
   handleWorkspacesPost,
 } from './routes/workspaces.js';
+export { handleChat } from './routes/chat.js';
+export { handleChatApprove } from './routes/approve.js';
+export type { ChatSeam } from './routes/seam.js';
 
 export interface RunningServer {
   port: number;

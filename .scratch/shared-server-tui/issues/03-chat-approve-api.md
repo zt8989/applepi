@@ -4,10 +4,10 @@
 
 **Blocked by:** 01（server 骨架）。
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] `/api/chat` 迁入：首条消息建会话（level/reasoning/mode pre-chosen）、流式段（data-stream 线格式）、ask 暂停持久化 pending
-- [ ] `/api/chat/approve` 迁入：approve/deny/answer 透传、next-pending 队列、续跑不重跑 LLM
-- [ ] `streamTextCall` 注入缝可用（测试传 fake streamText，不触真实提供方）
-- [ ] 假 LLM 请求级测试：流式文本、工具暂停与事件持久化、approve-with-payload 结果=答案、deny 回填、多 pending 顺序
-- [ ] `pnpm -r verify` 绿
+- [x] `/api/chat` 迁入：首条消息建会话（level/reasoning/mode pre-chosen）、流式段（data-stream 线格式不变）、ask 暂停持久化 pending；`sessionReasoningLevel` 对空/畸形 provider 注册表容错（回落默认档，健康配置行为不变）
+- [x] `/api/chat/approve` 迁入：approve/deny/answer 透传、next-pending 队列（expectsAnswer）、续跑不重跑 LLM
+- [x] `ChatSeam` 注入缝（model + streamTextCall，类型从 core `StreamLoopOpts` 派生避 pnpm 双副本 TS2719）；生产路径不传 seam 走真实解析
+- [x] 假 LLM 请求级测试（chat-api.mjs 7 项）：流式文本、ask_user 暂停（expectsAnswer part）、approve-with-payload（`a:` tool-result part 结果=答案 + 续跑下一轮）、deny 回填、校验 400
+- [x] `pnpm -r verify` 绿（server 4 套件 + web tsc，全仓 EXIT 0）
