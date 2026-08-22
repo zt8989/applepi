@@ -48,8 +48,6 @@ export interface StreamLoopOpts {
   protocol?: ProviderProtocol;
   /** Effective reasoning level for this run (session override ?? global default). */
   reasoningLevel?: ReasoningLevel;
-  /** Persist/emit a pending approval. Default: `tool/approval-pending` event. */
-  onPending?: (p: PendingApproval) => void | Promise<void>;
   /** Test seam: the streamText call used per LLM turn. */
   streamTextCall?: typeof import('ai').streamText;
   /** Override the Langfuse tracer (defaults to the env-configured one). */
@@ -95,10 +93,6 @@ export function pendingToolCalls(messages: any[]): PendingApproval[] {
   return [];
 }
 
-async function defaultPendingWriter(store: SessionStore | null, p: PendingApproval): Promise<void> {
-  await store?.appendEvent('tool/approval-pending', p);
-}
-
 function streamToolResult(writer: DataStreamWriter, toolCallId: string, result: string): void {
   writer.write(formatDataStreamPart('tool_result', { toolCallId, result }));
 }
@@ -120,6 +114,13 @@ export async function runLoopStreamSegment(
     input: [...messages].reverse().find((m: any) => m?.role === 'user')?.content,
   });
   let turn = 0;
+  // Lifecycle (ADR-0018): a turn is one streamed segment (one HTTP request's
+  // loop execution, however many LLM iterations it runs); start is written
+  // once at the segment head, end once at whichever finish reason terminates
+  // the segment. An approval pause closes the turn with `tool-calls` — the
+  // pause itself lives in the open tool_call interval; a resumed segment is a
+  // new turn.
+  await opts.store?.appendEvent('turn/start', {});
   try {
     while (turn < maxTurns) {
       turn++;
@@ -164,20 +165,38 @@ export async function runLoopStreamSegment(
         await opts.store?.appendMessage('assistant', assistantParts);
       }
 
-      if (toolCalls.length === 0) return { finishReason: 'stop' };
+      if (toolCalls.length === 0) {
+        await opts.store?.appendEvent('turn/end', { finishReason: 'stop' });
+        return { finishReason: 'stop' };
+      }
+
+      // Lifecycle (ADR-0018): open a `tool_call` interval for EVERY tool call
+      // at generation, BEFORE any classification — pending state (including
+      // later approvals in this same turn) is derived from open intervals, so
+      // this pass must complete even when the first call pauses the segment.
+      for (const tc of toolCalls) {
+        const spec = harness.getTool(tc.toolName);
+        await opts.store?.appendEvent('tool_call/start', {
+          toolCallId: tc.toolCallId,
+          toolName: tc.toolName,
+          args: tc.args,
+          expectsAnswer: spec?.expectsAnswer === true,
+        });
+      }
 
       for (const tc of toolCalls) {
         const mode = await classifyApproval(harness, tc.toolName, tc.args);
         if (mode === 'ask') {
-          const spec = harness.getTool(tc.toolName);
-          const expectsAnswer = spec?.expectsAnswer === true;
+          const expectsAnswer = harness.getTool(tc.toolName)?.expectsAnswer === true;
           const pending: PendingApproval = {
             toolCallId: tc.toolCallId,
             toolName: tc.toolName,
             args: tc.args,
             expectsAnswer,
           };
-          await (opts.onPending ?? ((p) => defaultPendingWriter(opts.store, p)))(pending);
+          // The tool_call interval stays open — the pending approval IS the
+          // open interval (ADR-0018); only the client-facing data part is
+          // streamed here, no store event.
           opts.writer.writeData({
             type: 'approval-pending',
             toolCallId: pending.toolCallId,
@@ -185,16 +204,19 @@ export async function runLoopStreamSegment(
             args: pending.args,
             expectsAnswer,
           });
+          await opts.store?.appendEvent('turn/end', { finishReason: 'tool-calls' });
           return { finishReason: 'tool-calls' };
         }
         await executeApprovedTool(harness, messages, tc, 'approve', opts, traceHandle);
       }
       // All tools executed inline -> next LLM turn.
     }
+    await opts.store?.appendEvent('turn/end', { finishReason: 'max-turns' });
     return { finishReason: 'max-turns' };
   } catch (e: any) {
     // Surface errors to the caller: the web route's onError turns this into an
     // error part the client can display, instead of a silently-truncated stream.
+    await opts.store?.appendEvent('turn/end', { finishReason: 'error' });
     throw new Error(`runLoopStreamSegment failed: ${e?.message ?? String(e)}`);
   }
 }
@@ -237,6 +259,12 @@ export async function executeApprovedTool(
     await harness.executeTool(tctx);
     res = tctx.toolResult ?? '';
   }
+  // Lifecycle (ADR-0018): the decision closes the tool_call interval (deny
+  // included — an unclosed interval means *pending*, so refusal must close);
+  // the result write back is its own interval (start = write-back begins,
+  // end = result fully landed).
+  await opts.store?.appendEvent('tool_call/end', { toolCallId: tc.toolCallId, decision });
+  await opts.store?.appendEvent('tool_result/start', { toolCallId: tc.toolCallId });
   span?.end({ result: res });
   streamToolResult(opts.writer, tc.toolCallId, res);
   const toolMsg: ThreadMessage = {
@@ -245,4 +273,5 @@ export async function executeApprovedTool(
   };
   messages.push(toolMsg);
   await opts.store?.appendMessage('tool', toolMsg.content);
+  await opts.store?.appendEvent('tool_result/end', { toolCallId: tc.toolCallId });
 }

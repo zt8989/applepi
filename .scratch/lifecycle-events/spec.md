@@ -44,8 +44,8 @@ jsonl 会话文件目前混入两类不相干的事件：UI 状态类（`title/s
   - `turn/start` → `{}`；`turn/end` → `{ finishReason }`
   - `tool_call/start` → `{ toolCallId, toolName, args, expectsAnswer }`；`tool_call/end` → `{ toolCallId, decision: 'approve' | 'deny' }`
   - `tool_result/start` / `tool_result/end` → `{ toolCallId }`
-  - `system_prompt/set` → `{ sections: string[] }`（沿用既有载荷）
-- **turn 的边界**：一次 LLM 生成迭代（loop 的一次 while 迭代）即一个 turn；遇 ask 工具暂停时写 `turn/end { finishReason: 'tool-calls' }`，暂停本身由 tool_call 开放区间表达；审批恢复后的后续生成为新 turn。`turn/end` 不悬跨 HTTP 段。
+  - `system_prompt/set` → `{ sections: string[] }`（沿用既有载荷形状；实现取组装来源标识，当前为 `[mode]`）
+- **turn 的边界**：一个 turn = **一次流式段**（`runLoopStreamSegment` 的一次调用 = 一个 HTTP 请求内的 loop 执行，可含多轮自动工具迭代）；遇 ask 工具暂停时写 `turn/end { finishReason: 'tool-calls' }`，暂停本身由 tool_call 开放区间表达；审批恢复后的续跑段是新 turn。`turn/end` 不悬跨 HTTP 段。（设计说明：若按 while 迭代切 turn，「自动迭代继续」的中间轮次在 finishReason 枚举 stop/tool-calls/max-turns/error 中无对应终因——枚举本就是段级的——故取段粒度。）
 - **tool_call 生命周期**：生成 pass 为**每条** tool-call part 写 `tool_call/start`（auto 工具紧随写 end）；ask 工具保持开放直到审批决定——approve 后执行完成写 `tool_call/end { decision: 'approve' }`，deny 直接写 `{ decision: 'deny' }`（不执行工具，但区间照常闭合）。
 - **tool_result 边界**：工具执行完成、结果开始写回（写 result part + 消息行）前写 `tool_result/start`，结果完整写入后写 `tool_result/end`。本次实现结果仍为一次性写出（非流式），start/end 界定「写回过程」两端，为将来流式化保留区间语义。
 - **审批推导原语**：会话存储层新增「第一个未闭合 tool_call」推导原语（按 toolCallId 配对 start/end，从头部顺序扫描）；`lastEvent` 及其调用方退役。执行中崩溃导致的开放区间会被误读为待审批——可接受（与现状等价），不在载荷中加 phase 区分字段。

@@ -72,8 +72,11 @@ export async function handleChat(req: Request, seam?: ChatSeam): Promise<Respons
 
   // A brand-new session persists its initial flat system prompt once, AFTER
   // the pre-chosen level/reasoning so the replay record matches the first turn.
+  // The assembly is an atomic, non-interruptible action — a single
+  // `system_prompt/set` event, no start/end pair (ADR-0018).
   if (isNew) {
     await store.appendMessage('system', buildSystemPrompt(harness));
+    await store.appendEvent('system_prompt/set', { sections: [mode] });
   }
 
   const messages = await buildTurnMessages(harness);

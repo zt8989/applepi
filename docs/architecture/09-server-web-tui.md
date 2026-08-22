@@ -36,8 +36,8 @@ core 的 `runLoopStreamSegment`：`streamText` 变体，token 级分段流 + **�
 web 会话对工具执行采用**前端批准**：
 
 - `ToolSpec.approval`（`auto` / `ask` / 按参数函数，缺省 `ask`）分类；
-- `ask` 工具暂停并持久化 `tool/approval-pending` 事件；`POST /api/chat/approve`
-  从暂停点续跑；
+- `ask` 工具暂停——其 `tool_call` 开放区间即待审批状态（ADR-0018，无专门事件）；
+  `POST /api/chat/approve` 扫描未闭合区间校验后从暂停点续跑；
 - 读类（`memory_read` / `skill_load` / `view` / bash 只读命令）自动执行，写/执行类须批准；
 - **拒绝 = 工具结果回填模型**（模型可自愈）。
 
@@ -53,7 +53,9 @@ web 会话对工具执行采用**前端批准**：
   （`bindSession` → `saveConfig({ workspace, mode })`）；
   恢复走 `sessionMode` / `Harness.resume` 读 config 文件重建匹配 spec；
 - 会话动作 API（`PATCH /api/session`）：rename / pin / unpin / archive / unarchive /
-  notify / level / reasoning / model；`GET /api/session?format=jsonl` 导出；级别切换走
+  notify / level / reasoning / model；`GET /api/session?format=jsonl` 导出；
+  rename/pin/unpin/notify 写旁挂 `<id>.meta.json`（ADR-0018，last-wins，
+  jsonl 只留消息 + 过程事件）；级别切换走
   core `applyPermissionLevel`（写 `session.config.permissionLevel` 覆盖到
   `<id>.config.json>`，ADR-0016；扁平提示词下一轮自带上新级别，无重建），
   与 core `/level` 同语义；reasoning/model 同样写会话覆盖。

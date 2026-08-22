@@ -198,27 +198,54 @@ const ws = 'test-ws-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8
   ok('Harness.resume(): restores session.config identity from the config file');
 }
 
-// 13. Display metadata primitives (deepen #02): title() from title/set event,
-//    pinned()/notify() from pin/set + notify/set, defaults when absent.
+// 13. Display metadata primitives (deepen #02 + ADR-0018): title/pinned/notify
+//    from the sibling <id>.meta.json (last-wins), defaults when absent; the
+//    jsonl itself carries NO UI meta events anymore.
 {
   const id = 'sess-meta';
   const s = new SessionStore({ baseDir: tmpRoot, workspace: ws, sessionId: id });
   await s.create();
   await s.appendMessage('user', 'fix the login bug');
-  await s.appendEvent('title/set', { title: 'My explicit title' });
-  await s.appendEvent('pin/set', { pinned: true });
-  await s.appendEvent('notify/set', { enabled: true });
+  await s.updateMeta({ title: 'My explicit title', pinned: true, notify: true });
 
-  assert.equal(await s.title(), 'My explicit title', 'title/set wins over user message');
-  assert.equal(await s.pinned(), true, 'pin/set true');
-  assert.equal(await s.notify(), true, 'notify/set true');
+  assert.equal(await s.title(), 'My explicit title', 'meta title wins over user message');
+  assert.equal(await s.pinned(), true, 'meta pinned true');
+  assert.equal(await s.notify(), true, 'meta notify true');
+
+  const raw = await fs.readFile(s.filePath(), 'utf8');
+  assert.ok(!raw.includes('title/set') && !raw.includes('pin/set') && !raw.includes('notify/set'), 'jsonl free of UI meta events');
+  const onDisk = JSON.parse(await fs.readFile(s.metaPath(), 'utf8'));
+  assert.deepEqual(onDisk, { title: 'My explicit title', pinned: true, notify: true }, 'meta file holds UI state');
+
+  // updateMeta merges (last-wins per key), other keys untouched.
+  const s2 = new SessionStore({ baseDir: tmpRoot, workspace: ws, sessionId: 'sess-meta-merge' });
+  await s2.create();
+  await s2.updateMeta({ title: 'T', pinned: true, notify: true });
+  await s2.updateMeta({ pinned: false });
+  assert.equal(await s2.pinned(), false, 'unpin wins');
+  assert.equal(await s2.title(), 'T', 'title preserved across partial update');
+  assert.equal(await s2.notify(), true, 'notify preserved across partial update');
 
   const empty = new SessionStore({ baseDir: tmpRoot, workspace: ws, sessionId: 'sess-nometa' });
   await empty.create();
   assert.equal(await empty.title(), 'New Chat', 'no meta -> default title');
-  assert.equal(await empty.pinned(), false, 'no pin/set -> false');
-  assert.equal(await empty.notify(), false, 'no notify/set -> false');
-  ok('display primitives: title/pinned/notify with event defaults');
+  assert.equal(await empty.pinned(), false, 'no meta -> false');
+  assert.equal(await empty.notify(), false, 'no meta -> false');
+  ok('display primitives: title/pinned/notify from meta file, jsonl untouched');
+}
+
+// 13b. Legacy sessions (title/set events in an old jsonl, no meta file): the
+//      event is ignored — title falls back to the first user message.
+{
+  const id = 'sess-legacy';
+  const s = new SessionStore({ baseDir: tmpRoot, workspace: ws, sessionId: id });
+  await s.create();
+  await s.appendMessage('user', 'legacy session');
+  await s.appendEvent('title/set', { title: 'OLD TITLE' });
+  await s.appendEvent('pin/set', { pinned: true });
+  assert.equal(await s.title(), 'legacy session', 'legacy title/set ignored, first-user fallback');
+  assert.equal(await s.pinned(), false, 'legacy pin/set ignored, default false');
+  ok('legacy jsonl: UI meta events ignored without a meta file');
 }
 
 // 14. title() falls back to the first user message (truncated at 40 chars)

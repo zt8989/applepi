@@ -108,12 +108,17 @@ const get = (p) => app.request(p);
   assert.equal(r.status, 400, 'invalid level rejected');
 }
 
-// 5. jsonl export.
+// 5. jsonl export: contents + the meta file holding UI state (ADR-0018).
 {
   const r = await get(`/api/session?workspace=${encodeURIComponent(wsDir)}&session=sess-abc&format=jsonl`);
   assert.equal(r.status, 200);
   const raw = await r.text();
-  ok('jsonl export returns ndjson content', raw.split('\n').filter(Boolean).length >= 1 && raw.includes('title/set'));
+  const rows = raw.split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  ok('jsonl export returns parseable ndjson', rows.every((l) => l && typeof l === 'object'));
+  ok('jsonl free of UI meta events', !raw.includes('title/set') && !raw.includes('pin/set') && !raw.includes('notify/set'));
+  const slug = (await (await get('/api/workspaces')).json()).workspaces[0].slug;
+  const meta = JSON.parse(await fs.readFile(path.join(process.env.APPLEPI_SESSIONS_DIR, slug, 'sess-abc.meta.json'), 'utf8'));
+  ok('meta file holds rename/pin/notify state', meta.title === 'my session' && meta.pinned === true && meta.notify === true);
 }
 
 await fs.rm(tmpRoot, { recursive: true, force: true });

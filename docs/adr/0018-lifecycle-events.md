@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-08-22, decided via design conversation（事件分类原则：可暂停/可中断的过程必须有 start/end 区间；不允许暂停的原子操作只留单事件点）。**实现待办**：spec `.scratch/lifecycle-events/spec.md`（ready-for-agent）。
+Accepted — 2026-08-22, decided via design conversation（事件分类原则：可暂停/可中断的过程必须有 start/end 区间；不允许暂停的原子操作只留单事件点）。**同日实现落地**：core（`turn` / `tool_call` / `tool_result` 区间写入、`pendingToolCall()` 推导原语、meta 文件三原语）+ server（审批恢复切换、会话动作写 meta）+ 双端测试；spec `.scratch/lifecycle-events/spec.md`。
 
 ## Context
 
@@ -27,7 +27,7 @@ jsonl 事件行目前混入两类不相干的事件：
 | 事件 | 载荷 | 说明 |
 |---|---|---|
 | `system_prompt/set` | `{ sections: string[] }` | 原子：一次性组装，写即完成，不允许暂停 → 无 start/end |
-| `turn/start` / `turn/end` | `end: { finishReason: 'stop' \| 'tool-calls' \| 'max-turns' \| 'error' }` | 一次 LLM 生成迭代（loop 的一次 while 迭代）即一个 turn。遇 ask 工具暂停写 `end { tool-calls }`，暂停本身由 tool_call 开放区间表达；`turn/end` 不悬跨 HTTP 段 |
+| `turn/start` / `turn/end` | `end: { finishReason: 'stop' \| 'tool-calls' \| 'max-turns' \| 'error' }` | 一个 turn = 一次流式段（loop 的一次调用 = 一个 HTTP 请求内的执行，可含多轮自动工具迭代）。遇 ask 工具暂停写 `end { tool-calls }`，暂停本身由 tool_call 开放区间表达；`turn/end` 不悬跨 HTTP 段。按 while 迭代切 turn 无法表达「自动迭代继续」的中间轮次（finishReason 枚举是段级终因），故取段粒度 |
 | `tool_call/start` / `tool_call/end` | `start: { toolCallId, toolName, args, expectsAnswer }`；`end: { toolCallId, decision: 'approve' \| 'deny' }` | 一个工具调用全生命周期：LLM 生成 → 审批（可能挂起）→ 执行/拒绝。生成 pass 为**每条** tool-call part 写 start（auto 工具紧随 end）；ask 工具保持开放直到决策——approve 执行完成后写 end，deny 直接写 end（不执行但区间闭合） |
 | `tool_result/start` / `tool_result/end` | `{ toolCallId }` | 结果**异步返回**区间：start = 结果开始写回（异步等待结束），end = 结果完整落地。本次实现结果仍一次性写出，start/end 界定写回过程两端，为将来流式结果传输预留区间语义 |
 

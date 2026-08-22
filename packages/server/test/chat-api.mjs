@@ -78,6 +78,23 @@ const json = (body) => ({
   ok('chat: text streamed (0: part)', stream.includes('0:"hi there"'));
 }
 
+// 1b. A new session records system_prompt/set (single, atomic) + turn events
+//     (ADR-0018); the jsonl holds messages + process events only.
+{
+  const app2 = makeApp([{ text: 'hi' }]);
+  const res = await app2.request('/api/chat', json(chatBody({ messageId: 'm1b' })));
+  assert.equal(res.status, 200);
+  const sid = ((await res.text()).match(/"sessionId":"([^"]+)"/) ?? [])[1];
+  const slug = (await (await app2.request('/api/workspaces')).json()).workspaces[0].slug;
+  const raw = await fs.readFile(path.join(process.env.APPLEPI_SESSIONS_DIR, slug, `${sid}.jsonl`), 'utf8');
+  const evs = raw.split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.kind === 'event');
+  const names = evs.map((e) => e.event);
+  ok('system_prompt/set recorded once (atomic, no start/end)', names.includes('system_prompt/set') && evs.find((e) => e.event === 'system_prompt/set').payload.sections.length === 1);
+  ok('turn bracket recorded', names.includes('turn/start') && names.includes('turn/end'));
+  const turnEnd = evs.find((e) => e.event === 'turn/end');
+  ok('turn/end carries finishReason stop', turnEnd.payload.finishReason === 'stop');
+}
+
 // 2. ask_user pause → approve-with-payload resume → answer IS the tool result.
 {
   const app2 = makeApp([

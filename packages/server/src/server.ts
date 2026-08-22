@@ -489,13 +489,13 @@ export async function readManifest(): Promise<Record<string, ManifestEntry>> {
 
 export interface SessionInfo {
   id: string;
-  /** Last `title/set` event, else the first user message (truncated). */
+  /** Last written title (meta), else the first user message (truncated). */
   title: string;
   /** File mtime (ISO). */
   ts: string;
-  /** Last `pin/set` event payload (default false). */
+  /** Last `pinned` meta value (default false). */
   pinned: boolean;
-  /** Last `notify/set` event payload (default false). */
+  /** Last `notify` meta value (default false). */
   notify: boolean;
 }
 
@@ -508,7 +508,7 @@ export interface WorkspaceInfo {
 }
 
 /**
- * Derive a session's display title: last `title/set` event wins, else the
+ * Derive a session's display title: last meta title wins, else the
  * first user message text (truncated), else "New Chat". Delegates to the core
  * `SessionStore.title` primitive (deepen #02) — no server-side jsonl parsing.
  */
@@ -519,12 +519,12 @@ export async function sessionTitle(
   return new SessionStore({ baseDir: SESSIONS_DIR(), workspace, sessionId: id }).title();
 }
 
-/** Read `pin/set` (last wins) via the core primitive (deepen #02). */
+/** Read `pinned` (last wins) via the core primitive (deepen #02). */
 export async function sessionPinned(workspace: string, id: string): Promise<boolean> {
   return new SessionStore({ baseDir: SESSIONS_DIR(), workspace, sessionId: id }).pinned();
 }
 
-/** Read `notify/set` (last wins) via the core primitive (deepen #02). */
+/** Read `notify` (last wins) via the core primitive (deepen #02). */
 export async function sessionNotify(workspace: string, id: string): Promise<boolean> {
   return new SessionStore({ baseDir: SESSIONS_DIR(), workspace, sessionId: id }).notify();
 }
@@ -609,9 +609,21 @@ export interface SessionActionRequest {
 const ARCHIVE_DIR = (slug: string) => path.join(SESSIONS_DIR(), slug, '.archive');
 
 /**
- * Apply a session action. Most are lightweight event writes (rename/pin/
- * notify) or file moves (archive/unarchive); `level`/`reasoning`/`model`
- * persist session-config overrides (ADR-0016, <id>.config.json).
+ * Session actions create the jsonl on first use: `rename` used to write an
+ * event line (which implicitly created the file); since ADR-0018 writes only
+ * meta, the file is touched explicitly to keep the create-on-rename contract.
+ */
+async function ensureSessionFile(store: SessionStore, sessionId: string): Promise<void> {
+  const st = await fs.stat(store.filePath(sessionId)).catch(() => null);
+  if (st) return;
+  await fs.writeFile(store.filePath(sessionId), '', 'utf8');
+}
+
+/**
+ * Apply a session action. Metadata writes (rename/pin/notify) go to the
+ * sibling `<id>.meta.json` (ADR-0018, last-wins); `archive`/`unarchive` move
+ * the jsonl; `level`/`reasoning`/`model` persist session-config overrides
+ * (ADR-0016, `<id>.config.json`). The jsonl holds messages + process events only.
  */
 export async function applySessionAction(
   workspace: string,
@@ -626,20 +638,24 @@ export async function applySessionAction(
       const title = String(req.title ?? '').trim().slice(0, 80);
       if (!title) throw new Error('rename requires a title');
       await store.create(sessionId);
-      await store.appendEvent('title/set', { title });
+      await ensureSessionFile(store, sessionId);
+      await store.updateMeta({ title });
       return { ok: true };
     }
     case 'pin':
       await store.create(sessionId);
-      await store.appendEvent('pin/set', { pinned: true });
+      await ensureSessionFile(store, sessionId);
+      await store.updateMeta({ pinned: true });
       return { ok: true };
     case 'unpin':
       await store.create(sessionId);
-      await store.appendEvent('pin/set', { pinned: false });
+      await ensureSessionFile(store, sessionId);
+      await store.updateMeta({ pinned: false });
       return { ok: true };
     case 'notify':
       await store.create(sessionId);
-      await store.appendEvent('notify/set', { enabled: req.enabled === true });
+      await ensureSessionFile(store, sessionId);
+      await store.updateMeta({ notify: req.enabled === true });
       return { ok: true };
     case 'archive': {
       await fs.mkdir(ARCHIVE_DIR(slug), { recursive: true });

@@ -19,7 +19,7 @@ core 按单职责拆成深模块，由薄 **Harness 壳** 组装：
 |---|---|---|
 | `llm` | LLM 交互面：工具目录 + 单段**流式**响应 | `llm.ts`：`buildToolDefs` / `reasoningProviderOptions` / `Llm.stream`，隐藏 AI SDK（`streamText`），消耗 app 已组装的 `{ prompt, tools }` + history 流式一段响应（ADR-0015）。 |
 | `loop` | 多回合编排 + 暂停/批准/恢复 | `stream-loop.ts`（`runLoopStreamSegment`，流式，唯一 agent loop），经 `harness.llm` 取模型调用、`harness.executeTool` 执行工具。 |
-| `session` | jsonl 持久化 + resume + 追加生命周期事件原语 + 会话展示元数据 | `session.ts`（`create`/`appendEvent`/`appendMessage`/`load`/`lastEvent`/`list` + deepen #02 新增的 `title`/`pinned`/`notify`/`listSessions` 展示元数据原语）。 |
+| `session` | jsonl 持久化 + resume + 追加生命周期事件原语 + 会话展示元数据 | `session.ts`（`create`/`appendEvent`/`appendMessage`/`load`/`list` + ADR-0018 的 `pendingToolCall()` 未闭合区间推导原语与 `loadMeta`/`saveMeta`/`updateMeta`，及 `title`/`pinned`/`notify`/`listSessions` 展示元数据原语）。 |
 | `config` | settings.json / provider / reasoning | `config.ts`。 |
 | `security` | 权限级别强制（工具执行缝） | `security.ts`：只保留强制机制（三值级别模型，级别存 `session.config.permissionLevel`（ADR-0016，非 `level/set` 事件）/ctx 注入/工具自决 + core 自注册 `/level`）；权限**声明段**按 ADR-0015 移入 bundle（[§7](07-security.md)）。 |
 | `trace` | 可观测埋点 | `trace.ts`。 |

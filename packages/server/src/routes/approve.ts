@@ -40,14 +40,11 @@ export async function handleChatApprove(req: Request, seam?: ChatSeam): Promise<
   const harness = getHarness(body.workspace, mode);
   const store = await bindSession(harness, body.workspace, body.sessionId, mode);
 
-  const pending = await store.lastEvent('tool/approval-pending');
+  const pending = await store.pendingToolCall();
   if (!pending) {
     return new Response('no pending approval for this session', { status: 400 });
   }
-  if (pending.payload?.decision) {
-    return new Response('approval already resolved', { status: 400 });
-  }
-  if (pending.payload?.toolCallId !== body.toolCallId) {
+  if (pending.toolCallId !== body.toolCallId) {
     return new Response('pending tool call mismatch', { status: 400 });
   }
 
@@ -56,12 +53,8 @@ export async function handleChatApprove(req: Request, seam?: ChatSeam): Promise<
 
   return createDataStreamResponse({
     async execute(writer) {
-      // Persist the decision; the client derives pending state from parts.
-      await store.appendEvent('tool/approval-pending', {
-        ...pending.payload,
-        decision: body.decision,
-      });
-
+      // The decision closes the tool_call interval (written by
+      // executeApprovedTool); the client derives pending state from parts.
       const target = pendingToolCalls(messages).find((t) => t.toolCallId === body.toolCallId);
       if (!target) {
         throw new Error(`tool call ${body.toolCallId} not found in session history`);
@@ -72,10 +65,8 @@ export async function handleChatApprove(req: Request, seam?: ChatSeam): Promise<
       if (remaining.length > 0) {
         const next = remaining[0];
         const nextExpectsAnswer = harness.getTool(next.toolName)?.expectsAnswer === true;
-        await store.appendEvent('tool/approval-pending', {
-          ...next,
-          expectsAnswer: nextExpectsAnswer,
-        });
+        // No store write: the next open tool_call interval already IS the
+        // pending state (ADR-0018); only the client-facing part is streamed.
         writer.writeData({
           type: 'approval-pending',
           toolCallId: next.toolCallId,

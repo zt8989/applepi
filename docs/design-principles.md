@@ -113,9 +113,10 @@ core 不兜底——这是信任扩展边界的直接推论（P5）。
   `session_id`/`workspace` 冗余身份字段）。ADR-0015 移除 `emit` 事件总线和
   `system_prompt` 事件族后，事件由 app / 工具直接 `store.appendEvent` 写入 jsonl——
   `appendEvent` 是存储原语，不存在 core 内置事件处理器。ADR-0016 进一步把配置类
-  状态（level/reasoning/mode/model）迁出 jsonl 进 `<id>.config.json>`——jsonl 只留
-  审计 + 消息 + 非配置类事件（`title/set`、`pin/set`、`notify/set`、
-  `tool/approval-pending`、`reload/start|end` 等）。
+  状态（level/reasoning/mode/model）迁出 jsonl 进 `<id>.config.json>`，ADR-0018
+  再把 UI 元数据（title/pin/notify）迁 `<id>.meta.json>`、事件重组为过程四族——
+  jsonl 只留消息 + LM 过程事件（`turn/*`、`tool_call/*`、`tool_result/*`、
+  `system_prompt/set`；`reload/start|end` 原语保留）。
 - 后果：坏掉的 reload 只靠读文件即可诊断；原始记录永不因视图变换被改写。
   行结构精简只影响"行内携带什么信息"，不影响 append-only 属性——文件路径
   仍是会话身份的权威位置（ADR-0006 的取舍：行不再自包含）。
@@ -184,8 +185,9 @@ app 选 bundle、叠加接口片段与插件，拼成 spec 交给 core `llm`。*
 
 **流式 loop 的暂停点是会话 jsonl 本身；批准后续跑从持久化点 resume，不重新调用 LLM。**
 
-`runLoopStreamSegment` 在遇到 `ask` 工具时持久化 `tool/approval-pending` 事件并
-暂停；`POST /api/chat/approve` 从 jsonl 的暂停点续跑。`jsonl` 既是审计日志
+`runLoopStreamSegment` 在遇到 `ask` 工具时暂停——其 `tool_call` 开放区间即待审批
+状态（ADR-0018，无专门事件）；`POST /api/chat/approve` 扫描未闭合区间校验后从
+jsonl 的暂停点续跑。`jsonl` 既是审计日志
 （P7）又是 loop 状态机——这是「文件即状态」的延伸：状态不需要额外的内存/数据库。
 
 - 依据：ADR-0011。

@@ -52,14 +52,37 @@ export interface LoadedSession {
 /** Session display metadata for listing (deepen #02). */
 export interface SessionSummary {
   id: string;
-  /** Last `title/set` event, else the first user message (truncated). */
+  /** Last written title (meta), else the first user message (truncated). */
   title: string;
   /** File mtime (ISO). */
   ts: string;
-  /** Last `pin/set` event payload (default false). */
+  /** Last `pinned` meta value (default false). */
   pinned: boolean;
-  /** Last `notify/set` event payload (default false). */
+  /** Last `notify` meta value (default false). */
   notify: boolean;
+}
+
+/**
+ * The earliest open `tool_call` interval (lifecycle events, ADR-0018) — the
+ * current pending approval, derived from `tool_call/start|end` pairs.
+ */
+export interface PendingToolCall {
+  toolCallId: string;
+  toolName: string;
+  args: any;
+  expectsAnswer?: boolean;
+}
+
+/**
+ * UI display metadata persisted in the sibling `<session_id>.meta.json`
+ * (lifecycle events, ADR-0018): last-wins, override-only — an absent key
+ * means no override. Deliberately separate from `<session_id>.config.json`
+ * (ADR-0016 cascade semantics are different from last-wins display state).
+ */
+export interface SessionMeta {
+  title?: string;
+  pinned?: boolean;
+  notify?: boolean;
 }
 
 /** Extract plain text from a message's `content` via the shared contract. */
@@ -124,16 +147,22 @@ export class SessionStore {
     return path.join(this.baseDir(), `${id}.config.json`);
   }
 
+  /** The sibling session-meta file path (lifecycle events, ADR-0018). */
+  metaPath(id: string = this.sessionId ?? ''): string {
+    if (!id) throw new Error('SessionStore: no session id (call create() first)');
+    return path.join(this.baseDir(), `${id}.meta.json`);
+  }
+
   /**
    * Read the session jsonl and split it into trimmed, non-empty raw lines.
    * The ONE place the file is read + line-split; each caller JSON.parses with
    * its own tolerance (deepen-followups #02):
-   *   - `load()` / `lastEvent()` propagate parse errors (a corrupt line fails
-   *     loudly);
+   *   - `load()` / `pendingToolCall()` propagate parse errors (a corrupt line
+   *     fails loudly);
    *   - `scanMeta()` skips corrupt lines.
    * A missing file propagates ENOENT — callers that tolerate absence
-   * (`lastEvent` → null, `scanMeta` → {}) catch it here; `load()` lets it
-   * propagate (its caller, `Harness.resume`, turns ENOENT into a fresh
+   * (`pendingToolCall` → null, `scanMeta` → {}) catch it here; `load()` lets
+   * it propagate (its caller, `Harness.resume`, turns ENOENT into a fresh
    * session).
    */
   private async readLines(id: string = this.sessionId ?? ''): Promise<string[]> {
@@ -173,6 +202,33 @@ export class SessionStore {
     const tmp = `${file}.tmp`;
     await fs.writeFile(tmp, JSON.stringify(config, null, 2) + '\n', 'utf8');
     await fs.rename(tmp, file);
+  }
+
+  /**
+   * Read the session meta (display metadata, ADR-0018). Missing or corrupt
+   * file → `{}` (no overrides, same tolerance as `loadConfig`).
+   */
+  async loadMeta(id: string = this.sessionId ?? ''): Promise<SessionMeta> {
+    try {
+      return JSON.parse(await fs.readFile(this.metaPath(id), 'utf8')) as SessionMeta;
+    } catch {
+      return {};
+    }
+  }
+
+  /** Persist the session meta atomically (write a temp sibling, then rename). */
+  async saveMeta(meta: SessionMeta, id: string = this.sessionId ?? ''): Promise<void> {
+    await fs.mkdir(this.baseDir(), { recursive: true });
+    const file = this.metaPath(id);
+    const tmp = `${file}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify(meta, null, 2) + '\n', 'utf8');
+    await fs.rename(tmp, file);
+  }
+
+  /** Merge a partial meta update (last-wins) and persist; the jsonl is untouched. */
+  async updateMeta(partial: SessionMeta, id: string = this.sessionId ?? ''): Promise<void> {
+    const meta = await this.loadMeta(id);
+    await this.saveMeta({ ...meta, ...partial }, id);
   }
 
   /** Open (create if needed) a session and return its id. */
@@ -229,12 +285,15 @@ export class SessionStore {
   }
 
   /**
-   * Read the LAST event with the given name (e.g. `level/set`), or null if
-   * none exists. Scans the file from the tail so the most recent occurrence
-   * wins; the file is never mutated. Events are otherwise discarded by
-   * `load()`, so this is the read primitive for state that lives in events.
+   * Derive the current pending approval: the EARLIEST `tool_call/start`
+   * interval without a matching `tool_call/end` (paired by toolCallId), in
+   * write order (lifecycle events, ADR-0018); null when every opened interval
+   * is closed. Pending state lives in open intervals, not a dedicated event —
+   * this replaces the former event-name lookup (`lastEvent`).
+   * Known ambiguity (accepted, ADR-0018): a crash mid-execution also leaves an
+   * open interval and is read as pending.
    */
-  async lastEvent(name: string): Promise<SessionEvent | null> {
+  async pendingToolCall(): Promise<PendingToolCall | null> {
     if (!this.sessionId) throw new Error('SessionStore: no session id (call create() first)');
     let lines: SessionLine[];
     try {
@@ -242,68 +301,77 @@ export class SessionStore {
     } catch (e: any) {
       if (e?.code === 'ENOENT') return null; // fresh session with no lines yet
       throw e; // parse errors fail loudly as before; non-ENOENT fs errors now
-      // propagate too (previously swallowed into null) — absence is the only
-      // tolerated "no state" case.
+      // propagate too — absence is the only tolerated "no state" case.
     }
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const l = lines[i];
-      if (l.kind === 'event' && l.event === name) return l;
+    const closed = new Set<string>();
+    const open: PendingToolCall[] = [];
+    for (const l of lines) {
+      if (l.kind !== 'event') continue;
+      if (l.event === 'tool_call/start') {
+        const p = l.payload ?? {};
+        open.push({
+          toolCallId: p.toolCallId,
+          toolName: p.toolName,
+          args: p.args,
+          expectsAnswer: p.expectsAnswer === true,
+        });
+      } else if (l.event === 'tool_call/end') {
+        closed.add(l.payload?.toolCallId);
+      }
     }
-    return null;
+    return open.find((c) => !closed.has(c.toolCallId)) ?? null;
   }
 
   /**
-   * Scan display metadata (title/pinned/notify) from the jsonl in one pass
-   * (deepen #02). Last `title/set` wins; else the first user message text
-   * (truncated at 40 chars); else no title (callers default it).
+   * Scan display metadata (title/pinned/notify) from the sibling meta file in
+   * one pass (deepen #02 + ADR-0018). Last written `title` wins; else the
+   * first user message text (truncated at 40 chars); else no title (callers
+   * default it). The jsonl is only consulted for the first-user fallback —
+   * legacy `title/set` events in old files are intentionally ignored (meta
+   * missing = no override; ADR-0018 has no backward-compat event reader).
    */
   private async scanMeta(id: string): Promise<{ title?: string; pinned?: boolean; notify?: boolean }> {
-    let lines: string[];
-    try {
-      lines = await this.readLines(id);
-    } catch {
-      return {}; // fresh session with no lines yet
-    }
-    let title: string | undefined;
-    let firstUser: string | undefined;
-    let pinned: boolean | undefined;
-    let notify: boolean | undefined;
-    for (const line of lines) {
-      let l: SessionLine;
+    const meta = await this.loadMeta(id);
+    let title = meta.title;
+    if (title === undefined) {
+      let lines: string[];
       try {
-        l = JSON.parse(line);
+        lines = await this.readLines(id);
       } catch {
-        continue; // skip malformed lines
+        return { pinned: meta.pinned, notify: meta.notify }; // fresh session: no lines yet
       }
-      if (l.kind === 'event') {
-        if (l.event === 'title/set' && typeof l.payload?.title === 'string') {
-          title = l.payload.title;
-        } else if (l.event === 'pin/set') {
-          pinned = l.payload?.pinned === true;
-        } else if (l.event === 'notify/set') {
-          notify = l.payload?.enabled === true;
+      for (const line of lines) {
+        let l: SessionLine;
+        try {
+          l = JSON.parse(line);
+        } catch {
+          continue; // skip malformed lines
         }
-      } else if (l.kind === 'message' && l.role === 'user' && firstUser === undefined) {
-        const text = messageText(l.content);
-        if (text) firstUser = text.length > 40 ? text.slice(0, 40) + '…' : text;
+        if (l.kind === 'message' && l.role === 'user') {
+          const text = messageText(l.content);
+          if (text) {
+            title = text.length > 40 ? text.slice(0, 40) + '…' : text;
+            break;
+          }
+        }
       }
     }
-    return { title: title ?? firstUser, pinned, notify };
+    return { title, pinned: meta.pinned, notify: meta.notify };
   }
 
-  /** Display title for a session id: last `title/set`, else first user message (truncated). */
+  /** Display title for a session id: last meta title, else first user message (truncated). */
   async title(id: string = this.sessionId ?? ''): Promise<string> {
     const meta = await this.scanMeta(id);
     return meta.title ?? 'New Chat';
   }
 
-  /** Whether the session is pinned (last `pin/set`, default false). */
+  /** Whether the session is pinned (meta `pinned`, default false). */
   async pinned(id: string = this.sessionId ?? ''): Promise<boolean> {
     const meta = await this.scanMeta(id);
     return meta.pinned ?? false;
   }
 
-  /** Whether session notifications are on (last `notify/set`, default false). */
+  /** Whether session notifications are on (meta `notify`, default false). */
   async notify(id: string = this.sessionId ?? ''): Promise<boolean> {
     const meta = await this.scanMeta(id);
     return meta.notify ?? false;
