@@ -15,6 +15,10 @@ export function createIdleGuard(opts: {
   logPath?: string;
 }): { refresh: () => void; stop: () => void } {
   const timeoutMs = opts.timeoutMs;
+  // timeoutMs <= 0 disables the guard entirely (no timer, no exit path).
+  if (timeoutMs <= 0) {
+    return { refresh: () => {}, stop: () => {} };
+  }
   let lastSeen = Date.now();
   const checkMs = opts.checkMs ?? Math.min(Math.max(Math.floor(timeoutMs / 3), 1000), 15000);
   const timer = setInterval(() => {
@@ -39,10 +43,12 @@ export function createIdleGuard(opts: {
   };
 }
 
+export const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+
 /** Idle timeout from env: APPLEPI_IDLE_TIMEOUT_MS (0 = disabled, default 5 min). */
 export function idleTimeoutFromEnv(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.APPLEPI_IDLE_TIMEOUT_MS;
-  if (raw === undefined) return 5 * 60 * 1000;
+  if (raw === undefined) return DEFAULT_IDLE_TIMEOUT_MS;
   const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 5 * 60 * 1000;
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_IDLE_TIMEOUT_MS;
 }

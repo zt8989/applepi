@@ -6,6 +6,7 @@ import {
   foldParts,
   genMessageId,
   parseCommand,
+  renderToolNote,
   type TurnView,
   type TuiCommand,
 } from './utils.js';
@@ -89,12 +90,7 @@ export function App({ serverUrl, cwd }: TuiProps) {
     if (t.error) items.push({ role: 'note', text: `⚠ ${t.error}` });
     if (t.text) items.push({ role: 'assistant', text: t.text });
     for (const tc of t.toolCalls) {
-      items.push({
-        role: 'note',
-        text: tc.result !== undefined
-          ? `[${tc.toolName}] → ${tc.result.slice(0, 200)}`
-          : `[${tc.toolName}] ${JSON.stringify(tc.args)}`,
-      });
+      items.push({ role: 'note', text: renderToolNote(tc.toolName, tc.args, tc.result) });
     }
     if (items.length) setHistory((h) => [...h, ...items]);
   }
@@ -132,16 +128,17 @@ export function App({ serverUrl, cwd }: TuiProps) {
     const messageId = genMessageId();
     messageIdRef.current = messageId;
     turnRef.current = emptyTurn();
-    sessionRef.current = null;
     bump();
     setHistory((h) => [...h, { role: 'user', text }]);
-    const mode = modeRef.current;
-    // The mode rides ONLY the new-session request (ADR-0015: chosen once).
+    // sessionId present → the server RESUMES that session (isNew=false); the
+    // mode rides ONLY the new-session request (ADR-0015: chosen once).
+    const sessionId = sessionRef.current ?? undefined;
+    const mode = sessionId ? undefined : modeRef.current;
     void runStream((ctrl) =>
       fetch(`${serverUrl}/api/chat`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ workspace: cwd, messageId, message: text, mode }),
+        body: JSON.stringify({ workspace: cwd, messageId, message: text, sessionId, mode }),
         signal: ctrl.signal,
       }),
     );
@@ -197,7 +194,7 @@ export function App({ serverUrl, cwd }: TuiProps) {
             const text = parts.filter((p: any) => p.type === 'text').map((p: any) => p.text).join('');
             if (text) items.push({ role: 'assistant', text });
             for (const tc of parts.filter((p: any) => p.type === 'tool-call')) {
-              items.push({ role: 'note', text: `[${tc.toolName}] ${JSON.stringify(tc.args ?? {})}` });
+              items.push({ role: 'note', text: renderToolNote(tc.toolName, tc.args) });
             }
           } else if (m.role === 'tool') {
             const parts = Array.isArray(m.content) ? m.content : [];
@@ -209,6 +206,9 @@ export function App({ serverUrl, cwd }: TuiProps) {
         setHistory(items);
         sessionRef.current = cmd.id;
         messageIdRef.current = genMessageId();
+        // A resumed session carries its own recorded mode; the pending
+        // /new-selection must not leak into it (ADR-0015: mode chosen once).
+        modeRef.current = undefined;
         note(data.title ? `已恢复会话 ${cmd.id}（${data.title}）` : `已恢复会话 ${cmd.id}`);
         break;
       }

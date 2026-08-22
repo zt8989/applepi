@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createApp, startHeartbeat, startServer, spawnServer, probeHealth, serverUrl } from '../dist/index.js';
+import { createApp, createIdleGuard, startHeartbeat, startServer, spawnServer, probeHealth, serverUrl } from '../dist/index.js';
 
 let passed = 0;
 let failed = 0;
@@ -120,6 +120,15 @@ process.env.APPLEPI_SESSIONS_DIR = path.join(tmpRoot, 'sessions');
   }
   ok('dual-client: server exits after BOTH leases lapse', exited === true);
   delete process.env.APPLEPI_IDLE_TIMEOUT_MS;
+}
+
+// 4. timeoutMs <= 0 disables the guard entirely (no rapid self-exit).
+{
+  let exited = false;
+  const guard = createIdleGuard({ timeoutMs: 0, onExit: () => (exited = true) });
+  await new Promise((r) => setTimeout(r, 1300));
+  ok('idle guard: timeoutMs 0 disables the guard (no exit)', exited === false);
+  guard.stop();
 }
 
 await fs.rm(tmpRoot, { recursive: true, force: true });

@@ -3,6 +3,7 @@
  * pure functions and unit-tested; Ink components are not).
  */
 import { randomUUID } from 'node:crypto';
+import { PERMISSION_LEVELS } from '@applepi/server';
 
 export function genMessageId(): string {
   return `msg-${randomUUID().slice(0, 8)}`;
@@ -78,6 +79,13 @@ export function awaitingApproval(view: TurnView) {
   return view.pending ?? view.toolCalls.find((t) => t.result === undefined) ?? null;
 }
 
+/** One history-note line for a tool call (shared by flush + resume render). */
+export function renderToolNote(toolName: string, args: any, result?: string): string {
+  return result !== undefined
+    ? `[${toolName}] → ${String(result).slice(0, 200)}`
+    : `[${toolName}] ${JSON.stringify(args ?? {})}`;
+}
+
 // ---- slash command mapping (ticket 08; pure + unit-tested) -----------------
 
 export type TuiCommand =
@@ -89,8 +97,6 @@ export type TuiCommand =
   | { type: 'help' }
   | { type: 'exit' }
   | { type: 'error'; message: string };
-
-const PERMISSION_LEVELS = ['readonly', 'workspace', 'fullaccess'];
 
 /**
  * Map an input line to a TUI command. Non-slash lines → null (ordinary chat).
@@ -115,7 +121,7 @@ export function parseCommand(line: string): TuiCommand | null {
     case 'config':
       return { type: 'config' };
     case 'level':
-      if (!arg || !PERMISSION_LEVELS.includes(arg)) {
+      if (!arg || !(PERMISSION_LEVELS as readonly string[]).includes(arg)) {
         return { type: 'error', message: `/level 须为 ${PERMISSION_LEVELS.join('|')}` };
       }
       return { type: 'level', level: arg };

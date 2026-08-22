@@ -10,6 +10,9 @@ export { createApp } from './app.js';
 export { serverLogPath, appendServerLog } from './log.js';
 export { createIdleGuard, idleTimeoutFromEnv } from './idle-guard.js';
 export { ensureServer, probeHealth, serverUrl, spawnServer, startHeartbeat } from './attach.js';
+// The canonical level vocabulary, re-exported so clients (TUI command mapping)
+// do not re-declare the domain's permission levels.
+export { PERMISSION_LEVELS } from '@applepi/core';
 export {
   sessionsRoot,
   unslugWorkspace,

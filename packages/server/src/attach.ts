@@ -71,7 +71,8 @@ export interface EnsureResult {
 export function startHeartbeat(url: string, intervalMs = 30000): { stop: () => void } {
   const id = setInterval(() => {
     void fetch(`${url}/api/heartbeat`, { method: 'POST' }).catch(() => {
-      /* server gone: next ensure will spawn a fresh one */
+      // Server gone (e.g. killed): silently skip — the next client start
+      // probes and spawns a fresh server on demand.
     });
   }, intervalMs);
   id.unref?.();
