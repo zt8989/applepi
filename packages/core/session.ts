@@ -125,6 +125,23 @@ export class SessionStore {
   }
 
   /**
+   * Read the session jsonl and split it into trimmed, non-empty raw lines.
+   * The ONE place the file is read + line-split; each caller JSON.parses with
+   * its own tolerance (deepen-followups #02):
+   *   - `load()` / `lastEvent()` propagate parse errors (a corrupt line fails
+   *     loudly);
+   *   - `scanMeta()` skips corrupt lines.
+   * A missing file propagates ENOENT — callers that tolerate absence
+   * (`lastEvent` → null, `scanMeta` → {}) catch it here; `load()` lets it
+   * propagate (its caller, `Harness.resume`, turns ENOENT into a fresh
+   * session).
+   */
+  private async readLines(id: string = this.sessionId ?? ''): Promise<string[]> {
+    const raw = await fs.readFile(this.filePath(id), 'utf8');
+    return raw.split('\n').map((l) => l.trim()).filter(Boolean);
+  }
+
+  /**
    * Read the session config (ADR-0016). Missing or corrupt file → `{}` (no
    * overrides, no fail-fast — it is not required config; P11 applies to the
    * global settings.json, not this per-session override file).
@@ -187,12 +204,7 @@ export class SessionStore {
   /** Read-time replay: message lines only, with reload replacing message[0]. */
   async load(): Promise<LoadedSession> {
     if (!this.sessionId) throw new Error('SessionStore: no session id (call create() first)');
-    const raw = await fs.readFile(this.filePath(), 'utf8');
-    const lines: SessionLine[] = raw
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean)
-      .map((l) => JSON.parse(l));
+    const lines: SessionLine[] = (await this.readLines()).map((l) => JSON.parse(l));
     const messages = lines.filter((l): l is SessionMessage => l.kind === 'message');
 
     // ADR-0006: event field carries type+phase (e.g. "reload/start"). The `?.`
@@ -224,17 +236,15 @@ export class SessionStore {
    */
   async lastEvent(name: string): Promise<SessionEvent | null> {
     if (!this.sessionId) throw new Error('SessionStore: no session id (call create() first)');
-    let raw: string;
+    let lines: SessionLine[];
     try {
-      raw = await fs.readFile(this.filePath(), 'utf8');
-    } catch {
-      return null; // fresh session with no lines yet
+      lines = (await this.readLines()).map((l) => JSON.parse(l));
+    } catch (e: any) {
+      if (e?.code === 'ENOENT') return null; // fresh session with no lines yet
+      throw e; // parse errors fail loudly as before; non-ENOENT fs errors now
+      // propagate too (previously swallowed into null) — absence is the only
+      // tolerated "no state" case.
     }
-    const lines: SessionLine[] = raw
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean)
-      .map((l) => JSON.parse(l));
     for (let i = lines.length - 1; i >= 0; i--) {
       const l = lines[i];
       if (l.kind === 'event' && l.event === name) return l;
@@ -248,9 +258,9 @@ export class SessionStore {
    * (truncated at 40 chars); else no title (callers default it).
    */
   private async scanMeta(id: string): Promise<{ title?: string; pinned?: boolean; notify?: boolean }> {
-    let raw: string;
+    let lines: string[];
     try {
-      raw = await fs.readFile(this.filePath(id), 'utf8');
+      lines = await this.readLines(id);
     } catch {
       return {}; // fresh session with no lines yet
     }
@@ -258,7 +268,7 @@ export class SessionStore {
     let firstUser: string | undefined;
     let pinned: boolean | undefined;
     let notify: boolean | undefined;
-    for (const line of raw.split('\n').map((l) => l.trim()).filter(Boolean)) {
+    for (const line of lines) {
       let l: SessionLine;
       try {
         l = JSON.parse(line);
