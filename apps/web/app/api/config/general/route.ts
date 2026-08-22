@@ -1,4 +1,4 @@
-import { saveGeneralDefaults, getGeneralDefaults } from '@/lib/server';
+import { saveGeneralDefaults, getGeneralDefaults } from '@applepi/server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';

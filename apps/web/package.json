@@ -11,12 +11,13 @@
     "test": "tsx test/display.test.ts"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^1.2.12",
+    "@ai-sdk/openai": "^1.3.24",
     "@applepi/bundle": "workspace:*",
     "@applepi/core": "workspace:*",
     "@applepi/extensions": "workspace:*",
+    "@applepi/server": "workspace:*",
     "@assistant-ui/react": "^0.15.15",
-    "@ai-sdk/anthropic": "^1.2.12",
-    "@ai-sdk/openai": "^1.3.24",
     "@tailwindcss/postcss": "^4.1.0",
     "ai": "^4.3.19",
     "next": "^15.5.0",

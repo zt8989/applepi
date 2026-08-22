@@ -1,4 +1,4 @@
-import { saveLastUsed } from '@/lib/server';
+import { saveLastUsed } from '@applepi/server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';

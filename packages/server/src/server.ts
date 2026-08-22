@@ -39,14 +39,23 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { createAnthropic } from '@ai-sdk/anthropic';
 
 /**
- * Server-side wiring for the web interface (ADR-0011 + ADR-0015): one Harness
- * per (workspace, mode) pair (the bundle's tool registry is immutable per
- * session — chosen once at creation, ADR-0015), one provider model from
- * ~/.applepi (ADR-0004), sessions mapped 1:1 to the core SessionStore jsonl.
+ * Shared server-side wiring (ADR-0017; migrated from apps/web/lib/server.ts):
+ * one Harness per (workspace, mode) pair (the bundle's tool registry is
+ * immutable per session — chosen once at creation, ADR-0015), one provider
+ * model from ~/.applepi (ADR-0004), sessions mapped 1:1 to the core
+ * SessionStore jsonl. The web shell and the TUI both attach to this server,
+ * so this state lives HERE — never per-interface.
  */
 
-const SESSIONS_DIR = () => path.join(os.homedir(), '.applepi', 'sessions');
+/** Session/manifest root. Default `~/.applepi/sessions`; APPLEPI_SESSIONS_DIR
+ *  overrides it (test isolation, data relocation). */
+export function sessionsRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return env.APPLEPI_SESSIONS_DIR ?? path.join(os.homedir(), '.applepi', 'sessions');
+}
+
+const SESSIONS_DIR = sessionsRoot;
 const MANIFEST_FILE = () => path.join(SESSIONS_DIR(), '.manifest.json');
+const APPLEPI_DIR = () => path.join(os.homedir(), '.applepi');
 
 /**
  * Best-effort reverse of `slugWorkspace`: the slug 'Users-x-applepi' came from
@@ -106,7 +115,7 @@ export async function getSessionModel(
   const settings = await loadSettings();
   const providers = mergedProviders(settings);
   const overrides = sessionId
-    ? await new SessionStore({ workspace: workspaceToSlug(workspace), sessionId }).loadConfig()
+    ? await new SessionStore({ baseDir: SESSIONS_DIR(), workspace: workspaceToSlug(workspace), sessionId }).loadConfig()
     : {};
   const resolved = resolveSessionConfig(
     overrides,
@@ -126,8 +135,6 @@ export async function getSessionModel(
   };
   return { model: buildModel(cfg), protocol: pc.protocol };
 }
-
-const APPLEPI_DIR = () => path.join(os.homedir(), '.applepi');
 
 /**
  * Providers for the settings UI (ADR-0014). Returns:
@@ -301,7 +308,7 @@ export async function sessionReasoningLevel(
   workspace: string,
   sessionId: string,
 ): Promise<ReasoningLevel> {
-  const store = new SessionStore({ workspace: workspaceToSlug(workspace), sessionId });
+  const store = new SessionStore({ baseDir: SESSIONS_DIR(), workspace: workspaceToSlug(workspace), sessionId });
   const overrides = await store.loadConfig();
   const settings = await loadSettings().catch(() => ({ providers: {}, general: undefined } as any));
   return resolveSessionConfig(
@@ -334,18 +341,20 @@ const harnessCache = new Map<string, Harness>();
 /**
  * One wired Harness per (workspace, mode) pair, cached for the server's
  * lifetime. The tool registry is determined by the session's bundle/mode,
- * which is immutable per session (ADR-0015: chosen once at creation).
+ * which is immutable per session (ADR-0015: chosen once at creation). The
+ * harness carries the sessions baseDir so resume() stays inside the same root.
  */
 export function getHarness(workspace: string, mode: string): Harness {
   const slug = workspaceToSlug(workspace);
   const key = `${slug}:${mode}`;
   let h = harnessCache.get(key);
   if (!h) {
-    h = new Harness({ workspace: slug });
+    h = new Harness({ workspace: slug, baseDir: SESSIONS_DIR() });
     const spec = makeBundleSpec(mode, { cwd: process.cwd() });
     if (!spec) throw new Error(`unknown mode: ${mode}`);
     // Enable the bundle's tools + its declared capabilities' tools (memory /
-    // skills) via the @applepi/extensions capability registry.
+    // skills / todo / plan / goal / ask_user) via the @applepi/extensions
+    // capability registry.
     enableBundleSpec(h, spec);
     harnessCache.set(key, h);
   }
@@ -359,7 +368,7 @@ export function getHarness(workspace: string, mode: string): Harness {
  * to 'standard' (the old base+memory+skills behavior).
  */
 export async function sessionMode(workspace: string, sessionId: string): Promise<string> {
-  const store = new SessionStore({ workspace: workspaceToSlug(workspace), sessionId });
+  const store = new SessionStore({ baseDir: SESSIONS_DIR(), workspace: workspaceToSlug(workspace), sessionId });
   const config = await store.loadConfig();
   return config.mode === 'base' ? 'base' : 'standard';
 }
@@ -428,7 +437,7 @@ export async function bindSession(
     // into session.config from the config file (ADR-0016).
     store = await harness.resume(sessionId);
   } else {
-    store = new SessionStore({ workspace: slug });
+    store = new SessionStore({ baseDir: SESSIONS_DIR(), workspace: slug });
     await store.create();
     harness.sessionStore = store;
     harness.session.history = [];
@@ -501,17 +510,17 @@ export async function sessionTitle(
   workspace: string,
   id: string,
 ): Promise<string> {
-  return new SessionStore({ workspace, sessionId: id }).title();
+  return new SessionStore({ baseDir: SESSIONS_DIR(), workspace, sessionId: id }).title();
 }
 
 /** Read `pin/set` (last wins) via the core primitive (deepen #02). */
 export async function sessionPinned(workspace: string, id: string): Promise<boolean> {
-  return new SessionStore({ workspace, sessionId: id }).pinned();
+  return new SessionStore({ baseDir: SESSIONS_DIR(), workspace, sessionId: id }).pinned();
 }
 
 /** Read `notify/set` (last wins) via the core primitive (deepen #02). */
 export async function sessionNotify(workspace: string, id: string): Promise<boolean> {
-  return new SessionStore({ workspace, sessionId: id }).notify();
+  return new SessionStore({ baseDir: SESSIONS_DIR(), workspace, sessionId: id }).notify();
 }
 
 /**
@@ -533,7 +542,7 @@ export async function listWorkspaces(): Promise<WorkspaceInfo[]> {
     if (!entry) continue; // manifest entries are always path-backed
     const wsPath = entryPath(entry);
     const nameOverride = entryName(entry);
-    const store = new SessionStore({ workspace: slug });
+    const store = new SessionStore({ baseDir: SESSIONS_DIR(), workspace: slug });
     const sessions = await store.listSessions();
     out.push({ slug, path: wsPath, name: nameOverride ?? path.basename(wsPath), sessions });
   }
@@ -604,7 +613,7 @@ export async function applySessionAction(
   req: SessionActionRequest,
 ): Promise<{ ok: true }> {
   const slug = workspaceToSlug(workspace);
-  const store = new SessionStore({ workspace: slug, sessionId });
+  const store = new SessionStore({ baseDir: SESSIONS_DIR(), workspace: slug, sessionId });
 
   switch (req.action) {
     case 'rename': {
@@ -657,7 +666,7 @@ export async function applySessionAction(
       if (!(REASONING_LEVELS as readonly string[]).includes(reasoning as any)) {
         throw new Error(`reasoning must be one of: ${REASONING_LEVELS.join('|')}`);
       }
-      const store = new SessionStore({ workspace: workspaceToSlug(workspace), sessionId });
+      const store = new SessionStore({ baseDir: SESSIONS_DIR(), workspace: workspaceToSlug(workspace), sessionId });
       await store.create(sessionId);
       const overrides = await store.loadConfig();
       await store.saveConfig({ ...overrides, reasoningLevel: reasoning as ReasoningLevel });
@@ -668,7 +677,7 @@ export async function applySessionAction(
       if (!m || typeof m.providerId !== 'string' || typeof m.modelId !== 'string') {
         throw new Error('model requires providerId + modelId');
       }
-      const store = new SessionStore({ workspace: workspaceToSlug(workspace), sessionId });
+      const store = new SessionStore({ baseDir: SESSIONS_DIR(), workspace: workspaceToSlug(workspace), sessionId });
       await store.create(sessionId);
       const overrides = await store.loadConfig();
       await store.saveConfig({ ...overrides, model: { providerId: m.providerId, modelId: m.modelId } });
@@ -685,7 +694,7 @@ export async function readSessionFile(
   sessionId: string,
 ): Promise<string> {
   const slug = workspaceToSlug(workspace);
-  const store = new SessionStore({ workspace: slug, sessionId });
+  const store = new SessionStore({ baseDir: SESSIONS_DIR(), workspace: slug, sessionId });
   return fs.readFile(store.filePath(), 'utf8');
 }
 

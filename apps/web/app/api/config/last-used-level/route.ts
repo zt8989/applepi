@@ -1,4 +1,4 @@
-import { saveLastUsedLevel } from '@/lib/server';
+import { saveLastUsedLevel } from '@applepi/server';
 import { REASONING_LEVELS } from '@applepi/core';
 
 export const runtime = 'nodejs';

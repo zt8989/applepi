@@ -1,4 +1,4 @@
-import { getProviders, saveProviders } from '@/lib/server';
+import { getProviders, saveProviders } from '@applepi/server';
 import { PROVIDER_PROTOCOLS, BUILTIN_PROVIDERS, type ProviderConfig, type ProviderProtocol } from '@applepi/core';
 
 export const runtime = 'nodejs';

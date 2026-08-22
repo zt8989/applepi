@@ -8,6 +8,50 @@ export { DEFAULT_PORT, serverPort } from './config.js';
 export { createApp } from './app.js';
 export { serverLogPath, appendServerLog } from './log.js';
 export { ensureServer, probeHealth, serverUrl, spawnServer } from './attach.js';
+export {
+  sessionsRoot,
+  unslugWorkspace,
+  workspaceToSlug,
+  getSessionModel,
+  getProviders,
+  getGeneralDefaults,
+  saveGeneralDefaults,
+  saveProviders,
+  listModels,
+  saveLastUsed,
+  saveLastUsedLevel,
+  sessionReasoningLevel,
+  configFileHidden,
+  openConfigFile,
+  getHarness,
+  sessionMode,
+  buildSystemPrompt,
+  bindSession,
+  buildTurnMessages,
+  entryPath,
+  entryName,
+  readManifest,
+  sessionTitle,
+  sessionPinned,
+  sessionNotify,
+  listWorkspaces,
+  addWorkspace,
+  renameWorkspace,
+  removeWorkspace,
+  applySessionAction,
+  readSessionFile,
+  pickFolder,
+  type ManifestEntry,
+  type SessionInfo,
+  type WorkspaceInfo,
+  type SessionActionRequest,
+} from './server.js';
+export { handleSessionGet, handleSessionPatch } from './routes/session.js';
+export {
+  handleWorkspacesGet,
+  handleWorkspacesPatch,
+  handleWorkspacesPost,
+} from './routes/workspaces.js';
 
 export interface RunningServer {
   port: number;

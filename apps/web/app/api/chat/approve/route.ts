@@ -12,7 +12,7 @@ import {
   getSessionModel,
   sessionMode,
   sessionReasoningLevel,
-} from '@/lib/server';
+} from '@applepi/server';
 import type { ApproveRequestBody } from '@/lib/types';
 
 export const runtime = 'nodejs';

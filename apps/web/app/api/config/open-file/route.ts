@@ -1,4 +1,4 @@
-import { openConfigFile, configFileHidden } from '@/lib/server';
+import { openConfigFile, configFileHidden } from '@applepi/server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';

@@ -1,4 +1,4 @@
-import { pickFolder } from '@/lib/server';
+import { pickFolder } from '@applepi/server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';

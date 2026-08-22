@@ -1,4 +1,4 @@
-import { listModels } from '@/lib/server';
+import { listModels } from '@applepi/server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
