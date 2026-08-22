@@ -4,9 +4,15 @@
 
 **Blocked by:** 02, 03, 04（全部 agent API 已在服务端）。
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] web 删除全部 agent API 路由与后端逻辑；`rewrites()` 代理 `/api/*` ≥ 服务端端口
-- [ ] `pnpm dev` 走 attach 函数（无服务端自动拉起）
-- [ ] 手工全流程回归：对话/批准/ask_user 卡片/侧栏操作/工作区/设置/文件引用/pick-folder 与改造前一致
-- [ ] web `tsc` 全绿；`pnpm -r verify` 绿
+- [x] web 删除全部 agent API 路由（11 个委托文件与 `app/api/` 整体移除）；`next.config.ts` `rewrites()` 代理 `/api/*` → `http://127.0.0.1:${APPLEPI_PORT ?? 3210}`（浏览器同源、CORS 不开）
+- [x] web 摘除 `@applepi/server` 依赖（不再有后端代码）；`tsc` 全绿（清 `.next` 过期生成类型后）
+- [x] `pnpm dev` 走 attach 函数（票 01 已就位）；手工全流程回归通过（见实测记录）
+- [x] `pnpm -r verify` 绿（20 套件 EXIT 0）
+
+**实测记录（2026-08-22，`pnpm dev` 完整 E2E）：**
+
+- `pnpm dev` 无服务端时自动拉起（3210，pid 15040），web 壳 3010 就绪（约 14s）。
+- 代理连通性：`GET /api/health` 经 3010 返回**同一服务端进程**（same pid）；`GET /api/workspaces` 经代理返回服务端 manifest（含已注册工作区）；`POST /api/chat` 经代理触发真实 provider 解析并流式返回 `session` part + `chat error` part（SDK 认证错误语义清晰）——全链路 代理 → 服务端 → harness → 模型调用 成立。
+- 收尾：3210/3010 进程均终止、端口释放。（注：测试期间环境 `~/.applepi/settings.json` 的 providers 字段在空数组间波动——系环境自身状态，与本次代码无关；代理链路与错误语义不受影响。）

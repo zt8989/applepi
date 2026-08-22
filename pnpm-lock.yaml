@@ -38,9 +38,6 @@ importers:
       '@applepi/extensions':
         specifier: workspace:*
         version: link:../../packages/extensions
-      '@applepi/server':
-        specifier: workspace:*
-        version: link:../../packages/server
       '@assistant-ui/react':
         specifier: ^0.15.15
         version: 0.15.15(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(use-sync-external-store@1.6.0(react@19.2.8))

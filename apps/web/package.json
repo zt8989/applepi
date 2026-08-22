@@ -16,7 +16,6 @@
     "@applepi/bundle": "workspace:*",
     "@applepi/core": "workspace:*",
     "@applepi/extensions": "workspace:*",
-    "@applepi/server": "workspace:*",
     "@assistant-ui/react": "^0.15.15",
     "@tailwindcss/postcss": "^4.1.0",
     "ai": "^4.3.19",
