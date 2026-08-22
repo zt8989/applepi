@@ -9,7 +9,7 @@
     "dev": "tsx scripts/dev-web.mjs",
     "dev:web": "tsx scripts/dev-web.mjs",
     "serve": "pnpm --filter @applepi/server start",
-    "tui": "tsx scripts/tui.mjs",
+    "tui": "tsx scripts/dev-tui.mjs",
     "test": "pnpm -r test",
     "verify": "pnpm -r build && pnpm -r test"
   },

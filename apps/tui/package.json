@@ -1,0 +1,20 @@
+{
+  "name": "@applepi/tui",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "tsc -p tsconfig.json && node test/stream-parser.mjs"
+  },
+  "dependencies": {
+    "@applepi/server": "workspace:*",
+    "ink": "^7.1.1",
+    "react": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18"
+  }
+}
