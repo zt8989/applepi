@@ -99,7 +99,7 @@ function freshHarness() {
 }
 
 // 6. (deepen #01 - a) Assembled prompt lists only real tools, no unwired
-//    capability names. standard's web/todo/subagent/workflow/ask_user ids
+//    capability names. standard's plan/goal/web/subagent/workflow/ask_user ids
 //    have no factory yet → they must NOT appear in the prompt.
 {
   const h = freshHarness();
@@ -107,11 +107,11 @@ function freshHarness() {
   enableBundleSpec(h, spec);
   const prompt = assembleFlatPrompt(h, spec, { app: ['app fragment'] });
   // Landed tools are listed.
-  for (const tool of ['bash', 'str_replace_editor', 'memory_read', 'memory_write', 'skill_load']) {
+  for (const tool of ['bash', 'str_replace_editor', 'memory_read', 'memory_write', 'skill_load', 'todo']) {
     assert.ok(prompt.includes(tool), `assembled standard prompt lists landed tool: ${tool}`);
   }
   // Declared-but-unwired names are absent.
-  for (const unwired of ['web search', 'todo', 'subagent', 'workflow', 'ralph', 'ask_user', 'plan mode']) {
+  for (const unwired of ['web search', 'subagent', 'workflow', 'ralph', 'ask_user', 'plan mode']) {
     assert.ok(!prompt.includes(unwired), `assembled standard prompt does not claim unwired: ${unwired}`);
   }
   assert.ok(prompt.includes('## Permission & Capability'), 'shared permission section present');
