@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — SessionConfig 存储；02 — general + 级联
 
-**Status:** ready-for-agent
+**Status:** resolved —— 199d104（票面标注过期，实现已随对应提交落地，2026-08-22 审计修正）
 
 - [ ] `getPermissionLevel` 读 `session.config.permissionLevel`（覆盖）?? `general.permissionLevel` ?? `workspace`
 - [ ] `applyPermissionLevel`/`restorePermissionLevel`/恢复写读配置文件而非 `level/set` 事件 / `PERMISSION_SCRATCH_KEY`

@@ -4,7 +4,7 @@
 
 **Blocked by:** None — can start immediately
 
-**Status:** ready-for-agent
+**Status:** resolved —— 04a33d1（票面标注过期，实现已随对应提交落地，2026-08-22 审计修正）
 
 - [ ] core `session` 模块存在 `SessionConfig` 类型导出与 `loadConfig`/`saveConfig`（原子写、缺失→`{}`）
 - [ ] `mode` 不再依赖 stopgap `mode` 事件：新建写 `session.config.mode` 落盘，resume 从配置文件恢复

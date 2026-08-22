@@ -4,7 +4,7 @@
 
 **Blocked by:** None — can start immediately
 
-**Status:** ready-for-agent
+**Status:** resolved —— 0767ffa（票面标注过期，实现已随对应提交落地，2026-08-22 审计修正）
 
 - [ ] CLI 应用包及其全部文件不再存在于 workspace（REPL 主入口、插件加载器、示例插件、六个 check 脚本）
 - [ ] 根/各包脚本不再引用 CLI 包（dev / check-* / verify 的接线与 build 入口移除；`@applepi/agent` 从 workspace 与相关 package.json 依赖消失）

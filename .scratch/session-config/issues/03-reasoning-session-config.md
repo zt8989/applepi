@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — SessionConfig 存储；02 — general + 级联
 
-**Status:** ready-for-agent
+**Status:** resolved —— 199d104（票面标注过期，实现已随对应提交落地，2026-08-22 审计修正）
 
 - [ ] composer chip 切换写 `session.config.reasoningLevel`（`saveConfig`），仅覆盖、不改 `general`
 - [ ] 首条消息 pre-chosen reasoning 写为初始覆盖

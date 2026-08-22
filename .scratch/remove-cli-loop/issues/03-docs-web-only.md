@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 — 从 core 移除非流式 loop（runLoop）
 
-**Status:** ready-for-agent
+**Status:** resolved —— 3f029a0（票面标注过期，实现已随对应提交落地，2026-08-22 审计修正）
 
 - [ ] 文档不再描述 CLI 界面或被删的非流式 loop（过时路径 / 术语消除）
 - [ ] 应用包清单与依赖图、验证脚本套件描述与删除后的目录树一致

@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — SessionConfig 类型 + `<id>.config.json>` 存储（共享 `SessionConfig` 类型）
 
-**Status:** ready-for-agent
+**Status:** resolved —— d57fae2（票面标注过期，实现已随对应提交落地，2026-08-22 审计修正）
 
 - [ ] `loadSettings` 解析 `general` 块；顶层 `lastUsedModel`/`lastUsedLevel` 不再产出（无兼容读）
 - [ ] `resolveSessionConfig(sessionConfig?, general?)` 按 `覆盖 ?? general ?? builtin` 逐 key 级联：model / reasoningLevel / permissionLevel

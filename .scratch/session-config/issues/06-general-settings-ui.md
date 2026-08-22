@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 — general + 级联；03 — reasoning 覆盖消费；04 — permission 覆盖消费
 
-**Status:** ready-for-agent
+**Status:** resolved —— ffa0068（票面标注过期，实现已随对应提交落地，2026-08-22 审计修正）
 
 - [ ] settings 弹窗出现「通用设置」区：model / reasoningLevel / permissionLevel 三默认
 - [ ] 变更只写 `settings.json.general`（不写任何会话覆盖）

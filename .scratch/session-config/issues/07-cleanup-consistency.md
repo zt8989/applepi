@@ -4,7 +4,7 @@
 
 **Blocked by:** 03 — reasoning 覆盖；04 — permission 覆盖；05 — model 覆盖（三处收敛完成后才有可删的死代码）
 
-**Status:** ready-for-agent
+**Status:** resolved —— ffa0068（票面标注过期，实现已随对应提交落地，2026-08-22 审计修正）
 
 - [ ] 旧 `reasoning/set`/`level/set`/`mode` 事件读写及相关 adapter 删除
 - [ ] `PERMISSION_SCRATCH_KEY` 残留、顶层 `lastUsedModel`/`lastUsedLevel` 解析删除

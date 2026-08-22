@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — 核心运行时 + 端到端 agent loop、02 — 本地扩展自动发现 + hello 工具、03 — Denylist 安全闭环、04 — Memory 参考扩展、05 — Skills 参考扩展、06 — MCP 参考扩展（bash + mcp-cli 桥）、07 — 软隔离（misbehaving middleware）
 
-**Status:** ready-for-agent
+**Status:** resolved —— dc61f94（票面标注过期，实现已随对应提交落地，2026-08-22 审计修正）
 
 - [ ] 所有 workspace 包构建无 TypeScript 错误
 - [ ] `apps/agent` 能成功跑完 "prompt → 工具调用 → 结果回灌" 的完整一轮

@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — 删除 CLI 应用（apps/agent）
 
-**Status:** ready-for-agent
+**Status:** resolved —— 610efc2（票面标注过期，实现已随对应提交落地，2026-08-22 审计修正）
 
 - [ ] 非流式 loop 函数不再存在；`index` 导出不再含它及其配套类型（依赖包重建后无 TS 解析错误）
 - [ ] 非流式模型调用面及其 `Harness` turn 便捷方法已移除；流式路径（供 web 的 loop）保持不变

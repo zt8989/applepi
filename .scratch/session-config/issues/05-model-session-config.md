@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — SessionConfig 存储；02 — general + 级联；03 — composer chip 写路径基建
 
-**Status:** ready-for-agent
+**Status:** resolved —— ffa0068（票面标注过期，实现已随对应提交落地，2026-08-22 审计修正）
 
 - [ ] model 选定写 `session.config.model` 覆盖（`saveConfig`），非全局
 - [ ] 解析走 02 级联；model 默认 = 动态「第一个可用 provider 的第一个模型」

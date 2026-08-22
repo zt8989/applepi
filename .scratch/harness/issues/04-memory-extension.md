@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — 核心运行时 + 端到端 agent loop
 
-**Status:** done
+**Status:** resolved —— 2a6f4e5
 
 - [x] `memory_write` 写入一个值后，后续同一会话内的 `memory_read` 能取回该值（scratch mirror）
 - [x] 持久化落盘到本地 JSON 文件，跨工具调用不丢（文件后端）
