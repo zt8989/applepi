@@ -7,7 +7,7 @@ import {
   sessionTitle,
   type SessionActionRequest,
 } from '@/lib/server';
-import { getPermissionLevel } from '@applepi/core';
+import { getPermissionLevel, pendingToolCalls } from '@applepi/core';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -48,7 +48,19 @@ export async function GET(req: Request) {
   const reasoning = config.reasoningLevel;
   // Mode: `sessionMode` reads the persisted config identity (ADR-0016).
   const title = await sessionTitle(store.workspace, session);
-  return Response.json({ messages: loaded.messages, level, reasoning, mode, title });
+  // Outstanding approval, server-resolved so the client can render an
+  // ask_user text-input card even after a refresh (expectsAnswer lives in the
+  // tool spec, which the client never sees).
+  const outstanding = pendingToolCalls(loaded.messages)[0];
+  const pending = outstanding
+    ? {
+        toolCallId: outstanding.toolCallId,
+        toolName: outstanding.toolName,
+        args: outstanding.args,
+        expectsAnswer: harness.getTool(outstanding.toolName)?.expectsAnswer === true,
+      }
+    : null;
+  return Response.json({ messages: loaded.messages, level, reasoning, mode, title, pending });
 }
 
 export async function PATCH(req: Request) {

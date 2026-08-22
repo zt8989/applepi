@@ -98,7 +98,7 @@ export interface ChatStore {
   llm: LlmConfig | null;
   refreshLlm: () => Promise<void>;
   pending: PendingApprovalInfo | null;
-  respond: (decision: 'approve' | 'deny') => Promise<void>;
+  respond: (decision: 'approve' | 'deny', answer?: string) => Promise<void>;
   error: string | null;
   renameSession: (sessionId: string, title: string) => Promise<void>;
   togglePin: (sessionId: string, pinned: boolean) => Promise<void>;
@@ -491,6 +491,7 @@ export function useChatStore(): ChatStore {
           toolCallId: String(v.toolCallId),
           toolName: String(v.toolName),
           args: (v.args ?? {}) as Record<string, unknown>,
+          expectsAnswer: v.expectsAnswer === true,
         });
       }
     }
@@ -645,7 +646,7 @@ export function useChatStore(): ChatStore {
   );
 
   const respond = useCallback(
-    async (decision: 'approve' | 'deny') => {
+    async (decision: 'approve' | 'deny', answer?: string) => {
       const p = pendingRef.current;
       const assistantId = assistantIdRef.current;
       if (!p || !assistantId || !sessionIdRef.current) return;
@@ -658,6 +659,7 @@ export function useChatStore(): ChatStore {
         messageId: assistantId,
         toolCallId: p.toolCallId,
         decision,
+        answer,
       };
       await runSegment('/api/chat/approve', body, assistantId);
     },
@@ -706,9 +708,16 @@ export function useChatStore(): ChatStore {
         }
         assistantIdRef.current = lastAssistantId;
         commit(out);
-        // Re-surface an outstanding approval (deepen #03: core pure resolver).
-        const p = pendingApproval(merged);
-        if (p) setPending({ toolCallId: p.toolCallId, toolName: p.toolName, args: p.args });
+        // Re-surface an outstanding approval (deepen #03: core pure resolver;
+        // #02: expectsAnswer comes server-resolved so the ask_user card stays
+        // a text-input card even after a refresh).
+        const serverPending = (data as any).pending as PendingApprovalInfo | null;
+        if (serverPending) {
+          setPending(serverPending);
+        } else {
+          const p = pendingApproval(merged);
+          if (p) setPending({ toolCallId: p.toolCallId, toolName: p.toolName, args: p.args });
+        }
       } catch (e: any) {
         setError(e?.message ?? String(e));
       }

@@ -64,17 +64,22 @@ export async function POST(req: Request) {
       if (!target) {
         throw new Error(`tool call ${body.toolCallId} not found in session history`);
       }
-      await executeApprovedTool(harness, messages, target, body.decision, { store, writer });
+      await executeApprovedTool(harness, messages, target, body.decision, { store, writer }, undefined, body.answer);
 
       const remaining = pendingToolCalls(messages);
       if (remaining.length > 0) {
         const next = remaining[0];
-        await store.appendEvent('tool/approval-pending', next);
+        const nextExpectsAnswer = harness.getTool(next.toolName)?.expectsAnswer === true;
+        await store.appendEvent('tool/approval-pending', {
+          ...next,
+          expectsAnswer: nextExpectsAnswer,
+        });
         writer.writeData({
           type: 'approval-pending',
           toolCallId: next.toolCallId,
           toolName: next.toolName,
           args: next.args,
+          expectsAnswer: nextExpectsAnswer,
         });
         return;
       }

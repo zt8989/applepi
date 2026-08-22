@@ -41,6 +41,8 @@ export interface PendingApproval {
   toolCallId: string;
   toolName: string;
   args: Record<string, unknown>;
+  /** True when the approval card should offer a text answer (ask_user). */
+  expectsAnswer?: boolean;
 }
 
 /** Extract the plain text of a message content (string or parts) — the ONE

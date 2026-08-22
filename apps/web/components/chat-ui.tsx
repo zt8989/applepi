@@ -600,7 +600,12 @@ export function ChatUI({ store }: { store: ChatStore }) {
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <ApprovalContext.Provider
-        value={{ pendingToolCallId: pending?.toolCallId ?? null, isRunning, respond }}
+        value={{
+          pendingToolCallId: pending?.toolCallId ?? null,
+          pendingExpectsAnswer: pending?.expectsAnswer,
+          isRunning,
+          respond,
+        }}
       >
         <div className="flex h-dvh w-full items-stretch justify-center bg-stone-100">
           <div className="flex h-full w-full overflow-hidden bg-white">

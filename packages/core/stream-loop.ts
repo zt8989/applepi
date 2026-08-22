@@ -30,6 +30,8 @@ export interface PendingApproval {
   toolName: string;
   args: any;
   decision?: 'approve' | 'deny';
+  /** True when the approval card should offer a text answer (ask_user). */
+  expectsAnswer?: boolean;
 }
 
 export interface StreamLoopOpts {
@@ -167,10 +169,13 @@ export async function runLoopStreamSegment(
       for (const tc of toolCalls) {
         const mode = await classifyApproval(harness, tc.toolName, tc.args);
         if (mode === 'ask') {
+          const spec = harness.getTool(tc.toolName);
+          const expectsAnswer = spec?.expectsAnswer === true;
           const pending: PendingApproval = {
             toolCallId: tc.toolCallId,
             toolName: tc.toolName,
             args: tc.args,
+            expectsAnswer,
           };
           await (opts.onPending ?? ((p) => defaultPendingWriter(opts.store, p)))(pending);
           opts.writer.writeData({
@@ -178,6 +183,7 @@ export async function runLoopStreamSegment(
             toolCallId: pending.toolCallId,
             toolName: pending.toolName,
             args: pending.args,
+            expectsAnswer,
           });
           return { finishReason: 'tool-calls' };
         }
@@ -197,7 +203,9 @@ export async function runLoopStreamSegment(
  * Execute (approve) or skip (deny) one pending tool call, streaming its
  * tool-result part and appending the tool message to `messages` + store.
  * Deny feeds a refusal back to the model (ADR-0011 Q12=A1), mirroring the
- * CLI's blocked-tool error semantics.
+ * CLI's blocked-tool error semantics. Approve-with-payload (ask_user): when
+ * `answer` is provided, the user's answer IS the tool result and the tool's
+ * `execute` is never called.
  */
 export async function executeApprovedTool(
   harness: Harness,
@@ -206,11 +214,15 @@ export async function executeApprovedTool(
   decision: 'approve' | 'deny',
   opts: { store: SessionStore | null; writer: DataStreamWriter },
   traceHandle?: TraceHandle | null,
+  answer?: string,
 ): Promise<void> {
   const span = traceHandle?.span('tool', { name: tc.toolName, args: tc.args, decision });
   let res: string;
   if (decision === 'deny') {
     res = `[user denied] tool ${tc.toolName} was NOT executed (the user rejected this tool call).`;
+  } else if (answer !== undefined) {
+    // approve-with-payload: the answer is the tool result (ask_user).
+    res = answer;
   } else {
     const tctx: any = {
       session: harness.session,

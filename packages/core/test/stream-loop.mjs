@@ -92,6 +92,20 @@ harness.registerTool({
   approval: 'ask',
   execute: (args) => `wrote(${args.key})`,
 });
+// Probe for #02 approve-with-payload (ask_user shape): asks the user for a
+// free-text reply; its execute must NEVER run (the answer IS the result).
+let userInputExecuted = false;
+harness.registerTool({
+  name: 'user_input',
+  description: 'ask the user a question',
+  parameters: z.object({ question: z.string() }),
+  approval: 'ask',
+  expectsAnswer: true,
+  execute: async () => {
+    userInputExecuted = true;
+    return 'SHOULD NOT RUN';
+  },
+});
 harness.attachSession(store);
 
 // 1. classifyApproval resolves ToolSpec.approval (auto / ask / default ask).
@@ -195,6 +209,57 @@ harness.attachSession(store);
   const last = messages[messages.length - 1];
   assert.match(last.content[0].result, /user denied/i);
   ok('executeApprovedTool: deny feeds refusal back, no execution');
+}
+
+// 5b. (#02) ask_user pause: pending carries expectsAnswer, card data part too.
+{
+  const messages = [{ role: 'user', content: 'ask me' }];
+  const writer = makeWriter();
+  const llm = fakeStreamText([
+    { toolCalls: [{ toolCallId: 'a1', toolName: 'user_input', args: { question: 'which port?' } }] },
+  ]);
+  const res = await runLoopStreamSegment(harness, messages, {
+    model: {},
+    store,
+    writer,
+    messageId: 'm4b',
+    streamTextCall: llm,
+  });
+  assert.equal(res.finishReason, 'tool-calls');
+  const part = writer.lines.find((l) => l.includes('approval-pending'));
+  assert.ok(part.includes('true'), 'approval-pending part carries expectsAnswer:true');
+  const ev = await store.lastEvent('tool/approval-pending');
+  assert.equal(ev.payload.expectsAnswer, true, 'persisted pending carries expectsAnswer');
+  ok('ask_user pause: expectsAnswer flagged in data part + persisted event');
+}
+
+// 5c. (#02) resume with answer: the answer IS the tool result, execute never
+//     called; message sequence stays assistant(tool-call) → tool(result=answer).
+{
+  const messages = [{ role: 'user', content: 'ask me' }];
+  const writer = makeWriter();
+  const llm = fakeStreamText([
+    { toolCalls: [{ toolCallId: 'a1', toolName: 'user_input', args: { question: 'which port?' } }] },
+  ]);
+  await runLoopStreamSegment(harness, messages, { model: {}, store: null, writer, messageId: 'm4c', streamTextCall: llm });
+  userInputExecuted = false;
+  const writer2 = makeWriter();
+  await executeApprovedTool(
+    harness,
+    messages,
+    { toolCallId: 'a1', toolName: 'user_input', args: { question: 'which port?' } },
+    'approve',
+    { store: null, writer: writer2 },
+    undefined,
+    'port 3010',
+  );
+  assert.equal(userInputExecuted, false, 'execute never called for answer');
+  assert.ok(writer2.lines.some((l) => l.includes('port 3010')), 'answer streamed as tool result');
+  const last = messages[messages.length - 1];
+  assert.equal(last.role, 'tool');
+  assert.equal(last.content[0].result, 'port 3010');
+  assert.deepEqual(pendingToolCalls(messages), [], 'no pending after answering');
+  ok('executeApprovedTool: approve-with-payload feeds the answer back, no execution');
 }
 
 // 6. Mixed turn: auto tool executes, ask tool pauses at the ask point.

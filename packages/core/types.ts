@@ -20,6 +20,12 @@ export interface ToolSpec {
   execute: (args: any, ctx: Ctx) => Promise<string> | string;
   /** Stream-interface approval classification (ADR-0011). Default 'ask'. */
   approval?: ApprovalMode | ((args: any) => ApprovalMode | Promise<ApprovalMode>);
+  /**
+   * ask-only: when true, the approval card offers a free-text answer and the
+   * answer is fed back as this tool call's result — the tool's `execute` is
+   * NOT called (ask_user). Default false.
+   */
+  expectsAnswer?: boolean;
 }
 
 /** The model-facing shape of a tool (description + zod parameters, no execute). */

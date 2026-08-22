@@ -23,12 +23,16 @@ export interface ApproveRequestBody {
   messageId: string;
   toolCallId: string;
   decision: 'approve' | 'deny';
+  /** Free-text answer for ask_user tools (approve-with-payload). */
+  answer?: string;
 }
 
 export interface PendingApprovalInfo {
   toolCallId: string;
   toolName: string;
   args: Record<string, unknown>;
+  /** True when the approval card should offer a text answer (ask_user). */
+  expectsAnswer?: boolean;
 }
 
 export interface SessionSummary {
