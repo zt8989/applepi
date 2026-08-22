@@ -77,3 +77,53 @@ export function foldParts(view: TurnView, parts: any[]): TurnView {
 export function awaitingApproval(view: TurnView) {
   return view.pending ?? view.toolCalls.find((t) => t.result === undefined) ?? null;
 }
+
+// ---- slash command mapping (ticket 08; pure + unit-tested) -----------------
+
+export type TuiCommand =
+  | { type: 'new'; mode?: 'base' | 'standard' }
+  | { type: 'resume'; id: string }
+  | { type: 'sessions' }
+  | { type: 'config' }
+  | { type: 'level'; level: string }
+  | { type: 'help' }
+  | { type: 'exit' }
+  | { type: 'error'; message: string };
+
+const PERMISSION_LEVELS = ['readonly', 'workspace', 'fullaccess'];
+
+/**
+ * Map an input line to a TUI command. Non-slash lines → null (ordinary chat).
+ * Invalid forms map to `error` with a concrete message, never throw.
+ */
+export function parseCommand(line: string): TuiCommand | null {
+  const text = line.trim();
+  if (!text.startsWith('/')) return null;
+  const parts = text.slice(1).split(/\s+/);
+  const name = parts[0] ?? '';
+  const arg = parts[1];
+  switch (name) {
+    case 'new':
+      if (arg === undefined) return { type: 'new' };
+      if (arg === 'base' || arg === 'standard') return { type: 'new', mode: arg };
+      return { type: 'error', message: '/new 参数须为 base 或 standard' };
+    case 'resume':
+      if (!arg) return { type: 'error', message: '/resume 需要会话 id，如 /resume abcd1234' };
+      return { type: 'resume', id: arg };
+    case 'sessions':
+      return { type: 'sessions' };
+    case 'config':
+      return { type: 'config' };
+    case 'level':
+      if (!arg || !PERMISSION_LEVELS.includes(arg)) {
+        return { type: 'error', message: `/level 须为 ${PERMISSION_LEVELS.join('|')}` };
+      }
+      return { type: 'level', level: arg };
+    case 'help':
+      return { type: 'help' };
+    case 'exit':
+      return { type: 'exit' };
+    default:
+      return { type: 'error', message: `未知命令 /${name}（/help 查看）` };
+  }
+}

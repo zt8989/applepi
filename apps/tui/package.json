@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "test": "tsc -p tsconfig.json && node test/stream-parser.mjs"
+    "test": "tsc -p tsconfig.json && node test/stream-parser.mjs && node test/commands.mjs"
   },
   "dependencies": {
     "@applepi/server": "workspace:*",

@@ -1,7 +1,14 @@
 import { Box, Text, useInput } from 'ink';
 import { useEffect, useRef, useState } from 'react';
 import { StreamLineDecoder } from './stream-parser.js';
-import { emptyTurn, foldParts, genMessageId, type TurnView } from './utils.js';
+import {
+  emptyTurn,
+  foldParts,
+  genMessageId,
+  parseCommand,
+  type TurnView,
+  type TuiCommand,
+} from './utils.js';
 
 export interface TuiProps {
   serverUrl: string;
@@ -35,11 +42,14 @@ export function App({ serverUrl, cwd }: TuiProps) {
   const turnRef = useRef<TurnView>(emptyTurn());
   const sessionRef = useRef<string | null>(null);
   const messageIdRef = useRef<string>('');
+  const modeRef = useRef<'base' | 'standard' | undefined>(undefined);
   const pendingModeRef = useRef<PendingMode>(null);
   pendingModeRef.current = pendingMode;
   const streamingRef = useRef(false);
   streamingRef.current = streaming;
   const bump = () => setTurn({ ...turnRef.current });
+
+  const note = (text: string) => setHistory((h) => [...h, { role: 'note', text }]);
 
   // Register the launch cwd as a workspace (manifest, ADR-0013) — best effort.
   useEffect(() => {
@@ -118,13 +128,15 @@ export function App({ serverUrl, cwd }: TuiProps) {
     }
   }
 
-  function sendChat(text: string, mode?: string) {
+  function sendChat(text: string) {
     const messageId = genMessageId();
     messageIdRef.current = messageId;
     turnRef.current = emptyTurn();
     sessionRef.current = null;
     bump();
     setHistory((h) => [...h, { role: 'user', text }]);
+    const mode = modeRef.current;
+    // The mode rides ONLY the new-session request (ADR-0015: chosen once).
     void runStream((ctrl) =>
       fetch(`${serverUrl}/api/chat`, {
         method: 'POST',
@@ -158,6 +170,99 @@ export function App({ serverUrl, cwd }: TuiProps) {
         signal: ctrl.signal,
       }),
     );
+  }
+
+  async function runCommand(cmd: TuiCommand) {
+    switch (cmd.type) {
+      case 'new': {
+        sessionRef.current = null;
+        modeRef.current = cmd.mode;
+        setHistory([]);
+        note(`新会话（mode: ${cmd.mode ?? 'standard'}）`);
+        break;
+      }
+      case 'resume': {
+        const res = await fetch(`${serverUrl}/api/session?workspace=${encodeURIComponent(cwd)}&session=${encodeURIComponent(cmd.id)}`);
+        if (!res.ok) {
+          note(`恢复失败：HTTP ${res.status}`);
+          break;
+        }
+        const data = (await res.json()) as { messages: any[]; title?: string };
+        const items: HistoryItem[] = [];
+        for (const m of data.messages) {
+          if (m.role === 'system') continue;
+          if (m.role === 'user') items.push({ role: 'user', text: String(m.content ?? '') });
+          else if (m.role === 'assistant') {
+            const parts = Array.isArray(m.content) ? m.content : [];
+            const text = parts.filter((p: any) => p.type === 'text').map((p: any) => p.text).join('');
+            if (text) items.push({ role: 'assistant', text });
+            for (const tc of parts.filter((p: any) => p.type === 'tool-call')) {
+              items.push({ role: 'note', text: `[${tc.toolName}] ${JSON.stringify(tc.args ?? {})}` });
+            }
+          } else if (m.role === 'tool') {
+            const parts = Array.isArray(m.content) ? m.content : [];
+            for (const p of parts) {
+              if (p.type === 'tool-result') items.push({ role: 'note', text: `→ ${String(p.result).slice(0, 200)}` });
+            }
+          }
+        }
+        setHistory(items);
+        sessionRef.current = cmd.id;
+        messageIdRef.current = genMessageId();
+        note(data.title ? `已恢复会话 ${cmd.id}（${data.title}）` : `已恢复会话 ${cmd.id}`);
+        break;
+      }
+      case 'sessions': {
+        const res = await fetch(`${serverUrl}/api/workspaces`);
+        if (!res.ok) {
+          note(`获取会话列表失败：HTTP ${res.status}`);
+          break;
+        }
+        const { workspaces } = (await res.json()) as { workspaces: any[] };
+        const ws = workspaces.find((w) => w.path === cwd) ?? workspaces.find((w) => w.slug === cwd);
+        if (!ws || !ws.sessions?.length) {
+          note(`当前工作区（${cwd}）暂无会话。/new 开始一个新会话。`);
+          break;
+        }
+        for (const s of ws.sessions) {
+          note(`${s.id}  ${s.title}${s.pinned ? ' 📌' : ''}`);
+        }
+        break;
+      }
+      case 'config': {
+        const res = await fetch(`${serverUrl}/api/config`);
+        const body = (await res.json()) as { provider?: string; model?: string; reasoningLevel?: string };
+        note(
+          body.provider && body.model
+            ? `model: ${body.provider} / ${body.model}${body.reasoningLevel ? `（推理 ${body.reasoningLevel}）` : ''}`
+            : '未配置模型（请先设置提供方与密钥）',
+        );
+        break;
+      }
+      case 'level': {
+        const sessionId = sessionRef.current;
+        if (!sessionId) {
+          note('/level 需要先有会话');
+          break;
+        }
+        const res = await fetch(`${serverUrl}/api/session`, {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ workspace: cwd, sessionId, action: 'level', level: cmd.level }),
+        });
+        note(res.ok ? `已切换权限级别：${cmd.level}` : `切换失败：HTTP ${res.status}`);
+        break;
+      }
+      case 'help':
+        note('命令：/new [base|standard] 新会话 /resume <id> 恢复 /sessions 列表 /config 模型 /level <level> 权限 /exit 退出');
+        break;
+      case 'exit':
+        process.exit(0);
+        break;
+      case 'error':
+        note(cmd.message);
+        break;
+    }
   }
 
   useInput((inputStr, key) => {
@@ -197,7 +302,12 @@ export function App({ serverUrl, cwd }: TuiProps) {
       const text = input.trim();
       if (text && !streamingRef.current) {
         setInput('');
-        void sendChat(text);
+        const cmd = parseCommand(text);
+        if (cmd) {
+          void runCommand(cmd);
+        } else {
+          void sendChat(text);
+        }
       }
       return;
     }

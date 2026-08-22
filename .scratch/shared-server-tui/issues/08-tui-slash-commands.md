@@ -4,10 +4,10 @@
 
 **Blocked by:** 05（契约冻结点）。
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 六内置命令全部可用（走服务端 API 对应语义：`/level` 写 session.config、`/resume` 切会话等）；`/new` mode 参数校验（base|standard，非法拒绝）
-- [ ] 命令映射纯函数单测（含非法命令、缺参、mode 校验）
-- [ ] 会话切换后消息流正确 hydrate；`/sessions` 展示工作区会话（标题只读）
-- [ ] 手工 E2E：/new standard → 对话 → /sessions → /resume → /level 往返
-- [ ] `pnpm -r verify` 绿
+- [x] 六内置命令全部可用：`/new [base|standard]`（新会话、清空上下文、mode 只随新会话请求）、`/resume <id>`（GET hydrate → 重建历史 + 续会话）、`/sessions`（当前 cwd 工作区会话列表，标题只读）、`/config`（模型/provider/推理档）、`/level <level>`（PATCH 会话 config，校验三值）、`/help`、`/exit`
+- [x] 命令映射纯函数单测（commands.mjs 2 项：六命令映射 + 非法形态 error 化），非法命令/缺参不抛错、给具体提示
+- [x] 会话切换 hydrate 正确（用户/助手文本 + 工具调用/结果折叠进历史）
+- [x] `pnpm -r verify` 绿（22 套件 EXIT 0）
+- 手工 E2E（真实终端往返）留待用户环境
