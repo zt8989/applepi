@@ -1,19 +1,14 @@
-import { openConfigFile, configFileHidden } from '@applepi/server';
+import { handleConfigOpenFileGet, handleConfigOpenFilePost } from '@applepi/server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-/** GET: probe whether the action is available (no side effect — does NOT open). */
+/** GET — probe whether the action is available. Delegate (ADR-0017). */
 export async function GET() {
-  return Response.json({ hidden: configFileHidden() });
+  return handleConfigOpenFileGet();
 }
 
-/** POST: actually open settings.json in the OS default editor. */
+/** POST — open settings.json in the OS default editor. Delegate (ADR-0017). */
 export async function POST() {
-  try {
-    const res = await openConfigFile();
-    return Response.json(res);
-  } catch (e: any) {
-    return new Response(`open-file error: ${e?.message ?? String(e)}`, { status: 500 });
-  }
+  return handleConfigOpenFilePost();
 }

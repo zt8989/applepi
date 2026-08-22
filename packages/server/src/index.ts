@@ -55,6 +55,20 @@ export {
 export { handleChat } from './routes/chat.js';
 export { handleChatApprove } from './routes/approve.js';
 export type { ChatSeam } from './routes/seam.js';
+export { handleFilesGet } from './routes/files.js';
+export {
+  handleConfigGet,
+  handleConfigGeneralGet,
+  handleConfigGeneralPut,
+  handleConfigProvidersGet,
+  handleConfigProvidersPut,
+  handleConfigModelsGet,
+  handleConfigLastUsedPost,
+  handleConfigLastUsedLevelPost,
+  handleConfigOpenFileGet,
+  handleConfigOpenFilePost,
+} from './routes/config.js';
+export { handlePickFolderPost } from './routes/pick-folder.js';
 
 export interface RunningServer {
   port: number;

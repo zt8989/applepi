@@ -1,14 +1,9 @@
-import { pickFolder } from '@applepi/server';
+import { handlePickFolderPost } from '@applepi/server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-/** POST /api/pick-folder — native macOS folder chooser, returns the absolute path. */
+/** POST /api/pick-folder — delegate to the shared server (ADR-0017). */
 export async function POST() {
-  try {
-    const p = await pickFolder();
-    return Response.json({ path: p });
-  } catch (e: any) {
-    return new Response(e?.message ?? String(e), { status: 400 });
-  }
+  return handlePickFolderPost();
 }

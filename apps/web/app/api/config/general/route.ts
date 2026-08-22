@@ -1,28 +1,14 @@
-import { saveGeneralDefaults, getGeneralDefaults } from '@applepi/server';
+import { handleConfigGeneralGet, handleConfigGeneralPut } from '@applepi/server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-/** GET — the current global default slots (ADR-0016 通用设置). */
+/** GET /api/config/general — delegate to the shared server (ADR-0017). */
 export async function GET() {
-  try {
-    return Response.json(await getGeneralDefaults());
-  } catch (e: any) {
-    return new Response(`general error: ${e?.message ?? String(e)}`, { status: 500 });
-  }
+  return handleConfigGeneralGet();
 }
 
-/** PUT — overwrite the global default slots (model/reasoning/permission). */
+/** PUT /api/config/general — delegate to the shared server (ADR-0017). */
 export async function PUT(req: Request) {
-  try {
-    const body = (await req.json()) as {
-      model?: { providerId: string; modelId: string };
-      reasoningLevel?: string;
-      permissionLevel?: string;
-    };
-    await saveGeneralDefaults(body);
-    return Response.json({ ok: true });
-  } catch (e: any) {
-    return new Response(`save general error: ${e?.message ?? String(e)}`, { status: 500 });
-  }
+  return handleConfigGeneralPut(req);
 }
