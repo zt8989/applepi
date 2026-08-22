@@ -1,5 +1,6 @@
 # ADR-0009: Security as Tool Self-Determination — Core-Built SecurityPolicy + Extension Reload
 
+> **修订注记（2026-08-22）**：`@applepi/extensions` 包已更名为 `@applepi/extension`（包名 = 核心概念名单数约定；正文沿用决策当时名称）。
 ## Status
 
 Accepted — 2026-08-19, decided via `/grill-with-docs` rounds 1–5 (Q1–Q23).

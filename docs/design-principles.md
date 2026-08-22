@@ -14,7 +14,7 @@
 ADR-0015 把 core 拆成单职责深模块：`llm`（LLM 交互面：工具目录 + 单段模型响应）、
 `loop`（多回合编排）、`session`（持久化）、`config`（LLM 配置）、`security`（权限
 强制）、`trace`（可观测），由薄 **Harness 壳** 组装。**不含工具**——`bash`、
-`str_replace_editor`、skills、memory 全部在 `@applepi/extensions`（ADR-0005/0007），
+`str_replace_editor`、skills、memory 全部在 `@applepi/extension`（ADR-0005/0007），
 能力集由 app/bundle 层装配。core 的 `llm` 只接受现成的 `{ prompt片段, tools }` 与
 history 产出一段响应；`registerExtension`/洋葱这类通用能力注入机制**已移出 core**
 （仅作为 app 层插件加载器/bundle 生产者形态残存）。
@@ -31,7 +31,7 @@ bundle/app 层装配，core 的 `llm` 只接受现成的 `{ prompt片段, tools 
 
 - 依据：ADR-0015（core 只关心 LLM 交互——system_prompt + tools）。
 - 现状（已实现）：能力由 `packages/bundle`（`base`/`standard` 纯声明
-  `(env)=>({prompt,tools})`）+ `@applepi/extensions` 能力工厂（memory/skills）+ app
+  `(env)=>({prompt,tools})`）+ `@applepi/extension` 能力工厂（memory/skills）+ app
   层插件加载器装配，core 不再持有通用能力注入机制（`registerExtension`/`HarnessApi`/
   洋葱已移除）。
 - 后果：core 对能力无感知；会话在 app 里选一个 bundle（base 或 standard），叠加
@@ -133,7 +133,7 @@ core 不兜底——这是信任扩展边界的直接推论（P5）。
 
 **内置工具是参考实现（reference tool），不是核心承诺。**
 
-`bashTool` / `strReplaceEditorTool` 由 `@applepi/extensions` 提供，是可替换的
+`bashTool` / `strReplaceEditorTool` 由 `@applepi/extension` 提供，是可替换的
 默认能力；bundle（`base`/`standard`）引用这些共享工具实现，app 也可以替换注册。
 
 - 依据：ADR-0005（Q2/Q6）、ADR-0015（`baseExtension` → `base` bundle）、CONTEXT.md 术语表。

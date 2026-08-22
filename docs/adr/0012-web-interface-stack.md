@@ -1,5 +1,6 @@
 # ADR-0012: Web Interface — Next.js + assistant-ui + AI SDK useChat + Langfuse in Core
 
+> **修订注记（2026-08-22）**：`@applepi/extensions` 包已更名为 `@applepi/extension`（包名 = 核心概念名单数约定；正文沿用决策当时名称）。
 ## Status
 
 Accepted — 2026-08-20, decided via `/grill-with-docs` (web interface design, rounds 1–3).

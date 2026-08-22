@@ -1,5 +1,6 @@
 # ADR-0005: Move Reference Tools and the Denylist Out of Core into `baseExtension`
 
+> **修订注记（2026-08-22）**：`@applepi/extensions` 包已更名为 `@applepi/extension`（包名 = 核心概念名单数约定；正文沿用决策当时名称）。
 ## Status
 
 Accepted — 2026-08-19, decided via `/grill-with-docs` rounds 1–3 (Q1–Q7).

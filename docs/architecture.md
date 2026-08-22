@@ -34,18 +34,18 @@
 │ 全部 agent API（chat/approve/session/workspaces/files/    │
 │ config/pick-folder/heartbeat）                            │
 └───────────────▲─────────────────────────────────────────┘
-                │ 依赖：server → bundle（→extensions/core）
+                │ 依赖：server → bundle（→extension/core）
 ┌───────────────┴─────────────────────────────────────────┐
 │ packages/bundle  (@applepi/bundle)                       │
 │ base / standard 能力包：纯声明 (env) => ({ prompt, tools }) │
 │ + enableBundleSpec / assembleFlatPrompt（装配助手）       │
 └───────────────▲─────────────────────────────────────────┘
 ┌───────────────┴─────────────────────────────────────────┐
-│ packages/extensions  (@applepi/extensions)               │
+│ packages/extension  (@applepi/extension)               │
 │ 参考工具 bash / str_replace_editor + 能力工厂             │
 │ memory/skills/todo/plan/goal/ask_user + 共享状态文件助手  │
 └───────────────▲─────────────────────────────────────────┘
-                │ 依赖：extensions → core（单向）
+                │ 依赖：extension → core（单向）
 ┌───────────────┴─────────────────────────────────────────┐
 │ packages/core  (@applepi/core)  —— 深模块 + 薄 Harness 壳 │
 │ llm(stream) · loop(stream-loop) · session · config ·     │
@@ -54,7 +54,7 @@
 ```
 
 依赖方向（ADR-0003，ADR-0015，ADR-0017）：`server → bundle → core` 与
-`bundle → extensions → core`；`web → server`、`tui → server`（均走 HTTP，客户端不
+`bundle → extension → core`；`web → server`、`tui → server`（均走 HTTP，客户端不
 再直接依赖 core/bundle——web 页面壳仅前端，`/api/*` 由 `rewrites()` 代理到服务端
 端口 3210）。能力集由**服务端**在运行时装配到 Harness 壳上（详见 §3、§9）。CLI
 （`apps/agent`）与非流式 loop 已删除。
@@ -158,7 +158,7 @@ ask_user）与 **plugin**（外部追加）三层构成，全部由 **共享运�
 - **Bundle（能力包）** — `packages/bundle` 的 `base` / `standard`：纯声明
   `(env) => ({ prompt, tools })`，无 side effect、无 core/onion 访问。建会话时选
   一个（mode），`enableBundleSpec(harness, spec)` 注册其工具。
-- **Capability（能力）** — `@applepi/extensions` 的能力工厂（`createMemory` /
+- **Capability（能力）** — `@applepi/extension` 的能力工厂（`createMemory` /
   `createSkills` / `createTodo` / `createPlan` / `createGoal` / `createAskUser`）
   返回 `{ id, prompt(env, session), tools }`。bundle 的 `capabilities` 声明 id 清单，
   服务端用 `getCapability(id)` 解析、注册工具并每轮把 `prompt(env, session)` 片段并入
@@ -432,7 +432,7 @@ applepi/
 ├── packages/
 │   ├── core/               # @applepi/core：深模块 llm(stream)·loop(stream-loop)·session·config·security·trace + Harness 壳（无工具、无洋葱）
 │   ├── bundle/             # @applepi/bundle：base / standard 能力包，纯声明 (env)=>({prompt,tools}) + app 侧装配助手
-│   └── extensions/         # @applepi/extensions：参考工具 bash/sre + 能力工厂 memory/skills
+│   └── extension/          # @applepi/extension：参考工具 bash/sre + 能力工厂 memory/skills
 ├── apps/
 │   ├── web/                # @applepi/web：页面壳，Next.js（assistant-ui + Tailwind v4），§9
 │   └── tui/                # @applepi/tui：终端界面（Ink 7，Claude Code 风格），§9
@@ -447,7 +447,7 @@ applepi/
 ```
 
 - **构建策略**：build-first，跑 web / test 前先构建依赖包（`pnpm -r build` 拓扑序自动处理）。
-- **验证**：`pnpm verify` = build + 各包测试（core / extensions / bundle / server / tui）。CLI 的六个
+- **验证**：`pnpm verify` = build + 各包测试（core / extension / bundle / server / tui）。CLI 的六个
   key-free 检查脚本与 `check-soft-isolation` 已随 CLI / 洋葱一并删除。
 
 ## 12. 已移除：MCP

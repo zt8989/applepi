@@ -1,5 +1,6 @@
 # ADR-0008: The System Prompt is Built on the Onion — a `system_prompt` Stack
 
+> **修订注记（2026-08-22）**：`@applepi/extensions` 包已更名为 `@applepi/extension`（包名 = 核心概念名单数约定；正文沿用决策当时名称）。
 ## Status
 
 **Superseded by ADR-0010 (2026-08-19)** — the single `system_prompt` stack was

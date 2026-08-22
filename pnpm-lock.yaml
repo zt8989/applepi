@@ -51,9 +51,9 @@ importers:
       '@applepi/core':
         specifier: workspace:*
         version: link:../../packages/core
-      '@applepi/extensions':
+      '@applepi/extension':
         specifier: workspace:*
-        version: link:../../packages/extensions
+        version: link:../../packages/extension
       '@assistant-ui/react':
         specifier: ^0.15.15
         version: 0.15.15(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(use-sync-external-store@1.6.0(react@19.2.8))
@@ -97,9 +97,9 @@ importers:
       '@applepi/core':
         specifier: workspace:*
         version: link:../core
-      '@applepi/extensions':
+      '@applepi/extension':
         specifier: workspace:*
-        version: link:../extensions
+        version: link:../extension
       zod:
         specifier: ^3.23.0
         version: 3.25.76
@@ -119,7 +119,7 @@ importers:
         specifier: ^3.23.0
         version: 3.25.76
 
-  packages/extensions:
+  packages/extension:
     dependencies:
       '@applepi/core':
         specifier: workspace:*
@@ -142,9 +142,9 @@ importers:
       '@applepi/core':
         specifier: workspace:*
         version: link:../core
-      '@applepi/extensions':
+      '@applepi/extension':
         specifier: workspace:*
-        version: link:../extensions
+        version: link:../extension
       '@hono/node-server':
         specifier: ^2.1.1
         version: 2.1.1(hono@4.13.3)

@@ -7,10 +7,12 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] 包重命名：`packages/extensions` → `packages/extension`；`package.json` name 改 `@applepi/extension`
-- [ ] 代码引用方全部切换：bundle 包的 `base.ts` / `standard.ts` / `assemble.ts` 三处源码 import、bundle `package.json`（scripts 中的过滤构建 + dependencies）；`packages/server` 与 `apps/web` 的 `package.json` 依赖（及 web 源码若引用）；`packages/core/test/stream-loop.mjs` 的 `../../extensions/dist/index.js` 路径导入
-- [ ] `pnpm install` 重链 lockfile；`pnpm -r verify` 全绿（23 套件）
-- [ ] 文档同步：CONTEXT.md（15 处 + 新增包名约定词条「包名 = 核心概念名单数」）、docs/architecture.md（§3/§11/图）、docs/design-principles.md、docs/README.md、`.scratch/standard-capabilities/spec.md`；ADR-0005（该包引入的决策）与其他波及 ADR 追加**修订注记**（不改写历史正文，注明旧名→新名）
-- [ ] 收尾：全仓 grep 无 `@applepi/extensions` / `packages/extensions` 残余（历史 ADR 修订注记与 CONTEXT 历史段允许说明性提及旧名）
+- [x] 包重命名：`packages/extensions` → `packages/extension`；`package.json` name 改 `@applepi/extension`
+- [x] 代码引用方全部切换：bundle `base.ts`/`standard.ts`/`assemble.ts`/`types.ts` 四处源码 import、bundle scripts 过滤构建 + dependencies、server/web `package.json` 依赖、core 测试 `../../extension/dist/index.js` 路径导入、extension 自身测试头注释；`pnpm install` 重链 lockfile
+- [x] `pnpm -r verify` 全绿（23 套件，重建后 dist 同步）
+- [x] 文档同步：CONTEXT（9 处替换 + 新增「包名约定」词条：包名 = 核心概念名单数）、architecture.md（§3/图/依赖行/布局/验证清单）、design-principles、README、standard-capabilities spec；ADR-0005 等 13 份波及 ADR 追加「修订注记」（正文沿用决策当时名称）
+- [x] 全仓 src/live-doc grep 无旧名残余（仅已删 CLI 的未跟踪 dist 死产物与 ADR 修订注记/词条的说明性提及）
+
+**提交：** `99cb4f9`（改名 + 代码引用方，verify 绿）→ 文档提交紧随。

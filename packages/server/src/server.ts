@@ -359,7 +359,7 @@ export function getHarness(workspace: string, mode: string): Harness {
     const spec = makeBundleSpec(mode, { cwd: process.cwd() });
     if (!spec) throw new Error(`unknown mode: ${mode}`);
     // Enable the bundle's tools + its declared capabilities' tools (memory /
-    // skills / todo / plan / goal / ask_user) via the @applepi/extensions
+    // skills / todo / plan / goal / ask_user) via the @applepi/extension
     // capability registry.
     enableBundleSpec(h, spec);
     harnessCache.set(key, h);

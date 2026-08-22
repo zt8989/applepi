@@ -1,4 +1,4 @@
-// Reference-tool tests for @applepi/extensions (ADR-0005) — no API key
+// Reference-tool tests for @applepi/extension (ADR-0005) — no API key
 // required. Exercises `bash` and `str_replace_editor` end-to-end through a
 // real Harness. Per ADR-0015 tools are registered directly and execute via the
 // tool seam (`harness.executeTool`).
