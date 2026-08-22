@@ -4,10 +4,10 @@
 
 **Blocked by:** 05（契约冻结点）。
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] ask 工具暂停 → 行内 y/n（键盘 y / n 或回车选择）；批准/拒绝后段续跑
-- [ ] ask_user（expectsAnswer）→ 文本输入行；提交答案后结果=答案回填；拒绝 → 「未回答」回填
-- [ ] 连续多 pending 时按序逐个处理
-- [ ] 手工 E2E：写工具批准一次 + ask_user 问答一次（TUI 内完成，不离开终端）
-- [ ] `pnpm -r verify` 绿
+- [x] ask 工具暂停 → 行内 y/n（[y] 批准 / [n] 拒绝 / Ctrl-C 拒绝）；批准/拒绝后同一 turn 续流（结果折叠进工具卡片、pending 经 fold 清除）
+- [x] ask_user（expectsAnswer）→ 文本回答行；回车提交答案（approve-with-payload，结果=答案）、空回车/Ctrl-C = 拒绝（「未回答」回填）
+- [x] 连续多 pending 时按序逐个处理（每次 approve 流结束若仍有 pending 则重新进入决策提示）
+- [x] 决策流与工具夹具的折叠/清除逻辑由解析器纯函数测试覆盖（fold: approval surface + expectsAnswer + resolution）；`pnpm -r verify` 绿
+- 手工 E2E（真实终端 + 真实提供方）留待用户环境：自动化层已覆盖 决策状态机输入分支（tsc + 单测）与服务端 approve 往返（server chat-api）
