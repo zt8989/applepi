@@ -1,7 +1,7 @@
 # 架构（Architecture）
 
-> 状态：持续更新（初版 2026-08-18/19 经 `/grill-me` / `/grill-with-docs` 多轮访谈锁定；2026-08-20 纳入 web 双接口、流式 loop、工具批准、Langfuse 埋点，对应 ADR-0011 / ADR-0012；2026-08-21 纳入并实现 ADR-0015——core 深模块拆分 + 扁平 system_prompt + bundle/mode/app 重塑，见 §1.6；2026-08-22 纳入 deepen #01–#05 修订与 ADR-0016 双层配置同步）。
-> 本页是系统设计的权威入口，细节与决策依据见各 ADR（ADR-0001 ~ ADR-0016）。
+> 状态：持续更新（初版 2026-08-18/19 经 `/grill-me` / `/grill-with-docs` 多轮访谈锁定；2026-08-20 纳入 web 双接口、流式 loop、工具批准、Langfuse 埋点，对应 ADR-0011 / ADR-0012；2026-08-21 纳入并实现 ADR-0015——core 深模块拆分 + 扁平 system_prompt + bundle/mode/app 重塑，见 §1.6；2026-08-22 纳入 deepen #01–#05 修订与 ADR-0016 双层配置同步；2026-08-22 纳入并实现 ADR-0017——共享运行时服务端 + web/tui 双接入端，见 §9）。
+> 本页是系统设计的权威入口，细节与决策依据见各 ADR（ADR-0001 ~ ADR-0017）。
 
 ## 1. 概览
 
@@ -19,34 +19,45 @@
 > **当前实现**（即 ADR-0015 最终形态）；历史机制见各 ADR。
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  apps/web  (@applepi/web)  —— 唯一界面（App）               │
-│  每 (workspace, mode) 缓存 Harness · 扁平提示词组装          │
-│  mode 列表 · 会话动作 · 批准卡片（接口层，非 bundle）         │
-└───────────────▲─────────────────────────────────────────────┘
-                │ 依赖：web → bundle（→extensions/core）
-┌───────────────┴─────────────────────────────────────────────┐
-│  packages/bundle  (@applepi/bundle)                         │
-│  base / standard 能力包：纯声明 (env) => ({ prompt, tools }) │
-│  + enableBundleSpec / assembleFlatPrompt（app 侧装配助手）    │
-└───────────────▲─────────────────────────────────────────────┘
-┌───────────────┴─────────────────────────────────────────────┐
-│  packages/extensions  (@applepi/extensions)                 │
-│  参考工具 bash / str_replace_editor + 能力工厂 memory/skills │
-└───────────────▲─────────────────────────────────────────────┘
+┌──────────────────────────┐   ┌──────────────────────────┐
+│ apps/web (@applepi/web)  │   │ apps/tui (@applepi/tui)   │
+│ 页面壳（Next.js，3010）   │   │ 终端界面（Ink 7，Claude   │
+│ 仅前端，/api/* 由        │   │ Code 风格）：流式、批准、   │
+│ rewrites() 代理到服务端   │   │ slash 命令                  │
+└────────────┬─────────────┘   └────────────┬──────────────┘
+             │  HTTP（127.0.0.1:3210，相同  │
+             │  /api/* 契约；先启动者拉起、 │
+             │  后启动者 attach，心跳租约    │
+┌────────────┴─────────────────────────────┴──────────────┐
+│ packages/server (@applepi/server)  —— 共享运行时服务端    │
+│ 每 (workspace, mode) Harness 缓存 · 扁平提示词组装 ·      │
+│ 全部 agent API（chat/approve/session/workspaces/files/    │
+│ config/pick-folder/heartbeat）                            │
+└───────────────▲─────────────────────────────────────────┘
+                │ 依赖：server → bundle（→extensions/core）
+┌───────────────┴─────────────────────────────────────────┐
+│ packages/bundle  (@applepi/bundle)                       │
+│ base / standard 能力包：纯声明 (env) => ({ prompt, tools }) │
+│ + enableBundleSpec / assembleFlatPrompt（装配助手）       │
+└───────────────▲─────────────────────────────────────────┘
+┌───────────────┴─────────────────────────────────────────┐
+│ packages/extensions  (@applepi/extensions)               │
+│ 参考工具 bash / str_replace_editor + 能力工厂             │
+│ memory/skills/todo/plan/goal/ask_user + 共享状态文件助手  │
+└───────────────▲─────────────────────────────────────────┘
                 │ 依赖：extensions → core（单向）
-┌───────────────┴─────────────────────────────────────────────┐
-│  packages/core  (@applepi/core)  —— 深模块 + 薄 Harness 壳   │
-│  llm(stream) · loop(stream-loop) · session · config ·       │
-│  security · trace                                           │
-└─────────────────────────────────────────────────────────────┘
+┌───────────────┴─────────────────────────────────────────┐
+│ packages/core  (@applepi/core)  —— 深模块 + 薄 Harness 壳 │
+│ llm(stream) · loop(stream-loop) · session · config ·     │
+│ security · trace                                         │
+└─────────────────────────────────────────────────────────┘
 ```
 
-依赖方向（ADR-0003，ADR-0015）：`@applepi/web → @applepi/bundle → @applepi/core` 与
-`@applepi/bundle → @applepi/extensions → @applepi/core`。Web 界面 `@applepi/web` 依赖
-core + bundle（驱动 Harness + SessionStore + `runLoopStreamSegment` + bundle 装配），
-能力集由 bundle/能力工厂在运行时装配（详见 §3、§9）。CLI（`apps/agent`）与非流式
-loop 已删除——web 是**唯一**界面。
+依赖方向（ADR-0003，ADR-0015，ADR-0017）：`server → bundle → core` 与
+`bundle → extensions → core`；`web → server`、`tui → server`（均走 HTTP，客户端不
+再直接依赖 core/bundle——web 页面壳仅前端，`/api/*` 由 `rewrites()` 代理到服务端
+端口 3210）。能力集由**服务端**在运行时装配到 Harness 壳上（详见 §3、§9）。CLI
+（`apps/agent`）与非流式 loop 已删除。
 跨包引用一律用包名（`@applepi/core` 等），解析到各包 `dist/`。
 
 ### 1.5 模块划分（ADR-0015）
@@ -77,7 +88,9 @@ ADR-0015 定义本系统的**最终形态（已实现）**。四个核心概念�
   mode 不是独立概念。
 - **App（应用）** — `web` / `tui`，是**接口**不是 bundle/mode；app 托管 mode 选择
   并在所选 bundle 之上叠加自带接口片段（如 web 的「Workspace」环境片段）。接口轴
-  （web/tui）× 能力轴（base/standard）正交。
+  （web/tui）× 能力轴（base/standard）正交。**ADR-0017：tui 已实现**（Ink 7，
+  Claude Code 风格），web/tui 都是**接入端**——先启动者拉起共享**服务端**，后启动者
+  attach，不重复启动运行时（§9）。
 - **Plugin（插件）** — 外部追加型能力：尾部追加 prompt 片段 + 注册新工具/技能，
   不可重排/删除 base/standard 内部（ADR-0015 概念）。原 app 层插件加载器
   （`apps/agent/plugins.ts`）随 CLI 删除；web 当前未挂插件目录。
@@ -133,27 +146,32 @@ web 装配。
 > 文件编辑和安全策略（ADR-0005 的问题陈述）；ADR-0015 强化为「core 只关心 LLM
 > 交互」——system_prompt + tools。
 
-## 3. 能力装配：bundle / capability / plugin（ADR-0015）
+## 3. 能力装配：bundle / capability / plugin（ADR-0015，ADR-0017 后由服务端持有）
 
 能力注入不再是 core 的通用机制（`registerExtension`/`api`/洋葱已移出 core）。能力
-由 **bundle**（核心能力集）、**capability 工厂**（memory/skills）与 **plugin**
-（外部追加）三层构成，全部由 **app 层**装配到 Harness 壳上：
+由 **bundle**（核心能力集）、**capability 工厂**（memory/skills/todo/plan/goal/
+ask_user）与 **plugin**（外部追加）三层构成，全部由 **共享运行时服务端**
+（ADR-0017：`packages/server` 的 `getHarness`/`bindSession`/`enableBundleSpec`，
+从 web 的 `lib/server.ts` 迁入）装配到 Harness 壳上；web/tui 只消费 `GET|POST
+/api/...` 契约，不再做装配。
 
 - **Bundle（能力包）** — `packages/bundle` 的 `base` / `standard`：纯声明
-  `(env) => ({ prompt, tools })`，无 side effect、无 core/onion 访问。app 建会话时选
+  `(env) => ({ prompt, tools })`，无 side effect、无 core/onion 访问。建会话时选
   一个（mode），`enableBundleSpec(harness, spec)` 注册其工具。
 - **Capability（能力）** — `@applepi/extensions` 的能力工厂（`createMemory` /
-  `createSkills`）返回 `{ id, prompt(env, session), tools }`。bundle 的
-  `capabilities` 声明 id 清单，app 用 `getCapability(id)` 解析、注册工具并每轮把
-  `prompt(env, session)` 片段并入扁平提示词（如 skills 把已加载技能渲染成片段）。
-  尚无工厂的 id（web/plan/goal/...）被跳过——声明可多于实现。
+  `createSkills` / `createTodo` / `createPlan` / `createGoal` / `createAskUser`）
+  返回 `{ id, prompt(env, session), tools }`。bundle 的 `capabilities` 声明 id 清单，
+  服务端用 `getCapability(id)` 解析、注册工具并每轮把 `prompt(env, session)` 片段并入
+  扁平提示词。尚无工厂的 id（web/subagent/workflow，批次二/三待 grill）被跳过——
+  声明可多于实现，`enableBundleSpec` 打 `console.warn`。状态类能力（todo/plan/goal）
+  文件态统一落盘 `<workspaceRoot>/.harness/<name>.json`（`state-file.ts` 助手），
+  ask_user 走 `ToolSpec.expectsAnswer`（答案即工具结果）。
 - **Plugin（插件）** — ADR-0015 定义的外部追加型能力（尾部追加 prompt 片段 + 注册
-  新工具/技能，不可重排/删除 bundle 内部）。原 `apps/agent/plugins.ts` 加载器
-  （`loadPlugins(dir)` 扫描 `extensions/` 下 `*.ext.ts`）随 CLI 删除；web 当前未挂插件
-  目录。
+  新工具/技能，不可重排/删除 bundle 内部）。原 `apps/agent/plugins.ts` 加载器随 CLI
+  删除；web / 服务端当前未挂插件目录。
 
-**装配流程（app 每轮）**：选取 mode → `makeBundleSpec(mode, { cwd, workspace, level })`
-→ `enableBundleSpec`（注册 bundle + capability 工具）→ 加载插件 → 用
+**装配流程（服务端）**：选取 mode → `makeBundleSpec(mode, { cwd, workspace, level })`
+→ `enableBundleSpec`（注册 bundle + capability 工具）→ 用
 `assembleFlatPrompt(harness, spec, { app, plugins })` 拼出扁平提示词 =
 `[...bundle.prompt, ...capabilities.prompt, ...app 接口片段, ...插件尾部]`，交给
 `harness.llm` / `loop`。重建 = 重读同一份 spec（无动态中间件）。
@@ -294,15 +312,30 @@ harness.registerTool({
   其余由 web 界面直接驱动同一套 core 方法（`SessionStore` / `applyPermissionLevel` /
   `resolveLlmConfig`），不再有独立 REPL。
 
-## 9. 界面：Web（唯一）
+## 9. 界面与共享运行时服务端（ADR-0017）
 
-CLI（`apps/agent`）已于 2026-08-21 删除——**Web 是唯一界面**，驱动同一个 core
-（Harness + SessionStore + `runLoopStreamSegment` + SecurityPolicy + trace）并通过
-HTTP 暴露给浏览器（无鉴权）。
+CLI（`apps/agent`）已于 2026-08-21 删除。**2026-08-22 起（ADR-0017）**：agent
+运行时后端不再内嵌于任何界面——独立的**共享运行时服务端**（`packages/server`，
+Hono，默认 `127.0.0.1:3210`，只绑 lo、无鉴权）持有全部 harness 缓存与 agent API；
+`web` 与 `tui` 都是**接入端**。启动顺序统一为「探测（`GET /api/health`）→ 拉起
+（spawn detached，日志 `~/.applepi/server.log`）→ attach」：先启动者拉起服务端，
+后启动者直接 attach（同一端口，`APPLEPI_PORT` 可覆盖）；生命周期 = **心跳租约**
+（`POST /api/heartbeat` 续命，无客户端超时默认 5 分钟自退，`APPLEPI_IDLE_TIMEOUT_MS`
+可调，0=禁用；SIGINT 立即退）。线协议保持 AI SDK data-stream 不变。
 
-- **Web（`apps/web`，`@applepi/web`）** — Next.js App Router（默认端口 3010，`pnpm dev`）
-  + assistant-ui 0.15 primitives（`ExternalStoreRuntime` 适配器）+ Tailwind v4 +
-  Vercel AI SDK v4 数据流（`createDataStreamResponse` + `processDataStream`）。
+- **Web 壳（`apps/web`，`@applepi/web`）** — 保留 Next.js 只做**页面壳**（3010）：
+  agent API 全部迁入服务端，`next.config` `rewrites()` 代理 `/api/*` → 3210（浏览器
+  同源、零 CORS、前端代码零改动）；`pnpm dev` 先 ensure server 再起页面。
+- **TUI（`apps/tui`，`@applepi/tui`）** — Ink 7 终端界面（Claude Code 风格）：
+  底部输入（Enter 发送 / Shift+Enter 换行）、流式渲染（自写 data-stream 解析器）、
+  行内工具批准（y/n）与 ask_user 文本回答（approve-with-payload）、六内置 slash 命令
+  （`/new [base|standard]` `/resume <id>` `/sessions` `/config` `/level` `/help`
+  `/exit`）、Ctrl-C 中断当前段 / 空闲退出；工作区 = 启动 cwd（自动注册 manifest）。
+  协议解析器与命令映射为纯函数（单测），Ink 组件不单测（R2Q6）。非 TTY 优雅降级。
+- **服务端（`packages/server`）** — 全部 agent API：`/api/chat`（流式段 +
+  `ChatSeam` 测试注入缝）、`/api/chat/approve`（暂停/恢复 + approve-with-payload）、
+  `/api/session`、`/api/workspaces`、`/api/files`、`/api/config*`、`/api/pick-folder`、
+  `/api/health`、`/api/heartbeat`。
 
 ### 9.1 流式 loop（streaming loop, ADR-0011）
 
@@ -340,7 +373,7 @@ web 会话对工具执行采用**前端批准**：
 ### 9.4 可观测性（Langfuse trace, ADR-0012）
 
 埋点位于 **core 层**（`trace.ts`）：每轮一条 trace + 每条 LLM 调用一个 generation
-（带 token usage）+ 每工具一个 span；**web（唯一界面）自动受益**，目标 **Langfuse
+（带 token usage）+ 每工具一个 span；**web 与 TUI 自动受益**，目标 **Langfuse
 Cloud**（`~/.applepi/.env` 的 `LANGFUSE_BASE_URL` / `PUBLIC_KEY` / `SECRET_KEY`），
 未配置则为 no-op（见 P14）。
 
@@ -401,18 +434,20 @@ applepi/
 │   ├── bundle/             # @applepi/bundle：base / standard 能力包，纯声明 (env)=>({prompt,tools}) + app 侧装配助手
 │   └── extensions/         # @applepi/extensions：参考工具 bash/sre + 能力工厂 memory/skills
 ├── apps/
-│   └── web/                # @applepi/web：唯一界面，Next.js（assistant-ui + Tailwind v4），§9
+│   ├── web/                # @applepi/web：页面壳，Next.js（assistant-ui + Tailwind v4），§9
+│   └── tui/                # @applepi/tui：终端界面（Ink 7，Claude Code 风格），§9
+├── scripts/                # dev-web.mjs / dev-tui.mjs（build-first + ensure server）
 ├── docs/
 │   ├── README.md           # Wiki 首页
 │   ├── architecture.md     # 本文档
 │   ├── design-principles.md
-│   ├── adr/                # ADR-0001 ~ 0016
+│   ├── adr/                # ADR-0001 ~ 0017
 │   └── agents/             # agent 协作约定
 └── CONTEXT.md              # 术语表 + 已锁定决策（单一事实来源）
 ```
 
 - **构建策略**：build-first，跑 web / test 前先构建依赖包（`pnpm -r build` 拓扑序自动处理）。
-- **验证**：`pnpm verify` = build + 各包测试（core / extensions / bundle）。CLI 的六个
+- **验证**：`pnpm verify` = build + 各包测试（core / extensions / bundle / server / tui）。CLI 的六个
   key-free 检查脚本与 `check-soft-isolation` 已随 CLI / 洋葱一并删除。
 
 ## 12. 已移除：MCP

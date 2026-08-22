@@ -19,12 +19,14 @@
   `config` / `security` / `trace` 与薄 Harness 壳——**不含任何工具**（ADR-0005）、
   无洋葱/扩展机制（ADR-0015）。
 - **能力来自 bundle + capability**：`@applepi/bundle` 的 `base`/`standard` 纯声明能力包 +
-   `@applepi/extensions` 的 memory/skills 能力工厂，由 app（web）装配。安全机制在 core
-  （ADR-0009）。
-- **仓库布局**：pnpm workspace —— `@applepi/web → @applepi/bundle → @applepi/extensions → @applepi/core`，
-  依赖单向（ADR-0003）。
-- **唯一界面**：Web（`apps/web` Next.js），驱动同一 core（流式 loop、工具批准、
-  Langfuse 埋点都在 core，ADR-0011 / ADR-0012）。CLI 已删除。
+   `@applepi/extensions` 的能力工厂（memory/skills/todo/plan/goal/ask_user），由
+   **共享运行时服务端**（`packages/server`）装配。安全机制在 core（ADR-0009）。
+- **仓库布局**：pnpm workspace —— `server → bundle → extensions → core` 单向（ADR-0003）；
+  接入端 `web`（页面壳）与 `tui`（Ink 终端）经 HTTP attach 服务端（ADR-0017）。
+- **共享运行时服务端（ADR-0017）**：`packages/server`（Hono，127.0.0.1:3210）持有全部
+  agent API（chat/approve/session/workspaces/files/config）；Web 壳与 TUI 都是接入端——
+  先启动者拉起服务端、后启动者 attach，心跳租约管生命周期。CLI 已删除；流式 loop、
+  工具批准、Langfuse 埋点都在 core（ADR-0011 / ADR-0012）。
 
 ## 常用命令
 

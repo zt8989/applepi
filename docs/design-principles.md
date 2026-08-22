@@ -196,7 +196,7 @@ app 选 bundle、叠加接口片段与插件，拼成 spec 交给 core `llm`。*
 
 ## P14. 可观测性归核心（Observability in Core）
 
-**trace 埋点位于 core，而非界面各自埋；web（唯一界面）自动获得追踪。**
+**trace 埋点位于 core，而非界面各自埋；web 与 TUI 自动获得追踪。**
 
 core 的 `trace.ts` 在每轮、每次 LLM 调用、每次工具执行处打点，目标 Langfuse
 Cloud（未配置则 no-op）。界面只负责把 trace id 透传给前端展示，不负责采集。
