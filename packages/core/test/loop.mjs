@@ -437,4 +437,4 @@ harness.attachSession(store);
 }
 
 await fs.rm(tmpRoot, { recursive: true, force: true });
-console.log(`stream-loop: ${passed} checks passed`);
+console.log(`loop: ${passed} checks passed`);

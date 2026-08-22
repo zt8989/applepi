@@ -15,7 +15,7 @@ export {
   type StreamLoopOpts,
   type StreamFinishReason,
   type StreamSegmentResult,
-} from './stream-loop.js';
+} from './loop.js';
 export { getTracer, flushTraces, resetTracer, modelLabel } from './trace.js';
 export type { Tracer, TraceHandle, SpanHandle } from './trace.js';
 export {
