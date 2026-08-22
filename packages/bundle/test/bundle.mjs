@@ -136,6 +136,8 @@ function freshHarness() {
 }
 
 // 8. (deepen #01 - c) enableBundleSpec warns on declared-but-unwired ids.
+//    Exact count doubles as a drift guard: exactly the three remaining ids
+//    (web / subagent / workflow) must warn — nothing more, nothing less.
 {
   const warns = [];
   const originalWarn = console.warn;
@@ -146,7 +148,7 @@ function freshHarness() {
   } finally {
     console.warn = originalWarn;
   }
-  assert.ok(warns.length > 0, 'enableBundleSpec(standard) emitted at least one warn');
+  assert.equal(warns.length, 3, `exactly 3 unwired ids warn (got ${warns.length})`);
   assert.ok(warns.some((w) => w.includes('web')), 'warn names an unwired id (web)');
   assert.ok(warns.some((w) => w.includes('workflow')), 'warn names an unwired id (workflow)');
   assert.ok(!warns.some((w) => w.includes('ask_user')), 'wired ask_user no longer warns');

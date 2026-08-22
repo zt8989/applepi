@@ -80,6 +80,10 @@ ok('todo add blocked at readonly', /BLOCKED \(readonly\)/.test(res));
 res = await tool.execute({ action: 'list' }, rctx);
 ok('todo list allowed at readonly', /write spec/.test(res));
 
+// fullaccess allows writes like workspace (the file stays inside the root).
+res = await tool.execute({ action: 'add', text: 'full ok' }, session('fullaccess'));
+ok('todo add allowed at fullaccess', /added todo/.test(res));
+
 await fs.rm(root, { force: true, recursive: true });
 console.log(`\n${passed} todo checks passed, ${failed} failed.`);
 process.exit(failed ? 1 : 0);

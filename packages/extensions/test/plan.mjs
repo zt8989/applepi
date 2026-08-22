@@ -81,6 +81,10 @@ ok('plan set blocked at readonly', /BLOCKED \(readonly\)/.test(res));
 res = await tool.execute({ action: 'clear' }, session('readonly'));
 ok('plan clear blocked at readonly', /BLOCKED \(readonly\)/.test(res));
 
+// fullaccess allows writes like workspace (the file stays inside the root).
+res = await tool.execute({ action: 'set', steps: ['full ok'] }, session('fullaccess'));
+ok('plan set allowed at fullaccess', /set plan with 1 steps/.test(res));
+
 await fs.rm(root, { force: true, recursive: true });
 console.log(`\n${passed} plan checks passed, ${failed} failed.`);
 process.exit(failed ? 1 : 0);

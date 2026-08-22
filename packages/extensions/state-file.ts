@@ -5,11 +5,11 @@ import path from 'node:path';
 /**
  * Shared state-file helpers for the declarative state capabilities (todo /
  * plan / goal). Each capability keeps one small JSON file under a dot-dir
- * inside the workspace root — the same trusted, extension-fixed location
- * discipline as memory's harness-memory.json. Because the file lives inside
- * the workspace root by construction, the WORKSPACE-level write gate is
- * satisfied without a per-call path check; tools still self-determine at
- * readonly (ADR-0009).
+ * inside the workspace root — extension-fixed and trusted, like memory's own
+ * single-file discipline (memory roots at the cwd; these state capabilities
+ * root at the session workspace). Because the file lives inside the workspace
+ * root by construction, the WORKSPACE-level write gate is satisfied without a
+ * per-call path check; tools still self-determine at readonly (ADR-0009).
  */
 
 /** State file path for capability `name` under `root` (the workspace root). */

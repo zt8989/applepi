@@ -220,8 +220,10 @@ export async function executeApprovedTool(
   let res: string;
   if (decision === 'deny') {
     res = `[user denied] tool ${tc.toolName} was NOT executed (the user rejected this tool call).`;
-  } else if (answer !== undefined) {
-    // approve-with-payload: the answer is the tool result (ask_user).
+  } else if (answer !== undefined && harness.getTool(tc.toolName)?.expectsAnswer === true) {
+    // approve-with-payload: the answer is the tool result (ask_user). Gated
+    // on the tool's expectsAnswer so a stray answer can never forge a result
+    // on a regular tool — for those, the answer is ignored and the tool runs.
     res = answer;
   } else {
     const tctx: any = {

@@ -262,6 +262,31 @@ harness.attachSession(store);
   ok('executeApprovedTool: approve-with-payload feeds the answer back, no execution');
 }
 
+// 5d. (#02 review) Stray answer on a NON-expectsAnswer tool is ignored — the
+//     tool executes normally (no result forgery).
+{
+  const messages = [{ role: 'user', content: 'do writes' }];
+  const writer = makeWriter();
+  const llm = fakeStreamText([
+    { toolCalls: [{ toolCallId: 'w9', toolName: 'write_thing', args: { key: 'q' } }] },
+  ]);
+  await runLoopStreamSegment(harness, messages, { model: {}, store: null, writer, messageId: 'm4d', streamTextCall: llm });
+  const writer2 = makeWriter();
+  await executeApprovedTool(
+    harness,
+    messages,
+    { toolCallId: 'w9', toolName: 'write_thing', args: { key: 'q' } },
+    'approve',
+    { store: null, writer: writer2 },
+    undefined,
+    'forged answer',
+  );
+  assert.ok(writer2.lines.some((l) => l.includes('wrote(q)')), 'tool ran, answer ignored');
+  const last = messages[messages.length - 1];
+  assert.equal(last.content[0].result, 'wrote(q)');
+  ok('executeApprovedTool: stray answer on plain tool ignored, tool executes');
+}
+
 // 6. Mixed turn: auto tool executes, ask tool pauses at the ask point.
 {
   const messages = [{ role: 'user', content: 'read then write' }];

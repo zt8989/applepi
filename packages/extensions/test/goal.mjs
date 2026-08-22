@@ -67,6 +67,10 @@ ok('goal set blocked at readonly', /BLOCKED \(readonly\)/.test(res));
 res = await tool.execute({ action: 'clear' }, session('readonly'));
 ok('goal clear blocked at readonly', /BLOCKED \(readonly\)/.test(res));
 
+// fullaccess allows writes (the file stays inside the workspace root).
+res = await tool.execute({ action: 'set', text: 'full ok' }, session('fullaccess'));
+ok('goal set allowed at fullaccess', /set session goal: full ok/.test(res));
+
 await fs.rm(root, { force: true, recursive: true });
 console.log(`\n${passed} goal checks passed, ${failed} failed.`);
 process.exit(failed ? 1 : 0);
