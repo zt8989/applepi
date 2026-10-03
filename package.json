@@ -1,0 +1,26 @@
+{
+  "name": "event-loop-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Redux Loop 驱动的 Agent Loop：reducer 纯函数返回 loop(state, Cmd)，LLM 流式调用与工具执行都是 Cmd；Provider 走 Pi（@earendil-works/pi-ai，DeepSeek）。",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env --import tsx src/cli.ts",
+    "agent": "node --env-file-if-exists=.env --import tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.84.1",
+    "redux": "^4.2.1",
+    "redux-loop": "^6.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
