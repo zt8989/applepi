@@ -12,7 +12,7 @@ test('pi-ai faux provider：真实 streamSimple 跑完一整条 Agent Loop', asy
   faux.setResponses(demoResponses());
 
   const store = createAgentStore({ runtime: faux.runtime, systemPrompt: 'test' });
-  store.dispatch({ type: 'prompt', text: '算一下 (3+4)*6' });
+  store.dispatch({ type: 'user.message', text: '算一下 (3+4)*6' });
   const state = await waitForIdle(store);
 
   assert.equal(state.phase, 'idle');

@@ -8,8 +8,8 @@ import type {
 } from '@earendil-works/pi-ai';
 import { createAgentStore, waitForIdle } from '../src/store';
 import { createFauxRuntime } from '../src/provider';
-import { agentReducer } from '../src/reducer';
-import { createInitialState } from '../src/state';
+import { createAgentReducer } from '../src/reducer';
+import { createInitialState, type AgentState } from '../src/state';
 
 const usage = () => ({
   input: 1,
@@ -82,7 +82,7 @@ test('prompt → LLM → 工具 → LLM → idle：环闭合，工具结果回�
     },
   });
 
-  store.dispatch({ type: 'prompt', text: '算一下 (3+4)*6' });
+  store.dispatch({ type: 'user.message', text: '算一下 (3+4)*6' });
   const state = await waitForIdle(store);
   console.log('  → 消息链：', state.messages.map((m) => m.role).join(' → '));
 
@@ -121,7 +121,7 @@ test('单回合轮数上限：不再无限调 LLM，而是停下并报错', asyn
     },
   });
 
-  store.dispatch({ type: 'prompt', text: '一直调工具' });
+  store.dispatch({ type: 'user.message', text: '一直调工具' });
   const state = await waitForIdle(store);
 
   assert.equal(calls, 1);
@@ -142,7 +142,7 @@ test('LLM 出错：错误进状态树，相位回 idle', async () => {
     },
   });
 
-  store.dispatch({ type: 'prompt', text: '你好' });
+  store.dispatch({ type: 'user.message', text: '你好' });
   const state = await waitForIdle(store);
 
   assert.equal(state.phase, 'idle');
@@ -157,7 +157,8 @@ test('reducer 是纯的：idle 时的流式增量不会改动状态', () => {
     toolNames: [],
   });
   // redux-loop 的 reducer 可以返回纯 state（没有命令），也可以返回 loop(state, cmd)。
-  const next = agentReducer(state, { type: 'llm/delta', delta: 'x' });
+  const reducer = createAgentReducer({});
+  const next = reducer(state, { type: 'llm.delta', delta: 'x' }) as AgentState;
   assert.equal(next, state);
   assert.equal(Array.isArray(next), false);
 });

@@ -1,11 +1,20 @@
 /**
  * 库入口：把 Agent Loop 的几个部件暴露出去，方便复用/测试。
  */
-export type { AgentAction } from './actions';
-export { createInitialState, type AgentState, type Phase } from './state';
-export { agentReducer } from './reducer';
-export { callLlmCmd, executeToolCallsCmd, setEffectDeps, clearEffectDeps } from './effects';
-export { createAgentStore, waitForIdle, type AgentStore } from './store';
+export type { AgentAction, AgentActionType } from './actions';
+export { createInitialState, type AgentState, type ExecutingTool, type Phase } from './state';
+export {
+  createAgentReducer,
+  loopWiring,
+  type ReducerEffects,
+} from './reducer';
+export {
+  createAgentDrivenEffectTable,
+  createPiAiEffectTable,
+  type EffectTable,
+  type PiAiEffectsOptions,
+} from './effects';
+export { createAgentStore, waitForIdle, type AgentStore, type CreateAgentStoreOptions } from './store';
 export {
   createFauxRuntime,
   createRuntime,

@@ -248,7 +248,7 @@ async function repl(store: AgentStore, runtime: AgentRuntime): Promise<void> {
       }
       switch (command) {
         case '/reset':
-          store.dispatch({ type: 'reset' });
+          store.dispatch({ type: 'conversation.reset' });
           process.stdout.write(`${dim('对话已清空。')}\n`);
           break;
         case '/tools':
@@ -276,7 +276,7 @@ async function repl(store: AgentStore, runtime: AgentRuntime): Promise<void> {
       continue;
     }
 
-    store.dispatch({ type: 'prompt', text: input });
+    store.dispatch({ type: 'user.message', text: input });
     try {
       await waitForIdle(store);
     } catch (error) {
@@ -339,7 +339,7 @@ async function main(): Promise<void> {
   // --demo 不带问题：给一句默认的，跑完就退。
   const prompt = args.prompt ?? (args.demo ? '算一下 (3+4)*6' : undefined);
   if (prompt !== undefined) {
-    store.dispatch({ type: 'prompt', text: prompt });
+    store.dispatch({ type: 'user.message', text: prompt });
     const state = await waitForIdle(store);
     process.exitCode = state.error ? 1 : 0;
     return;
