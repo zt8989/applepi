@@ -1,71 +1,86 @@
-import { Type } from '@earendil-works/pi-ai';
 import type { AgentTool, AgentToolResult } from './agent-tool';
 
 /**
- * 内置工具集。围绕「本地小助手」这个骨架给三个够用的：
- * 看时间、算算术、读文件。想要 fs / shell 自己在这里加就行。
+ * 内置工具集。
+ *
+ * 这里的工具**不再是自己实现的** —— 来自 `@earendil-works/pi-coding-agent`
+ * （源码在那个仓库的 `packages/coding-agent/src/core/tools/`），也就是 Pi 官方
+ * coding agent 用的那套：`read` / `write` / `edit` / `bash`。
+ *
+ * 换来的好处是实打实的：路径边界检查、文件变更串行化（`withFileMutationQueue`）、
+ * 截断策略、bash 超时与进程回收 —— 这些自己写要花很多功夫，而且容易写漏。
+ *
+ * ## 为什么要一层适配
+ *
+ * 官方的 `AgentTool`（来自 pi-agent-core）execute 签名多两个尾参：
+ *
+ *   execute(toolCallId, params, signal, onUpdate, ctx)
+ *
+ * 我们自己的 effect 只需要前三个。所以这里把后两个丢掉，签名收窄成本项目的形状 ——
+ * 这样 `effects.ts` 完全不知道 pi-coding-agent 的存在，环的逻辑也不用动。
+ *
+ * `parameters` 那边也有个细节：官方用的是 typebox 的 `TObject`，本项目声明的是
+ * pi-ai 的 `TSchema`。两者同源（都出自 typebox），直接给即可。
  */
+import {
+  createBashTool,
+  createEditTool,
+  createReadTool,
+  createWriteTool,
+} from '@earendil-works/pi-coding-agent';
+import type { AgentTool as OfficialTool } from '@earendil-works/pi-agent-core';
 
-const nowTool: AgentTool = {
-  name: 'now',
-  label: '当前时间',
-  description: '获取当前的本地日期与时间。',
-  parameters: Type.Object({}),
-  execute: async (): Promise<AgentToolResult> => {
-    const text = new Date().toLocaleString('zh-CN', { hour12: false });
-    return { content: [{ type: 'text', text: `当前时间：${text}` }], details: null };
-  },
-};
+/** 官方工具 → 本项目工具。只做签名收窄，逻辑一行不改。 */
+function adapt(official: OfficialTool<any>, label: string): AgentTool {
+  return {
+    name: official.name,
+    // 官方 label 就是英文工具名；这里给个中文的，界面读它。
+    label,
+    description: official.description,
+    parameters: official.parameters as AgentTool['parameters'],
+    async execute(toolCallId, params, signal) {
+      // 只传前四个：第五个 ctx 由对方运行时注入，不在公开契约里。
+      const result = (await official.execute(
+        toolCallId,
+        params as never,
+        signal,
+        undefined,
+      )) as AgentToolResult;
+      // 官方有些工具的 details 是 undefined，本项目的 AgentToolResult 要求有 details。
+      return {
+        content: result.content ?? [],
+        details: result.details ?? null,
+      };
+    },
+  };
+}
 
-const calcTool: AgentTool = {
-  name: 'calc',
-  label: '计算器',
-  description:
-    '计算一个算术表达式，例如 "1+2*3"、"(2**10)/4"。只支持纯算术，不要夹别的文字。',
-  parameters: Type.Object({
-    expression: Type.String({ description: '算术表达式，如 "1+2*3"' }),
-  }),
-  execute: async (_id, params): Promise<AgentToolResult> => {
-    const expression = String(params.expression ?? '');
-    if (!/^[0-9+\-*/().,%\s]+$/.test(expression)) {
-      throw new Error(`表达式含不允许的字符：${expression}`);
-    }
-    const mathNames = Object.getOwnPropertyNames(Math).join(',');
-    const value = new Function(
-      `"use strict";const {${mathNames}}=Math;return (${expression});`,
-    )() as unknown;
-    if (typeof value !== 'number' || !Number.isFinite(value)) {
-      throw new Error(`计算结果不是有限数：${String(value)}`);
-    }
-    return {
-      content: [{ type: 'text', text: `${expression} = ${value}` }],
-      details: { value },
-    };
-  },
-};
+/**
+ * 工具注册表。cwd 是工作目录 —— 官方工具用它做路径边界检查
+ * （防止 LLM 跑到工作目录外面去读写文件）。
+ */
+let registry: readonly AgentTool[] | null = null;
 
-const readFileTool: AgentTool = {
-  name: 'read_file',
-  label: '读文件',
-  description: '读取一个本地文本文件（UTF-8），返回其内容。需要绝对路径。',
-  parameters: Type.Object({
-    path: Type.String({ description: '文件的绝对路径' }),
-  }),
-  execute: async (_id, params): Promise<AgentToolResult> => {
-    const { readFile } = await import('node:fs/promises');
-    const path = String(params.path ?? '');
-    const text = await readFile(path, 'utf8');
-    const truncated = text.length > 8000 ? `${text.slice(0, 8000)}\n…（已截断）` : text;
-    return { content: [{ type: 'text', text: truncated }], details: { bytes: text.length } };
-  },
-};
+function build(cwd: string): readonly AgentTool[] {
+  return [
+    adapt(createReadTool(cwd), '读文件'),
+    adapt(createWriteTool(cwd), '写文件'),
+    adapt(createEditTool(cwd), '编辑文件'),
+    adapt(createBashTool(cwd), '执行命令'),
+  ];
+}
 
-const registry: readonly AgentTool[] = [nowTool, calcTool, readFileTool];
-
-export function getTools(): readonly AgentTool[] {
+export function getTools(cwd: string = process.cwd()): readonly AgentTool[] {
+  registry ??= build(cwd);
   return registry;
 }
 
-export function getTool(name: string): AgentTool | undefined {
-  return registry.find((tool) => tool.name === name);
+export function getTool(name: string, cwd: string = process.cwd()): AgentTool | undefined {
+  return getTools(cwd).find((tool) => tool.name === name);
+}
+
+/** 重新按新的 cwd 建注册表（测试用：换目录后要能看到新目录）。 */
+export function resetTools(cwd: string = process.cwd()): readonly AgentTool[] {
+  registry = build(cwd);
+  return registry;
 }

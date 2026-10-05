@@ -61,8 +61,9 @@ test('prompt → LLM → 工具 → LLM → idle：环闭合，工具结果回�
         const toolCall: ToolCall = {
           type: 'toolCall',
           id: 'call_1',
-          name: 'calc',
-          arguments: { expression: '(3+4)*6' },
+          // 工具来自 @earendil-works/pi-coding-agent，这里用官方的 bash 算。
+          name: 'bash',
+          arguments: { command: 'echo $(((3+4)*6))' },
         };
         const message = assistantMessage(
           [{ type: 'text', text: '我来算。' }, toolCall],
@@ -98,7 +99,8 @@ test('prompt → LLM → 工具 → LLM → idle：环闭合，工具结果回�
   assert.ok(toolResult);
   assert.equal(toolResult.role, 'toolResult');
   assert.ok(toolResult.role === 'toolResult' && !toolResult.isError);
-  assert.match(textOf(toolResult), /= 42/);
+  // bash 的 stdout 里就是 42。
+  assert.match(textOf(toolResult), /42/);
 });
 
 test('单回合轮数上限：不再无限调 LLM，而是停下并报错', async () => {
@@ -113,8 +115,8 @@ test('单回合轮数上限：不再无限调 LLM，而是停下并报错', asyn
       const toolCall: ToolCall = {
         type: 'toolCall',
         id: `call_${calls}`,
-        name: 'now',
-        arguments: {},
+        name: 'bash',
+        arguments: { command: 'echo tick' },
       };
       const message = assistantMessage([toolCall], 'toolUse');
       return streamOf([{ type: 'done', reason: 'toolUse', message }]);

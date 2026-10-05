@@ -37,7 +37,7 @@ import {
 } from '@earendil-works/pi-web-ui';
 import { createPiAiEffectTable } from '../../src/effects';
 import { createAgentStore, type AgentStore } from '../../src/store';
-import { getTools } from '../../src/tools';
+import type { AgentTool } from '../../src/agent-tool';
 import { createSessionAdapter, type SessionAdapter } from './session-adapter';
 import './trace-panel';
 import './app.css';
@@ -111,7 +111,11 @@ const streamFn = (
 
 // ─── Redux Loop 状态树（与 CLI 共用同一个 reducer / 状态树 / effect 表） ───
 
-const browserTools = getTools().filter((tool) => tool.name !== 'read_file'); // read_file 只有 Node 端有
+//
+// 工具来自 @earendil-works/pi-coding-agent，它们全都直接摸真实文件系统 / 起子进程，
+// 浏览器里一个都用不了。所以 Web 侧不注册任何工具 —— 环照样跑，只是模型没有手。
+// （要能在浏览器里用，得另配一套基于 fetch 的实现，那是另一件事。）
+const browserTools: readonly AgentTool[] = [];
 
 const store: AgentStore = createAgentStore({
   runtime: {

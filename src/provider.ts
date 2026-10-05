@@ -120,7 +120,8 @@ export function createFauxRuntime(): FauxRuntime {
 export function demoResponses(): AssistantMessage[] {
   return [
     fauxAssistantMessage(
-      [fauxText('我来算一下。'), fauxToolCall('calc', { expression: '(3+4)*6' })],
+      // 用官方的 bash 工具（来自 @earendil-works/pi-coding-agent）来算。
+      [fauxText('我来算一下。'), fauxToolCall('bash', { command: 'echo $(((3+4)*6))' })],
       { stopReason: 'toolUse' },
     ),
     fauxAssistantMessage('(3+4)*6 = 42。'),

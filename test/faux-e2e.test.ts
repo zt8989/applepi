@@ -29,7 +29,8 @@ test('pi-ai faux provider：真实 streamSimple 跑完一整条 Agent Loop', asy
   const toolText = toolResult.content
     .map((c) => (c.type === 'text' ? c.text : ''))
     .join('');
-  assert.match(toolText, /= 42/);
+  // bash 的 stdout 就是 42。
+  assert.match(toolText, /42/);
 
   const final = state.messages[3];
   assert.ok(final && final.role === 'assistant');

@@ -161,7 +161,9 @@ npm run web                                  # http://localhost:5273
 open http://localhost:5273/?demo=1          # 离线 demo（faux provider，不用 key）
 ```
 
-> `read_file` 工具在浏览器里不可用（要读真实文件系统），`main.ts` 里过滤掉了。
+> 工具来自 `@earendil-works/pi-coding-agent`（`read` / `write` / `edit` / `bash`），它们全都直接摸
+> 真实文件系统、起真实子进程，浏览器里一个都用不了。所以 Web 侧**不注册任何工具** ——
+> 环照常跑，只是模型没有手。要在浏览器里用得另配一套基于 fetch 的实现。
 
 ## Web 侧怎么接的（为什么不需要 pi-agent-core）
 
@@ -212,17 +214,52 @@ models.streamSimple(model, context, options);    // 流式调用，事件是 Ass
 - 模型：默认取 deepseek provider 目录里的第一个，`-m` / `?model=` 可换。
 - 换 provider：TUI `-P anthropic|openai`；Web `?provider=xxx`。
 
-### 加工具
+## 工具：直接用 Pi 官方的
 
-`src/tools.ts` 里加一个对象即可，TUI 和 Web 都会用：
+工具实现在 **`@earendil-works/pi-coding-agent`**（源码：那个仓库的
+`packages/coding-agent/src/core/tools/`），也就是 Pi 官方 coding agent 用的那一套。本项目不再自己写。
+
+```ts
+import {
+  createReadTool, createWriteTool, createEditTool, createBashTool,
+  createReadOnlyTools, // read / grep / find / ls
+} from '@earendil-works/pi-coding-agent';
+
+// 工厂函数的第一个参数是 cwd —— 官方工具用它做**路径边界检查**，
+// 防止模型跑到工作目录外面去读写文件。这个约束是白拿的，别浪费。
+const tools = [createReadTool(cwd), createBashTool(cwd)];
+```
+
+换来的东西是实打实的：文件变更串行化（`withFileMutationQueue`）、截断策略、bash 超时与
+子进程回收、路径越界防护 —— 这些自己写既费劲又容易漏。
+
+### 为什么要一层适配（`src/tools.ts`）
+
+官方 `AgentTool`（来自 pi-agent-core）的 `execute` 是 4 个参数：
+
+```ts
+execute(toolCallId, params, signal?, onUpdate?)
+```
+
+本项目只需要前三个（`onUpdate` 是给 UI 流式刷进度用的，我们没有这个需求）。
+`src/tools.ts` 的 `adapt()` 把签名收窄成本项目的形状，于是 `effects.ts` 完全不知道
+pi-coding-agent 的存在，环的逻辑一行都不用改。
+
+另外补了 `label`（官方给的是英文工具名，我们界面要中文展示名），以及把可能为
+`undefined` 的 `details` 归一成 `null`。
+
+### 想加自己的工具
+
+本项目的 `AgentTool` 形状很简单，照着写再 push 进 `build()` 即可：
 
 ```ts
 const myTool: AgentTool = {
-  name: 'read_file', label: '读文件', description: '…',
-  parameters: Type.Object({ path: Type.String() }),
+  name: 'my_tool', label: '我的工具', description: '…',
+  parameters: Type.Object({ x: Type.String() }),
   execute: async (id, params, signal) => ({ content: [{ type: 'text', text: '…' }], details: null }),
 };
 ```
+
 
 ## 测试
 
@@ -248,7 +285,7 @@ src/
   trace-store.ts  轨迹落盘：JSONL 追加写 + 回放 + 驱动器
   trace-file.ts   Node 端 sink：写 .trace/<sessionId>.jsonl
   store.ts        createStore + redux-loop 的 install()，waitForIdle，createPersistentStore
-  tools.ts        内置工具（now / calc / read_file）
+  tools.ts        工具注册表：适配 pi-coding-agent 的 read/write/edit/bash
   provider.ts     Pi(pi-ai) 装配：createModels + deepseekProvider + streamSimple
   tui.ts          入口：装配 + 落盘，然后交给 tui/app.ts
   tui/app.ts      pi-tui 界面：对话区 + 轨迹面板（Ctrl+T）
