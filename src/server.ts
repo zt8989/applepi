@@ -20,6 +20,7 @@ import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { createKernel, defaultSystemPrompt, type Kernel, type KernelOptions } from './kernel';
+import { defaultProviderSpec } from './provider';
 import { abortRun } from './run-control';
 import { getTools } from './tools';
 import { traceStats } from './trace';
@@ -128,7 +129,12 @@ const MIME: Record<string, string> = {
 export async function startServer(options: ServerOptions = {}): Promise<RunningServer> {
   const cwd = path.resolve(options.cwd ?? process.cwd());
   const kernel = createKernel({
-    provider: options.provider ?? 'deepseek',
+    // provider / model / thinkingLevel 必须原样传下去：调用方（serve.ts）已经解析过默认值，
+    // 这里再兜一次就会把用户选的模型悄悄换成别的（之前就漏了 model，害得默认回落成第一个模型）。
+    ...defaultProviderSpec(),
+    ...(options.provider ? { provider: options.provider } : {}),
+    ...(options.model ? { model: options.model } : {}),
+    ...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
     systemPrompt: options.systemPrompt ?? defaultSystemPrompt(),
     cwd,
     demo: options.demo,
