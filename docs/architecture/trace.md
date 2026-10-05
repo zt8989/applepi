@@ -18,7 +18,9 @@ interface TraceNode {
   id: string;                    // "n7"，reducer 内单调自增
   parentId: string | null;       // 根为 null
   kind: 'user' | 'llm.attempt' | 'llm.result'
-      | 'tool.attempt' | 'tool.result' | 'error' | 'stop';
+      | 'tool.attempt' | 'tool.result' | 'error' | 'stop'
+      // 上下文族（不推进 tip，见下）
+      | 'prompt.base' | 'prompt.tools' | 'prompt.segment' | 'model.init';
   status: 'pending' | 'ok' | 'error' | 'aborted';
   label: string;                 // 短标签，渲染用
   detail?: string;               // 详细文本（回答全文、错误信息、工具参数）
@@ -113,6 +115,48 @@ HEAD → n7
 数成两次。
 
 `retries` 的判据是「同一父节点下有多个 attempt 节点」。
+## 上下文族：提示词与模型也进树
+
+「系统提示词的生成」也在树上，不用翻 `.init.jsonl` 就看得到模型当时看到了什么。
+
+| kind | 谁产生 | label | meta |
+| --- | --- | --- | --- |
+| `prompt.base` | `prompt.init` | system prompt 首行摘要 | — |
+| `prompt.tools` | `prompt.init` | 工具名逗号分隔 | `count` |
+| `model.init` | `model.init` | `provider/model` | `thinking` / `midConvoSystem` / `midConvoTools` / `developerRole` |
+| `prompt.segment` | `prompt.segment.added` | 片段首行摘要 | `role` / `source` |
+
+完整内容在 `detail` 里（prompt 全文、每个工具的 description、片段原文），`label` 只是摘要。
+
+### 这一族**不推进 tip**
+
+它们是「上下文」，不是「发生过的事」：
+
+    const TIP_ADVANCING_KINDS = new Set(['user', 'llm.result', 'tool.result', 'stop']);
+    // prompt.* 与 model.init 都不在里面
+
+于是三个装载节点是**平级兄弟**，不是对话的祖先（`n1`/`n2` 有父子关系，见下），
+`n3` 的 parent 是 null 而 `n4`（user）也是 null —— 上下文与对话是两条线，
+混进同一棵「历史」树会让重试分叉的语义变糊。
+
+同一次 `prompt.init` 产出的两个节点之间**是**有父子关系的（`prompt.tools` 挂在 `prompt.base` 下）。
+那里要显式用 base 的 `id` 当 parent，不能用它的 `tipId` —— `prompt.base` 不推进 tip，
+取 `tipId` 会拿到装载前的值，两兄弟就散了。
+
+### 重复装载是追加
+
+`prompt.init` 走 `appendNode` 而非 `patchNode`：热重载再装载一次是**追加**一对新节点，旧的不改写。
+生效的是最新那个（`state.prompt` 里是最新值）。
+
+### reset 会清掉它们
+
+`conversation.reset` 清空树（连同 prompt.* / model.init），但保留 `state.prompt` /
+`state.model` —— 那两块是会话级状态。见 [init](init.md)。
+
+### 统计不计入
+
+`traceStats` 的 `turns` 只数 `llm.result`、`toolCalls` 只数 `tool.result`，
+所以 `prompt.tools` 不会让「调用过工具」计数虚高。
 
 ## 相关
 

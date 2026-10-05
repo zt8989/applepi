@@ -29,6 +29,13 @@
  */
 
 /** 节点类型。 */
+/**
+ * 节点类型。
+ *
+ * 分两族：
+ *   - **对话族**（user / llm.* / tool.* / error / stop）—— 会推进 tip，是「发生过的事」。
+ *   - **上下文族**（prompt.*）—— **不推进 tip**，是「发给模型的上下文长什么样」。
+ */
 export type TraceNodeKind =
   /** 一条用户消息。 */
   | 'user'
@@ -43,7 +50,15 @@ export type TraceNodeKind =
   /** 某个尝试的失败（超时 / 网络 / 模型报错 / 工具抛错）。 */
   | 'error'
   /** 轮数上限等「主动收工」。 */
-  | 'stop';
+  | 'stop'
+  /** 装载进来的基础 system prompt（prompt.init）。 */
+  | 'prompt.base'
+  /** 随 prompt 一起装进来的工具定义（prompt.init 的 tools）。 */
+  | 'prompt.tools'
+  /** 中途追加的一段 prompt（prompt.segment.added）。 */
+  | 'prompt.segment'
+  /** 装载的模型与它的能力（model.init）。 */
+  | 'model.init'
 
 /**
  * 节点状态。

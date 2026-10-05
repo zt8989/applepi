@@ -59,6 +59,15 @@ function nodeColor(node: TraceNode): (t: string) => string {
       return red;
     case 'stop':
       return magenta;
+    // 上下文族（prompt.*）统一用暗色：它们是「背景」不是「事件」，不该抢对话的注意力。
+    case 'prompt.base':
+      return magenta;
+    case 'prompt.tools':
+      return dim;
+    case 'prompt.segment':
+      return blue;
+    case 'model.init':
+      return dim;
   }
 }
 
@@ -79,9 +88,11 @@ export function renderColoredTree(tree: TraceTree, maxWidth: number): string {
   return plain
     .split('\n')
     .map((line) => {
-      const match = /^(.*?)(n\d+) (llm\.attempt|llm\.result|tool\.attempt|tool\.result|user|error|stop):/.exec(
-        line,
-      );
+      // 节点 kind 的全集。**漏一个就等于那个 kind 整族不上色**（静默退化，最难发现的一种 bug）。
+      const match =
+        /^(.*?)(n\d+) (llm\.attempt|llm\.result|tool\.attempt|tool\.result|user|error|stop|prompt\.base|prompt\.tools|prompt\.segment|model\.init):/.exec(
+          line,
+        );
       if (!match) return line.startsWith('HEAD') ? bold(line) : line;
       const [, prefix, id] = match;
       const color = colorOf.get(id ?? '') ?? dim;

@@ -132,17 +132,46 @@ const transitions: TransitionHandlers = {
    * tools 落进 state 之后，`effects.ts` 就不用每次 `getTools()` 现算了 —— 既少一次 IO，
    * 也让回放时不必重新装配工具就能知道当时发给模型的是什么。
    */
-  'prompt.init': (state, action) => ({
-    ...state,
-    prompt: {
+  'prompt.init': (state, action) => {
+    const now = Date.now();
+    // 装载也进轨迹树：树上要能看见「提示词是怎么来的」。
+    // 用 appendNode 而不是 patchNode —— 重复装载（比如热重载）是追加一条新的，不是改旧的。
+    const { tree: afterBase, node: baseNode } = appendNode(state.trace, state.trace.tipId, 'prompt.base', {
+      status: 'ok',
+      label: summarize(action.systemPrompt),
+      detail: action.systemPrompt,
+      createdAt: now,
+      endedAt: now,
+    });
+    // 工具定义单独一个节点：它和 system prompt 是两回事（一个是「说什么」，一个是「能做什么」）。
+    const { tree } = appendNode(
+      afterBase,
+      // parent 用 base 节点的 **id**（不是它的 tipId —— prompt.base 不推进 tip，
+      // 那样取会拿到装载前的 tip，两兄弟就散了）。
+      baseNode.id,
+      'prompt.tools',
+      {
+        status: 'ok',
+        label: action.tools.map((t) => t.name).join(', ') || '（无）',
+        detail: action.tools.map((t) => `${t.name}: ${t.description}`).join('\n'),
+        meta: { count: String(action.tools.length) },
+        createdAt: now,
+        endedAt: now,
+      },
+    );
+    return {
+      ...state,
+      trace: tree,
+      prompt: {
+        systemPrompt: action.systemPrompt,
+        tools: action.tools,
+        seeded: true,
+      },
+      // 扁平别名跟着更新（真相在 prompt 块里）。
       systemPrompt: action.systemPrompt,
-      tools: action.tools,
-      seeded: true,
-    },
-    // 扁平别名跟着更新（真相在 prompt 块里）。
-    systemPrompt: action.systemPrompt,
-    toolNames: action.tools.map((tool) => tool.name),
-  }),
+      toolNames: action.tools.map((tool) => tool.name),
+    };
+  },
 
   /**
    * 中途追加一段 prompt。落进 `messages` —— 它是 Conversation 的一部分，所以会被一起
@@ -152,13 +181,27 @@ const transitions: TransitionHandlers = {
    * 不支持时 pi-ai 会把后来的 system 消息折进开头那条。
    */
   'prompt.segment.added': (state, action) => {
+    const now = Date.now();
     const message: Message = {
       role: action.role,
       content: action.text,
-      timestamp: Date.now(),
+      timestamp: now,
       ...(action.source !== undefined ? { source: action.source } : {}),
     } as Message;
-    return { ...state, messages: [...state.messages, message] };
+    // 也进轨迹树：追加 prompt 是「上下文变了」，树上要看得见它插在哪个 attempt 之前。
+    // parent 取此刻的 tip —— 于是它就落在「下一轮会读它的那次调用」的正上方。
+    const { tree } = appendNode(state.trace, state.trace.tipId, 'prompt.segment', {
+      status: 'ok',
+      label: summarize(action.text),
+      detail: action.text,
+      meta: {
+        role: action.role,
+        ...(action.source !== undefined ? { source: action.source } : {}),
+      },
+      createdAt: now,
+      endedAt: now,
+    });
+    return { ...state, trace: tree, messages: [...state.messages, message] };
   },
 
   // ── model 侧装载 ──
@@ -168,20 +211,38 @@ const transitions: TransitionHandlers = {
    *
    * 能力随 init 一起落盘：回放时不必再问 provider「这个模型能不能中途插 system」。
    */
-  'model.init': (state, action) => ({
-    ...state,
-    model: {
-      provider: action.provider,
+  'model.init': (state, action) => {
+    const now = Date.now();
+    // 能力逐条写进 meta：树上就能一眼看出「这个模型能不能中途插 system」。
+    const caps = action.capabilities;
+    const { tree } = appendNode(state.trace, state.trace.tipId, 'model.init', {
+      status: 'ok',
+      label: `${action.provider}/${action.modelId}`,
+      meta: {
+        thinking: action.thinkingLevel,
+        midConvoSystem: String(caps.midConvoSystemMessages),
+        midConvoTools: String(caps.midConvoToolAdditions),
+        developerRole: String(caps.developerRole),
+      },
+      createdAt: now,
+      endedAt: now,
+    });
+    return {
+      ...state,
+      trace: tree,
+      model: {
+        provider: action.provider,
+        modelId: action.modelId,
+        thinkingLevel: action.thinkingLevel,
+        capabilities: action.capabilities,
+        seeded: true,
+      },
+      // 扁平别名跟着更新。
+      providerName: action.provider,
       modelId: action.modelId,
       thinkingLevel: action.thinkingLevel,
-      capabilities: action.capabilities,
-      seeded: true,
-    },
-    // 扁平别名跟着更新。
-    providerName: action.provider,
-    modelId: action.modelId,
-    thinkingLevel: action.thinkingLevel,
-  }),
+    };
+  },
 
   'user.message': (state, action) => {
     if (state.phase !== 'idle') return state;
