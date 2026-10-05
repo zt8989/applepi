@@ -12,16 +12,19 @@
  * 不会整屏闪烁 —— 这对一个一直在吐 delta 的 agent 界面很关键。
  */
 // pi-tui 1.x：`TUI` 是共享**接口**，实例化要选具体渲染器。
-// TuiMainScreen = 终端自己管回滚（对话越积越长，向上翻能看到历史）；
-// TuiAltScreen  = 占满整个视口、滚动自己管。对话式界面用前者更合适。
+// TuiAltScreen  = 真正的全屏：占满视口，终端不留回滚缓冲，界面自己管滚动。
+// TuiMainScreen = 让出回滚缓冲（内容永久留在终端历史里，能往上翻）。
+// 对话式 agent 用前者：输入框要钉在底部、对话区独立滚动，滚出去的内容不该污染终端回滚。
 import {
   CancellableLoader,
   Editor,
   ProcessTerminal,
   Text,
-  TuiMainScreen,
+  ScrollView,
+  TuiAltScreen,
+  VStack,
   matchesKey,
-  type TUI,
+  type ViewportTUI,
   type EditorTheme,
   type TuiInputListener,
 } from '@earendil-works/pi-tui';
@@ -119,6 +122,24 @@ function statusLine(state: AgentState): string {
   return `${dim(bits.filter(Boolean).join(' · '))}   ${dim('轨迹')} ${traceBits.join(dim(' · '))}`;
 }
 
+/** 去掉 ANSI 序列，拿到可见宽度。 */
+function stripAnsi(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+}
+
+/**
+ * 顶栏补到终端全宽。
+ *
+ * pi-tui 是**增量**重绘：只重画变化的行。顶栏本来是变长的（`0 轮` → `1 轮`、节点数增加），
+ * 变长时旧内容的尾巴不会被擦掉，于是下一帧会叠着出现 —— 看起来像「重复刷屏」。
+ * 补齐宽度让这一行长度恒定，增量重绘就不留残影。
+ */
+function padToWidth(text: string, width: number): string {
+  const visible = stripAnsi(text).length;
+  return visible >= width ? text : text + ' '.repeat(width - visible);
+}
+
 const EDITOR_THEME: EditorTheme = {
   borderColor: (s: string) => dim(s),
   selectList: {
@@ -137,7 +158,11 @@ export interface TuiOptions {
 export async function runTui(options: TuiOptions): Promise<number> {
   const { store, prompt } = options;
   const terminal = new ProcessTerminal();
-  const tui: TUI = new TuiMainScreen(terminal);
+  // AltScreen 是 viewport 实现，setLayoutRoot 在 ViewportTUI 上（TUI 接口没有）。
+  const tui: ViewportTUI = new TuiAltScreen(terminal, true, undefined, {
+    mouse: true,
+    copyOnSelect: true,
+  });
 
   const header = new Text('', 0, 0);
   const transcript = new Text('', 0, 0);
@@ -151,12 +176,16 @@ export async function runTui(options: TuiOptions): Promise<number> {
   let loading = false;
   let lastLoaderMessage = '';
   // 已经画过的消息条数：只渲染新增的那些。
-  let renderedMessages = 0;
 
   const refresh = (): void => {
     const state = store.getState();
-    header.setText(statusLine(state));
-    transcript.setText(renderTranscript(state, renderedMessages));
+    // 补到全宽：顶栏长度变化会让 pi-tui 的增量重绘留下残影（见 padToWidth 的注释）。
+    header.setText(padToWidth(statusLine(state), terminal.columns ?? 100));
+    // 整段重渲染：ScrollView 自己管滚动与跟随，我们每次给它完整的对话文本。
+    // （早前这里只渲染「新增的那几条」，靠 renderedMessages 游标 —— 那个游标每帧都被
+    //  推到最新，等于永远从末尾开始渲染，于是对话区什么都不显示。ScrollView 只重画
+    //  变化区域，这个 bug 才暴露出来。）
+    transcript.setText(renderTranscript(state, 0));
     if (showTrace) {
       tracePanel.setText(
         state.trace.order.length === 0
@@ -175,10 +204,11 @@ export async function runTui(options: TuiOptions): Promise<number> {
     if (state.phase === 'idle' && loading) {
       loading = false;
       loader.stop();
+      // stop() 只停动画，**不清那一行文字** —— 不置空的话「思考中…」会一直留在屏幕上转，
+      // 看起来像还在跑（这是「TUI 不可用」最容易被误判的地方）。
+      loader.setMessage('');
       lastLoaderMessage = '';
     }
-    // 状态里已有的消息补渲染（重绘时不会漏）。
-    renderedMessages = Math.max(renderedMessages, state.messages.length);
     refresh();
   });
 
@@ -192,9 +222,10 @@ export async function runTui(options: TuiOptions): Promise<number> {
       tui.stop();
       process.exit(0);
     }
-    // Ctrl+T：切换轨迹面板。
+    // Ctrl+T：切换轨迹面板。底部要放哪些组件变了，布局必须跟着重设。
     if (matchesKey(data, 'ctrl+t')) {
       showTrace = !showTrace;
+      applyLayout();
       refresh();
       return { consume: true };
     }
@@ -218,16 +249,37 @@ export async function runTui(options: TuiOptions): Promise<number> {
     lastLoaderMessage = '';
     loader.setMessage(yellow('思考中…'));
     loader.start();
-    renderedMessages = store.getState().messages.length;
     store.dispatch({ type: 'user.message', text });
     refresh();
   };
 
-  tui.addChild(header);
-  tui.addChild(transcript);
-  tui.addChild(tracePanel);
-  tui.addChild(loader);
-  tui.addChild(editor);
+  // 布局：AltScreen = 真正的全屏（占满视口、终端不留回滚缓冲）。
+  // 纵向三段：顶栏一行 / 对话区（唯一可伸缩，自己滚）/ 底部输入区。
+  //
+  // 为什么不能用 addChild 平铺：那样每个组件各占若干行，内容一多就把输入框顶出屏幕，
+  // 而且整屏重画时旧内容会留在回滚缓冲里（看起来像「重复刷屏」）。
+  //
+  // 为什么写成函数：Ctrl+T 切换轨迹面板会改变底部要放哪些组件，布局得跟着重设。
+  const scroll = new ScrollView(transcript, { follow: 'end', primary: true });
+  // 用函数声明（不是 const 箭头）：onInput 里会调它，const 有 TDZ，声明会提升。
+  function applyLayout(): void {
+    // 对话区是**唯一**可伸缩的（basis 0 + grow 1），其余按内容自适应。
+    // basis 给死会把对话区压扁：Editor 自己要画上下两条横线，实际占的比 basis 多。
+    const bottom = new VStack([
+      ...(showTrace ? [{ component: tracePanel, basis: 0, grow: 0, minSize: 1 }] : []),
+      { component: loader, basis: 0, grow: 0, minSize: 1 },
+      { component: editor, basis: 0, grow: 0, minSize: 3 },
+    ]);
+    tui.setLayoutRoot(
+      new VStack([
+        { component: header, basis: 1, grow: 0, minSize: 1 },
+        { component: scroll, basis: 0, grow: 1, minSize: 3 },
+        bottom,
+      ]),
+    );
+  }
+  applyLayout();
+
   tui.setFocus(editor);
   tui.start();
 
