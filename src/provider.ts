@@ -20,6 +20,13 @@ import {
 import { deepseekProvider } from '@earendil-works/pi-ai/providers/deepseek';
 import { anthropicProvider } from '@earendil-works/pi-ai/providers/anthropic';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
+import {
+  createModelsWithPiConfig,
+  loadPiAuth,
+  loadPiModels,
+  loadPiSettings,
+  piModelsPath,
+} from './pi-config';
 
 export interface ProviderSpec {
   /** pi-ai provider id，如 "deepseek"。 */
@@ -35,27 +42,56 @@ export interface AgentRuntime {
   model: Model<any>;
 }
 
+/**
+ * 内置 provider 工厂（pi-ai 自带）。**自定义 provider 不在这里** —— 它们来自
+ * `~/.pi/agent/models.json`，由 `createModelsWithPiConfig()` 装配。
+ */
 const PROVIDER_FACTORIES: Record<string, () => Provider<any>> = {
   deepseek: deepseekProvider as () => Provider<any>,
   anthropic: anthropicProvider as () => Provider<any>,
   openai: openaiProvider as () => Provider<any>,
 };
 
+/** 默认 provider / 模型：从 `~/.pi/agent/settings.json` 读，读不到用这组兜底。 */
+const FALLBACK_DEFAULT = { provider: 'workbuddy', model: 'cn:space-bunny' } as const;
+
+/**
+ * 默认 provider / 模型。
+ *
+ * 顺序：`~/.pi/agent/settings.json`（由 `npm run config:migrate` 从 clj-harness 写入）
+ * → 内置兜底 `workbuddy` / `cn:space-bunny`。命令行显式给的参数永远优先。
+ */
+export function defaultProviderSpec(): ProviderSpec {
+  const settings = loadPiSettings();
+  return {
+    provider: settings.defaultProvider ?? FALLBACK_DEFAULT.provider,
+    model: settings.defaultModel ?? FALLBACK_DEFAULT.model,
+  };
+}
+
+/**
+ * 可用的 provider 名 = 内置的 + models.json 里的。
+ *
+ * 读 models.json 失败不算错（可能还没迁移过），只是少列几个。
+ */
 export function providerNames(): string[] {
-  return Object.keys(PROVIDER_FACTORIES);
+  const custom = Object.keys(loadPiModels()?.providers ?? {});
+  return [...new Set([...Object.keys(PROVIDER_FACTORIES), ...custom])];
 }
 
 /** 建运行时：注册 provider，按 spec 解析出 Model。 */
 export function createRuntime(spec: ProviderSpec): AgentRuntime {
-  const factory = PROVIDER_FACTORIES[spec.provider];
-  if (!factory) {
+  // 先把 models.json 里的自定义 provider 全装上，再装内置的 ——
+  // 内置的放在后面，同名时以内置为准（内置的模型目录更全）。
+  const models = createModelsWithPiConfig(Object.values(PROVIDER_FACTORIES));
+
+  const modelsOfProvider = models.getModels(spec.provider);
+  if (modelsOfProvider.length === 0) {
     throw new Error(
-      `未知 provider：${spec.provider}。可用：${providerNames().join(', ')}`,
+      `未知 provider：${spec.provider}。可用：${providerNames().join(', ')}` +
+        `（自定义 provider 来自 ${piModelsPath()}，可用 npm run config:migrate 生成）`,
     );
   }
-  const models = createModels();
-  models.setProvider(factory());
-  const modelsOfProvider = models.getModels(spec.provider);
   const modelId = spec.model || modelsOfProvider[0]?.id;
   const model = modelId ? models.getModel(spec.provider, modelId) : undefined;
   if (!model) {
@@ -90,11 +126,20 @@ const KEYLESS_PROVIDERS = new Set(['faux']);
  * 否则抛出可读的错误。
  */
 export function resolveApiKey(provider: string): string | undefined {
-  const envName = `${provider.toUpperCase().replace(/-/g, '_')}_API_KEY`;
-  const key = process.env[envName];
-  if (key) return key;
+  // 非字母数字的 provider id 要归一下（`my-gateway` → `MY_GATEWAY_API_KEY`），
+  // 与 pi 的 envApiKeyAuth 规则一致。
+  const envName = `${provider.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`;
+  const fromEnv = process.env[envName];
+  if (fromEnv) return fromEnv;
+  // 再看 pi 的 auth.json（`npm run config:migrate` 写的）——
+  // 这样即使项目 .env 里没有那个 key，迁移过来的凭证也能用。
+  const fromAuth = loadPiAuth()[provider]?.key;
+  if (fromAuth) return fromAuth;
   if (KEYLESS_PROVIDERS.has(provider)) return undefined;
-  throw new Error(`缺少 ${envName} 环境变量（写进 .env 或 shell 里都行）。`);
+  throw new Error(
+    `缺少 ${envName}。三处任选其一：` +
+      `项目 .env、shell 环境变量、或 ~/.pi/agent/auth.json（跑 npm run config:migrate 生成）。`,
+  );
 }
 
 // ─── 离线演示 provider（pi-ai 自带的 faux） ───

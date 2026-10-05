@@ -16,7 +16,7 @@ import path from 'node:path';
 import { DEFAULT_PORT, DEV_KERNEL_PORT, startServer } from './server';
 import { renderTree } from './trace';
 import { getTools } from './tools';
-import { providerNames } from './provider';
+import { defaultProviderSpec, providerNames } from './provider';
 
 interface Args {
   /** 不给就按 dev 决定（生产 5273 / 开发 5274）。 */
@@ -55,7 +55,7 @@ const USAGE = `redux-agent serve —— Node 内核 + 网页界面（同一个�
 
 function parseArgs(argv: string[]): Args | { help: true } {
   const args: Args = {
-    provider: 'deepseek',
+    provider: '',
     cwd: process.cwd(),
     demo: false,
     dev: false,
@@ -137,8 +137,10 @@ async function main(): Promise<void> {
   const server = await startServer({
     // 开发模式让开 5273 给 vite（vite 把 /api 代理过来）。
     port: parsed.port ?? (parsed.dev ? DEV_KERNEL_PORT : DEFAULT_PORT),
-    provider: parsed.provider,
-    model: parsed.model,
+    // 没给 -P/-m 就用默认（settings.json → 兜底 workbuddy/cn:space-bunny）
+    ...defaultProviderSpec(),
+    ...(parsed.provider ? { provider: parsed.provider } : {}),
+    ...(parsed.model ? { model: parsed.model } : {}),
     cwd: parsed.cwd,
     demo: parsed.demo,
     llmTimeoutMs: parsed.llmTimeoutMs,

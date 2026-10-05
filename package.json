@@ -17,6 +17,8 @@
     "web:dev": "node scripts/dev-web.mjs",
     "web:build": "vite build --config web/vite.config.ts",
     "web:serve": "npm run web:build && npm run serve",
+    "config:migrate": "node scripts/migrate-pi-config.mjs --overwrite",
+    "config:check": "node scripts/migrate-pi-config.mjs --dry-run",
     "test": "node --import tsx --test test/*.test.ts"
   },
   "dependencies": {

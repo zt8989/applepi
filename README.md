@@ -22,15 +22,29 @@ agent** —— 循环不是写出来的，是 reducer 与副作用互相 dispatc
 
 - **Node.js 20+**（pi-tui 要求 ≥22.19，实测 24.9 可用）
 - **npm**
-- 真实跑模型时需要对应 provider 的 API key（默认 DeepSeek，读 `.env`）
+- **npm**
+- 真实跑模型时需要对应 provider 的 API key
+
+默认 provider / 模型来自 **pi 的配置目录**（`~/.pi/agent/`），当前是
+`workbuddy` / `cn:space-bunny`。这些是从 clj-harness 迁过来的：
+
+```bash
+npm run config:migrate     # 从 ~/.clj-harness/config.edn + .env 生成 ~/.pi/agent/{models,auth,settings}.json
+npm run config:check      # 只看会迁什么，不写文件
+```
+
+路径与格式**完全按 pi 的约定**（`PI_CODING_AGENT_DIR` 可搬家）：`models.json` 放
+provider 的 baseUrl / api / 模型目录，`auth.json` 只放凭证，`.env` 里的 `<ID>_API_KEY`
+也能用（`npm start` 走 `--env-file-if-exists=.env`）。
+
+命令行的 `-P` / `-m` 仍然优先。
 
 ## 运行
 
 ```bash
 npm install
-cp .env.example .env        # 填入 DEEPSEEK_API_KEY
+npm run config:migrate            # 首次：把 provider / 模型配置迁到 ~/.pi/agent
 ```
-
 **终端界面**（pi-tui）：
 
 ```bash

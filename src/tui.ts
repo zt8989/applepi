@@ -11,7 +11,7 @@
  */
 import process from 'node:process';
 import path from 'node:path';
-import { providerNames } from './provider';
+import { defaultProviderSpec, providerNames } from './provider';
 import { createKernel, type Kernel } from './kernel';
 import { runTui } from './tui/app';
 
@@ -22,8 +22,9 @@ const DEFAULT_SYSTEM_PROMPT = [
 ].join('\n');
 
 interface CliArgs {
+  /** 命令行没给就留空 → 走 defaultProviderSpec()（settings.json → 兜底）。 */
   provider: string;
-  model?: string;
+  model?: string | undefined;
   system: string;
   maxTurns: number;
   prompt?: string;
@@ -68,7 +69,10 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
 
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
-    provider: 'deepseek',
+  // provider/model 留空 → 走 defaultProviderSpec()：先读 ~/.pi/agent/settings.json，
+  // 再退到内置兜底 workbuddy / cn:space-bunny。命令行 -P/-m 仍然优先。
+  provider: '',
+  model: undefined,
     system: DEFAULT_SYSTEM_PROMPT,
     maxTurns: 25,
     help: false,
@@ -167,8 +171,10 @@ async function main(): Promise<void> {
   let kernel: Kernel;
   try {
     kernel = createKernel({
-      provider: args.provider,
-      ...(args.model !== undefined ? { model: args.model } : {}),
+      // 没给 -P/-m 就用默认（settings.json → 兜底 workbuddy/cn:space-bunny）
+      ...defaultProviderSpec(),
+      ...(args.provider ? { provider: args.provider } : {}),
+      ...(args.model ? { model: args.model } : {}),
       systemPrompt: args.system,
       cwd: args.cwd,
       demo: args.demo,
