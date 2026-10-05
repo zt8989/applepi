@@ -15,6 +15,9 @@ import type { TraceTree } from './trace';
 
 export const TRACE_DIR = '.trace';
 
+/** 轨迹目录：相对路径（相对进程 cwd）或绝对路径。 */
+export type TraceDir = string;
+
 /** 某个会话的 JSONL 路径。 */
 export function tracePath(sessionId: string, dir: string = TRACE_DIR): string {
   return path.join(dir, `${sessionId}.jsonl`);

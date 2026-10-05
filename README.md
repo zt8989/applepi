@@ -135,7 +135,25 @@ error 节点和成功节点走**同一条路**落盘，所以「失败过」这�
 `src/trace.ts` 是纯函数：没有 IO、没有 `Date.now()`、没有随机数，节点 id 由 reducer 单调自增。
 所以同一串 Action 必然产出同一棵树 —— 能在测试里逐字断言，也能在 TUI 侧从 JSONL 回放重建。
 
-## 界面
+## 一个内核，两个界面
+
+环**只有一份**，跑在 Node 里（`src/kernel.ts` 的 `createKernel()`）。TUI 和 Web 都是它的渲染层：
+
+```
+                    ┌─────────────────────────────┐
+                    │  内核（Node，唯一的 store）    │
+                    │  Redux Loop + LLM + 工具执行   │
+                    └──────┬───────────────┬──────┘
+             订阅 state     │               │  POST 消息
+                    ┌──────▼──────┐  ┌─────▼────────┐
+                    │ TUI(pi-tui)│  │ Web(浏览器)   │
+                    │  直接读     │  │ SSE 订阅      │
+                    │  store      │  │ POST /api/... │
+                    └─────────────┘  └──────────────┘
+```
+
+这不是为了好看，是必需的：环有副作用（真调模型、真读写文件、真起子进程）。
+浏览器里如果也跑一份，就会出现两边都发起 LLM 调用、消息流不一致、文件被写两次。
 
 ### 终端（pi-tui）
 
@@ -147,28 +165,41 @@ npm start                          # 交互式（pi-tui 差分渲染）
 npm start -- -p "今天几号？"        # 跑一条就退出，顺带打印轨迹树
 npm start -- --demo                # 不打网络：pi-ai 自带的 faux provider
 npm start -- --llm-timeout 30000 --attempts 3   # 短超时 + 三次尝试，好看到重试分叉
+npm start -- --cwd ../other        # 工具的文件操作边界换到别的目录
 ```
 
 界面里：`Ctrl+T` 切换轨迹面板，`Ctrl+C` 中断当前回合（空闲时退出）。
 
 选项：`-p/--print`、`-P/--provider`、`-m/--model`、`-s/--system`、`--max-turns`、
-`--llm-timeout`、`--attempts`、`--api-key`、`--demo`、`--no-trace`、`--session`、`-h/--help`。
+`--llm-timeout`、`--attempts`、`--api-key`、`--demo`、`--no-trace`、`--session`、
+`--cwd`、`--trace-dir`、`-h/--help`。
 
-### Web（pi-web-ui）
+### Web（pi-web-ui，渲染层）
 
 ```bash
-npm run web                                  # http://localhost:5273
-open http://localhost:5273/?demo=1          # 离线 demo（faux provider，不用 key）
+npm run web:serve                  # 构建前端 + 起 Node 内核 → http://localhost:5273
+npm run serve -- --demo           # 只起内核（前端已构建过）
+npm run serve -- --cwd D:/proj    # 工具的文件操作边界
 ```
 
-> 工具来自 `@earendil-works/pi-coding-agent`（`read` / `write` / `edit` / `bash`），它们全都直接摸
-> 真实文件系统、起真实子进程，浏览器里一个都用不了。所以 Web 侧**不注册任何工具** ——
-> 环照常跑，只是模型没有手。要在浏览器里用得另配一套基于 fetch 的实现。
+浏览器这一侧**不跑环**，只做三件事：SSE 订阅状态树、POST 发消息、把状态画出来。
+所以 `read` / `write` / `edit` / `bash` 摸的是**真实文件系统**，路径边界由 `--cwd` 决定。
 
+接口：
+
+| 端点 | 作用 |
+| --- | --- |
+| `GET /api/events` | SSE：状态一变就推一帧（含轨迹树） |
+| `GET /api/snapshot` | 首次进入拿全量状态 |
+| `POST /api/message` | 发一句话（环在跑时返回 409，不会双跑） |
+| `POST /api/abort` | 中断当前回合 |
+| `POST /api/model` | 换模型 |
+| `POST /api/reset` | 新对话 |
+| `GET /api/tools` | 工具清单 + cwd |
 ## Web 侧怎么接的（为什么不需要 pi-agent-core）
 
-pi-web-ui 在**运行时从不 import pi-agent-core** —— 对它的引用 100% 是 `import type`。
-它唯一碰「session」的地方是 `AgentInterface`，而它要的是**鸭子类型**，不是 `instanceof Agent`：
+pi-web-ui 唯一碰「session」的地方是 `AgentInterface`，而它要的是**鸭子类型**。浏览器侧由
+`web/src/remote-session.ts` 提供：
 
 ```ts
 session.state.messages / .tools / .model / .thinkingLevel
@@ -181,23 +212,26 @@ session.abort()                        // 停止
 它只 `switch` 7 种 lifecycle 事件（`message_start` / `turn_start` / `turn_end` /
 `agent_start` / `message_end` / `agent_end` / `message_update`），其余一概不看。
 
-`web/src/session-adapter.ts` 就是这层翻译，而且是**全仓库唯一**知道 pi-web-ui 存在的地方：
+`remote-session.ts` 做三件事：
 
-1. 从 Redux 状态树造出上面那个 `state` 结构（每次都是新对象 / 新数组，pi-web-ui 按引用判断重渲染）。
-2. 订阅 `store`，把状态变化翻译成那 7 种事件。
+1. **SSE → 状态**：订阅 `/api/events`，每帧存进 `snapshot`。
+2. **状态 → lifecycle 事件**：对比前后两帧，看消息数变了没、`streamingText` 变了没，
+   合成对应的 `message_start` / `message_end` / `message_update` / `agent_end`。
+   pi-web-ui 上来就 `switch (e.type)`，所以**必须真的发事件**，发个「变了」的通知没用。
+3. **prompt → POST**：把输入发回内核，由 Node dispatch。
 
-为什么从**状态树**推导而不是转发 action？因为 `Cmd.dispatch` 走的是 redux-loop 自己的
-dispatch，绕过了我们能包装的那一层；状态树是环的收敛点，从它出发不会漏掉任何一条 action。
+### 踩过的坑（都在代码里留了注释）
 
-这也意味着 Web 侧**没有**任何「特殊接线」：不置空任何一行，不双跑一轮 ——
-因为环本来就该由 Redux 驱动。
-
-两个容易踩的坑，adapter 里都处理了（`main.ts` / adapter 里有注释）：
-
-- `state.messages` 必须每次给**新的数组**，否则工具回合之后最后一条回答不显示。
-- `MessageEditor` 是**直接写** `session.state.thinkingLevel = level` 的，所以 adapter 把这两个
-  字段做成 setter，把赋值翻成 `thinking.changed` / `model.changed`，而不是改一个没人看的新对象。
-
+- **`state` 每次都要新对象。** pi-web-ui 按引用判断要不要重渲染，一直返回同一个对象
+  的话界面永远不更新。
+- **自定义元素要显式保住。** `agent-interface` 是靠模块副作用 `customElements.define` 注册的，
+  bundler 认定「只当类型用」时会把它 tree-shake 掉，页面就只剩一个没升级的空标签。
+  `web/src/ensure-elements.ts` 用一次真实的 `new` 逼 bundler 保留。
+- **别在订阅回调里调 `chat.requestUpdate()`。** 自定义元素在 define 完成前没有这个方法，
+  而 `subscribe` 那一刻会**同步**回调一次。
+- **`setAppStorage()` 必须调。** 否则 `sendMessage()` 第一件事 `getAppStorage()` 就抛。
+- **key 检查要骗过去。** `sendMessage` 会先查 providerKeys，查不到就弹 key 对话框。真正的鉴权在
+  Node 侧，浏览器只需要一个占位值就能通过检查。
 ## Provider：Pi（和 DeepSeek Harness 一样）
 
 `src/provider.ts` 与 `my-pi-desktop/src/main/agent/runtime.ts` 是同一套路：
@@ -264,7 +298,7 @@ const myTool: AgentTool = {
 ## 测试
 
 ```bash
-npm test          # 29 个离线测试
+npm test          # 36 个离线测试
 npm run typecheck # tsc --noEmit（src + test）+ tsc --noEmit -p web
 ```
 
@@ -287,22 +321,29 @@ src/
   store.ts        createStore + redux-loop 的 install()，waitForIdle，createPersistentStore
   tools.ts        工具注册表：适配 pi-coding-agent 的 read/write/edit/bash
   provider.ts     Pi(pi-ai) 装配：createModels + deepseekProvider + streamSimple
-  tui.ts          入口：装配 + 落盘，然后交给 tui/app.ts
+  kernel.ts       内核装配：TUI 与 Web 共用的唯一一份环
+  server.ts       HTTP + SSE：订阅状态树、发消息、中断、静态文件
+  serve.ts        Web 入口：起内核 + 页面
+  tui.ts          TUI 入口：同一个内核，交给 tui/app.ts
   tui/app.ts      pi-tui 界面：对话区 + 轨迹面板（Ctrl+T）
 web/
-  src/main.ts            pi-web-ui 装配：Redux 状态树 + adapter + 顶栏
-  src/session-adapter.ts 状态树 → pi-web-ui 的 lifecycle 事件
+  src/main.ts            pi-web-ui 装配 + 顶栏（环不在浏览器里）
+  src/remote-session.ts  SSE 订阅 + 合成 lifecycle 事件 + POST 消息
+  src/ensure-elements.ts  保住 agent-interface 的 define 不被 tree-shake
   src/trace-panel.ts     底部轨迹面板（与 TUI 共用 renderTree）
 test/            离线测试（faux provider，不打网络）
   trace.test.ts         轨迹树：重试父 id、不变量、端到端超时
   trace-persist.test.ts 错误落盘、JSONL 回放、界面渲染一致性
+  server.test.ts        SSE 推状态、409 不双跑、真实文件 IO、目录穿越防护
 .trace/         运行时生成的轨迹 JSONL（已 gitignore）
 
 ## 边界
 
-- 工具在本地直接执行（`read_file` 读真实文件），没有沙箱；只当自己机器上的小助手用。
-- `--demo` / `?demo=1` 走 pi-ai 自带的 faux provider，只为演示与自检，不会真的调模型。
+- 工具在 Node 侧直接执行，没有沙箱。`--cwd` 只限制**路径边界**（官方工具自带的检查），
+  不阻止 `bash` 跑任意命令。只当自己机器上的小助手用。
+- `--demo` 走 pi-ai 自带的 faux provider，只为演示与自检，不会真的调模型。
 - Web 侧没接会话持久化：`SessionsStore` 只是在 `AppStorage` 构造函数里占位（pi-web-ui 强制要四个
-  store），顶栏的「新对话」是清空，不落盘。要接的话看 `web/src/main.ts` 里的 `sessions`。
-- pi-web-ui 自带一份嵌套的 `pi-ai@0.75.5`，本项目根目录是 `0.84.4`。两边都是纯数据交互，
-  实测（浏览器 demo）没问题，但这是「碰巧兼容」，不是「设计上兼容」。
+  store），顶栏的「新对话」是清空内核，不落盘。真正的历史在 `.trace/<id>.jsonl`。
+- **pi-web-ui 最高只到 `0.75.3`，没有 1.x**（其余 @earendil-works 包都到 1.0.2）。它自带一份嵌套的
+  `pi-ai@0.75.5`，而根目录是 `1.0.2`，所以 `web/src/main.ts` 里有两处 `as never`。
+  这是「碰巧兼容」不是「设计上兼容」——pi-web-ui 发 1.x 时该换掉。

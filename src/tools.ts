@@ -1,3 +1,4 @@
+import path from 'node:path';
 import type { AgentTool, AgentToolResult } from './agent-tool';
 
 /**
@@ -59,7 +60,10 @@ function adapt(official: OfficialTool<any>, label: string): AgentTool {
  * 工具注册表。cwd 是工作目录 —— 官方工具用它做路径边界检查
  * （防止 LLM 跑到工作目录外面去读写文件）。
  */
-let registry: readonly AgentTool[] | null = null;
+// 按 cwd 缓存：官方工具在**构造时**就把 cwd 烤进闭包（路径边界检查靠它），
+// 所以同一个 cwd 复用同一批实例；换个 cwd 必须重建，否则边界还是旧的。
+// 用绝对路径做 key，免得 'x' 和 './x' 各建一份。
+const registries = new Map<string, readonly AgentTool[]>();
 
 function build(cwd: string): readonly AgentTool[] {
   return [
@@ -71,16 +75,23 @@ function build(cwd: string): readonly AgentTool[] {
 }
 
 export function getTools(cwd: string = process.cwd()): readonly AgentTool[] {
-  registry ??= build(cwd);
-  return registry;
+  const key = path.resolve(cwd);
+  let tools = registries.get(key);
+  if (!tools) {
+    tools = build(cwd);
+    registries.set(key, tools);
+  }
+  return tools;
 }
 
 export function getTool(name: string, cwd: string = process.cwd()): AgentTool | undefined {
   return getTools(cwd).find((tool) => tool.name === name);
 }
 
-/** 重新按新的 cwd 建注册表（测试用：换目录后要能看到新目录）。 */
+/** 丢掉某个 cwd 的缓存（测试用：换目录后要能看到新目录的工具实例）。 */
 export function resetTools(cwd: string = process.cwd()): readonly AgentTool[] {
-  registry = build(cwd);
-  return registry;
+  const key = path.resolve(cwd);
+  const tools = build(cwd);
+  registries.set(key, tools);
+  return tools;
 }

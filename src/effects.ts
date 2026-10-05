@@ -14,6 +14,7 @@ import { Cmd, type CmdType } from 'redux-loop';
 import type {
   AssistantMessage,
   Context,
+  JsonValue,
   Model,
   SimpleStreamOptions,
   Tool,
@@ -180,7 +181,8 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
   function toToolResult(
     call: ToolCall,
     content: ToolResultMessage['content'],
-    details: unknown,
+  // pi-ai 1.x 把 details 从 unknown 收紧成 JsonValue（要能真的序列化进 JSONL / 存盘）。
+  details: JsonValue,
     isError: boolean,
   ): ToolResultMessage {
     return {

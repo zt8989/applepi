@@ -1,11 +1,12 @@
-import type { TSchema, TextContent, ImageContent } from '@earendil-works/pi-ai';
+import type { ImageContent, JsonValue, TextContent, TSchema } from '@earendil-works/pi-ai';
 
 /**
  * 工具执行结果（pi-ai Tool 约定的 execute 返回值形状）。
  */
 export interface AgentToolResult {
   content: (TextContent | ImageContent)[];
-  details: unknown;
+  /** pi-ai 1.x 要求 details 能真的 JSON 序列化（要进消息流、存盘、发给 provider）。 */
+  details: JsonValue;
 }
 
 /**

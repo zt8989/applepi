@@ -11,8 +11,20 @@
  * pi-tui 的好处是差分渲染：流式 token 一个个进来时只重画变化的那几行，
  * 不会整屏闪烁 —— 这对一个一直在吐 delta 的 agent 界面很关键。
  */
-import { CancellableLoader, Editor, ProcessTerminal, TUI, Text, matchesKey } from '@earendil-works/pi-tui';
-import type { EditorTheme } from '@earendil-works/pi-tui';
+// pi-tui 1.x：`TUI` 是共享**接口**，实例化要选具体渲染器。
+// TuiMainScreen = 终端自己管回滚（对话越积越长，向上翻能看到历史）；
+// TuiAltScreen  = 占满整个视口、滚动自己管。对话式界面用前者更合适。
+import {
+  CancellableLoader,
+  Editor,
+  ProcessTerminal,
+  Text,
+  TuiMainScreen,
+  matchesKey,
+  type TUI,
+  type EditorTheme,
+  type TuiInputListener,
+} from '@earendil-works/pi-tui';
 import { abortRun } from '../run-control';
 import { renderTree, traceStats, type TraceNode, type TraceTree } from '../trace';
 import type { AgentState } from '../state';
@@ -114,7 +126,7 @@ export interface TuiOptions {
 export async function runTui(options: TuiOptions): Promise<number> {
   const { store, prompt } = options;
   const terminal = new ProcessTerminal();
-  const tui = new TUI(terminal);
+  const tui: TUI = new TuiMainScreen(terminal);
 
   const header = new Text('', 0, 0);
   const transcript = new Text('', 0, 0);
@@ -159,8 +171,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
     refresh();
   });
 
-  // Ctrl-C：环在跑就中断这一轮，闲时就退出。
-  tui.addInputListener((data) => {
+  // 显式标出回调参数类型：1.x 的 TuiInputListener 是具名类型，不再从上下文推断。
+  const onInput: TuiInputListener = (data: string) => {
     if (matchesKey(data, 'ctrl+c')) {
       if (store.getState().phase !== 'idle') {
         abortRun();
@@ -176,7 +188,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
       return { consume: true };
     }
     return undefined;
-  });
+  };
+  tui.addInputListener(onInput);
 
   editor.onSubmit = (text: string) => {
     const input = text.trim();
@@ -245,8 +258,19 @@ function renderTranscript(state: AgentState, from: number): string {
   for (let i = from; i < state.messages.length; i += 1) {
     const message = state.messages[i];
     if (!message) continue;
-    if (message.role === 'user') {
-      lines.push(`${cyan('你 ›')} ${String(message.content)}`);
+    // pi-ai 1.x：Message 联合多了 system，且 content 可能是纯字符串 ——
+    // 先按 role 收窄，再把 content 归一成「文本片段数组」再渲染。
+    if (message.role === 'system') {
+      const text = typeof message.content === 'string' ? message.content : '';
+      if (text) lines.push(`${dim('系统 ›')} ${dim(text)}`);
+    } else if (message.role === 'user') {
+      const text =
+        typeof message.content === 'string'
+          ? message.content
+          : message.content
+              .map((c) => (c.type === 'text' ? c.text : '[image]'))
+              .join(' ');
+      lines.push(`${cyan('你 ›')} ${text}`);
     } else if (message.role === 'assistant') {
       const text = message.content
         .map((c) => (c.type === 'text' ? c.text : c.type === 'toolCall' ? `[调用 ${c.name}]` : ''))

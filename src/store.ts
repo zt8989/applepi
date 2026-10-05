@@ -32,6 +32,8 @@ export interface CreateAgentStoreOptions {
   maxTurns?: number | undefined;
   /** 一次 LLM 调用的超时（毫秒）；超时按可重试错误处理。 */
   llmTimeoutMs?: number | undefined;
+  /** 工具的工作目录（官方工具用它做路径边界检查）。不给则用 process.cwd()。 */
+  cwd?: string | undefined;
   /** 单轮内最多几次 LLM 尝试（含首次），2 = 失败后重试一次。 */
   maxLlmAttempts?: number | undefined;
   /** 注入会话 id（决定持久化文件名；默认按时间生成）。 */
@@ -65,7 +67,8 @@ export function createAgentStore(options: CreateAgentStoreOptions): AgentStore {
     systemPrompt,
     providerName: runtime.spec.provider,
     modelId: runtime.model.id,
-    toolNames: getTools().map((tool) => tool.name),
+    // 工具按 cwd 建（官方工具用它做路径边界检查）。
+    toolNames: getTools(options.cwd ?? process.cwd()).map((tool) => tool.name),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(options.llmTimeoutMs !== undefined ? { llmTimeoutMs: options.llmTimeoutMs } : {}),
     ...(options.maxLlmAttempts !== undefined

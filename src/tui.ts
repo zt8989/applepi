@@ -10,16 +10,9 @@
  * 环本身仍然只由本项目的 Redux Loop 驱动（`createPersistentStore`），这里只订阅状态、画界面。
  */
 import process from 'node:process';
-import {
-  createFauxRuntime,
-  createRuntime,
-  demoResponses,
-  providerNames,
-  type AgentRuntime,
-} from './provider';
-import { createPersistentStore } from './store';
-import { createFileSink, tracePath } from './trace-file';
-import { newSessionId } from './trace';
+import path from 'node:path';
+import { providerNames } from './provider';
+import { createKernel, type Kernel } from './kernel';
 import { runTui } from './tui/app';
 
 const DEFAULT_SYSTEM_PROMPT = [
@@ -41,6 +34,9 @@ interface CliArgs {
   demo: boolean;
   noTrace: boolean;
   sessionId?: string;
+  /** 工具的工作目录（文件操作边界）。 */
+  cwd: string;
+  traceDir?: string;
 }
 
 const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界面）
@@ -61,6 +57,8 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
       --demo             不打网络：用 pi-ai 自带的 faux provider 跑一遍完整环
       --no-trace         不把轨迹落盘到 .trace/
       --session <id>     指定会话 id（决定 .trace/<id>.jsonl 的文件名）
+      --cwd <dir>       工具的工作目录（文件操作边界，默认当前目录）
+      --trace-dir <dir> 轨迹目录（默认 .trace）
   -h, --help             显示本帮助
 
 界面里:
@@ -76,6 +74,7 @@ function parseArgs(argv: string[]): CliArgs {
     help: false,
     demo: false,
     noTrace: false,
+    cwd: process.cwd(),
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -118,6 +117,13 @@ function parseArgs(argv: string[]): CliArgs {
       case '--session':
         args.sessionId = next();
         break;
+      case '--cwd':
+        // 工具的文件操作边界由它决定。
+        args.cwd = path.resolve(next());
+        break;
+      case '--trace-dir':
+        args.traceDir = next();
+        break;
       case '--demo':
         args.demo = true;
         break;
@@ -136,17 +142,6 @@ function parseArgs(argv: string[]): CliArgs {
   return args;
 }
 
-function buildRuntime(args: CliArgs): AgentRuntime {
-  if (args.demo) {
-    const faux = createFauxRuntime();
-    faux.setResponses(demoResponses());
-    return faux.runtime;
-  }
-  return createRuntime({
-    provider: args.provider,
-    ...(args.model ? { model: args.model } : {}),
-  });
-}
 
 async function main(): Promise<void> {
   let args: CliArgs;
@@ -167,43 +162,40 @@ async function main(): Promise<void> {
     process.env[`${args.provider.toUpperCase().replace(/-/g, '_')}_API_KEY`] = args.apiKey;
   }
 
-  let runtime: AgentRuntime;
+  // 内核：和 `npm run serve`（Web）用的是**同一个** createKernel()。
+  // 两个界面只是同一个环的两个渲染层 —— 没有第二份 store，也没有第二份环。
+  let kernel: Kernel;
   try {
-    runtime = buildRuntime(args);
+    kernel = createKernel({
+      provider: args.provider,
+      ...(args.model !== undefined ? { model: args.model } : {}),
+      systemPrompt: args.system,
+      cwd: args.cwd,
+      demo: args.demo,
+      maxTurns: args.maxTurns,
+      llmTimeoutMs: args.llmTimeoutMs,
+      maxLlmAttempts: args.maxLlmAttempts,
+      ...(args.sessionId !== undefined ? { sessionId: args.sessionId } : {}),
+      traceDir: args.noTrace ? null : args.traceDir,
+      onTraceError: (error) => {
+        process.stderr.write(
+          `轨迹落盘失败（不影响对话）：${String(error instanceof Error ? error.message : error)}\n`,
+        );
+      },
+    });
   } catch (error) {
     process.stderr.write(`${String(error instanceof Error ? error.message : error)}\n`);
     process.exitCode = 2;
     return;
   }
 
-  const sessionId = args.sessionId ?? newSessionId();
-  // 落盘：追加写 JSONL。错误节点同样会被写进去（落盘器对成功/失败一视同仁）。
-  const sink = args.noTrace ? undefined : createFileSink(tracePath(sessionId));
-
-  const { store, persistence } = createPersistentStore({
-    runtime,
-    systemPrompt: args.system,
-    maxTurns: args.maxTurns,
-    sessionId,
-    ...(args.llmTimeoutMs !== undefined ? { llmTimeoutMs: args.llmTimeoutMs } : {}),
-    ...(args.maxLlmAttempts !== undefined ? { maxLlmAttempts: args.maxLlmAttempts } : {}),
-    ...(sink ? { traceSink: sink } : {}),
-    onTraceError: (error) => {
-      process.stderr.write(
-        `轨迹落盘失败（不影响对话）：${String(error instanceof Error ? error.message : error)}\n`,
-      );
-    },
-  });
-
-  // 退出前把 pending 的写入刷完，否则最后几行可能还在缓冲里。
-  const shutdown = (): void => {
-    persistence?.dispose();
-    if (sink && 'close' in sink) void sink.close?.();
-  };
-  process.once('exit', shutdown);
+  process.once('exit', () => kernel.dispose());
 
   const prompt = args.prompt ?? (args.demo ? '算一下 (3+4)*6' : undefined);
-  process.exitCode = await runTui({ store, ...(prompt !== undefined ? { prompt } : {}) });
+  process.exitCode = await runTui({
+    store: kernel.store,
+    ...(prompt !== undefined ? { prompt } : {}),
+  });
 }
 
 void main();
