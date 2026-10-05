@@ -159,7 +159,11 @@ const SLASH_COMMANDS: SlashCommand[] = [
     name: 'resume',
     description: '同 /sessions（方便记）',
   },
-  { name: 'new', description: '开新对话（历史仍留在 sessions/ 里）' },
+  {
+    name: 'new',
+    description: '开新会话（换文件；上一段仍留在 sessions/ 里）',
+  },
+  { name: 'clean', description: '同 /new' },
   { name: 'help', description: '列出全部命令' },
 ];
 
@@ -186,10 +190,16 @@ export interface TuiOptions {
   store: AgentStore;
   /** 一次性提问：给完就退出（脚本/管道友好）。 */
   prompt?: string | undefined;
+  /**
+   * 开新会话（换 id → 换文件）。由内核提供 —— TUI 拿不到内核，只能收回调。
+   *
+   * 不传就退化成「只清对话、沿用原 id」，那样之后的消者会追加进同一个文件。
+   */
+  newSession?: (() => { id: string }) | undefined;
 }
 
 export async function runTui(options: TuiOptions): Promise<number> {
-  const { store, prompt } = options;
+  const { store, prompt, newSession } = options;
   const terminal = new ProcessTerminal();
   // AltScreen 是 viewport 实现，setLayoutRoot 在 ViewportTUI 上（TUI 接口没有）。
   const tui: ViewportTUI = new TuiAltScreen(terminal, true, undefined, {
@@ -326,9 +336,25 @@ export async function runTui(options: TuiOptions): Promise<number> {
         return;
       }
       case 'new':
-        store.dispatch({ type: 'conversation.reset' });
-        notify(dim('已开新对话（历史仍在 sessions/ 里，随时 /sessions 回来）'));
+      case 'clean': {
+        // 环在跑时不能换会话（正在写消息）。
+        if (store.getState().phase !== 'idle') {
+          notify(yellow('上一回合还没结束，先 Ctrl-C 中断再开新会话'));
+          return;
+        }
+        // 走内核的 newSession：**换 sessionId**，于是换文件。
+        // 只 dispatch conversation.reset 的话 id 不变，新消息会续写进旧文件 ——
+        // 界面上看着像新会话，实际上把上一段历史污染了。
+        const created = newSession?.();
+        if (!created) {
+          // 没接内核（比如测试）：退化成只清对话，并说清差别。
+          store.dispatch({ type: 'conversation.reset' });
+          notify(dim('已清空对话（未接内核，沿用原会话文件）'));
+          return;
+        }
+        notify(dim(`已开新会话 ${created.id}（上一段仍在 sessions/ 里，/sessions 可回来）`));
         return;
+      }
       case 'help':
         // 念同一份 SLASH_COMMANDS —— 手抄一份迟早会和补全列表漂移。
         notify(

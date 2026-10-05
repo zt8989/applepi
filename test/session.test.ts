@@ -13,7 +13,7 @@ import {
   SessionWriter,
   sessionTitle,
 } from '../src/session-file';
-import { encodeCwd, listSessions } from '../src/config-home';
+import { configHome, encodeCwd, listSessions } from '../src/config-home';
 import type { AgentAction } from '../src/actions';
 import type { AssistantMessage, Message } from '@earendil-works/pi-ai';
 
@@ -325,3 +325,110 @@ test('session.restored 只加消息，**不动相位也不动轨迹树**', () =>
   assert.equal(state.phase, phaseBefore, '相位不动（历史不是「正在跑」）');
   assert.equal(state.trace.order.length, nodesBefore, '轨迹树不动（历史属于那一轮）');
 });
+
+// ── 开新会话：必须换文件 ──
+
+test('conversation.reset 带 sessionId 时轨迹树也换 id（于是换文件）', () => {
+  const reducer = createAgentReducer({});
+  let state: AgentState = createInitialState({
+    systemPrompt: 'p',
+    providerName: 'p',
+    modelId: 'm',
+    toolNames: [],
+    sessionId: 'old',
+  });
+  state = reducer(state, { type: 'user.message', text: '旧对话' }) as AgentState;
+  assert.equal(state.trace.sessionId, 'old');
+
+  state = reducer(state, { type: 'conversation.reset', sessionId: 'brand-new' }) as AgentState;
+
+  assert.equal(state.trace.sessionId, 'brand-new', '树的 id 跟着换（落盘才会换文件）');
+  assert.equal(state.messages.length, 0, '对话清空');
+  assert.equal(state.trace.order.length, 0, '轨迹清空');
+});
+
+test('conversation.reset 不带 sessionId：沿用原 id（只清对话）', () => {
+  const reducer = createAgentReducer({});
+  let state: AgentState = createInitialState({
+    systemPrompt: 'p',
+    providerName: 'p',
+    modelId: 'm',
+    toolNames: [],
+    sessionId: 'keep-me',
+  });
+  state = reducer(state, { type: 'conversation.reset' }) as AgentState;
+  assert.equal(state.trace.sessionId, 'keep-me');
+});
+
+test('内核 newSession：换 id、清对话、保留装载的 prompt / model', async () => {
+  await withHome(async () => {
+    const { createKernel } = await import('../src/kernel');
+    const kernel = createKernel({
+      provider: 'deepseek',
+      systemPrompt: '装载过的 prompt',
+      cwd: '/proj',
+      demo: true,
+      sessionId: 'first',
+      traceDir: null, // 这个测试只关心会话文件
+    });
+    try {
+      assert.equal(kernel.sessionId, 'first');
+      const created = kernel.newSession();
+
+      assert.notEqual(created.id, 'first', '换了 id');
+      assert.equal(kernel.sessionId, created.id, '内核上的 id 也换');
+      assert.equal(kernel.store.getState().messages.length, 0, '对话清空');
+      assert.equal(kernel.store.getState().prompt.seeded, true, 'prompt 保留（会话级）');
+      assert.equal(kernel.store.getState().systemPrompt, '装载过的 prompt');
+      assert.equal(kernel.store.getState().model.seeded, true, 'model 保留');
+    } finally {
+      kernel.dispose();
+    }
+  });
+});
+
+test('开新会话后，两段对话落在**两个文件**里（旧的不被续写）', async () => {
+  await withHome(async () => {
+    const { createKernel } = await import('../src/kernel');
+    const kernel = createKernel({
+      provider: 'deepseek',
+      systemPrompt: 'p',
+      cwd: '/proj',
+      demo: true,
+      sessionId: 'para1',
+      traceDir: null,
+    });
+    try {
+      kernel.store.dispatch({ type: 'user.message', text: '第一段' });
+      await new Promise((r) => setTimeout(r, 50));
+      const second = kernel.newSession();
+      kernel.store.dispatch({ type: 'user.message', text: '第二段' });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const file1 = path.join(sessionPathIn('/proj'), 'para1.jsonl');
+      const file2 = path.join(sessionPathIn('/proj'), `${second.id}.jsonl`);
+      const text1 = await readFile(file1, 'utf8');
+      const text2 = await readFile(file2, 'utf8');
+
+      assert.ok(text1.includes('第一段'), '第一段在自己的文件里');
+      assert.ok(
+        !text1.includes('第二段'),
+        '第一段那文件里**没有**第二段 —— 这正是修掉的 bug（以前会续写进去）',
+      );
+      assert.ok(text2.includes('第二段'), '第二段在新文件里');
+      assert.ok(!text2.includes('第一段'));
+    } finally {
+      kernel.dispose();
+    }
+  });
+});
+
+/**
+ * 算某个 cwd 的会话目录（与 config-home 同一规则）。
+ *
+ * 必须先 `path.resolve`：内核建会话时是把 cwd 解析过的（Windows 上 `/proj` → `C:\proj`），
+ * 不解析就会算出另一个目录 —— 我第一版就是这样，测试去错误的路径找文件。
+ */
+function sessionPathIn(cwd: string): string {
+  return path.join(configHome(), 'sessions', encodeCwd(path.resolve(cwd)));
+}

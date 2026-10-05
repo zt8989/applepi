@@ -101,8 +101,21 @@ npm run trace:migrate      # .trace/ → ~/.redux-agent/traces/，并重建会�
 
 默认**不覆盖**已有的会话文件（那可能是用户正在用的历史），`--overwrite` 才覆盖。
 
-## 两个界面的入口
+## 开新会话
 
+`kernel.newSession()`：**换 sessionId**（于是换文件）+ 清空对话，保留装载的 prompt / model。
+
+为什么不只 `dispatch({type:'conversation.reset'})`：那个默认**沿用原 id**，于是之后的
+消息会追加进**同一个文件** —— 界面上看着像新会话，实际上把上一段历史续写了。
+这是之前的 bug，现在 `conversation.reset` 可以带 `sessionId`，界面一律走 `newSession()`。
+
+顺序要紧：先摘掉旧记录器（它绑在旧 id 上）→ 换资源 → dispatch → 建新记录器 → 写装载段
+→ 关旧 sink。反过来的话，`conversation.reset` 一发生，旧记录器还会把「清空」当成一次状态
+变化去写旧文件。
+
+同理 `restoreSession()` 也换 id —— 之后的消息要追加进**那个**会话的文件。
+
+## 两个界面的入口
 | | 交互 |
 | --- | --- |
 | TUI | `/sessions` → `SelectList` 弹窗（覆盖层，输入即筛、上下键、回车选定） |

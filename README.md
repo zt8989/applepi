@@ -83,7 +83,7 @@ npm start -- --cwd ../other                # 工具的文件操作边界换到�
 | 命令 | 作用 |
 | --- | --- |
 | `/sessions` | 弹窗选一个历史会话恢复。**零 token** —— 不重跑模型，只把消息读回来 |
-| `/new` | 开新对话（历史仍在 `sessions/` 里） |
+| `/new`（或 `/clean`） | 开**新会话**：换 id → 换文件。上一段完整留在 `sessions/` 里 |
 | `/help` | 命令列表 |
 
 选项：`-p/--print`、`-P/--provider`、`-m/--model`、`-s/--system`、`--max-turns`、

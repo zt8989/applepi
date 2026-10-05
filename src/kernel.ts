@@ -21,7 +21,7 @@ import { createPersistentStore } from './store';
 import { createFileSink, initPath, tracePath, type TraceDir } from './trace-file';
 import { newSessionId } from './trace';
 import type { AgentStore } from './store';
-import type { InitRecord, TracePersistence } from './trace-store';
+import type { InitRecord, TracePersistence, TraceSink } from './trace-store';
 import type { Message, Model, ModelThinkingLevel } from '@earendil-works/pi-ai';
 import type { AgentAction, ModelCapabilities } from './actions';
 import { createSessionRecorder, type SessionRecorder } from './session-recorder';
@@ -78,10 +78,13 @@ export interface KernelOptions {
 export interface Kernel {
   store: AgentStore;
   runtime: AgentRuntime;
-  sessionId: string;
+  /** 当前会话 id。**会变**（开新会话 / 恢复历史），所以是只读取值。 */
+  readonly sessionId: string;
   persistence: TracePersistence | null;
-  /** 会话文件记录器（写 `sessions/<cwd>/<id>.jsonl`，供「恢复历史」用）。 */
-  session: SessionRecorder | null;
+  /** 当前会话记录器（写 `sessions/<cwd>/<id>.jsonl`，供「恢复历史」用）。 */
+  readonly session: SessionRecorder | null;
+  /** 开一个新会话：换 id（于是换文件）、清空对话。**不会**把新消息写进旧文件。 */
+  newSession(): { id: string };
   /**
    * 恢复一个历史会话（读文件 + 灌回 state）。**零 token**，不重跑模型。
    * @returns 恢复的会话 id 与灌进去的消息条数。
@@ -114,17 +117,39 @@ export function createKernel(options: KernelOptions): Kernel {
         ...(options.model ? { model: options.model } : {}),
       });
 
-  const sessionId = options.sessionId ?? newSessionId();
-  // 两个 sink：轨迹（对话级，追加频繁）与装载段（会话级，只写一次）。
-  // 分开两个文件是因为生命周期不同 —— 回放一段对话不必先跳过一堆装载记录。
-  const sink =
-    options.traceDir === null
-      ? undefined
-      : createFileSink(tracePath(sessionId, options.traceDir ?? undefined));
-  const initSink =
-    options.traceDir === null
-      ? undefined
-      : createFileSink(initPath(sessionId, options.traceDir ?? undefined));
+  // ── 会话级资源（可以换） ──
+  //
+  // 「开新会话」要换 sessionId，而轨迹 sink / 装载段 sink / 会话记录器都是**绑在 id 上**
+  // 的（文件名由 id 决定），所以要能整体替换。用一个 holder 持有当前的三个，
+  // 并把一个**转发 sink** 交给 store —— store 建好之后不该再被重建（那会丢状态）。
+  interface SessionResources {
+    sessionId: string;
+    sink: TraceSink | undefined;
+    initSink: TraceSink | undefined;
+    recorder: SessionRecorder | null;
+  }
+
+  // 转发 sink：所有写入都问「当前是哪个」，这样换会话不需要重建 store。
+  const delegator: TraceSink = {
+    append: (line) => {
+      const target = current.sink;
+      return target ? target.append(line) : undefined;
+    },
+  };
+
+  const openResources = (id: string, resumeFrom?: number): SessionResources => {
+    const dir = options.traceDir;
+    return {
+      sessionId: id,
+      sink: dir === null ? undefined : createFileSink(tracePath(id, dir ?? undefined)),
+      initSink: dir === null ? undefined : createFileSink(initPath(id, dir ?? undefined)),
+      recorder: null, // 由下面的 openRecorder 填（它要等 store 建好）
+      ...(resumeFrom !== undefined ? {} : {}),
+    };
+  };
+
+  let current: SessionResources = openResources(options.sessionId ?? newSessionId());
+  const sessionId = current.sessionId;
   const cwd = path.resolve(options.cwd ?? process.cwd());
 
   const { store, persistence } = createPersistentStore({
@@ -135,7 +160,7 @@ export function createKernel(options: KernelOptions): Kernel {
     ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
     ...(options.llmTimeoutMs !== undefined ? { llmTimeoutMs: options.llmTimeoutMs } : {}),
     ...(options.maxLlmAttempts !== undefined ? { maxLlmAttempts: options.maxLlmAttempts } : {}),
-    ...(sink ? { traceSink: sink } : {}),
+    ...(options.traceDir === null ? {} : { traceSink: delegator }),
     ...(options.onTraceError ? { onTraceError: options.onTraceError } : {}),
   });
 
@@ -166,7 +191,9 @@ export function createKernel(options: KernelOptions): Kernel {
 
   // 装载段落盘：与轨迹分开一个文件（会话级 vs 对话级）。
   // 有了它，回放时不必重装配工具、不必再问 provider「这个模型支持中途插 system 吗」。
-  if (initSink) {
+  const writeInit = (): void => {
+    const target = current.initSink;
+    if (!target) return;
     const capabilities = readCapabilities(runtime.model);
     const records: InitRecord[] = [
       {
@@ -182,24 +209,63 @@ export function createKernel(options: KernelOptions): Kernel {
         capabilities,
       },
     ];
-    void initSink.append(records.map((r) => JSON.stringify(r)).join('\n'));
-  }
+    void target.append(records.map((r) => JSON.stringify(r)).join('\n'));
+  };
+  writeInit();
 
+  //
   // 会话记录器：把消息流写成 `sessions/<cwd>/<id>.jsonl`，供「恢复历史」用。
-  // 和轨迹落盘器一样是 store 订阅器 —— 挂在 dispatch 链上，成功失败都记。
-  const recorder = createSessionRecorder(store, {
-    sessionId,
-    cwd,
-    enabled: options.writeSession !== false,
-    ...(options.resumeFrom !== undefined ? { resumeFrom: options.resumeFrom } : {}),
-  });
+  // 它同样是 store 订阅器 —— 挂在 dispatch 链上，成功失败都记。
+  //
+  // 写成可替换的：`newSession()` 要换 id（于是换文件），而 store 不重建。
+  const openRecorder = (id: string, resumeFrom?: number): SessionRecorder | null => {
+    const rec = createSessionRecorder(store, {
+      sessionId: id,
+      cwd,
+      enabled: options.writeSession !== false,
+      ...(resumeFrom !== undefined ? { resumeFrom } : {}),
+    });
+    current = { ...current, sessionId: id, recorder: rec };
+    return rec;
+  };
+  openRecorder(sessionId, options.resumeFrom);
 
   return {
     store,
     runtime,
-    sessionId,
+    /** 当前会话 id。**会变**（`newSession()` / 恢复历史），所以是取值而不是常量。 */
+    get sessionId(): string {
+      return current.sessionId;
+    },
     persistence,
-    session: recorder,
+    /** 当前会话记录器（换会话后指向新的那个）。 */
+    get session(): SessionRecorder | null {
+      return current.recorder;
+    },
+    /**
+     * 开一个新会话：换 sessionId（于是换文件），清空对话。
+     *
+     * 为什么不复用 `conversation.reset`：那个默认沿用原 id，之后的消者会追加进
+     * **同一个文件** —— 界面上看着像新会话，实际上把上一段历史续写了（这是之前的 bug）。
+     *
+     * 顺序要紧：先把旧的收掉（flush 缓冲），再换资源，最后 dispatch。反过来的话
+     * `conversation.reset` 一发生，旧记录器还会把「清空」这件事当成一次状态变化去写。
+     */
+    newSession(): { id: string } {
+      const previous = current;
+      const id = newSessionId();
+      const next = openResources(id);
+      current = next;
+      // 旧记录器先摘掉：它绑在旧 id 上，不该再往旧文件写。
+      previous.recorder?.dispose();
+      store.dispatch({ type: 'conversation.reset', sessionId: id } as AgentAction);
+      openRecorder(id);
+      writeInit();
+      // 旧 sink 收尾（把缓冲 flush 掉）。
+      if (previous.sink?.close) void previous.sink.close();
+      if (previous.initSink?.close) void previous.initSink.close();
+      return { id };
+    },
     /**
      * 恢复一个历史会话：读文件、清空当前对话、把消息灌回去。
      *
@@ -208,11 +274,20 @@ export function createKernel(options: KernelOptions): Kernel {
      */
     restoreSession(file: string): { id: string; restored: number } {
       const messages = readSessionMessages(file);
-      const id = readSession(file)?.header.id ?? '';
-      store.dispatch({ type: 'conversation.reset' } as AgentAction);
+      const header = readSession(file)?.header;
+      const id = header?.id ?? '';
+      // 恢复也换 id：之后的消息要追加进**那个**会话的文件，而不是当前这个。
+      const previous = current;
+      previous.recorder?.dispose();
+      current = openResources(id);
+      store.dispatch({ type: 'conversation.reset', sessionId: id } as AgentAction);
       for (const message of messages) {
         store.dispatch({ type: 'session.restored', message } as AgentAction);
       }
+      // 恢复出来的消息已经在文件里，记录器游标要从这里接着算，别再写一遍。
+      openRecorder(id, messages.length);
+      if (previous.sink?.close) void previous.sink.close();
+      if (previous.initSink?.close) void previous.initSink.close();
       return { id, restored: messages.length };
     },
     restore(messages: Message[]): void {
@@ -221,10 +296,10 @@ export function createKernel(options: KernelOptions): Kernel {
       }
     },
     dispose(): void {
-      recorder?.dispose();
+      current.recorder?.dispose();
       persistence?.dispose();
-      if (sink?.close) void sink.close();
-      if (initSink?.close) void initSink.close();
+      if (current.sink?.close) void current.sink.close();
+      if (current.initSink?.close) void current.initSink.close();
     },
   };
 }

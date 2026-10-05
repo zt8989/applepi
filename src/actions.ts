@@ -181,7 +181,12 @@ export type AgentAction =
    * 零 token：不重跑模型，纯粹是把 JSONL 里读到的内容灌回状态。
    */
   | { type: 'session.restored'; message: Message }
-  /** 清空对话。 */
-  | { type: 'conversation.reset' };
+  /**
+   * 清空对话。
+   *
+   * 带 `sessionId` 就是**开新会话**（新 id → 新文件）；不带则只清对话、沿用原 id
+   * —— 后者会让之后的消息追加进同一个文件，所以界面上的「新会话」一定要带 id。
+   */
+  | { type: 'conversation.reset'; sessionId?: string | undefined };
 
 export type AgentActionType = AgentAction['type'];

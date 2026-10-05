@@ -248,8 +248,9 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
 
     // ── 新对话 ──
     if (url.pathname === '/api/reset' && req.method === 'POST') {
-      kernel.store.dispatch({ type: 'conversation.reset' });
-      sendJson(res, 200, { ok: true });
+      // 走内核的 newSession：**换 sessionId**，于是换文件。
+      // 只 dispatch conversation.reset 的话 id 不变，新消息会续写进旧会话文件。
+      sendJson(res, 200, { ok: true, ...kernel.newSession() });
       return;
     }
 

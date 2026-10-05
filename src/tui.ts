@@ -200,6 +200,8 @@ async function main(): Promise<void> {
   const prompt = args.prompt ?? (args.demo ? '算一下 (3+4)*6' : undefined);
   process.exitCode = await runTui({
     store: kernel.store,
+    // 把内核的「开新会话」交进去 —— TUI 只拿 store，换 id（于是换文件）要内核出手。
+    newSession: () => kernel.newSession(),
     ...(prompt !== undefined ? { prompt } : {}),
   });
 }

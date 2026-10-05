@@ -646,12 +646,16 @@ const transitions: TransitionHandlers = {
   }),
 
   /**
-   * 新对话：清空 messages 与轨迹，但**保留**已装载的 prompt / model。
+   * 清空对话（可选：换一个新会话 id）。
    *
-   * 它们是**会话级**的（这个内核用哪个模型、跟它说什么），不是这一轮对话的产物。
-   * 换模型请走 `model.changed` + `model.init`，别混在这里。
+   * 保留已装载的 prompt / model —— 它们是**会话级**的（这个内核用哪个模型、跟它说什么），
+   * 不是这一轮对话的产物。换模型请走 `model.changed` + `model.init`，别混在这里。
+   *
+   * 带 `action.sessionId` 时轨迹树的 sessionId 也跟着换，于是落盘换到新文件；
+   * 不带则沿用原 id（只清对话）—— 但那样之后的消者会追加进同一个文件，
+   * 所以界面上的「新会话」都应该带上新 id。
    */
-  'conversation.reset': (state) => {
+  'conversation.reset': (state, action) => {
     const fresh = createInitialState({
       systemPrompt: state.prompt.systemPrompt,
       providerName: state.model.provider,
@@ -663,7 +667,7 @@ const transitions: TransitionHandlers = {
       maxTurns: state.maxTurns,
       llmTimeoutMs: state.llmTimeoutMs,
       maxLlmAttempts: state.maxLlmAttempts,
-      sessionId: state.trace.sessionId,
+      sessionId: action.sessionId ?? state.trace.sessionId,
     });
     return {
       ...fresh,
