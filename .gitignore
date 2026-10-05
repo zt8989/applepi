@@ -3,3 +3,6 @@ dist/
 .env
 *.log
 web/dist/
+
+# 轨迹日志：每次会话一个 JSONL，是运行时产物（想留就 `--no-trace` 关掉落盘）。
+.trace/

@@ -9,7 +9,6 @@ export {
   type ReducerEffects,
 } from './reducer';
 export {
-  createAgentDrivenEffectTable,
   createPiAiEffectTable,
   type EffectTable,
   type PiAiEffectsOptions,
@@ -30,3 +29,49 @@ export {
 export { getTool, getTools } from './tools';
 export type { AgentTool, AgentToolResult } from './agent-tool';
 export { abortRun, isRunning } from './run-control';
+
+// ─── 轨迹树（trace tree） ───
+export {
+  appendNode,
+  childrenOf,
+  createTraceTree,
+  deserializeTree,
+  formatDuration,
+  getNode,
+  headPath,
+  newSessionId,
+  patchNode,
+  pathTo,
+  renderTree,
+  serializeTree,
+  traceStats,
+  type SerializedTrace,
+  type SerializedTraceNode,
+  type TraceNode,
+  type TraceNodeKind,
+  type TraceNodeStatus,
+  type TraceStats,
+  type TraceTree,
+  type TreeRenderOptions,
+} from './trace';
+export {
+  createTracePersistence,
+  pendingRecords,
+  replayTrace,
+  toJsonl,
+  type TracePersistence,
+  type TraceRecord,
+  type TraceSink,
+} from './trace-store';
+export {
+  createFileSink,
+  listSessions,
+  loadTrace,
+  tracePath,
+  TRACE_DIR,
+} from './trace-file';
+export {
+  createPersistentStore,
+  type AgentStoreHandle,
+} from './store';
+export { classifyLlmError, isRetryable, DEFAULT_LLM_TIMEOUT_MS } from './state';

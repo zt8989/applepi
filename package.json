@@ -8,16 +8,16 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node --env-file-if-exists=.env --import tsx src/cli.ts",
-    "agent": "node --env-file-if-exists=.env --import tsx src/cli.ts",
+    "start": "node --env-file-if-exists=.env --import tsx src/tui.ts",
+    "agent": "node --env-file-if-exists=.env --import tsx src/tui.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web",
     "web": "vite --config web/vite.config.ts",
     "web:build": "vite build --config web/vite.config.ts",
     "test": "node --import tsx --test test/*.test.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "^0.75.3",
     "@earendil-works/pi-ai": "^0.84.1",
+    "@earendil-works/pi-tui": "^0.75.5",
     "@earendil-works/pi-web-ui": "^0.75.3",
     "@mariozechner/mini-lit": "^0.2.1",
     "lit": "^3.3.3",

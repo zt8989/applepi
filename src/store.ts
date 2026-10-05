@@ -16,16 +16,33 @@ import type { AgentAction } from './actions';
 import { createPiAiEffectTable, type EffectTable } from './effects';
 import { getTools } from './tools';
 import { defaultStreamFn, type AgentRuntime, type StreamFn } from './provider';
+import { createTracePersistence, type TracePersistence, type TraceSink } from './trace-store';
 
 export type AgentStore = Store<AgentState, AgentAction>;
+
+/** 一个装配好的 store + （可选的）轨迹落盘器。 */
+export interface AgentStoreHandle {
+  store: AgentStore;
+  persistence: TracePersistence | null;
+}
 
 export interface CreateAgentStoreOptions {
   runtime: AgentRuntime;
   systemPrompt: string;
   maxTurns?: number | undefined;
+  /** 一次 LLM 调用的超时（毫秒）；超时按可重试错误处理。 */
+  llmTimeoutMs?: number | undefined;
+  /** 单轮内最多几次 LLM 尝试（含首次），2 = 失败后重试一次。 */
+  maxLlmAttempts?: number | undefined;
+  /** 注入会话 id（决定持久化文件名；默认按时间生成）。 */
+  sessionId?: string | undefined;
   /** 测试注入假 streamFn 用；默认走 pi-ai。 */
   streamFn?: StreamFn | undefined;
-  /** 自定义 effect 表（Web 用 agent-driven 表）；不给就用 pi-ai 表。 */
+  /** 轨迹落盘器（JSONL 追加写）。不给就是纯内存，不落盘。 */
+  traceSink?: TraceSink | undefined;
+  /** 轨迹落盘失败时的回调（磁盘满 / 权限 / localStorage 配额）。 */
+  onTraceError?: ((error: unknown) => void) | undefined;
+  /** 自定义 effect 表（Web 用）；不给就用 pi-ai 表。 */
   effects?: EffectTable | undefined;
   /** 完全自定义 reducer 接线（测试用）。 */
   reducerEffects?: Partial<ReducerEffects> | undefined;
@@ -35,7 +52,7 @@ export interface CreateAgentStoreOptions {
 export const effectTableToReducerEffects = loopWiring;
 
 export function createAgentStore(options: CreateAgentStoreOptions): AgentStore {
-  const { runtime, systemPrompt, maxTurns, streamFn, effects, reducerEffects } = options;
+  const { runtime, systemPrompt, maxTurns, streamFn, effects, reducerEffects, sessionId } = options;
 
   const table: EffectTable =
     effects ??
@@ -50,6 +67,11 @@ export function createAgentStore(options: CreateAgentStoreOptions): AgentStore {
     modelId: runtime.model.id,
     toolNames: getTools().map((tool) => tool.name),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
+    ...(options.llmTimeoutMs !== undefined ? { llmTimeoutMs: options.llmTimeoutMs } : {}),
+    ...(options.maxLlmAttempts !== undefined
+      ? { maxLlmAttempts: options.maxLlmAttempts }
+      : {}),
+    ...(sessionId !== undefined ? { sessionId } : {}),
   });
 
   const reducer = createAgentReducer({
@@ -65,6 +87,26 @@ export function createAgentStore(options: CreateAgentStoreOptions): AgentStore {
     install<AgentState>({ DONT_LOG_ERRORS_ON_HANDLED_FAILURES: true }) as never,
   ) as unknown as AgentStore;
   return store;
+}
+
+/**
+ * 装一个会**把轨迹落盘**的 store。
+ *
+ * `createAgentStore` 保持只返回 store（测试里要的就是 store 本身），
+ * 需要持久化时用这个，它额外挂一个订阅器把新节点追加写进 sink。
+ *
+ * 错误节点同样会被写进去 —— 落盘器对成功与失败一视同仁。
+ */
+export function createPersistentStore(options: CreateAgentStoreOptions): AgentStoreHandle {
+  const store = createAgentStore(options);
+  if (!options.traceSink) return { store, persistence: null };
+  const persistence = createTracePersistence({
+    store,
+    sink: options.traceSink,
+    ...(options.onTraceError ? { onError: options.onTraceError } : {}),
+  });
+  return { store, persistence };
+  return { store, persistence };
 }
 
 /**

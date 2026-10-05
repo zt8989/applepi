@@ -1,12 +1,14 @@
 /**
- * Web UI 入口：pi-web-ui 的聊天界面 + 本仓库的 Redux Loop 状态树。
+ * Web UI 入口：pi-web-ui 的聊天组件 + 本仓库的 Redux Loop 状态树。
+ *
+ * 这里没有 `Agent`（pi-agent-core）。环由 `src/` 的 reducer + pi-ai effect 表驱动，
+ * 和 CLI 走的是**同一条环**；pi-web-ui 只是一个把状态树画出来的渲染层。
  *
  * 用法：
  *   npm run web            # 默认 deepseek（浏览器里弹窗填 DEEPSEEK_API_KEY）
  *   npm run web            # 打开 http://localhost:5273/?demo=1 走 faux provider，无需 key
  */
 import { html, render } from 'lit';
-import { Agent } from '@earendil-works/pi-agent-core';
 import {
   getModel,
   getModels,
@@ -30,13 +32,14 @@ import {
   ProviderKeysStore,
   SessionsStore,
   SettingsStore,
-  defaultConvertToLlm,
+  convertAttachments,
   setAppStorage,
 } from '@earendil-works/pi-web-ui';
-import { createAgentDrivenEffectTable } from '../../src/effects';
+import { createPiAiEffectTable } from '../../src/effects';
 import { createAgentStore, type AgentStore } from '../../src/store';
 import { getTools } from '../../src/tools';
-import { createAgentBridge } from './bridge';
+import { createSessionAdapter, type SessionAdapter } from './session-adapter';
+import './trace-panel';
 import './app.css';
 
 const SYSTEM_PROMPT = [
@@ -45,23 +48,15 @@ const SYSTEM_PROMPT = [
   '回答保持简短、直给；用用户的语言回答。',
 ].join('\n');
 
-/**
- * 「环由 pi-agent-core 驱动」时的接线：四行全是空操作。
- * reducer 依然照常迁移状态，只是永远不发 Cmd。
- */
-const AGENT_DRIVEN_WIRING = {
-  'user.message': () => [],
-  'agent.run': () => [],
-  'llm.done': () => [],
-  'tool.batch.done': () => [],
-} as const;
-
 const params = new URLSearchParams(window.location.search);
 const DEMO = params.get('demo') === '1';
 const providerId = params.get('provider') ?? 'deepseek';
 const modelId = params.get('model') ?? getModels(providerId as never)[0]?.id ?? '';
 
 // ─── 存储（pi-web-ui 的 IndexedDB；API key 也存在这里，不进代码） ───
+//
+// AgentInterface 只用到 settings（proxy.*）和 providerKeys；AppStorage 的构造函数
+// 强制要四个 store + backend，所以 sessions / customProviders 也得给 —— 纯占位。
 
 const settings = new SettingsStore();
 const providerKeys = new ProviderKeysStore();
@@ -91,10 +86,10 @@ setAppStorage(new AppStorage(settings, providerKeys, sessions, customProviders, 
 const faux = DEMO ? fauxProvider() : undefined;
 if (faux) {
   faux.setResponses([
-    fauxAssistantMessage([
-      fauxText('我来算一下。'),
-      fauxToolCall('calc', { expression: '(3+4)*6' }),
-    ], { stopReason: 'toolUse' }),
+    fauxAssistantMessage(
+      [fauxText('我来算一下。'), fauxToolCall('calc', { expression: '(3+4)*6' })],
+      { stopReason: 'toolUse' },
+    ),
     fauxAssistantMessage([fauxText('(3+4)*6 = 42。')]),
   ]);
   await providerKeys.set('faux', 'demo');
@@ -114,30 +109,10 @@ const streamFn = (
   return apiStreamSimple(requestModel, context, options);
 };
 
-// ─── Redux Loop 状态树（与 CLI 共用同一个 reducer） ───
-
-// ─── Agent（pi-agent-core；Web 侧的环由它驱动） ───
+// ─── Redux Loop 状态树（与 CLI 共用同一个 reducer / 状态树 / effect 表） ───
 
 const browserTools = getTools().filter((tool) => tool.name !== 'read_file'); // read_file 只有 Node 端有
 
-const agent = new Agent({
-  initialState: {
-    systemPrompt: SYSTEM_PROMPT,
-    model,
-    thinkingLevel: 'off',
-    messages: [],
-    tools: browserTools as never,
-  },
-  convertToLlm: defaultConvertToLlm as never,
-  getApiKey: async (provider: string) => (await providerKeys.get(provider)) ?? undefined,
-  streamFn: streamFn as never,
-});
-
-// ─── Redux Loop 状态树（与 CLI 共用同一个 reducer / 状态树） ───
-//
-// Web 侧注入的是 agent-driven effect 表：`agent.run` 这一行的实现是「让 pi-agent-core
-// 的 Agent 跑起来」，而不是自己调 pi-ai。reducer 完全不知道自己接的是哪张表 ——
-// 这正是「一切皆 Action」的意思：状态机与执行者解耦。
 const store: AgentStore = createAgentStore({
   runtime: {
     models: undefined as never,
@@ -145,34 +120,36 @@ const store: AgentStore = createAgentStore({
     model,
   },
   systemPrompt: SYSTEM_PROMPT,
-  effects: createAgentDrivenEffectTable({ agent }),
-  // 接线四行全部置空：环由 pi-agent-core 的 Agent 驱动，reducer 只维护状态树。
-  // 不能只置空 llm.done / tool.batch.done —— user.message 与 agent.run 的 effect
-  // 会再次调用 Agent.prompt()，而那次调用正在跑 →「already processing a prompt」。
-  reducerEffects: AGENT_DRIVEN_WIRING,
+  // 和 CLI 一模一样的这张表：agent.run → Cmd.run(streamFn)，工具也由自己的 Cmd 跑。
+  // 这里没有「置空四行」那种特殊接线 —— 因为环本来就该由 Redux 驱动。
+  effects: createPiAiEffectTable({
+    streamFn,
+    model,
+    // 浏览器里没有 process.env，key 从 IndexedDB 的 providerKeys 取（所以是 async）。
+    resolveKey: async (provider) => (await providerKeys.get(provider)) ?? undefined,
+  }),
 });
 
-
-const bridge = createAgentBridge({ agent, store, onChange: () => updateHeader() });
+const adapter: SessionAdapter = createSessionAdapter({
+  store,
+  model,
+  tools: browserTools,
+  convertAttachments: convertAttachments as never,
+});
 
 // ─── 界面 ───
 
 const chat = document.createElement('agent-interface') as AgentInterface;
 chat.classList.add('flex-1', 'min-h-0');
-chat.session = bridge.session;
+chat.session = adapter as never;
 chat.enableAttachments = true;
 chat.enableModelSelector = true;
 chat.enableThinkingSelector = true;
 chat.showThemeToggle = true;
 chat.onApiKeyRequired = (provider: string) => ApiKeyPromptDialog.prompt(provider);
 chat.onModelSelect = () => {
-  void ModelSelector.open(agent.state.model, (selected: Model<any>) => {
-    agent.state.model = selected;
-    store.dispatch({
-      type: 'model.changed',
-      provider: selected.provider,
-      modelId: selected.id,
-    });
+  void ModelSelector.open(adapter.currentModel, (selected: Model<any>) => {
+    adapter.setModel(selected);
     updateHeader();
   });
 };
@@ -180,7 +157,7 @@ chat.onModelSelect = () => {
 const headerStats = () => {
   const state = store.getState();
   const cost = state.totalCost > 0 ? ` · $${state.totalCost.toFixed(4)}` : '';
-  return `${agent.state.model.id} · ${state.turns} 轮 · ${state.messages.length} 条消息${cost}`;
+  return `${adapter.currentModel.id} · ${state.turns} 轮 · ${state.messages.length} 条消息${cost}`;
 };
 
 function updateHeader(): void {
@@ -189,7 +166,6 @@ function updateHeader(): void {
 }
 
 function newChat(): void {
-  agent.reset();
   store.dispatch({ type: 'conversation.reset' });
   updateHeader();
   chat.requestUpdate();
@@ -213,19 +189,20 @@ render(
         </div>
       </header>
       ${chat}
+      <!-- 轨迹面板：和 TUI 共用 src/trace.ts 的 renderTree，错误/超时是树上的节点。 -->
+      <trace-panel .store=${store}></trace-panel>
     </div>
   `,
   document.getElementById('app')!,
 );
 
-agent.subscribe(() => updateHeader());
+store.subscribe(() => updateHeader());
 updateHeader();
 
 // 调试用：把 store 挂到 window（控制台里可以直接看状态树 / dispatch action）。
 declare global {
   interface Window {
-    reduxLoopAgent?: { store: AgentStore; agent: Agent; providers: string[] };
+    reduxLoopAgent?: { store: AgentStore; adapter: SessionAdapter; providers: string[] };
   }
 }
-window.reduxLoopAgent = { store, agent, providers: getProviders() };
-
+window.reduxLoopAgent = { store, adapter, providers: getProviders() };

@@ -68,8 +68,9 @@ export function createRuntime(spec: ProviderSpec): AgentRuntime {
 }
 
 /**
- * streamFn 的形状与 pi-agent-core 的 StreamFn 一致；
- * Agent Loop（effects.ts）只依赖这个形状，离线测试用假 streamFn 替换即可。
+ * streamFn 的形状就是 pi-ai 的 `StreamFunction`：给模型、一段 context、一些选项，
+ * 拿回一个事件流。Agent Loop（effects.ts）只依赖这个形状，
+ * 离线测试用假 streamFn 替换即可。
  */
 export type StreamFn = (
   model: Model<any>,

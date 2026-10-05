@@ -3,13 +3,12 @@
  *
  * reducer 是纯表：action → (state, effect)。effect 由谁来做，是**接线**的事：
  *
- *   - CLI：effect 直接调 pi-ai（createModels/deepseekProvider + streamSimple），
- *           并由 redux-loop 执行 Cmd.run —— 环自己转。
- *   - Web：effect 是 `agent.run` → pi-agent-core 的 Agent.prompt()，
- *           Agent 自己会再发 LLM/工具回合，事件经桥回流成 action —— 环还是同一个环。
+ *   - `createPiAiEffectTable`：effect 直接调 pi-ai（createModels/deepseekProvider +
+ *     streamSimple），工具也由本仓库的 Cmd 执行，由 redux-loop 驱动 —— 环自己转。
  *
- * 两张表对 reducer 是同一个形状。reducer 里没有 if (kind === 'agent')，
- * 只有「这个 action 类型的 effect 是谁」。
+ * 这张表对 CLI 和 Web 是同一张。reducer 里没有 if (kind === 'agent')，
+ * 只有「这个 action 类型的 effect 是谁」。想换执行者，注入另一张同形状的表就行 ——
+ * reducer 一行都不用改。
  */
 import { Cmd, type CmdType } from 'redux-loop';
 import type {
@@ -22,14 +21,15 @@ import type {
   ToolResultMessage,
 } from '@earendil-works/pi-ai';
 import type { AgentAction } from './actions';
-import type { AgentState } from './state';
+import { classifyLlmError, type AgentState, type LlmErrorKind } from './state';
 import { getTool, getTools } from './tools';
 import { beginRun, endRun } from './run-control';
 import { resolveApiKey, type StreamFn } from './provider';
+import { formatDuration } from './trace';
 
 /** effect 表：每个名字返回一个 Cmd。 */
 export interface EffectTable {
-  /** 跑一轮对话（= 调一次 LLM）。text 只在 agent-driven 表里有用。 */
+  /** 跑一轮对话（= 调一次 LLM）。text 只在需要把用户输入带进这次请求的接线里才有意义。 */
   runAgent(text?: string | undefined): CmdType;
   /** 执行一批工具调用。 */
   runTools(calls: ToolCall[]): CmdType;
@@ -50,8 +50,8 @@ function toolSchemas(): Tool[] {
 export interface PiAiEffectsOptions {
   streamFn: StreamFn;
   model: Model<any>;
-  /** node-only：浏览器里没有 process.env，交给宿主注入 key。 */
-  resolveKey?: (provider: string) => string | undefined;
+  /** 浏览器/宿主注入 key 的口子（node 下默认读 process.env）。 */
+  resolveKey?: (provider: string) => string | undefined | Promise<string | undefined>;
 }
 
 export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable {
@@ -61,18 +61,33 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
   async function callLlm(
     dispatch: Cmd.Dispatch,
     getState: Cmd.GetState,
-  ): Promise<AssistantMessage> {
+  ): Promise<{ message: AssistantMessage; nodeId: string | null }> {
+    // 「这一轮开始流了」也是一条 action：在发出第一次请求之前就 dispatch 出去，
+    // 这样 UI 的生成中动画不必等第一个 token。
+    dispatch({ type: 'llm.started' });
     const state = getState<AgentState>();
+    // 记住这次尝试的轨迹节点 id：失败时带着它回来，reducer 才能把 error 挂对地方。
+    const nodeId = state.openLlmNodeId;
     const context: Context = {
       systemPrompt: state.systemPrompt,
       messages: state.messages,
       tools: toolSchemas(),
     };
     const controller = beginRun();
+    // 超时闸：到点就 abort 掉这次流。分类是 timeout → 可重试，于是环自己会再试一次。
+    // 手动中断（Ctrl-C）也走 abort，但它不是超时 —— 用 source 区分开。
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new LlmTimeoutError(state.llmTimeoutMs));
+    }, state.llmTimeoutMs);
     try {
-      const apiKey = keyOf(model.provider);
+      // await 是必要的：浏览器侧 resolveKey 是 async（key 在 IndexedDB 里）。
+      const apiKey = await keyOf(model.provider);
       const streamOptions: SimpleStreamOptions = { signal: controller.signal };
       if (apiKey !== undefined) streamOptions.apiKey = apiKey;
+      // 思考级别直接用 pi-ai 的 ModelThinkingLevel；'off' 就是不带 reasoning。
+      if (state.thinkingLevel !== 'off') streamOptions.reasoning = state.thinkingLevel;
       const stream = streamFn(model, context, streamOptions);
       let final: AssistantMessage | undefined;
       for await (const event of stream) {
@@ -86,14 +101,80 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
           final = event.error;
         }
       }
-      if (!final) throw new Error('LLM 流在发出 done/error 之前就结束了');
+      // 流被 abort 后就断在这里（没有 done 事件）。必须主动把原因抛出来，
+      // 否则下面那句「流在 done 之前结束」会报一个跟真实原因无关的错误，超时也就不会重试。
+      if (!final) {
+        if (timedOut) throw new LlmTimeoutError(state.llmTimeoutMs);
+        if (controller.signal.aborted) {
+          const reason = abortReason(controller.signal);
+          if (reason instanceof LlmTimeoutError) throw reason;
+          throw new Error('LLM 调用已中断');
+        }
+        throw new Error('LLM 流在发出 done/error 之前就结束了');
+      }
       if (final.stopReason === 'error') {
         throw new Error(final.errorMessage || 'LLM 返回错误');
       }
-      return final;
+      // 连同 attempt 的 id 一起返回：成功/失败都要靠它把节点挂到正确的父节点下。
+      return { message: final, nodeId };
+    } catch (error) {
+      // 把 attempt 的 id 绑在异常上再抛出去：`successActionCreator` / `failActionCreator`
+      // 都拿不到 Cmd.getState，只能靠异常本身把「这次失败属于哪个节点」带回去。
+      throw attachNodeId(error, nodeId);
     } finally {
+      clearTimeout(timer);
       endRun();
     }
+  }
+
+  /** 超时是「可重试」的失败，区别于鉴权/参数错。用一个专门的类型，分类时不必去猜文案。 */
+  class LlmTimeoutError extends Error {
+    readonly timeoutMs: number;
+
+    constructor(timeoutMs: number) {
+      // 复用 trace 的格式化：小于 1s 的超时（测试里很常见）显示 400ms 而不是 0s。
+      super(`LLM 调用超时（${formatDuration(timeoutMs)}）`);
+      this.name = 'LlmTimeoutError';
+      this.timeoutMs = timeoutMs;
+    }
+  }
+  /** 给异常挂上 attempt 的 id（非 Error 也包一个 Error，否则信息会丢）。 */
+  function attachNodeId(error: unknown, nodeId: string | null): Error {
+    const wrapped =
+      error instanceof Error ? error : new Error(error === undefined ? '未知错误' : String(error));
+    return Object.assign(wrapped, { traceNodeId: nodeId });
+  }
+
+  /** 从异常里取回 attempt 的 id（超时的 abort 原因里没有，得靠这个字段）。 */
+  function nodeIdOf(error: unknown): string | null {
+    if (error !== null && typeof error === 'object' && 'traceNodeId' in error) {
+      const value = (error as { traceNodeId?: unknown }).traceNodeId;
+      return typeof value === 'string' ? value : null;
+    }
+    return null;
+  }
+
+  /** abort 的原因可能是一个字符串或 AbortError，从 controller.signal.reason 里捞出来。 */
+  function abortReason(signal: AbortSignal): unknown {
+    return 'reason' in signal ? signal.reason : undefined;
+  }
+
+  /**
+   * 把 effect 侧的异常归成 LlmErrorKind，并带上这次 attempt 的 nodeId。
+   * `nodeId` 传 null 表示「这不是某次 LLM 尝试的失败」（比如工具批次整体挂掉），
+   * reducer 会据此判定不重试。
+   */
+  function failureAction(error: unknown, nodeId: string | null): AgentAction {
+    const message = error instanceof Error ? error.message : String(error);
+    const kind: LlmErrorKind =
+      error instanceof LlmTimeoutError ? 'timeout' : classifyLlmError(message);
+    const id = nodeIdOf(error) ?? nodeId;
+    return {
+      type: 'llm.failed',
+      error: message,
+      kind,
+      ...(id !== null ? { nodeId: id } : {}),
+    };
   }
 
   function toToolResult(
@@ -166,14 +247,18 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
     runAgent: () =>
       Cmd.run(callLlm, {
         args: [Cmd.dispatch, Cmd.getState],
-        successActionCreator: (message: AssistantMessage): AgentAction => ({
+        successActionCreator: (result: {
+          message: AssistantMessage;
+          nodeId: string | null;
+        }): AgentAction => ({
           type: 'llm.done',
-          message,
+          message: result.message,
+          // 把 attempt 的 id 带回 reducer：成功节点要挂在**这次**尝试下面。
+          ...(result.nodeId !== null ? { nodeId: result.nodeId } : {}),
         }),
-        failActionCreator: (error: unknown): AgentAction => ({
-          type: 'llm.failed',
-          error: error instanceof Error ? error.message : String(error),
-        }),
+        // 失败也带上 attempt 的 id（异常身上已经有了，这里只兜底）：
+        // reducer 据此挂 error 节点，并判断要不要重试。
+        failActionCreator: (error: unknown): AgentAction => failureAction(error, null),
       }),
 
     runTools: (calls: ToolCall[]) =>
@@ -183,52 +268,11 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
           type: 'tool.batch.done',
           count,
         }),
-        failActionCreator: (error: unknown): AgentAction => ({
-          type: 'llm.failed',
-          error: error instanceof Error ? error.message : String(error),
-        }),
+        // 工具批次整体挂掉（比如 abort）不该被当成 LLM 失败去重试，
+        // 所以这里明确给 nodeId: null，让 reducer 看到「没有 LLM 尝试在跑」。
+        failActionCreator: (error: unknown): AgentAction =>
+          failureAction(error, null),
       }),
   };
 }
 
-/**
- * pi-agent-core 版 effect 表：runAgent 变成一次 `Agent.prompt()`，
- * 之后 LLM/工具回合由 Agent 自己驱动，事件经桥回流成 action（Web 用）。
- *
- * 这张表证明 reducer 不关心 agent 是什么 —— 它只是「agent.run」这一行的实现。
- */
-export interface AgentDrivenEffectOptions {
-  /** pi-agent-core 的 Agent（可以是桥接过的 Proxy）。 */
-  agent: { prompt(input: string): Promise<void> };
-}
-
-/**
- * 成功不产出 action：`Cmd.run` 必须给一个 successActionCreator，这里用哨兵值
- * `agent.handoff` —— reducer 的 transition 表里没有这一项，所以它只是个穿过状态树的
- * 记账标记（相位由 Agent 事件经桥改）。真正的回合结果由 llm.done / llm.failed 写入。
- */
-const HANDOFF = { type: 'agent.handoff' } as unknown as AgentAction;
-
-export function createAgentDrivenEffectTable(options: AgentDrivenEffectOptions): EffectTable {
-  const { agent } = options;
-
-  return {
-    runAgent: (text?: string) =>
-      Cmd.run(
-        async () => {
-          if (text) await agent.prompt(text);
-          return HANDOFF;
-        },
-        {
-          successActionCreator: (next: AgentAction) => next,
-          failActionCreator: (error: unknown): AgentAction => ({
-            type: 'llm.failed',
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        },
-      ),
-    runTools: () =>
-      // Web 侧工具由 Agent 内部执行（pi-web-ui 需要它自己的 registry），这里不重复跑。
-      Cmd.run(() => HANDOFF, { successActionCreator: (next: AgentAction) => next }),
-  };
-}
