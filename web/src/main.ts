@@ -36,6 +36,9 @@ import {
 } from '@earendil-works/pi-web-ui';
 import { ensureElementsRegistered } from './ensure-elements';
 import { createRemoteSession } from './remote-session';
+import { attachComposerMenu } from './composer-menu';
+import { runCommand, type CommandContext } from './commands';
+import { listSessions, restoreSession } from './session-client';
 import './trace-panel';
 import './app.css';
 
@@ -64,8 +67,37 @@ sessions.setBackend(backend);
 customProviders.setBackend(backend);
 setAppStorage(new AppStorage(settings, providerKeys, sessions, customProviders, backend));
 // 与内核的连接。环在服务端，这里只是一个镜像。
-const remote = createRemoteSession();
+const remote = createRemoteSession({
+  // 斜杠命令：**在这里拦下**，不发 `/api/message`。
+  // 返回 true 表示「已处理」，prompt() 就不再 POST。
+  onCommand: async (text) => {
+    const result = await runCommand(text, commandContext);
+    if (result.message) notify(result.message);
+    return result.handled;
+  },
+});
 const session = remote;
+
+/**
+ * 命令的上下文：命令要动界面/内核时走这里，而不是自己去摸 DOM 或 fetch。
+ *
+ * `openSessionPicker` 在 main.ts 下面定义（它要碰 DOM），所以这里用函数声明式的
+ * 延迟引用 —— 命令执行发生在用户交互时，那时整份模块早已求值完。
+ */
+const commandContext: CommandContext = {
+  newSession: async () => {
+    const res = await fetch('/api/reset', { method: 'POST' });
+    const body = (await res.json()) as { id?: string };
+    updateHeader();
+    return { id: body.id ?? '?' };
+  },
+  restoreSession: async (target) => {
+    await restoreRemoteSession(target.id);
+    updateHeader();
+  },
+  openSessionPicker: () => openSessions(),
+  notify,
+};
 
 // 先确保元素注册，再 createElement —— 顺序反了拿到的是一个没升级的空标签。
 ensureElementsRegistered();
@@ -150,12 +182,41 @@ function newChat(): void {
  * 「只列当前 cwd」的会话在前面（内核标了 `current`）—— 别的目录的历史恢复进来，
  * 工具的文件边界会和对话内容对不上。
  */
+/**
+ * 在界面下方弹一行提示（命令结果、错误）。
+ *
+ * 不用 alert：那是模态的，会把「刚发的命令」的上下文打断。几秒后自动消失的横幅够了。
+ */
+function notify(text: string): void {
+  let bar = document.getElementById('notice-bar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'notice-bar';
+    bar.className =
+      'fixed left-1/2 -translate-x-1/2 bottom-24 z-40 max-w-[80vw] rounded-lg border border-border bg-background px-3 py-2 text-sm whitespace-pre-wrap shadow-lg';
+    document.body.appendChild(bar);
+  }
+  bar.textContent = text;
+  bar.style.display = 'block';
+  window.clearTimeout(noticeTimer);
+  noticeTimer = window.setTimeout(() => {
+    bar.style.display = 'none';
+  }, 5000);
+}
+let noticeTimer = 0;
+
+/** 恢复一个历史会话（零 token，不重跑模型）。 */
+async function restoreRemoteSession(id: string): Promise<void> {
+  try {
+    const result = await restoreSession(id);
+    notify(`已恢复 ${result.id}（${result.restored} 条消息，未重跑模型）`);
+  } catch (error) {
+    notify(`恢复失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 async function openSessions(): Promise<void> {
-  const res = await fetch('/api/sessions');
-  const data = (await res.json()) as {
-    sessions: { id: string; title: string; entries: number; mtimeMs: number; cwd: string; current: boolean }[];
-    current: string;
-  };
+  const data = await listSessions();
 
   const dialog = document.createElement('dialog');
   dialog.className = 'rounded-lg border border-border p-0 w-[32rem] max-w-[90vw] bg-background text-foreground';
@@ -186,14 +247,7 @@ async function openSessions(): Promise<void> {
     }
     const id = target.closest('button[data-id]')?.getAttribute('data-id');
     if (!id) return;
-    void fetch('/api/sessions/restore', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id }),
-    }).then(() => {
-      dialog.close();
-      updateHeader();
-    });
+    void restoreRemoteSession(id).then(() => dialog.close());
   });
 
   document.body.appendChild(dialog);
@@ -281,3 +335,13 @@ declare global {
   }
 }
 window.reduxLoopAgent = { remote };
+
+// `/` 补全层：挂在 pi-web-ui 渲染出来的那个 textarea 上（它自己不提供命令口子）。
+// 选中命令后走同一条 runCommand —— 与「输入 /sessions 回车」是同一个效果。
+attachComposerMenu({
+  onPick(command) {
+    void runCommand(`/${command.name}`, commandContext).then((result) => {
+      if (result.message) notify(result.message);
+    });
+  },
+});

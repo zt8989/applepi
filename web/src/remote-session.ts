@@ -57,6 +57,13 @@ export interface RemoteSessionOptions {
   /** 覆盖 SSE 端点（测试用）。 */
   eventsUrl?: string;
   fetchImpl?: typeof fetch;
+  /**
+   * 命令处理器。返回 true 表示「这条输入是命令，别发给模型」。
+   *
+   * 拦截点放在这里而不是界面里：`prompt()` 是输入的**唯一**出口，判一次前缀就够，
+   * 不必去碰 pi-web-ui 的组件内部。
+   */
+  onCommand?: ((text: string) => Promise<boolean>) | undefined;
 }
 
 /**
@@ -239,6 +246,9 @@ export function createRemoteSession(options: RemoteSessionOptions = {}) {
             ? (input as { content: string }).content
             : '';
       if (!text.trim()) return;
+      // 斜杠命令在浏览器侧处理，**不发**给内核（那是给界面/内核的管理动作，
+      // 不是「跟模型说的话」）。
+      if (options.onCommand && (await options.onCommand(text))) return;
       await post('/api/message', { text });
     },
 

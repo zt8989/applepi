@@ -78,13 +78,15 @@ npm start -- --cwd ../other                # 工具的文件操作边界换到�
 
 界面里：`Ctrl+T` 切换轨迹面板，`Ctrl+C` 中断当前回合（空闲时退出）。
 
-斜杠命令：
+**两个界面都有**斜杠命令，且都在输入框里打 `/` 弹补全：
 
 | 命令 | 作用 |
 | --- | --- |
 | `/sessions` | 弹窗选一个历史会话恢复。**零 token** —— 不重跑模型，只把消息读回来 |
 | `/new`（或 `/clean`） | 开**新会话**：换 id → 换文件。上一段完整留在 `sessions/` 里 |
 | `/help` | 命令列表 |
+
+命令**不发给模型** —— 那是给界面/内核的管理动作。
 
 选项：`-p/--print`、`-P/--provider`、`-m/--model`、`-s/--system`、`--max-turns`、
 `--llm-timeout`、`--attempts`、`--api-key`、`--demo`、`--no-trace`、`--session`、
