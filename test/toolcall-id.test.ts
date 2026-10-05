@@ -134,29 +134,59 @@ test('三个重复 id：#2 #3 依次排开，全部执行', () => {
   assert.equal(state.pendingToolCalls.length, 0);
 });
 
-test('与**历史**消息的 id 撞了也要改名', () => {
-  let state = startTurn([call('call_1')]);
-  state = runTools(state);
+/**
+ * 现场报告的场景：模型**跨 assistant 消息**重复 id —— 每轮都从 `call_1` 重新数。
+ *
+ * 这才是主要路径（同一个 assistant 里两个同名 id 要少见得多），所以单独立一条测试。
+ * `dedupeToolCallIds` 的 `used` 集合扫的是**全部** `state.messages`（历史 toolResult 的
+ * toolCallId + 历史 assistant 消息里所有 toolCall.id），所以跨轮是覆盖到的。
+ */
+test('跨 assistant 消息重复 id（模型每轮都从 call_1 开始）：连跑多轮都合法', () => {
+  let state = createInitialState({
+    systemPrompt: 'p',
+    providerName: 'p',
+    modelId: 'm',
+    toolNames: [],
+    sessionId: 't',
+  });
+  state = reduce(state, { type: 'prompt.init', systemPrompt: 'p', tools: [] });
 
-  // 下一轮模型又返回了 call_1（有些模型每轮都从 call_1 开始数）
-  state = reduce(state, { type: 'user.message', text: '再来' });
-  state = reduce(state, { type: 'agent.run' });
-  state = reduce(state, { type: 'llm.done', message: assistant([call('call_1')]) });
+  // 四轮，每轮模型都返回 call_1
+  const perTurn: string[][] = [];
+  for (let turn = 1; turn <= 4; turn += 1) {
+    state = reduce(state, { type: 'user.message', text: `第 ${turn} 轮` });
+    state = reduce(state, { type: 'agent.run' });
+    state = reduce(state, { type: 'llm.done', message: assistant([call('call_1')]) });
+    perTurn.push(state.pendingToolCalls.map((c) => c.id));
+    state = runTools(state);
+  }
 
-  const ids = state.pendingToolCalls.map((c) => c.id);
-  assert.equal(ids.length, 1);
-  assert.notEqual(ids[0], 'call_1', '不能与历史 toolResult 的 id 相同');
-  assert.ok(ids[0]?.startsWith('call_1#'), '实际是加后缀：' + ids[0]);
+  // 第 1 轮保留原 id，之后依次加后缀
+  assert.deepEqual(
+    perTurn,
+    [['call_1'], ['call_1#2'], ['call_1#3'], ['call_1#4']],
+    '每轮的 toolCall id 依次加后缀',
+  );
 
-  state = runTools(state);
-  // 两轮的工具结果都在，且 id 互不冲突
-  const results = state.messages
-    .filter((m) => m.role === 'toolResult')
-    .map((m) => (m as { toolCallId: string }).toolCallId);
-  assert.equal(results.length, 2);
-  assert.equal(new Set(results).size, 2, '两轮的 toolResult id 不重复');
+  // 整条会话的消息序列合法
+  assertLegalSequence(state, 4);
+
+  // 每个工具各有独立的轨迹节点，没有互相覆盖
+  const toolResults = state.trace.order.filter(
+    (id) => state.trace.nodes[id]?.kind === 'tool.result',
+  );
+  assert.equal(toolResults.length, 4, '四个 tool.result 节点');
+
+  // 没有残留：pending 僵尸节点会让轨迹看起来「还在跑」
+  assert.equal(state.executing.length, 0, 'executing 已清空');
+  assert.equal(state.pendingToolCalls.length, 0, 'pendingToolCalls 已清空');
+  assert.equal(Object.keys(state.openToolNodeIds).length, 0, 'openToolNodeIds 已清空');
+  assert.equal(
+    state.trace.order.filter((id) => state.trace.nodes[id]?.status === 'pending').length,
+    0,
+    '没有 pending 僵尸节点',
+  );
 });
-
 test('没有重复时**不改** id（不做无谓的改写）', () => {
   const state = startTurn([call('call_a'), call('call_b')]);
   assert.deepEqual(
