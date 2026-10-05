@@ -13,6 +13,8 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p web",
     "serve": "node --env-file-if-exists=.env --import tsx src/serve.ts",
     "web": "vite --config web/vite.config.ts",
+    "web:kernel": "node --env-file-if-exists=.env --import tsx src/serve.ts --dev",
+    "web:dev": "node scripts/dev-web.mjs",
     "web:build": "vite build --config web/vite.config.ts",
     "web:serve": "npm run web:build && npm run serve",
     "test": "node --import tsx --test test/*.test.ts"

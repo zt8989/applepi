@@ -13,17 +13,20 @@
 import process from 'node:process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { startServer } from './server';
+import { DEFAULT_PORT, DEV_KERNEL_PORT, startServer } from './server';
 import { renderTree } from './trace';
 import { getTools } from './tools';
 import { providerNames } from './provider';
 
 interface Args {
-  port: number;
+  /** 不给就按 dev 决定（生产 5273 / 开发 5274）。 */
+  port?: number | undefined;
   provider: string;
   model?: string;
   cwd: string;
   demo: boolean;
+  /** 开发模式：让开 5273 给 vite，内核改用 5274。 */
+  dev: boolean;
   noTrace: boolean;
   traceDir?: string;
   llmTimeoutMs?: number;
@@ -33,8 +36,9 @@ interface Args {
 
 const USAGE = `redux-agent serve —— Node 内核 + 网页界面（同一个环）
 
-选项:
   -p, --port <n>        端口（默认 5273；被占用会自动 +1）
+      --dev             开发模式：让开 5273 给 vite，内核改用 5274，
+                        由 vite 反向代理 /api 过来（配合 npm run web）
   -P, --provider <id>   provider（默认 deepseek；可用: ${providerNames().join(', ')}）
   -m, --model <id>      模型 id
       --cwd <dir>       工具的工作目录（文件操作边界，默认当前目录）
@@ -51,10 +55,10 @@ const USAGE = `redux-agent serve —— Node 内核 + 网页界面（同一个�
 
 function parseArgs(argv: string[]): Args | { help: true } {
   const args: Args = {
-    port: 5273,
     provider: 'deepseek',
     cwd: process.cwd(),
     demo: false,
+    dev: false,
     noTrace: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -84,6 +88,9 @@ function parseArgs(argv: string[]): Args | { help: true } {
         break;
       case '--demo':
         args.demo = true;
+        break;
+      case '--dev':
+        args.dev = true;
         break;
       case '--no-trace':
         args.noTrace = true;
@@ -128,7 +135,8 @@ async function main(): Promise<void> {
   const hasWeb = existsSync(webRoot);
 
   const server = await startServer({
-    port: parsed.port,
+    // 开发模式让开 5273 给 vite（vite 把 /api 代理过来）。
+    port: parsed.port ?? (parsed.dev ? DEV_KERNEL_PORT : DEFAULT_PORT),
     provider: parsed.provider,
     model: parsed.model,
     cwd: parsed.cwd,
@@ -148,10 +156,19 @@ async function main(): Promise<void> {
       `  cwd       ${parsed.cwd}   ← 工具的文件操作边界`,
       `  tools     ${tools.map((t) => t.name).join(', ')}`,
       `  session   ${server.kernel.sessionId}`,
-      hasWeb ? `  页面      已从 ${webRoot} 提供` : `  页面      还没构建（先跑 npm run web:build）`,
+      hasWeb
+        ? `  页面      已从 ${webRoot} 提供`
+        : `  页面      还没构建（先跑 npm run web:build）`,
       '',
-      '提示：环只在 Node 这一侧跑。浏览器通过 SSE 订阅状态树、POST 发消息。',
-      '      所以文件工具摸的是真实文件系统，Ctrl-C 中断请另开终端或用界面按钮。',
+      // 开发模式下要说清「浏览器该开哪个」—— 这是最容易搞错的一步。
+      parsed.dev
+        ? [
+            '开发模式：5273 归 vite，浏览器请开 http://localhost:5273',
+            `          （vite 会把 /api 代理到本进程 ${server.port}；先另开终端跑 npm run web）`,
+            `          没起 vite 的话直接访问本进程 ${server.port} 也能用 API，但没有页面。`,
+          ].join('\n')
+        : '提示：环只在 Node 这一侧跑。浏览器通过 SSE 订阅状态树、POST 发消息。',
+      '      文件工具摸的是真实文件系统；Ctrl-C 中断请用界面按钮或另开终端。',
       '',
     ].join('\n'),
   );

@@ -93,6 +93,17 @@ function snapshot(kernel: Kernel, cwd: string): Snapshot {
   };
 }
 
+/**
+ * 生产模式下内核的默认端口。
+ *
+ * 生产（`npm run serve`）时内核自己发 `web/dist`，页面与 API 同源，所以 5273 就够。
+ * 开发（`npm run web`）时 5273 归 vite，内核要让开 —— 那时用 `--port 5274`，
+ * 由 vite 反向代理 `/api` 过来（见 web/vite.config.ts）。
+ */
+export const DEFAULT_PORT = 5273;
+/** 开发时内核让给 vite 后用的端口。 */
+export const DEV_KERNEL_PORT = 5274;
+
 export interface ServerOptions extends Partial<KernelOptions> {
   port?: number | undefined;
   /** 静态文件目录（web/dist）。存在才提供页面。 */
@@ -266,7 +277,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     res.end('not found');
   }
 
-  const port = await listen(server, options.port ?? 5273);
+  const port = await listen(server, options.port ?? DEFAULT_PORT);
   return {
     kernel,
     port,

@@ -50,14 +50,26 @@ npm start -- --cwd ../other                # 工具的文件操作边界换到�
 **网页界面**（同一个内核，浏览器只当渲染层）：
 
 ```bash
-npm run web:serve                  # 构建前端 + 起内核 → http://localhost:5273
+npm run web:dev                    # 开发：一条命令起内核 + vite，浏览器开 5273
+npm run web:serve                  # 生产：构建前端 + 起内核 → http://localhost:5273
 npm run serve                      # 只起内核（前端已构建过）
 npm run serve -- --demo            # 离线 demo，不用 key
 npm run serve -- --cwd D:/proj     # 工具的文件操作边界
-npm run web                        # 只开 vite（前端热更新；此时没有内核，页面连不上）
+npm run web                        # 只开 vite（内核要另开终端跑 npm run web:kernel）
+npm run web:kernel                 # 只起内核（让开 5273，用 5274）
 ```
 
-**只起内核、页面发构建产物**（一个进程、一个地址）：
+**端口分工**（两个进程不能抢同一个端口）：
+
+| 端口 | 谁 | 说明 |
+| --- | --- | --- |
+| 5273 | vite（开发）/ 内核（生产） | 开发时页面在这儿，`/api` 反代到 5274 |
+| 5274 | 内核（开发） | `--dev` 让开 5273 后用这个 |
+
+前端只用**相对路径** `/api/*`，它不知道内核在哪 —— 开发时由 vite 转发，所以浏览器始终只跟
+5273 说话（同源，SSE 不会被跨域挡掉）。生产时内核自己发 `web/dist`，页面与 API 同源，不需要代理。
+
+**只起内核、页面发构建产物**（一个进程、一个地址，生产形态）：
 
 ```bash
 npm run web:build                  # 产出 web/dist
@@ -66,13 +78,21 @@ npm run serve                      # http://localhost:5273 既是页面也是 AP
 
 - 页面默认取 `<cwd>/web/dist`；`--cwd` 换目录时也跟着换。
 - 没有 `index.html` 就只服务 `/api`（`GET /` 的 404 会写明该先跑什么命令）。
-- 开发时分开起：`npm run serve -- --port 0` 起内核（启动横幅打印真正绑到的端口），
-  另开终端 `npm run web` 连过去。
+
+开发时分开起（`web:dev` 的手动版）：
+
+```bash
+npm run web:kernel                 # 终端 1：内核（5274）
+npm run web                        # 终端 2：vite（5273）
+```
+
+`web:dev` 会给两个进程的输出加 `[kernel]` / `[vite]` 前缀，任一挂了另一个一并停掉，
+不会留下半个进程。端口可用 `HARNESS_KERNEL_PORT` / `HARNESS_WEB_PORT` 改。
 
 ## 测试
 
 ```bash
-npm test           # 36 个离线测试，不打网络
+npm test           # 52 个离线测试，不打网络
 npm run typecheck  # tsc --noEmit（src + test）+ tsc --noEmit -p web
 ```
 
