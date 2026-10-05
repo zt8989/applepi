@@ -13,7 +13,8 @@
  * 关键点：`session.state` 每次都返回**新对象 / 新数组**。pi-web-ui 靠引用变化判断
  * 要不要重渲染，直接把远端那份对象原样透出去是不够的。
  */
-import type { AssistantMessage } from '@earendil-works/pi-ai';
+import type { AssistantMessage, ImageContent, TextContent } from '@earendil-works/pi-ai';
+import { isImageStub, stubImageData } from '../../src/message-content';
 /** 服务端推来的那一帧（与 src/server.ts 的 Snapshot 对应，但只声明界面用到的部分）。 */
 export interface RemoteSnapshot {
   type: 'snapshot';
@@ -68,6 +69,79 @@ export interface RemoteSessionOptions {
    * 不必去碰 pi-web-ui 的组件内部。
    */
   onCommand?: ((text: string) => Promise<boolean>) | undefined;
+  /**
+   * 请求失败时回调（发消息被 409/400 挡下、附件超限……）。
+   *
+   * 为什么不抛：pi-web-ui 的 `sendMessage()` 没人 catch，一个未处理的 Promise 拒绝
+   * 在控制台里只是一行红字，界面上却是「消息消失了、模型也不回」—— 用户无从判断
+   * 是哪儿坏了。走回调才能把它变成一条看得见的提示。
+   */
+  onError?: ((message: string) => void) | undefined;
+}
+
+/** pi-web-ui 的 Attachment（只声明用到的字段）。 */
+interface UiAttachment {
+  type: 'image' | 'document';
+  fileName: string;
+  mimeType: string;
+  /** base64，不带 `data:` 前缀。 */
+  content: string;
+  extractedText?: string | undefined;
+}
+
+/**
+ * 从 prompt 入参里取纯文本。
+ *
+ * 两种形状都要认：光秃秃一个字符串（无附件时 pi-web-ui 就是这么传的），或者
+ * `{content: '...'}`（带附件时它传的是对象）。
+ */
+function readPromptText(input: unknown): string {
+  if (typeof input === 'string') return input;
+  if (input !== null && typeof input === 'object' && 'content' in input) {
+    const content = (input as { content?: unknown }).content;
+    if (typeof content === 'string') return content;
+  }
+  return '';
+}
+
+/** 取附件数组。pi-web-ui 在没有附件时**干脆不给这个字段**（不是给空数组）。 */
+function readAttachments(input: unknown): UiAttachment[] {
+  if (input === null || typeof input !== 'object' || !('attachments' in input)) return [];
+  const attachments = (input as { attachments?: unknown }).attachments;
+  return Array.isArray(attachments) ? (attachments as UiAttachment[]) : [];
+}
+
+/**
+ * 附件 → pi-ai 的 content 块。
+ *
+ * 折法必须与 pi-web-ui 内部的 `convertAttachments` 一致（它也是：图片 → image 块；
+ * 带 extractedText 的文档 → 带 `[Document: 文件名]` 头的 text 块），否则同一次发送
+ * 在界面上是一种形状、发给模型是另一种。
+ *
+ * 这里**不 import** 那个函数：它会把 pdfjs / jszip / xlsx 整条依赖链拉进我们的模块图，
+ * 而它自己早已全量加载过了。形状对等 + 服务端再校验一遍，比多一条依赖更稳。
+ *
+ * 返回 `undefined` = 没有附件（或附件全是非文本又抽不出字），让服务端走纯文本老路。
+ */
+function buildContent(
+  text: string,
+  attachments: readonly UiAttachment[],
+): (TextContent | ImageContent)[] | undefined {
+  if (attachments.length === 0) return undefined;
+  const blocks: (TextContent | ImageContent)[] = [];
+  // 文本块只在非空时加：用户可能只发图，而一个空的 text 块会让某些 provider 报参数错。
+  if (text.trim()) blocks.push({ type: 'text', text });
+  for (const attachment of attachments) {
+    if (attachment.type === 'image') {
+      blocks.push({ type: 'image', data: attachment.content, mimeType: attachment.mimeType });
+    } else if (attachment.extractedText) {
+      blocks.push({
+        type: 'text',
+        text: `\n\n[Document: ${attachment.fileName}]\n${attachment.extractedText}`,
+      });
+    }
+  }
+  return blocks.length > 0 ? blocks : undefined;
 }
 
 /**
@@ -80,6 +154,20 @@ export function createRemoteSession(options: RemoteSessionOptions = {}) {
   const eventsUrl = options.eventsUrl ?? '/api/events';
 
   let snapshot: RemoteSnapshot | null = null;
+  /**
+   * 占位串 → 真 base64 的图片缓存。
+   *
+   * 服务端的**广播帧**会把图片折成短占位串（见 src/message-content.ts 的
+   * stubImageData）—— 不剥的话一张 2MB 的图会在一次回合的几百帧里反复传几百 MB，
+   * 页面直接卡死。而**首帧**（新连接）与 `/api/snapshot` 带的是真图。
+   *
+   * 所以：首帧把每张真图按「它的占位串」记进这个 Map，之后的广播帧就只剩占位串。
+   * 渲染时用同一个 `resolveImageStub()` 换回来（见 web/src/user-message.ts）。
+   *
+   * 用内容哈希当 key 是关键：同一张图在首帧与广播帧里的占位串天然一致，
+   * 不需要维护任何跨帧的序号映射。
+   */
+  const imageCache = new Map<string, string>();
   // pi-web-ui 的 subscribe 回调收的是 **lifecycle 事件**（`{type: 'message_start'}` 这种），
   // 不是「状态变了」的裸回调 —— 它直接 `switch (e.type)`。所以这里要主动合成事件。
   const listeners = new Set<(event: UiLifecycleEvent) => void>();
@@ -102,11 +190,31 @@ let shownError: string | null = null;
     for (const listener of plainListeners) listener();
   };
 
+  /** 扫一帧的消息，把里面的真图 base64 记进 imageCache（key 用它自己的占位串）。 */
+  const cacheImages = (messages: unknown[]): void => {
+    for (const m of messages) {
+      if (m === null || typeof m !== 'object') continue;
+      const content = (m as { content?: unknown }).content;
+      if (!Array.isArray(content)) continue;
+      for (const block of content) {
+        if (block === null || typeof block !== 'object') continue;
+        const b = block as { type?: unknown; data?: unknown };
+        if (b.type !== 'image' || typeof b.data !== 'string') continue;
+        if (isImageStub(b.data)) continue;
+        imageCache.set(stubImageData(b.data), b.data);
+      }
+    }
+  };
+
   const applySnapshot = (next: RemoteSnapshot): void => {
     const before = previous;
     previous = next;
     snapshot = next;
     received += 1;
+
+    // 把这一帧里出现的**真图**记进缓存（首帧走这条路）。已是占位串的跳过 ——
+    // 反过来做（把占位串存成自己）会污染缓存。
+    cacheImages(next.messages);
 
     const messages = next.messages;
     const beforeMessages = before?.messages ?? [];
@@ -153,9 +261,12 @@ let shownError: string | null = null;
       connected = true;
       notify();
     };
-    source.onmessage = (event: MessageEvent<string>) => {
+    // 注解只能给 `source.onmessage` 这个赋值语句（EventSource 的属性类型是
+    // `(this: EventSource, ev: MessageEvent) => any`）。事件本身不泛型：EventSource 收的
+    // SSE 数据只是 `string`，泛型化没有意义（那是 XMLHttpRequest 那侧的签名）。
+    source.onmessage = (event: MessageEvent) => {
       try {
-        applySnapshot(JSON.parse(event.data) as RemoteSnapshot);
+        applySnapshot(JSON.parse(event.data as string) as RemoteSnapshot);
       } catch {
         // 半帧 JSON（理论上不会发生，EventSource 保证整帧）：丢掉这一帧，等下一帧。
       }
@@ -293,22 +404,29 @@ const errorNotice = (s: RemoteSnapshot | null): AssistantMessage | null => {
       };
     },
 
-    /** 发送一句话 → Node dispatch 进环。 */
+    /** 发送一句话（可能带附件） → Node dispatch 进环。 */
     async prompt(input: unknown): Promise<void> {
-      const text =
-        typeof input === 'string'
-          ? input
-          : input !== null &&
-              typeof input === 'object' &&
-              'content' in input &&
-              typeof (input as { content?: unknown }).content === 'string'
-            ? (input as { content: string }).content
-            : '';
-      if (!text.trim()) return;
+      // pi-web-ui 带附件时传 `{role:'user-with-attachments', content: 文本, attachments: [...]}`，
+      // 无附件时传光字符串。两条形状都得认：
+      //   - 只读 `content` 里的字符串 → attachments 被整个丢弃，图片永远发不出去；
+      //   - 只认「有文本才发」        → 用户只发一张截图时消息被当成空消息丢掉。
+      const text = readPromptText(input);
+      const content = buildContent(text, readAttachments(input));
+      if (!text.trim() && !content) return;
       // 斜杠命令在浏览器侧处理，**不发**给内核（那是给界面/内核的管理动作，
       // 不是「跟模型说的话」）。
       if (options.onCommand && (await options.onCommand(text))) return;
-      await post('/api/message', { text });
+      // 发的是 `content`（已折成 pi-ai 的块），不是 `attachments`：后者是浏览器侧
+      // 的对象，前者才是内核与 LLM 都认、且能落盘回放的形状。
+      const res = await doFetch('/api/message', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(content ? { text, content } : { text }),
+      });
+      if (!res.ok) {
+        const detail = (await res.json().catch(() => null)) as { error?: string } | null;
+        options.onError?.(detail?.error ?? `发消息失败（HTTP ${res.status}）`);
+      }
     },
 
     /**
@@ -357,6 +475,13 @@ const errorNotice = (s: RemoteSnapshot | null): AssistantMessage | null => {
     /** 当前快照（只读）。轨迹面板直接读它。 */
     get snapshot(): RemoteSnapshot | null {
       return snapshot;
+    },
+    /**
+     * 占位串 → 真 base64。渲染器拿它把广播帧里的短占位换回图片
+     * （见 web/src/user-message.ts）。**只读**。
+     */
+    get images(): ReadonlyMap<string, string> {
+      return imageCache;
     },
     isConnected(): boolean {
       return connected;

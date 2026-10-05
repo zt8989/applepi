@@ -36,6 +36,7 @@ import {
 } from '@earendil-works/pi-web-ui';
 import { ensureElementsRegistered } from './ensure-elements';
 import { createRemoteSession } from './remote-session';
+import { registerUserMessageRenderer } from './user-message';
 import { attachComposerMenu } from './composer-menu';
 import { runCommand, type CommandContext } from './commands';
 import { listSessions, restoreSession } from './session-client';
@@ -75,6 +76,9 @@ const remote = createRemoteSession({
     if (result.message) notify(result.message);
     return result.handled;
   },
+  // 发消息被内核挡下（409 上一回合没完 / 400 附件不合法 / 超限）时，
+  // pi-web-ui 不会把 promise 往外抛，只能走这里才能让用户看见原因。
+  onError: notify,
 });
 const session = remote;
 
@@ -101,6 +105,11 @@ const commandContext: CommandContext = {
 
 // 先确保元素注册，再 createElement —— 顺序反了拿到的是一个没升级的空标签。
 ensureElementsRegistered();
+//
+// 补上「标准 pi-ai user 消息里的图片」渲染（见 user-message.ts 的说明）。
+// **必须在这里调**：pi-web-ui 的 renderer 是**渲染那一刻**才问注册表的，已经画出来的
+// 消息不会因为事后注册而重画。放在 createElement 之后，聊天区第一帧就是缺图的。
+registerUserMessageRenderer(remote.images);
 const chat = document.createElement('agent-interface') as AgentInterface;
 chat.classList.add('flex-1', 'min-h-0');
 chat.session = session as never;

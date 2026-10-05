@@ -26,6 +26,14 @@ import { listSessions } from './config-home';
 import { sessionTitle } from './session-file';
 import { getTools } from './tools';
 import { traceStats } from './trace';
+import {
+  ContentParseError,
+  contentText,
+  hasImageBlock,
+  parseUserContent,
+  stubImageData,
+  type UserContentBlock,
+} from './message-content';
 import { providerNames } from './provider';
 import type { AgentState } from './state';
 
@@ -161,12 +169,58 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
 
   // 流式 token 变化极快（每个 delta 一次）。攒一小会儿再推，避免每秒几百帧。
   let pending: NodeJS.Timeout | null = null;
+  //
+  // 广播帧里把图片折成短占位串（见 message-content.ts 的 stubImageData）。
+  //
+  // 为什么要剥：图片**内联**在 state.messages 里，而这里推的是**全量帧**。一张 2MB 的图
+  // 就是约 2.7MB base64 字符，一次回合的流式帧有几百个 —— 不剥就是每 40ms 重新序列化
+  // 几百 MB 并推给每个客户端，页面会直接卡死。注意这与「图片显示不出来」是两回事，
+  // 很容易把方向搞反：一个是渲染缺口，一个是带宽/内存问题，两个都得修。
+  //
+  // 剥掉的那部分由浏览器从**首帧**（带真图）缓存下来，按同一个占位串换回去。
+  const stripImages = (messages: unknown[]): unknown[] =>
+    messages.map((m) => {
+      if (m === null || typeof m !== 'object') return m;
+      const content = (m as { content?: unknown }).content;
+      if (!Array.isArray(content)) return m;
+      const hasImage = content.some(
+        (b) => b !== null && typeof b === 'object' && (b as { type?: unknown }).type === 'image',
+      );
+      if (!hasImage) return m;
+      return {
+        ...(m as Record<string, unknown>),
+        content: content.map((b) => {
+          if (b === null || typeof b !== 'object' || (b as { type?: unknown }).type !== 'image') {
+            return b;
+          }
+          const block = b as { data?: unknown; mimeType?: unknown };
+          return {
+            type: 'image',
+            data: stubImageData(String(block.data ?? '')),
+            mimeType: block.mimeType,
+          };
+        }),
+      };
+    });
+  /**
+   * SSE 首帧（每个新连接）与 GET /api/snapshot：**必须带真图**。
+   *
+   * 剥图只对**广播帧**成立（见 lightFrame）。新开的标签页 / 刷新后的第一帧走这里，
+   * 浏览器据此把每张图按占位串填进 imageCache；反过来的话，刷新后历史消息里的图
+   * 就只剩占位串、缓存里又没有，渲染出「图片不可用」。两处都得是真图。
+   */
+  const fullFrame = (): Snapshot => snapshot(kernel, cwd);
+  /** 广播帧：剥掉图片。 */
+  const lightFrame = (): string => {
+    const s = snapshot(kernel, cwd);
+    return `data: ${JSON.stringify({ ...s, messages: stripImages(s.messages) })}\n\n`;
+  };
   const broadcast = (): void => {
     if (clients.size === 0) return;
     if (pending) return;
     pending = setTimeout(() => {
       pending = null;
-      const frame = `data: ${JSON.stringify(snapshot(kernel, cwd))}\n\n`;
+      const frame = lightFrame();
       for (const client of clients) {
         // 断了就悄悄踢掉，下一帧自然会跳过。
         client.write(frame);
@@ -196,7 +250,7 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         // 关掉 nginx 之类的缓冲，否则事件会被攒住。
         'x-accel-buffering': 'no',
       });
-      res.write(`data: ${JSON.stringify(snapshot(kernel, cwd))}\n\n`);
+      res.write(`data: ${JSON.stringify(fullFrame())}\n\n`);
       clients.add(res);
       // 心跳：有些代理会掐掉闲置连接。
       const beat = setInterval(() => res.write(': ping\n\n'), 25_000);
@@ -209,24 +263,40 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
 
     // ── 首次快照 ──
     if (url.pathname === '/api/snapshot') {
-      sendJson(res, 200, snapshot(kernel, cwd));
+      sendJson(res, 200, fullFrame());
       return;
     }
 
     // ── 发消息 ──
     if (url.pathname === '/api/message' && req.method === 'POST') {
-      const body = (await readJson(req)) as { text?: unknown };
+      const body = (await readJson(req)) as { text?: unknown; content?: unknown };
       const text = typeof body.text === 'string' ? body.text.trim() : '';
-      if (!text) {
-        sendJson(res, 400, { error: '缺少 text' });
+      // content 是附件（图片）折成的块数组。必须在入口校验：它一旦进了 state，
+      // 就会被写进会话 JSONL，并在每 40ms 一帧的全量 SSE 里反复推给浏览器。
+      let content: UserContentBlock[] | undefined;
+      try {
+        content = parseUserContent(body.content);
+      } catch (error) {
+        const reason = error instanceof ContentParseError ? error.message : String(error);
+        sendJson(res, 400, { error: `content 不合法：${reason}` });
+        return;
+      }
+      // 有图没字是合法的（用户可以只发一张截图），所以不能只看 text。
+      if (!text && !content) {
+        sendJson(res, 400, { error: '缺少 text 与 content' });
         return;
       }
       if (kernel.store.getState().phase !== 'idle') {
         sendJson(res, 409, { error: '上一回合还没结束' });
         return;
       }
-      kernel.store.dispatch({ type: 'user.message', text });
-      sendJson(res, 200, { ok: true });
+      kernel.store.dispatch({
+        type: 'user.message',
+        // text 缺省时从 content 里取纯文本：轨迹节点与回放都只放得下文本。
+        text: text || contentText(content),
+        ...(content ? { content } : {}),
+      });
+      sendJson(res, 200, { ok: true, images: hasImageBlock(content) ? 1 : 0 });
       return;
     }
 
