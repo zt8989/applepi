@@ -25,25 +25,37 @@ agent** —— 循环不是写出来的，是 reducer 与副作用互相 dispatc
 - **npm**
 - 真实跑模型时需要对应 provider 的 API key
 
-默认 provider / 模型来自 **pi 的配置目录**（`~/.pi/agent/`），当前是
-`workbuddy` / `cn:space-bunny`。这些是从 clj-harness 迁过来的：
+所有全局状态都在**配置家目录** `~/.redux-agent/`（`REDUX_AGENT_DIR` 可搬家）：
 
-```bash
-npm run config:migrate     # 从 ~/.clj-harness/config.edn + .env 生成 ~/.pi/agent/{models,auth,settings}.json
-npm run config:check      # 只看会迁什么，不写文件
+```text
+~/.redux-agent/
+  models.json            provider / 模型目录
+  auth.json              凭证
+  settings.json          默认 provider / model
+  sessions/
+    --<cwd 编码>--/<id>.jsonl   会话（可恢复）
+  traces/
+    <id>.jsonl                  轨迹树（一次尝试一节点）
+    <id>.init.jsonl             装载段（prompt / model）
 ```
 
-路径与格式**完全按 pi 的约定**（`PI_CODING_AGENT_DIR` 可搬家）：`models.json` 放
-provider 的 baseUrl / api / 模型目录，`auth.json` 只放凭证，`.env` 里的 `<ID>_API_KEY`
-也能用（`npm start` 走 `--env-file-if-exists=.env`）。
+**目录内部的结构照抄 pi，位置是自己的** —— 名字不带 `pi` 前缀，因为里面没有 pi 的东西。
+初始配置从 clj-harness 迁过来（当前默认 `workbuddy` / `cn:space-bunny`）：
+
+```bash
+npm run config:migrate     # 从 ~/.clj-harness/config.edn + .env 生成上面三个 json
+npm run config:check       # 只看会迁什么，不写文件
+```
+
+`models.json` 放 provider 的 baseUrl / api / 模型目录，`auth.json` 只放凭证；
+`.env` 里的 `<ID>_API_KEY` 也能用（`npm start` 走 `--env-file-if-exists=.env`）。
 
 命令行的 `-P` / `-m` 仍然优先。
-
 ## 运行
 
 ```bash
 npm install
-npm run config:migrate            # 首次：把 provider / 模型配置迁到 ~/.pi/agent
+npm run config:migrate            # 首次：把 provider / 模型配置迁到 ~/.redux-agent
 ```
 **终端界面**（pi-tui）：
 
@@ -56,6 +68,14 @@ npm start -- --cwd ../other                # 工具的文件操作边界换到�
 ```
 
 界面里：`Ctrl+T` 切换轨迹面板，`Ctrl+C` 中断当前回合（空闲时退出）。
+
+斜杠命令：
+
+| 命令 | 作用 |
+| --- | --- |
+| `/sessions` | 弹窗选一个历史会话恢复。**零 token** —— 不重跑模型，只把消息读回来 |
+| `/new` | 开新对话（历史仍在 `sessions/` 里） |
+| `/help` | 命令列表 |
 
 选项：`-p/--print`、`-P/--provider`、`-m/--model`、`-s/--system`、`--max-turns`、
 `--llm-timeout`、`--attempts`、`--api-key`、`--demo`、`--no-trace`、`--session`、
@@ -121,5 +141,6 @@ src/                    内核（见 docs/architecture.md）
 web/                    浏览器渲染层
 test/                   离线测试
 docs/architecture/      架构现状
-.trace/                 运行时生成的轨迹 JSONL（已 gitignore）
+scripts/                配置迁移（config:migrate）
+~/.redux-agent/         运行时状态：配置 / 会话 / 轨迹（不在仓库里）
 ```

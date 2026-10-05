@@ -4,6 +4,5 @@ dist/
 *.log
 web/dist/
 
-# 轨迹日志：每次会话一个 JSONL，是运行时产物（想留就 `--no-trace` 关掉落盘）。
-.trace/
+# 会话与轨迹不再落在仓库里（在 ~/.redux-agent/），所以这里没有条目。
 .playwright-mcp/

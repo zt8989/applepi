@@ -68,7 +68,7 @@ export {
   listSessions,
   loadTrace,
   tracePath,
-  TRACE_DIR,
+
 } from './trace-file';
 export {
   createPersistentStore,

@@ -492,6 +492,18 @@ const transitions: TransitionHandlers = {
   },
 
   /** 持久化游标：effect 写完文件后推回来，避免同一段重复落盘。 */
+  /**
+   * 恢复历史：把已有会话的消息灌进 messages。
+   *
+   * **只加消息，不动相位也不动轨迹树** —— 这些消息是「上次发生的」，开新节点或推进 tip
+   * 会把历史伪装成这一轮。轨迹是那一轮的东西，这里只负责把对话补齐。
+   */
+  'session.restored': (state, action) => ({
+    ...state,
+    messages: [...state.messages, action.message],
+  }),
+
+  /** 持久化游标：effect 写完文件后推回来，避免同一段重复落盘。 */
   'trace.persisted': (state, action) => ({
     ...state,
     persistedSeq: Math.max(state.persistedSeq, action.upToSeq),

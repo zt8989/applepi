@@ -18,11 +18,22 @@ import {
   type ReplayedSession,
 } from './trace-store';
 import type { TraceTree } from './trace';
+import { tracesDir } from './config-home';
 
-export const TRACE_DIR = '.trace';
+/**
+ * 轨迹目录。**默认落在配置家目录里**（`~/.redux-agent/traces/`），不再是项目下的
+ * `.trace/` —— 轨迹是会话级产物，和会话文件放一起才对；放项目里会在每个仓库留一堆
+ * 垃圾，而且换个目录就「找不到历史」。
+ *
+ * 传字符串则用该目录（相对路径相对进程 cwd），测试用。
+ */
+export type TraceDir = string | null;
 
-/** 轨迹目录：相对路径（相对进程 cwd）或绝对路径。 */
-export type TraceDir = string;
+/** 解析成绝对目录。 */
+function resolveDir(dir?: TraceDir): string {
+  if (dir) return path.resolve(dir);
+  return tracesDir();
+}
 
 /**
  * 装载段的路径 —— 与轨迹分开一个文件。
@@ -30,14 +41,13 @@ export type TraceDir = string;
  * 生命周期不同：装载是**会话级**的（内核起来时装一次），轨迹节点是**这次对话**的产物。
  * 分开之后「回放一段对话」不必先跳过一堆与它无关的装载记录。
  */
-export function initPath(sessionId: string, dir: string = TRACE_DIR): string {
-  return path.join(dir, `${sessionId}.init.jsonl`);
+export function initPath(sessionId: string, dir?: TraceDir): string {
+  return path.join(resolveDir(dir), `${sessionId}.init.jsonl`);
 }
 
-
-/** 某个会话的 JSONL 路径。 */
-export function tracePath(sessionId: string, dir: string = TRACE_DIR): string {
-  return path.join(dir, `${sessionId}.jsonl`);
+/** 某个会话的轨迹 JSONL 路径。 */
+export function tracePath(sessionId: string, dir?: TraceDir): string {
+  return path.join(resolveDir(dir), `${sessionId}.jsonl`);
 }
 
 /**
@@ -78,7 +88,7 @@ export function createFileSink(filePath: string): TraceSink {
  */
 export async function loadSession(
   sessionId: string,
-  dir: string = TRACE_DIR,
+  dir?: TraceDir,
 ): Promise<ReplayedSession | null> {
   const file = tracePath(sessionId, dir);
   if (!existsSync(file)) return null;
@@ -89,7 +99,7 @@ export async function loadSession(
 /** 读回一个会话的**装载段**（prompt / model 两块）。文件不存在返回 null。 */
 export async function loadInit(
   sessionId: string,
-  dir: string = TRACE_DIR,
+  dir?: TraceDir,
 ): Promise<ReplayedInit | null> {
   const file = initPath(sessionId, dir);
   if (!existsSync(file)) return null;
@@ -100,7 +110,7 @@ export async function loadInit(
 /** 读回一个会话的轨迹树（只要树，不要消息；老调用方用它）。 */
 export async function loadTrace(
   sessionId: string,
-  dir: string = TRACE_DIR,
+  dir?: TraceDir,
 ): Promise<TraceTree | null> {
   const file = tracePath(sessionId, dir);
   if (!existsSync(file)) return null;
@@ -108,13 +118,18 @@ export async function loadTrace(
   return replayTrace(text, sessionId);
 }
 
-/** 列出所有已落盘的会话 id（新的在后）。 */
-export async function listSessions(dir: string = TRACE_DIR): Promise<string[]> {
+/**
+ * 列出所有已落盘的**轨迹**会话 id。
+ *
+ * 注意这不是「会话列表」—— 后者在 config-home 的 `listSessions()`，那是给人看的历史。
+ */
+export async function listSessions(dir?: TraceDir): Promise<string[]> {
   const { readdir } = await import('node:fs/promises');
-  if (!existsSync(dir)) return [];
-  const entries = await readdir(dir);
+  const target = resolveDir(dir);
+  if (!existsSync(target)) return [];
+  const entries = await readdir(target);
   return entries
-    .filter((name) => name.endsWith('.jsonl'))
+    .filter((name) => name.endsWith('.jsonl') && !name.endsWith('.init.jsonl'))
     .map((name) => name.slice(0, -'.jsonl'.length))
     .sort();
 }

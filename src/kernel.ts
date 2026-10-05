@@ -22,11 +22,12 @@ import { createFileSink, initPath, tracePath, type TraceDir } from './trace-file
 import { newSessionId } from './trace';
 import type { AgentStore } from './store';
 import type { InitRecord, TracePersistence } from './trace-store';
-import type { Model, ModelThinkingLevel } from '@earendil-works/pi-ai';
-import type { ModelCapabilities } from './actions';
+import type { Message, Model, ModelThinkingLevel } from '@earendil-works/pi-ai';
+import type { AgentAction, ModelCapabilities } from './actions';
+import { createSessionRecorder, type SessionRecorder } from './session-recorder';
+import { readSession, readSessionMessages } from './session-file';
 import path from 'node:path';
 import { getTools } from './tools';
-
 /**
  * 从 Model 对象上读我们关心的三个能力。
  *
@@ -68,6 +69,10 @@ export interface KernelOptions {
   /** 传 null 就完全不落盘。 */
   traceDir?: TraceDir | null | undefined;
   onTraceError?: ((error: unknown) => void) | undefined;
+  /** false = 不写会话文件（只落轨迹）。 */
+  writeSession?: boolean | undefined;
+  /** 恢复已有会话时传「已经灌进去多少条消息」，记录器的游标要接着算，否则会重写一遍。 */
+  resumeFrom?: number | undefined;
 }
 
 export interface Kernel {
@@ -75,6 +80,15 @@ export interface Kernel {
   runtime: AgentRuntime;
   sessionId: string;
   persistence: TracePersistence | null;
+  /** 会话文件记录器（写 `sessions/<cwd>/<id>.jsonl`，供「恢复历史」用）。 */
+  session: SessionRecorder | null;
+  /**
+   * 恢复一个历史会话（读文件 + 灌回 state）。**零 token**，不重跑模型。
+   * @returns 恢复的会话 id 与灌进去的消息条数。
+   */
+  restoreSession(file: string): { id: string; restored: number };
+  /** 把已经读出来的消息灌回 state。 */
+  restore(messages: Message[]): void;
   dispose(): void;
 }
 
@@ -171,12 +185,43 @@ export function createKernel(options: KernelOptions): Kernel {
     void initSink.append(records.map((r) => JSON.stringify(r)).join('\n'));
   }
 
+  // 会话记录器：把消息流写成 `sessions/<cwd>/<id>.jsonl`，供「恢复历史」用。
+  // 和轨迹落盘器一样是 store 订阅器 —— 挂在 dispatch 链上，成功失败都记。
+  const recorder = createSessionRecorder(store, {
+    sessionId,
+    cwd,
+    enabled: options.writeSession !== false,
+    ...(options.resumeFrom !== undefined ? { resumeFrom: options.resumeFrom } : {}),
+  });
+
   return {
     store,
     runtime,
     sessionId,
     persistence,
+    session: recorder,
+    /**
+     * 恢复一个历史会话：读文件、清空当前对话、把消息灌回去。
+     *
+     * **零 token** —— 不重跑模型。状态只能由 action 改（本项目的不变式），所以走
+     * `conversation.reset` + 逐条 `session.restored`，而不是直接改 state。
+     */
+    restoreSession(file: string): { id: string; restored: number } {
+      const messages = readSessionMessages(file);
+      const id = readSession(file)?.header.id ?? '';
+      store.dispatch({ type: 'conversation.reset' } as AgentAction);
+      for (const message of messages) {
+        store.dispatch({ type: 'session.restored', message } as AgentAction);
+      }
+      return { id, restored: messages.length };
+    },
+    restore(messages: Message[]): void {
+      for (const message of messages) {
+        store.dispatch({ type: 'session.restored', message } as AgentAction);
+      }
+    },
     dispose(): void {
+      recorder?.dispose();
       persistence?.dispose();
       if (sink?.close) void sink.close();
       if (initSink?.close) void initSink.close();

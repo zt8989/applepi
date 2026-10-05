@@ -9,7 +9,7 @@ Agent 的执行历史不是一条流水。`src/trace.ts` 把它做成**一棵树
 | commit 有 parent | 每个节点有 `parentId` |
 | commit 有分支（`--graph` 里的 `│` `/` `\`） | **重试就是分支** |
 | HEAD 指向当前所在的线 | `tipId` = 最后一条推进 tip 的节点 |
-| `git reflog` 只追加不改写 | `.trace/<id>.jsonl` 追加写 JSONL |
+| `git reflog` 只追加不改写 | `~/.redux-agent/traces/<id>.jsonl` 追加写 JSONL |
 
 ## 节点模型
 

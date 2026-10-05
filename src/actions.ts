@@ -6,6 +6,7 @@ import type {
   ToolCall,
   ToolResultMessage,
 } from '@earendil-works/pi-ai';
+import type { Message } from '@earendil-works/pi-ai';
 import type { LlmErrorKind } from './state';
 
 /**
@@ -170,6 +171,16 @@ export type AgentAction =
    * 于是 reducer 知道自己已经写过哪一段，重复的记录不会二次落盘。
    */
   | { type: 'trace.persisted'; upToSeq: number }
+  /**
+   * 恢复历史：把一条**已有会话里读回来的**消息塞进 messages。
+   *
+   * 它跟 `user.message` / `llm.done` 的区别是：消息不是「刚发生的」，是「上次发生的」。
+   * 迁移时**不能**开新的 user 节点、也不能推进 tip —— 轨迹是那一轮的东西，这里只是把
+   * 对话补齐。所以相位不动、树不动。
+   *
+   * 零 token：不重跑模型，纯粹是把 JSONL 里读到的内容灌回状态。
+   */
+  | { type: 'session.restored'; message: Message }
   /** 清空对话。 */
   | { type: 'conversation.reset' };
 

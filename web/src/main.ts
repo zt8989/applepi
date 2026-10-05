@@ -141,6 +141,73 @@ function newChat(): void {
   void remote.reset().then(updateHeader);
 }
 
+/**
+ * 历史会话选择器。
+ *
+ * 用 `window.prompt` 之外的原生弹窗没有更好的选择（不引 UI 库），所以用
+ * `<dialog>` + 列表：能滚动、能点、能 Esc 关，够用且零依赖。
+ *
+ * 「只列当前 cwd」的会话在前面（内核标了 `current`）—— 别的目录的历史恢复进来，
+ * 工具的文件边界会和对话内容对不上。
+ */
+async function openSessions(): Promise<void> {
+  const res = await fetch('/api/sessions');
+  const data = (await res.json()) as {
+    sessions: { id: string; title: string; entries: number; mtimeMs: number; cwd: string; current: boolean }[];
+    current: string;
+  };
+
+  const dialog = document.createElement('dialog');
+  dialog.className = 'rounded-lg border border-border p-0 w-[32rem] max-w-[90vw] bg-background text-foreground';
+  const rows = data.sessions
+    .map((s) => {
+      const when = new Date(s.mtimeMs).toLocaleString();
+      const badge = s.current ? '' : '<span class="text-amber-600">（其它目录）</span>';
+      return `<li><button data-id="${s.id}" class="w-full text-left px-3 py-2 hover:bg-secondary transition-colors">
+        <div class="text-sm truncate">${escapeHtml(s.title)} ${badge}</div>
+        <div class="text-xs text-muted-foreground">${escapeHtml(s.id)} · ${s.entries} 条 · ${when}</div>
+      </button></li>`;
+    })
+    .join('');
+  dialog.innerHTML = `
+    <div class="px-3 py-2 border-b border-border text-sm font-semibold">恢复历史会话</div>
+    <ul class="max-h-[60vh] overflow-auto m-0 p-0 list-none">
+      ${rows || '<li class="px-3 py-4 text-sm text-muted-foreground">还没有历史会话</li>'}
+    </ul>
+    <div class="px-3 py-2 border-t border-border text-right">
+      <button data-close class="px-2 py-1 text-sm rounded border border-border hover:bg-secondary">关闭</button>
+    </div>`;
+
+  dialog.addEventListener('click', (event) => {
+    const target = event.target as HTMLElement;
+    if (target.closest('[data-close]') || target === dialog) {
+      dialog.close();
+      return;
+    }
+    const id = target.closest('button[data-id]')?.getAttribute('data-id');
+    if (!id) return;
+    void fetch('/api/sessions/restore', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id }),
+    }).then(() => {
+      dialog.close();
+      updateHeader();
+    });
+  });
+
+  document.body.appendChild(dialog);
+  dialog.addEventListener('close', () => dialog.remove());
+  dialog.showModal();
+}
+
+/** 列表里的标题来自会话内容，要转义（不能把用户输入当 HTML 插进去）。 */
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c,
+  );
+}
+
 render(
   html`
     <div class="w-full h-screen flex flex-col bg-background text-foreground overflow-hidden">
@@ -152,6 +219,12 @@ render(
         <div class="flex items-center gap-3">
           <span id="stats" class="text-xs text-muted-foreground">连接中…</span>
           <theme-toggle></theme-toggle>
+          <button
+            class="px-2 py-1 text-sm rounded border border-border hover:bg-secondary transition-colors"
+            @click=${openSessions}
+          >
+            历史会话
+          </button>
           <button
             class="px-2 py-1 text-sm rounded border border-border hover:bg-secondary transition-colors"
             @click=${newChat}

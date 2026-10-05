@@ -41,10 +41,15 @@ const RED = "[31m";
 const RESET = "[0m";
 const paint = (c, s) => (process.env.NO_COLOR ? s : `${c}${s}${RESET}`);
 
-/** pi 的配置目录：默认 ~/.pi/agent，可用 PI_CODING_AGENT_DIR 搬走（同 pi 的约定）。 */
+/**
+ * 配置家目录：默认 ~/.redux-agent，可用 REDUX_AGENT_DIR 搬走。
+ *
+ * 目录名不带 `pi` 前缀 —— 里面没有 pi 的代码，唯一交集是**布局照抄 pi**。
+ * 源仍然是 clj-harness 的 config.edn / .env。
+ */
 function agentDir() {
-  const env = process.env.PI_CODING_AGENT_DIR;
-  return env ? path.resolve(env) : path.join(homedir(), ".pi", "agent");
+  const env = process.env.REDUX_AGENT_DIR;
+  return env ? path.resolve(env) : path.join(homedir(), ".redux-agent");
 }
 
 const args = process.argv.slice(2);

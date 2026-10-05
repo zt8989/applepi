@@ -136,8 +136,8 @@ dispatch(action)
 
 | 文件 | 内容 | 记录类型 |
 | --- | --- | --- |
-| `.trace/<id>.init.jsonl` | 装载 | `prompt.init`、`model.init`（各一条） |
-| `.trace/<id>.jsonl` | 对话 + 轨迹 | `message`、`add`、`close` |
+| `~/.redux-agent/traces/<id>.init.jsonl` | 装载 | `prompt.init`、`model.init`（各一条） |
+| `~/.redux-agent/traces/<id>.jsonl` | 对话 + 轨迹 | `message`、`add`、`close` |
 
 `message` 记录是**零 token 回放**的关键：每条对话消息（user / assistant / toolResult /
 中途插的 system 段）都追加一行，回放时按顺序重放就重建出 `messages`。

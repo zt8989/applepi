@@ -33,7 +33,7 @@
  * 注意 **baseUrl 不在这里** —— 它在 models.json 里。auth.json 只放凭证。
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { authPath, configHome, modelsPath, settingsPath } from './config-home';
 import path from 'node:path';
 import { createProvider, createModels, type Model, type Models, type Provider } from '@earendil-works/pi-ai';
 import { envApiKeyAuth } from '@earendil-works/pi-ai';
@@ -41,22 +41,26 @@ import { streamSimple as openaiCompletionsStreamSimple } from '@earendil-works/p
 import { streamSimple as anthropicStreamSimple } from '@earendil-works/pi-ai/api/anthropic-messages';
 import { streamSimple as openaiResponsesStreamSimple } from '@earendil-works/pi-ai/api/openai-responses';
 
-/** pi 的配置目录（与 pi-coding-agent 的 `getAgentDir()` 同一套规则）。 */
+/**
+ * 配置家目录。**格式照抄 pi，位置是自己的** —— 见 `src/config-home.ts` 头部。
+ *
+ * 这三个函数保留旧名是为了少改调用点；语义上它们现在指向 `~/.redux-agent/`，不再是
+ * `~/.pi/agent/`。新代码直接用 config-home 里的 `modelsPath()` / `authPath()`。
+ */
 export function piAgentDir(): string {
-  const env = process.env['PI_CODING_AGENT_DIR'];
-  return env ? path.resolve(env) : path.join(homedir(), '.pi', 'agent');
+  return configHome();
 }
 
 export function piModelsPath(): string {
-  return path.join(piAgentDir(), 'models.json');
+  return modelsPath();
 }
 
 export function piAuthPath(): string {
-  return path.join(piAgentDir(), 'auth.json');
+  return authPath();
 }
 
 export function piSettingsPath(): string {
-  return path.join(piAgentDir(), 'settings.json');
+  return settingsPath();
 }
 
 /** models.json 里的一个 provider 条目（只声明我们真会用到的字段）。 */

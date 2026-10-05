@@ -32,6 +32,8 @@ import { abortRun } from '../run-control';
 import { renderTree, traceStats, type TraceNode, type TraceTree } from '../trace';
 import type { AgentState } from '../state';
 import type { AgentStore } from '../store';
+import type { SessionSummary } from '../config-home';
+import { loadSessionMessages, openSessionPicker } from './session-picker';
 import { getTool } from '../tools';
 
 const useColor = !process.env.NO_COLOR;
@@ -175,7 +177,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
   let showTrace = false;
   let loading = false;
   let lastLoaderMessage = '';
-  // 已经画过的消息条数：只渲染新增的那些。
+  /** 命令反馈：插在对话区顶部，6 秒后自动消失（不占输入区）。 */
+  const notice = { text: '' };
+  let noticeUntil = 0;
 
   const refresh = (): void => {
     const state = store.getState();
@@ -185,7 +189,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // （早前这里只渲染「新增的那几条」，靠 renderedMessages 游标 —— 那个游标每帧都被
     //  推到最新，等于永远从末尾开始渲染，于是对话区什么都不显示。ScrollView 只重画
     //  变化区域，这个 bug 才暴露出来。）
-    transcript.setText(renderTranscript(state, 0));
+    // 提示过期就清掉（6 秒后自动消失，不留一行孤儿文本）。
+    if (notice.text !== '' && Date.now() > noticeUntil) notice.text = '';
+    transcript.setText(renderTranscript(state, 0, notice));
     if (showTrace) {
       tracePanel.setText(
         state.trace.order.length === 0
@@ -233,15 +239,84 @@ export async function runTui(options: TuiOptions): Promise<number> {
   };
   tui.addInputListener(onInput);
 
-  editor.onSubmit = (text: string) => {
-    const input = text.trim();
+  editor.onSubmit = (rawText: string) => {
+    const input = rawText.trim();
     if (!input) return;
+    // 斜杠命令：不发给模型。
+    if (input.startsWith('/')) {
+      runCommand(input.slice(1));
+      return;
+    }
     if (store.getState().phase !== 'idle') {
       lastLoaderMessage = `${yellow('上一回合还没结束（Ctrl-C 可中断）')}`;
       refresh();
       return;
     }
     send(input);
+  };
+
+  /**
+   * 斜杠命令。不发给模型 —— 那是「跟模型说」的通道，命令是「跟界面说」的。
+   * 未知命令回一行提示，不静默吞掉（否则用户以为自己已经在跟模型说了）。
+   */
+  const runCommand = (raw: string): void => {
+    const [name = '', ...rest] = raw.trim().split(/\s+/);
+    const arg = rest.join(' ');
+    switch (name) {
+      case 'sessions':
+      case 'resume': {
+        // 环在跑时不能换会话（正在写消息）。
+        if (store.getState().phase !== 'idle') {
+          notify(yellow('上一回合还没结束，先 Ctrl-C 中断再恢复历史'));
+          return;
+        }
+        openSessionPicker({
+          tui,
+          onPick: (session) => restoreSession(session),
+        });
+        return;
+      }
+      case 'new':
+        store.dispatch({ type: 'conversation.reset' });
+        notify(dim('已开新对话（历史仍在 sessions/ 里，随时 /sessions 回来）'));
+        return;
+      case 'help':
+        notify(
+          [
+            `${bold('/sessions')}  恢复历史会话（弹窗选择，零 token）`,
+            `${bold('/new')}      开新对话`,
+            `${bold('/help')}     这份列表`,
+          ].join('\n'),
+        );
+        return;
+      default:
+        notify(yellow(`未知命令 /${name}（试试 /help）`));
+    }
+    void arg;
+  };
+
+  /** 在对话区插一行提示（命令结果、错误）。 */
+  const notify = (text: string): void => {
+    notice.text = text;
+    noticeUntil = Date.now() + 6000;
+    refresh();
+  };
+
+  /**
+   * 恢复一个历史会话：把它的消息灌回 state。**零 token** —— 不重跑模型，
+   * 纯粹是把 JSONL 里读到的内容搬进状态树。
+   *
+   * 轨迹**不**跟着恢复：轨迹是那一轮的产物（时间线、失败、重试），和「对话内容」是两份
+   * 并行的记录，历史轨迹在 `~/.redux-agent/traces/<id>.jsonl`（`/trace` 面板只看当前轮）。
+   */
+  const restoreSession = (session: SessionSummary): void => {
+    const messages = loadSessionMessages(session);
+    store.dispatch({ type: 'conversation.reset' });
+    for (const message of messages) {
+      store.dispatch({ type: 'session.restored', message });
+    }
+    notify(dim(`已恢复 ${session.id}（${messages.length} 条消息，未重跑模型）`));
+    refresh();
   };
 
   const send = (text: string): void => {
@@ -315,9 +390,11 @@ function waitForIdleOrExit(store: AgentStore): Promise<void> {
   });
 }
 
-/** 把新增的消息渲染成文本块。 */
-function renderTranscript(state: AgentState, from: number): string {
+/** 把整段对话渲染成文本块（`from` 恒为 0：滚动交给 ScrollView）。 */
+function renderTranscript(state: AgentState, from: number, notice?: { text: string }): string {
   const lines: string[] = [];
+  // 命令反馈贴在最上面，6 秒后自动消失。
+  if (notice && notice.text !== '') lines.push(notice.text, '');
   for (let i = from; i < state.messages.length; i += 1) {
     const message = state.messages[i];
     if (!message) continue;

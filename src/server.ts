@@ -22,6 +22,8 @@ import path from 'node:path';
 import { createKernel, defaultSystemPrompt, type Kernel, type KernelOptions } from './kernel';
 import { defaultProviderSpec } from './provider';
 import { abortRun } from './run-control';
+import { listSessions } from './config-home';
+import { sessionTitle } from './session-file';
 import { getTools } from './tools';
 import { traceStats } from './trace';
 import { providerNames } from './provider';
@@ -251,7 +253,38 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
       return;
     }
 
-    // ── 工具清单（界面展示用） ──
+    // ── 历史会话（Web 侧的「恢复历史」用） ──
+    if (url.pathname === '/api/sessions') {
+      sendJson(res, 200, {
+        sessions: listSessions().map((s) => ({
+          id: s.id,
+          cwd: s.cwd,
+          mtimeMs: s.mtimeMs,
+          createdAt: s.createdAt ?? null,
+          entries: s.entries,
+          title: sessionTitle(s.file),
+          // 只有当前 cwd 的会话才标成「可以在这里继续」—— 别的项目的历史恢复进来，
+          // 工具的文件边界会和对话内容对不上。
+          current: path.resolve(s.cwd) === cwd,
+        })),
+        current: kernel.sessionId,
+      });
+      return;
+    }
+
+    // ── 恢复一个历史会话（零 token，不重跑模型） ──
+    if (url.pathname === '/api/sessions/restore' && req.method === 'POST') {
+      const body = (await readJson(req)) as { id?: unknown };
+      const id = typeof body.id === 'string' ? body.id : '';
+      const target = id ? listSessions().find((s) => s.id === id) : undefined;
+      if (!target) {
+        sendJson(res, 404, { error: `找不到会话 ${id || '(未给 id)'}` });
+        return;
+      }
+      sendJson(res, 200, kernel.restoreSession(target.file));
+      return;
+    }
+
     if (url.pathname === '/api/tools') {
       sendJson(res, 200, {
         cwd,
