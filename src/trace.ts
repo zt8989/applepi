@@ -324,6 +324,37 @@ function metaSuffix(node: TraceNode): string {
 
 /**
  * 把树渲染成多行字符串。最后一行是 tip 标记（类似 git log 显示 HEAD）。
+ *
+ * ## 渲染策略：单链拉平，只在真有分叉时画树
+ *
+ * 一次**正常**对话在树里是一条长链：user → attempt → result → tool → result →
+ * attempt → result …。按 git 那样层层缩进，它会变成 5~7 层的阶梯，右半边全空着，
+ * 而它其实**没有任何分支** —— 树形在这里是噪声。
+ *
+ * 所以规则很简单：**父节点只有一个孩子时，这一层不缩进**（就是列表里的一行）。
+ * 只有出现第二个孩子（= 真的有分叉或并列）才切回树枝画法：
+ *
+ *   - 重试：同父下第 2 个及以后的 llm.attempt；
+ *   - 并行工具：一个 llm.result 下多个 tool.attempt。
+ *
+ * 根节点（prompt.* / model.init / user 那些「各自起头」的节点）一律平铺 ——
+ * 它们本来就是并列的一串，缩进它们只会让人误以为有父子关系。
+ *
+ * 效果：正常对话是一张平铺的列表，出问题时才在出问题的那里长出一棵小树。
+ *
+ * ```
+ * ✓ n1 user: 算一下 (3+4)*6
+ * ✓ n2 llm.attempt: 第 1 次尝试
+ * ✓ n3 llm.result: 我来算。
+ * ├── ✓ n4 tool.attempt: bash
+ * │   └── ✓ n5 tool.result: 42
+ * └── ✓ n6 tool.attempt: read
+ *     └── ✓ n7 tool.result: …
+ * ✓ n8 llm.attempt: 第 2 次尝试（模型看过工具结果）
+ * ✓ n9 llm.result: 42
+ * ```
+ *
+ * 树本身一点没变（还是同一棵树、同一套父子关系），只是**画法**不同。
  */
 export function renderTree(tree: TraceTree, options: TreeRenderOptions = {}): string {
   // 树枝前缀恒为 3 字符（'├─ '），竖线也画在同一列，所以默认 3。
@@ -336,8 +367,13 @@ export function renderTree(tree: TraceTree, options: TreeRenderOptions = {}): st
     const children = childrenOf(tree, parentId);
     children.forEach((node, index) => {
       const last = index === children.length - 1;
-      // 根节点没有树枝前缀。
-      const branch = isRoot ? '' : last ? `${'└'}${'─'.repeat(branchWidth - 1)} ` : `${'├'}${'─'.repeat(branchWidth - 1)} `;
+      //
+      // **这一行到底画不画树枝**，是这套渲染的全部规则：
+      //   - 根：平铺（它们本来就并列，缩进会伪造出父子关系）；
+      //   - 单孩子：继续平铺（一条链，缩进没有信息量）；
+      //   - 多孩子：切回树枝（这里才是真分叉/并列，缩进开始有意义）。
+      const flat = isRoot || children.length === 1;
+      const branch = flat ? '' : last ? `${'└'}${'─'.repeat(branchWidth - 1)} ` : `${'├'}${'─'.repeat(branchWidth - 1)} `;
       // 续行占位必须与树枝前缀同宽，竖线才不会跟子节点错开。
       const mark = statusMark(node);
       const elapsed =
@@ -346,9 +382,10 @@ export function renderTree(tree: TraceTree, options: TreeRenderOptions = {}): st
         `${prefix}${branch}${mark} ${marks[node.id] ?? ''}${node.id} ${node.kind}: ${node.label}` +
         `${elapsed}${metaSuffix(node)}`;
       lines.push(truncate(head, maxWidth));
-      // 竖线画在「树枝」那一列，所以占位宽度与 branchPrefix 一致。
-      const childPrefix = isRoot
-        ? ''
+      // 平铺时**不给子节点加前缀** —— 缩进必须停在分叉点为止，否则「拉平」就白做了。
+      // 画了树枝才需要给子节点留出竖线的那一列（宽度与 branch 对齐，否则竖线会错开）。
+      const childPrefix = flat
+        ? prefix
         : `${prefix}${last ? ' '.repeat(branchWidth) : `│${' '.repeat(branchWidth - 1)}`}`;
       if (options.collapsed?.has(node.id)) {
         const hidden = childrenOf(tree, node.id).length;
