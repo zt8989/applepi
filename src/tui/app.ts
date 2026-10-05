@@ -24,6 +24,8 @@ import {
   TuiAltScreen,
   VStack,
   matchesKey,
+  CombinedAutocompleteProvider,
+  type SlashCommand,
   type ViewportTUI,
   type EditorTheme,
   type TuiInputListener,
@@ -142,14 +144,43 @@ function padToWidth(text: string, width: number): string {
   return visible >= width ? text : text + ' '.repeat(width - visible);
 }
 
+/**
+ * 斜杠命令表——**唯一的真相**。
+ *
+ * 补全（`setAutocompleteProvider`）和 `/help` 都念这一份，所以加命令只改这里一处；
+ * 以前 `/help` 里手抄了一份，两边会漂移。
+ */
+const SLASH_COMMANDS: SlashCommand[] = [
+  {
+    name: 'sessions',
+    description: '恢复历史会话（弹窗选择，零 token 不重跑模型）',
+  },
+  {
+    name: 'resume',
+    description: '同 /sessions（方便记）',
+  },
+  { name: 'new', description: '开新对话（历史仍留在 sessions/ 里）' },
+  { name: 'help', description: '列出全部命令' },
+];
+
+/**
+ * 编辑器的配色。`selectList` 是 **`SelectListTheme`** —— 补全弹窗复用的就是它
+ * （不是另一套 `selected` / `unselected` 形状）。
+ *
+ * 这里**不能**写 `as unknown as EditorTheme`：那个 cast 会把形状不匹配压成运行时崩溃
+ * （`this.theme.selectedText is not a function`），而补全列表渲染失败在界面上只表现为
+ * 「打 `/` 什么都没弹」—— tsconfig 早就想告诉我们，是 cast 捂住了它的嘴。
+ */
 const EDITOR_THEME: EditorTheme = {
   borderColor: (s: string) => dim(s),
   selectList: {
-    selected: (s: string) => cyan(s),
-    unselected: (s: string) => s,
+    selectedPrefix: (s: string) => cyan(s),
+    selectedText: (s: string) => bold(s),
     description: (s: string) => dim(s),
+    scrollInfo: (s: string) => dim(s),
+    noMatch: (s: string) => dim(s),
   },
-} as unknown as EditorTheme;
+};
 
 export interface TuiOptions {
   store: AgentStore;
@@ -173,6 +204,24 @@ export async function runTui(options: TuiOptions): Promise<number> {
   loader.setIndicator({ frames: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] });
 
   const editor = new Editor(tui, EDITOR_THEME);
+  // 补全：`/` 触发命令列表（带说明），路径位置触发文件补全。
+  //
+  // 没有它就只能盲打 —— 用户得先记住有哪些命令。装上之后打 `/` 会直接列出，
+  // Tab/回车选定；打路径时也会补全（`read` 这种工具名反而不用记）。
+  //
+  // **`triggerCharacters` 必须自己给**：`setAutocompleteProvider` 会把它设成
+  // `provider.triggerCharacters ?? []`，而 `CombinedAutocompleteProvider` 没声明这个字段
+  // （它的默认触发字符是 `@` `#`，`/` 不在里面）。不给的话打 `/` 什么都不会弹，
+  // 看起来就像补全根本没装上 —— 这个坑很隐蔽。
+  // 类上没声明 `triggerCharacters`（接口上才有），所以用一层薄包装把它补上 ——
+  // 其余方法原样转发。
+  const base = new CombinedAutocompleteProvider(SLASH_COMMANDS, process.cwd());
+  editor.setAutocompleteProvider({
+    triggerCharacters: ['/', '@'],
+    getSuggestions: (...args) => base.getSuggestions(...args),
+    applyCompletion: (...args) => base.applyCompletion(...args),
+    shouldTriggerFileCompletion: (...args) => base.shouldTriggerFileCompletion?.(...args) ?? false,
+  });
 
   let showTrace = false;
   let loading = false;
@@ -281,12 +330,12 @@ export async function runTui(options: TuiOptions): Promise<number> {
         notify(dim('已开新对话（历史仍在 sessions/ 里，随时 /sessions 回来）'));
         return;
       case 'help':
+        // 念同一份 SLASH_COMMANDS —— 手抄一份迟早会和补全列表漂移。
         notify(
-          [
-            `${bold('/sessions')}  恢复历史会话（弹窗选择，零 token）`,
-            `${bold('/new')}      开新对话`,
-            `${bold('/help')}     这份列表`,
-          ].join('\n'),
+          SLASH_COMMANDS.map(
+            (c) =>
+              `${bold(`/${c.name}`)}${' '.repeat(Math.max(1, 10 - c.name.length))}${c.description ?? ''}`,
+          ).join('\n'),
         );
         return;
       default:
@@ -339,11 +388,15 @@ export async function runTui(options: TuiOptions): Promise<number> {
   // 用函数声明（不是 const 箭头）：onInput 里会调它，const 有 TDZ，声明会提升。
   function applyLayout(): void {
     // 对话区是**唯一**可伸缩的（basis 0 + grow 1），其余按内容自适应。
-    // basis 给死会把对话区压扁：Editor 自己要画上下两条横线，实际占的比 basis 多。
+    //
+    // 下面这三个**不给 `basis`**：给了就把固有高度钉死成那个数（`layout.js` 里是
+    // `typeof entry.basis === 'number' ? entry.basis : measureHeight(...)`），
+    // 于是编辑器永远只有 3 行 —— 它的补全列表（自己渲染成额外行）就画不出来，
+    // 打 `/` 看着像什么都没发生。不给则每帧渲染一遍量真实高度，补全展开时自然变高。
     const bottom = new VStack([
-      ...(showTrace ? [{ component: tracePanel, basis: 0, grow: 0, minSize: 1 }] : []),
-      { component: loader, basis: 0, grow: 0, minSize: 1 },
-      { component: editor, basis: 0, grow: 0, minSize: 3 },
+      ...(showTrace ? [{ component: tracePanel, minSize: 1 }] : []),
+      { component: loader, minSize: 1 },
+      { component: editor, minSize: 3 },
     ]);
     tui.setLayoutRoot(
       new VStack([
