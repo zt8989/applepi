@@ -1,0 +1,107 @@
+# 环
+
+## 环长什么样
+
+```
+                      dispatch(Action)
+  TUI / Web UI ─────────────────────────────► agentReducer（纯函数）
+       ▲                                          │
+       │                                          │ 算状态 + 查「这个 action 的 effect 是谁」
+       │  store.subscribe(state)                   ▼
+       │                                 redux-loop 的 install() enhancer
+       │                                          │ 执行 Cmd.run
+       │                                          ▼
+       └────────── Action 回流 ◄───────── LLM 流式调用 / 工具执行
+                   （Cmd.dispatch）
+```
+
+reducer 里没有一个 `await`、没有一个 `fetch`。真正干活的 `Cmd.run` 把结果（包括 token 增量）
+作为 action 再 dispatch 回来。
+
+## 三张表
+
+| 表 | 在哪 | 是什么 |
+| --- | --- | --- |
+| transitions | `reducer.ts` 的 `transitions` | action → 下一个状态（纯函数） |
+| 接线（effects） | `reducer.ts` 的 `loopWiring` | action → Cmd[]（纯数据，无 `if`） |
+| effect 表 | `effects.ts` 的 `createPiAiEffectTable` | `agent.run` / `tool.call` 的真正实现 |
+
+15 种 action 里，`transitions` 全部有对应项。其中 **`llm.giveup` 目前没有任何地方 dispatch**
+（`llm.failed` 在重试用尽时直接把相位推到 `idle` 就够了），留着是给「显式收工」用的备用口。
+
+## 环上每一步
+
+| 进来的 Action | 状态迁移 | 接线发出什么 |
+| --- | --- | --- |
+| `user.message` | 追加 user 消息，开一个 `user` 节点，相位 → `thinking` | `Cmd.action(agent.run)` |
+| `agent.run` | **开一个 `llm.attempt` 节点**（parent = 此刻 tip），相位 → `thinking` | `Cmd.run(streamFn)` |
+| `llm.started` | 流式累积清零，`streamSeq` +1 | 无 |
+| `llm.delta` / `llm.thinking` | 累积流式文本 | 无（渲染用） |
+| `llm.done`（有 toolCall） | 追加 assistant 消息，开 `llm.result`，相位 → `calling-tools` | `Cmd.run(执行工具)` |
+| `llm.done`（无 toolCall） | 开 `llm.result`，相位 → `idle`，**环在这里闭合** | 无 |
+| `tool.start` | 开一个 `tool.attempt` 节点 | 无 |
+| `tool.result` | 开 `tool.result`（失败则开 `error`），并入 messages | 无 |
+| `tool.batch.done` | 相位 → `thinking`（撞上限则 → `idle` + `stop` 节点） | `Cmd.action(agent.run)` |
+| `llm.failed`（可重试且还有次数） | 开 `error` 节点，**相位留在 `thinking`** | `Cmd.action(agent.run)` |
+| `llm.failed`（重试用尽 / 不可重试） | 开 `error` 节点，相位 → `idle` | 无 |
+| `trace.persisted` | 落盘游标前移 | 无 |
+
+## 接线表里几处刻意的「绕圈」
+
+`user.message`、`llm.failed`（重试）、`tool.batch.done` 三处发的是 `Cmd.action(agent.run)`
+而不是直接调 `runAgent()`。原因是：**只有让 reducer 再看到一次 `agent.run`，它的迁移才会开出
+一个新的 `llm.attempt` 节点。** 直接调下一个 effect 的话，这一轮 LLM 在树上就没有节点，
+它的 `llm.result` 会变成孤儿（parent 为 null，浮在根上）。
+
+`llm.done` 是唯一例外：它发的是 `Cmd.run(执行工具)`。因为 `llm.done` 是从 `Cmd.run` 的
+`successActionCreator` 进来的，此时 redux-loop 的 `cmdsQueue` 已经被外层 `dispatch` 取走，
+从这里再 dispatch 一个 action，它触发的 Cmd 没人冲刷 —— 环会停在 `calling-tools`。
+工具的 `tool.attempt` 节点由 `tool/start` 的迁移开，而 `tool/start` 本来就是
+`executeToolCalls` 内部 dispatch 的第一条 action，所以不会漏。
+
+## 接线读的是**迁移之后**的状态
+
+`createAgentReducer` 里 `emit(typed, nextState)` 传的是 `nextState`，不是 `state`。
+
+原因：`llm.failed` 判出的 `retrying` 是它的迁移**刚算出来**的。传旧状态的话，接线永远看不到
+本次 action 造成的新事实，重试就发不出去。
+
+这也是为什么 `llm.done` 的接线里不能用 `phase === 'thinking'` 判定 ——
+`llm.done` 的迁移已经把相位推到 `calling-tools` 了，那个条件永远为假，工具永远不跑。
+该跑的判据是「这次确实带工具调用」。
+
+## 超时与重试
+
+超时是 effect 侧的事（`effects.ts`）：
+
+- 每次 LLM 调用起一个 `setTimeout`，到点 `controller.abort(new LlmTimeoutError(...))`。
+- 流被 abort 后没有 `done` 事件，所以 `callLlm` **主动**检查 `timedOut` / `signal.aborted` 并抛出
+  真正的原因 —— 否则会落到下面那句「流在 done 之前结束」，报一个与真实原因无关的错误，
+  超时也就不会被判定为可重试。
+- `LlmTimeoutError` 是一个专门的 Error 类型，分类时不必去猜文案。
+
+分类与重试判定：
+
+| 类别 | 可重试 | 判据 |
+| --- | --- | --- |
+| `timeout` | ✓ | `LlmTimeoutError`，或文案含 timeout / 超时 |
+| `network` | ✓ | fetch failed / ECONNRESET / socket hang up / 网络 |
+| `auth` | ✗ | 401 / 403 / api key / 鉴权 |
+| `model` | ✗ | model / 模型 |
+| `aborted` | ✗ | 手动中断（Ctrl-C） |
+| `unknown` | ✗ | 兜底 |
+
+`llm.failed` 的迁移做判定：可重试 **且** `llmAttempts < maxLlmAttempts`（默认 2，即失败后重试一次）
+→ 相位留在 `thinking`；否则 → `idle`。接线看到 `state.retrying` 为真就补一条 `agent.run`。
+
+一轮结束（`tool.batch.done`）时 `llmAttempts` 归零，下一轮又从第 1 次尝试开始。
+
+## 轮数上限
+
+`tool.batch.done` 时若 `turns >= maxTurns`（默认 25），开一个 `stop` 节点（它是闭合的，
+所以推进 tip）、相位 → `idle`。这一步必须在 reducer 里闭合，否则 `waitForIdle` 永远等不到。
+
+## 相关
+
+- 这些节点为什么长成那样 → [trace](trace.md)
+- 谁在调 `agent.run` → [kernel](kernel.md)

@@ -1,171 +1,44 @@
 # event-loop-agent
 
-用 **Redux Loop**（[redux-loop](https://github.com/redux-loop/redux-loop)，Elm Architecture 移植到
-Redux 的那个开源库）做 **Agent Loop**，模型走 **Pi**（`@earendil-works/pi-ai`，与你的 DeepSeek
-Harness 同一套 provider 装配），配一个 **pi-tui** 终端界面和一个用 **pi-web-ui** 做的网页界面。
+## 介绍
 
-Agent 不是一个对象，也不是一个类 —— 它只是 `agent.run` 这一个 Action，和 `tool.call`、
-`user.message` 完全平级。两个界面也只是渲染层：它们不驱动环，环跑在 Redux 里。
+用 **Redux Loop**（Elm Architecture 移植到 Redux 的那个库）写的一个 agent 内核：**没有 while 循环的
+agent** —— 循环不是写出来的，是 reducer 与副作用互相 dispatch 出来的环。
 
-执行历史不是一条流水，而是一棵**像 git log 一样的树**：一次尝试一个节点，失败和超时也留在树上，
-重试是分叉。见下面「轨迹树」。
+三件事让它和一般的 agent 写法不一样：
 
-## 环长什么样
+- **执行历史是一棵树**，像 `git log` 一样，一次尝试一个节点。失败和超时也留在树上，
+  重试就是一次分叉：新尝试的父 id 指向**超时前**的那个节点。
+- **错误也持久化。** 错误节点和成功节点走同一条路落盘（追加写 JSONL，崩了只丢最后半行），
+  所以「失败过」不会随着对话滚出屏幕而消失。
+- **内核只有一份，跑在 Node 里。** TUI 和 Web 是它的两个渲染层，工具（`read` / `write` / `edit` /
+  `bash`，直接用 Pi 官方那套）摸的是真实文件系统。
 
-```
-                      dispatch(Action)
-  CLI / Web UI ─────────────────────────────► agentReducer（纯函数）
-       ▲                                          │
-       │                                          │ 算状态 + 查「这个 action 的 effect 是谁」
-       │  store.subscribe(state, action)          ▼
-       │                                 redux-loop 的 install() enhancer
-       │                                          │ 执行 Cmd.run
-       │                                          ▼
-       └────────── Action 回流 ◄───────── LLM 流式调用 / 工具执行
-                   （Cmd.dispatch）
-```
+**本文只讲怎么装、怎么起、怎么测。** 它是什么、内部怎么转、接口有哪些见
+[`docs/architecture.md`](docs/architecture.md)。文档分工：README 是入口，
+`docs/architecture/` 是现状（对着代码核过，带快照 commit）。
 
-reducer 里没有一个 `await`、没有一个 `fetch`：它只做两件事 —— **算下一个状态**、**把副作用描述成
-Cmd 丢出去**。真正干活的 `Cmd.run` 把结果（包括 token 增量）作为 action 再 dispatch 回来。
+## 前置准备
 
-### 环上每一步
+- **Node.js 20+**（pi-tui 要求 ≥22.19，实测 24.9 可用）
+- **npm**
+- 真实跑模型时需要对应 provider 的 API key（默认 DeepSeek，读 `.env`）
 
-| 进来的 Action | 状态迁移 | 接线发出什么 |
-| --- | --- | --- |
-| `user.message` | 追加 user 消息，相位 → `thinking` | `[agent.run]` |
-| `agent.run` | 相位 → `thinking` | `[llm.done]`（effect 回流） |
-| `llm.delta` / `llm.thinking` | 累积流式文本 | 无（渲染用） |
-| `llm.started` | 流式累积清零，`streamSeq` 加一 | 无 |
-| `llm.delta` / `llm.thinking` | 累积流式文本 | 无（渲染用） |
-| `llm.done`（有 toolCall） | 追加 assistant 消息，相位 → `calling-tools` | `Cmd.action(tool.call)` |
-| `llm.done`（无 toolCall） | 相位 → `idle`，**环在这里闭合** | 无 |
-| `tool.call` | 记下待执行的工具调用 | `[tool.batch.done]`（effect 回流） |
-| `tool/start` / `tool.result` | 记 executing / `toolResult` 并入 messages | 无 |
-| `tool.batch.done` | 相位 → `thinking`（撞上限则回 `idle`） | `[agent.run]` ← 回到 LLM |
-| `llm.failed`（可重试且还有次数） | 树上挂 error 节点，**相位留在 `thinking`** | `[agent.run]` ← 自动重试 |
-| `llm.failed`（重试用尽 / 不可重试） | 树上挂 error 节点，相位 → `idle` | 无（环闭合） |
-
-`user.message → LLM → 工具 → LLM → … → idle` 就是 agent 循环；它由数据（Action）驱动，
-因此每一步都能在测试里断言，不需要 mock 一个 while 循环。
-
-## 一张 reducer，一张 effect 表
-
-这是整个设计的核心：**reducer 里没有 `if (kind === 'agent')`**，Agent 只是一个 Action
-（`agent.run`）。谁来执行它，是**接线**时注入的 effect 表决定的。
-
-接线的形状（`loopWiring`）是纯数据，没有一行 `if`：
-
-| 进来的 Action | 接线发出什么 |
-| --- | --- |
-| `user.message` | `Cmd.action(agent.run)` ← 让迁移先开出一个 attempt 节点 |
-| `agent.run` | `Cmd.run(streamFn)` |
-| `llm.started` | 无（纯状态变更：流式累积清零） |
-| `llm.done` | 有工具时 `Cmd.run(执行工具)` |
-| `llm.failed` | 可重试且还有次数 → `Cmd.action(agent.run)`；否则无 |
-| `tool.call` | `Cmd.run(执行工具)` |
-| `tool.batch.done` | `Cmd.action(agent.run)` ← 环在这里闭合 |
-
-几处刻意的「绕一圈」（`Cmd.action` 而不是直接调下一个 effect）：`user.message`、
-`llm.failed`（重试）、`tool.batch.done`。它们都要让 reducer **再看到一次** `agent.run`，
-好让 `agent.run` 的迁移在轨迹树上开出一个新的 `llm.attempt` 节点。直接调下一个 effect 的话，
-这一轮 LLM 在树上就没有节点，result 会变成孤儿。
-
-`llm.done` 是唯一例外：它发的是 `Cmd.run(执行工具)` 而不是绕一圈。因为 `llm.done` 是从
-`Cmd.run` 的 `successActionCreator` 进来的，此时 redux-loop 的 `cmdsQueue` 已经被外层
-`dispatch` 取走，从这里再 dispatch 一个 action，它触发的 Cmd 没人冲刷 —— 环会停在
-`calling-tools`。工具的 attempt 节点由 `tool/start` 的迁移开，而 `tool/start` 本来就是
-`executeToolCalls` 内部 dispatch 的第一条 action，所以不会漏。
-
-TUI 和 Web 共用**同一个 reducer、同一个状态树、同一张 effect 表**。
-## 轨迹树（trace tree）：像 git log 一样的执行历史
-
-Agent 的执行历史不是一条流水。`src/trace.ts` 把它做成**一棵树**，概念直接照搬 git：
-
-| git | 这里 |
-| --- | --- |
-| commit 有 parent | 每个节点有 `parentId` |
-| commit 有分支（`--graph` 里的 `\|` `/` `\`） | **重试就是分支** |
-| HEAD 指向当前所在的线 | `tipId` = 最后一条闭合节点 |
-| `git reflog` 只追加不改写 | `.trace/<id>.jsonl` 追加写 JSONL |
-
-### 关键规则：attempt 的父 id 取「发起时」的 tip
-
-这是最容易做错的地方，所以写成了不变量：
-
-> **只有 `user` / `llm.result` / `tool.result` / `stop` 这四类节点推进 tip。**
-> `llm.attempt`、`tool.attempt` 是容器（分叉点），`error` 是失败记录 —— 它们**都不推进 tip**。
-
-于是 LLM 第一次调用超时后的重试，树上长这样：
-
-```
-✓ n1 user: 今天几号？
-├── ✗ n2 llm.attempt: 第 1 次尝试 407ms
-│  └── ✗ n3 error: LLM 调用超时（400ms） (kind=timeout)
-├── ✗ n4 llm.attempt: 第 2 次尝试（重试） 414ms
-│  └── ✗ n5 error: LLM 调用超时（400ms） (kind=timeout)
-└── ✓ n6 llm.attempt: 第 3 次尝试（重试） 1.2s
-   └── ✓ n7 llm.result: 10 月 5 日
-HEAD → n7
-```
-
-注意 `n4` 的父 id 是 **`n1`**（超时前的那个节点），不是 `n3`（失败节点）。
-失败与重试是**兄弟**，这正是 git 的语义 —— 如果错误节点推进了 tip，重试就会被挂到
-「错误的子节点才是正史」下面，那就不是 git 了。
-
-环上对应的那一步：`llm.failed` 判出「可重试且还有次数」时，把相位**留在 `thinking`**
-（环不闭合），接线看到就补一条 `agent.run`；而 `agent.run` 的迁移开新节点时取的正是
-此刻的 tip —— 那个从没动过的 `n1`。
-
-### 错误也持久化
-
-error 节点和成功节点走**同一条路**落盘，所以「失败过」这件事不会随着对话滚出屏幕而消失。
-`createTracePersistence` 是个 store 订阅器（不是 effect 表里的一行），因为它几乎每次 dispatch 都要跑，
-而且**对成功与失败一视同仁** —— 这正是需求要的那种语义：出错的那条路径也必须落盘。
-
-写盘失败（磁盘满、权限）不会打断环：游标不推进，下次状态变化再试一遍。
-
-回放时坏行直接跳过 —— 崩溃只会丢掉最后没写完的那半行。
-
-### 在哪儿看
-
-- **TUI**：`Ctrl+T` 切换轨迹面板；一次性模式（`-p`）直接把纯文本的树打到 stdout。
-- **Web**：底部可折叠的「轨迹」条，展开就是同一棵树（两个界面共用 `renderTree`）。
-- **文件**：`.trace/<sessionId>.jsonl`，一行一个节点（`add` / `close` 两种 op）。
-
-`src/trace.ts` 是纯函数：没有 IO、没有 `Date.now()`、没有随机数，节点 id 由 reducer 单调自增。
-所以同一串 Action 必然产出同一棵树 —— 能在测试里逐字断言，也能在 TUI 侧从 JSONL 回放重建。
-
-## 一个内核，两个界面
-
-环**只有一份**，跑在 Node 里（`src/kernel.ts` 的 `createKernel()`）。TUI 和 Web 都是它的渲染层：
-
-```
-                    ┌─────────────────────────────┐
-                    │  内核（Node，唯一的 store）    │
-                    │  Redux Loop + LLM + 工具执行   │
-                    └──────┬───────────────┬──────┘
-             订阅 state     │               │  POST 消息
-                    ┌──────▼──────┐  ┌─────▼────────┐
-                    │ TUI(pi-tui)│  │ Web(浏览器)   │
-                    │  直接读     │  │ SSE 订阅      │
-                    │  store      │  │ POST /api/... │
-                    └─────────────┘  └──────────────┘
-```
-
-这不是为了好看，是必需的：环有副作用（真调模型、真读写文件、真起子进程）。
-浏览器里如果也跑一份，就会出现两边都发起 LLM 调用、消息流不一致、文件被写两次。
-
-### 终端（pi-tui）
+## 运行
 
 ```bash
 npm install
 cp .env.example .env        # 填入 DEEPSEEK_API_KEY
+```
 
-npm start                          # 交互式（pi-tui 差分渲染）
-npm start -- -p "今天几号？"        # 跑一条就退出，顺带打印轨迹树
-npm start -- --demo                # 不打网络：pi-ai 自带的 faux provider
+**终端界面**（pi-tui）：
+
+```bash
+npm start                                  # 交互式
+npm start -- -p "今天几号？"               # 跑一条就退出，顺带打印轨迹树
+npm start -- --demo                        # 不打网络：pi-ai 自带的 faux provider
 npm start -- --llm-timeout 30000 --attempts 3   # 短超时 + 三次尝试，好看到重试分叉
-npm start -- --cwd ../other        # 工具的文件操作边界换到别的目录
+npm start -- --cwd ../other                # 工具的文件操作边界换到别的目录
 ```
 
 界面里：`Ctrl+T` 切换轨迹面板，`Ctrl+C` 中断当前回合（空闲时退出）。
@@ -174,176 +47,45 @@ npm start -- --cwd ../other        # 工具的文件操作边界换到别的目�
 `--llm-timeout`、`--attempts`、`--api-key`、`--demo`、`--no-trace`、`--session`、
 `--cwd`、`--trace-dir`、`-h/--help`。
 
-### Web（pi-web-ui，渲染层）
+**网页界面**（同一个内核，浏览器只当渲染层）：
 
 ```bash
-npm run web:serve                  # 构建前端 + 起 Node 内核 → http://localhost:5273
-npm run serve -- --demo           # 只起内核（前端已构建过）
-npm run serve -- --cwd D:/proj    # 工具的文件操作边界
+npm run web:serve                  # 构建前端 + 起内核 → http://localhost:5273
+npm run serve                      # 只起内核（前端已构建过）
+npm run serve -- --demo            # 离线 demo，不用 key
+npm run serve -- --cwd D:/proj     # 工具的文件操作边界
+npm run web                        # 只开 vite（前端热更新；此时没有内核，页面连不上）
 ```
 
-浏览器这一侧**不跑环**，只做三件事：SSE 订阅状态树、POST 发消息、把状态画出来。
-所以 `read` / `write` / `edit` / `bash` 摸的是**真实文件系统**，路径边界由 `--cwd` 决定。
+**只起内核、页面发构建产物**（一个进程、一个地址）：
 
-接口：
-
-| 端点 | 作用 |
-| --- | --- |
-| `GET /api/events` | SSE：状态一变就推一帧（含轨迹树） |
-| `GET /api/snapshot` | 首次进入拿全量状态 |
-| `POST /api/message` | 发一句话（环在跑时返回 409，不会双跑） |
-| `POST /api/abort` | 中断当前回合 |
-| `POST /api/model` | 换模型 |
-| `POST /api/reset` | 新对话 |
-| `GET /api/tools` | 工具清单 + cwd |
-## Web 侧怎么接的（为什么不需要 pi-agent-core）
-
-pi-web-ui 唯一碰「session」的地方是 `AgentInterface`，而它要的是**鸭子类型**。浏览器侧由
-`web/src/remote-session.ts` 提供：
-
-```ts
-session.state.messages / .tools / .model / .thinkingLevel
-session.state.isStreaming / .pendingToolCalls
-session.subscribe(cb) => unsubscribe   // 唯一的更新驱动
-session.prompt(input)                  // 发送
-session.abort()                        // 停止
+```bash
+npm run web:build                  # 产出 web/dist
+npm run serve                      # http://localhost:5273 既是页面也是 API
 ```
 
-它只 `switch` 7 种 lifecycle 事件（`message_start` / `turn_start` / `turn_end` /
-`agent_start` / `message_end` / `agent_end` / `message_update`），其余一概不看。
-
-`remote-session.ts` 做三件事：
-
-1. **SSE → 状态**：订阅 `/api/events`，每帧存进 `snapshot`。
-2. **状态 → lifecycle 事件**：对比前后两帧，看消息数变了没、`streamingText` 变了没，
-   合成对应的 `message_start` / `message_end` / `message_update` / `agent_end`。
-   pi-web-ui 上来就 `switch (e.type)`，所以**必须真的发事件**，发个「变了」的通知没用。
-3. **prompt → POST**：把输入发回内核，由 Node dispatch。
-
-### 踩过的坑（都在代码里留了注释）
-
-- **`state` 每次都要新对象。** pi-web-ui 按引用判断要不要重渲染，一直返回同一个对象
-  的话界面永远不更新。
-- **自定义元素要显式保住。** `agent-interface` 是靠模块副作用 `customElements.define` 注册的，
-  bundler 认定「只当类型用」时会把它 tree-shake 掉，页面就只剩一个没升级的空标签。
-  `web/src/ensure-elements.ts` 用一次真实的 `new` 逼 bundler 保留。
-- **别在订阅回调里调 `chat.requestUpdate()`。** 自定义元素在 define 完成前没有这个方法，
-  而 `subscribe` 那一刻会**同步**回调一次。
-- **`setAppStorage()` 必须调。** 否则 `sendMessage()` 第一件事 `getAppStorage()` 就抛。
-- **key 检查要骗过去。** `sendMessage` 会先查 providerKeys，查不到就弹 key 对话框。真正的鉴权在
-  Node 侧，浏览器只需要一个占位值就能通过检查。
-## Provider：Pi（和 DeepSeek Harness 一样）
-
-`src/provider.ts` 与 `my-pi-desktop/src/main/agent/runtime.ts` 是同一套路：
-
-```ts
-const models = createModels();
-models.setProvider(deepseekProvider());          // pi-ai 自带 providers/deepseek
-const model = models.getModel('deepseek', id);   // 模型目录来自 provider
-models.streamSimple(model, context, options);    // 流式调用，事件是 AssistantMessageEvent
-```
-
-- 鉴权：TUI 读 `DEEPSEEK_API_KEY`（provider 自带的 `envApiKeyAuth`）或 `--api-key`；
-  Web 侧由 pi-web-ui 弹窗填，存进 IndexedDB。
-- 模型：默认取 deepseek provider 目录里的第一个，`-m` / `?model=` 可换。
-- 换 provider：TUI `-P anthropic|openai`；Web `?provider=xxx`。
-
-## 工具：直接用 Pi 官方的
-
-工具实现在 **`@earendil-works/pi-coding-agent`**（源码：那个仓库的
-`packages/coding-agent/src/core/tools/`），也就是 Pi 官方 coding agent 用的那一套。本项目不再自己写。
-
-```ts
-import {
-  createReadTool, createWriteTool, createEditTool, createBashTool,
-  createReadOnlyTools, // read / grep / find / ls
-} from '@earendil-works/pi-coding-agent';
-
-// 工厂函数的第一个参数是 cwd —— 官方工具用它做**路径边界检查**，
-// 防止模型跑到工作目录外面去读写文件。这个约束是白拿的，别浪费。
-const tools = [createReadTool(cwd), createBashTool(cwd)];
-```
-
-换来的东西是实打实的：文件变更串行化（`withFileMutationQueue`）、截断策略、bash 超时与
-子进程回收、路径越界防护 —— 这些自己写既费劲又容易漏。
-
-### 为什么要一层适配（`src/tools.ts`）
-
-官方 `AgentTool`（来自 pi-agent-core）的 `execute` 是 4 个参数：
-
-```ts
-execute(toolCallId, params, signal?, onUpdate?)
-```
-
-本项目只需要前三个（`onUpdate` 是给 UI 流式刷进度用的，我们没有这个需求）。
-`src/tools.ts` 的 `adapt()` 把签名收窄成本项目的形状，于是 `effects.ts` 完全不知道
-pi-coding-agent 的存在，环的逻辑一行都不用改。
-
-另外补了 `label`（官方给的是英文工具名，我们界面要中文展示名），以及把可能为
-`undefined` 的 `details` 归一成 `null`。
-
-### 想加自己的工具
-
-本项目的 `AgentTool` 形状很简单，照着写再 push 进 `build()` 即可：
-
-```ts
-const myTool: AgentTool = {
-  name: 'my_tool', label: '我的工具', description: '…',
-  parameters: Type.Object({ x: Type.String() }),
-  execute: async (id, params, signal) => ({ content: [{ type: 'text', text: '…' }], details: null }),
-};
-```
-
+- 页面默认取 `<cwd>/web/dist`；`--cwd` 换目录时也跟着换。
+- 没有 `index.html` 就只服务 `/api`（`GET /` 的 404 会写明该先跑什么命令）。
+- 开发时分开起：`npm run serve -- --port 0` 起内核（启动横幅打印真正绑到的端口），
+  另开终端 `npm run web` 连过去。
 
 ## 测试
 
 ```bash
-npm test          # 36 个离线测试
-npm run typecheck # tsc --noEmit（src + test）+ tsc --noEmit -p web
+npm test           # 36 个离线测试，不打网络
+npm run typecheck  # tsc --noEmit（src + test）+ tsc --noEmit -p web
 ```
 
-覆盖：环闭合、轮数上限、错误路径、reducer 纯性、faux provider 端到端、Web adapter，
-以及轨迹树本身 —— 包括**「超时后重试的父 id 指向超时前的节点」**这条不变量、
-错误节点落盘、从 JSONL 回放重建、界面与命令行渲染出同一棵树。
-
+全程离线（pi-ai 的 faux provider），不消耗 token。覆盖：环闭合、轮数上限、错误路径、
+reducer 纯性、轨迹树的不变量（**超时后重试的父 id 指向超时前的节点**）、错误落盘与 JSONL
+回放、SSE 推状态、409 防双跑、真实文件 IO、目录穿越防护。
 
 ## 目录
 
 ```
-src/
-  actions.ts      所有 Action（Elm 里的 Msg）
-  state.ts        单一状态树（含轨迹树与重试/超时字段）
-  reducer.ts      transitions 表（纯函数）+ 接线（action type → Cmd[]）
-  effects.ts      effect 表：agent.run → Cmd.run(streamFn)，工具也由自己的 Cmd 跑
-  trace.ts        轨迹树：节点/父子/tip/渲染/序列化（纯函数，无 IO）
-  trace-store.ts  轨迹落盘：JSONL 追加写 + 回放 + 驱动器
-  trace-file.ts   Node 端 sink：写 .trace/<sessionId>.jsonl
-  store.ts        createStore + redux-loop 的 install()，waitForIdle，createPersistentStore
-  tools.ts        工具注册表：适配 pi-coding-agent 的 read/write/edit/bash
-  provider.ts     Pi(pi-ai) 装配：createModels + deepseekProvider + streamSimple
-  kernel.ts       内核装配：TUI 与 Web 共用的唯一一份环
-  server.ts       HTTP + SSE：订阅状态树、发消息、中断、静态文件
-  serve.ts        Web 入口：起内核 + 页面
-  tui.ts          TUI 入口：同一个内核，交给 tui/app.ts
-  tui/app.ts      pi-tui 界面：对话区 + 轨迹面板（Ctrl+T）
-web/
-  src/main.ts            pi-web-ui 装配 + 顶栏（环不在浏览器里）
-  src/remote-session.ts  SSE 订阅 + 合成 lifecycle 事件 + POST 消息
-  src/ensure-elements.ts  保住 agent-interface 的 define 不被 tree-shake
-  src/trace-panel.ts     底部轨迹面板（与 TUI 共用 renderTree）
-test/            离线测试（faux provider，不打网络）
-  trace.test.ts         轨迹树：重试父 id、不变量、端到端超时
-  trace-persist.test.ts 错误落盘、JSONL 回放、界面渲染一致性
-  server.test.ts        SSE 推状态、409 不双跑、真实文件 IO、目录穿越防护
-.trace/         运行时生成的轨迹 JSONL（已 gitignore）
-
-## 边界
-
-- 工具在 Node 侧直接执行，没有沙箱。`--cwd` 只限制**路径边界**（官方工具自带的检查），
-  不阻止 `bash` 跑任意命令。只当自己机器上的小助手用。
-- `--demo` 走 pi-ai 自带的 faux provider，只为演示与自检，不会真的调模型。
-- Web 侧没接会话持久化：`SessionsStore` 只是在 `AppStorage` 构造函数里占位（pi-web-ui 强制要四个
-  store），顶栏的「新对话」是清空内核，不落盘。真正的历史在 `.trace/<id>.jsonl`。
-- **pi-web-ui 最高只到 `0.75.3`，没有 1.x**（其余 @earendil-works 包都到 1.0.2）。它自带一份嵌套的
-  `pi-ai@0.75.5`，而根目录是 `1.0.2`，所以 `web/src/main.ts` 里有两处 `as never`。
-  这是「碰巧兼容」不是「设计上兼容」——pi-web-ui 发 1.x 时该换掉。
+src/                    内核（见 docs/architecture.md）
+web/                    浏览器渲染层
+test/                   离线测试
+docs/architecture/      架构现状
+.trace/                 运行时生成的轨迹 JSONL（已 gitignore）
+```
