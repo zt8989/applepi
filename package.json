@@ -19,6 +19,8 @@
     "web:serve": "npm run web:build && npm run serve",
     "config:migrate": "node scripts/migrate-pi-config.mjs --overwrite",
     "config:check": "node scripts/migrate-pi-config.mjs --dry-run",
+    "trace:migrate": "node scripts/migrate-traces.mjs",
+    "trace:check": "node scripts/migrate-traces.mjs --dry-run",
     "test": "node --import tsx --test test/*.test.ts"
   },
   "dependencies": {

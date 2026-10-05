@@ -51,6 +51,15 @@ npm run config:check       # 只看会迁什么，不写文件
 `.env` 里的 `<ID>_API_KEY` 也能用（`npm start` 走 `--env-file-if-exists=.env`）。
 
 命令行的 `-P` / `-m` 仍然优先。
+
+**从旧位置搬来的数据**（轨迹本来落在项目的 `.trace/`，现在在家目录）：
+
+```bash
+npm run trace:migrate      # 搬 .trace/ → ~/.redux-agent/traces/，并重建可恢复的会话
+npm run trace:check        # 只看会迁什么
+```
+
+轨迹文件里也记了完整的 message 记录，所以旧轨迹能被重建成会话 —— 不只是能看，还能接着聊。
 ## 运行
 
 ```bash
