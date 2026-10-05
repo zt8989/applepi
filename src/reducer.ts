@@ -111,6 +111,82 @@ function summarize(text: string): string {
 }
 
 /**
+ * 给重复的 tool call id 改名，保证一轮里的 id 唯一。
+ *
+ * ## 为什么必须做
+ *
+ * 协议要求：一个 assistant 消息里有几个 toolCall，就必须有几个对应的 toolResult，
+ * 且靠 id 配对。模型偶尔会返回**重复的 id**（同一批里两个都叫 `call_1`），于是：
+ *   - `toolResult` 的判重会把第二个结果丢掉，消息流变成「2 个 call、1 个 result」——协议非法，
+ *     provider 报错或行为异常，表现为**会话莫名停掉**；
+ *   - `openToolNodeIds[id]` 也会互相覆盖，第一个工具的轨迹节点永远闭合不了。
+ *
+ * 去重是错的（丢掉模型真要执行的调用），必须在我们这一层把 id 变唯一。
+ *
+ * ## 怎么改
+ *
+ * id 在会话里出现过就加 `#2`、`#3` 后缀。id 对模型只是占位符（它下一轮看到的是我们回传的
+ * toolResult 与新 id 的配对），所以改写是安全的 —— 而且**必须**改写。
+ *
+ * 同一批内的重复、以及与历史消息的重复，都算「出现过」。
+ *
+ * @returns 改写后的 message、toolCalls，以及「原 id → 新 id」的映射（排障用）。
+ */
+function dedupeToolCallIds(
+  message: AssistantMessage,
+  state: AgentState,
+): { message: AssistantMessage; toolCalls: ToolCall[]; renames: Map<string, string> } {
+  const calls = message.content.filter((c): c is ToolCall => c.type === 'toolCall');
+  if (calls.length === 0) return { message, toolCalls: calls, renames: new Map() };
+
+  // 已用过的 id：历史 toolResult 里的 + 历史 assistant 消息里的。
+  const used = new Set<string>();
+  for (const m of state.messages) {
+    if (m.role === 'toolResult') used.add(m.toolCallId);
+    if (m.role === 'assistant') {
+      for (const c of m.content) {
+        if (c.type === 'toolCall') used.add(c.id);
+      }
+    }
+  }
+
+  const renames = new Map<string, string>();
+  const claimed = new Set<string>();
+  const rewritten = calls.map((call) => {
+    const original = call.id;
+    if (!used.has(original) && !claimed.has(original)) {
+      claimed.add(original);
+      return call;
+    }
+    // 撞了：加后缀直到唯一。
+    let n = 2;
+    let candidate = `${original}#${n}`;
+    while (used.has(candidate) || claimed.has(candidate)) {
+      n += 1;
+      candidate = `${original}#${n}`;
+    }
+    claimed.add(candidate);
+    // 每次改名都记一条（不用 has() 去重）：三个同名 id 会产生两条改名记录，
+    // 告警要能反映真实次数 —— 少了就看不出模型重复了几次。
+    renames.set(`${original}@${n}`, candidate);
+    return { ...call, id: candidate };
+  });
+
+  if (renames.size === 0) return { message, toolCalls: rewritten, renames };
+
+  // 改写后的 toolCall 必须放回 message.content —— messages 里要用新 id，
+  // 否则后面 toolResult 回来的 id 与消息里的对不上（那正是要避免的病）。
+  let index = 0;
+  const content = message.content.map((c) => {
+    if (c.type !== 'toolCall') return c;
+    const next = rewritten[index];
+    index += 1;
+    return next ?? c;
+  });
+  return { message: { ...message, content }, toolCalls: rewritten, renames };
+}
+
+/**
  * 「还不知道这个模型支持什么」时的保守值：全 false。
  *
  * 用在两处：`createInitialState` 的空 model 块，以及 `model.changed` 之后等 `model.init` 补上之前。
@@ -323,8 +399,27 @@ const transitions: TransitionHandlers = {
 
   'llm.done': (state, action) => {
     if (state.phase === 'idle') return state;
-    const message: AssistantMessage = action.message;
-    const toolCalls = message.content.filter((c): c is ToolCall => c.type === 'toolCall');
+    const raw = action.message;
+    //
+    // 模型偶尔会返回**重复的 tool call id**。我们控制不了模型，但必须在自己这一层消掉冲突，
+    // 否则消息流会变成「两个 toolCall(call_1) 只有一个 toolResult」——那是协议里非法的序列，
+    // provider 会报错或行为异常（表现为会话莫名停掉）。
+    //
+    // 对策：给 toolCall 换一个**内部唯一 id**（原 id 已在会话内出现过就加后缀），
+    // 并让 messages 里的 assistant 消息与 toolResult 用同一套新 id —— 对模型而言 id 只是个占位符。
+    const { message, toolCalls, renames } = dedupeToolCallIds(raw, state);
+    if (renames.size > 0) {
+      // 冲突必须留痕：模型给了重复 id 而我们悄悄改名了，如果什么都不说，
+      // 将来出现「工具结果对不上」时根本查不出是哪一步干的。
+      // renames 的 key 是 `原id@序号`（保证多次改名都能记下），
+      // 告警要显示的是「原 id → 新 id」，所以把序号剥掉。
+      for (const [key, to] of renames) {
+        const from = (key.split('@')[0] ?? key);
+        console.warn(
+          `[agent] 模型返回了重复的 tool call id「${from}」，已改名为「${to}」以保证消息序列合法。`,
+        );
+      }
+    }
     const text = message.content
       .map((c) => (c.type === 'text' ? c.text : c.type === 'toolCall' ? `[调用 ${c.name}]` : ''))
       .join(' ')
@@ -438,7 +533,15 @@ const transitions: TransitionHandlers = {
     const exists = state.messages.some(
       (m) => m.role === 'toolResult' && m.toolCallId === result.toolCallId,
     );
-    if (exists) return state;
+    if (exists) {
+      // 正常情况下不该走到这里 —— llm.done 已经把重复 id 改掉了。
+      // 走到了说明还有别的路径漏了，别静默丢弃：丢了工具结果，消息序列就非法了。
+      console.warn(
+        `[agent] 收到重复的 toolResult（toolCallId=${result.toolCallId}），已忽略。` +
+          `如果反复出现，说明 id 去重漏了哪条路径。`,
+      );
+      return state;
+    }
     const now = Date.now();
     const openId = state.openToolNodeIds[result.toolCallId] ?? null;
     const text = result.content
