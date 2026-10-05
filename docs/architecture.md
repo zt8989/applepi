@@ -3,11 +3,14 @@
 这套文档记录 event-loop-agent **今天是什么样**，而不是它曾经是什么样、或打算成为什么样。
 每条陈述都对着代码核过；快照点写在下面，与它对不上的地方以代码为准。
 
-**快照：`4f535fb`（2026-10-05）。** 那一提交是「内核搬到 Node，TUI 与 Web 共享同一份环；
-工具走真实文件系统」——它给本目录添的是 [kernel](architecture/kernel.md) 整篇、
-[tools](architecture/tools.md) 的全部，以及 [loop](architecture/loop.md) 里「接线的几处绕圈」
-与 [surfaces](architecture/surfaces.md) 整篇。上一版结构对应 `2ea9113`（工具换成 pi-coding-agent
-的官方实现，pi-ai 升到 1.0.2），那之前是 `2b7053a`（引入轨迹树与 pi-tui，删掉 CLI 与 pi-agent-core）。
+**快照：`80a8733`（2026-10-05）。** 那一提交是「README 只留简介与启动/测试，架构现状搬进
+`docs/architecture/`」—— 它给本目录建立了六篇的骨架。骨架之上的工作树改动（prompt / model
+两块状态、洋葱式 middleware、装载段落盘与零 token 回放）见 [init](architecture/init.md)。
+
+再往前：`4f535fb`（内核搬到 Node，TUI 与 Web 共享同一份环；工具走真实文件系统）给了
+[kernel](architecture/kernel.md) 与 [surfaces](architecture/surfaces.md) 整篇；`2ea9113`（工具换成
+pi-coding-agent 的官方实现，pi-ai 升到 1.0.2）给了 [tools](architecture/tools.md) 全部；
+`2b7053a`（引入轨迹树与 pi-tui）给了 [trace](architecture/trace.md) 与 [loop](architecture/loop.md)。
 
 ## 与别处的分工
 
@@ -51,3 +54,4 @@ Web（pi-web-ui 组件 + 浏览器）是它的两个渲染层。执行历史是�
 | [kernel](architecture/kernel.md) | 内核装配：一个 store、两个界面共享它 |
 | [tools](architecture/tools.md) | 工具来自 pi-coding-agent，那层适配做了什么 |
 | [surfaces](architecture/surfaces.md) | TUI 与 Web 各自的渲染层，以及它们各自踩过的坑 |
+| [init](architecture/init.md) | 装载：prompt / model 两块、模型能力、中途插 prompt、洋葱式 middleware、零 token 回放 |

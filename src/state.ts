@@ -1,4 +1,5 @@
 import type { Message, ModelThinkingLevel, ToolCall, Usage } from '@earendil-works/pi-ai';
+import type { ModelCapabilities, PromptToolDefinition } from './actions';
 import { createTraceTree, newSessionId, type TraceTree } from './trace';
 
 /** 相位：只描述「现在在等谁」，不含任何驱动方式的信息。 */
@@ -12,8 +13,46 @@ export interface ExecutingTool {
 /** LLM 失败的类别 —— 决定它是不是「可重试」的（超时/网络可重试，鉴权/参数不行）。 */
 export type LlmErrorKind = 'timeout' | 'network' | 'auth' | 'model' | 'aborted' | 'unknown';
 
+/**
+ * prompt 侧状态 —— 与 model 分开装载：prompt 是「跟模型说什么」，model 是「用哪个模型说」。
+ * 整块由 `prompt.init` 装载，之后只被 `prompt.segment.added` 追加。
+ *
+ * 有了它，回放时不必重跑就知道当时发给模型的是什么。
+ *
+ * 扩展（洋葱式 middleware）不写在这里 —— 它横切所有 action，见 src/middleware.ts。
+ */
+export interface PromptState {
+  /** 基础 system prompt。 */
+  systemPrompt: string;
+  /** 工具的完整定义（原样进 LLM 请求的那三样）。 */
+  tools: PromptToolDefinition[];
+  /** 是否已经装载过。回放时据此判断「init 段读到了没有」。 */
+  seeded: boolean;
+}
+
+/** 模型侧状态 —— 由 `model.init` 装载。 */
+export interface ModelState {
+  provider: string;
+  modelId: string;
+  /** 当前思考级别；`off` 表示不带 reasoning。 */
+  thinkingLevel: ModelThinkingLevel;
+  /** 这个模型支持什么（中途插 system / developer role / 中途加工具）。 */
+  capabilities: ModelCapabilities;
+  seeded: boolean;
+}
+
 export interface AgentState {
   phase: Phase;
+
+  // ── prompt 侧（与 model 分开，因为 system prompt 后面要挂 Hooks） ──
+  prompt: PromptState;
+  // ── model 侧 ──
+  model: ModelState;
+
+  /**
+   * 下面四个是 prompt / model 里常用字段的**扁平别名**，为了不让既有代码（UI、adapter、
+   * 轨迹渲染）到处写 `state.prompt.systemPrompt`。真相在两块里，别处只读不算独立来源。
+   */
   systemPrompt: string;
   providerName: string;
   modelId: string;
@@ -89,12 +128,32 @@ export interface InitialStateOptions {
 export const DEFAULT_LLM_TIMEOUT_MS = 120_000;
 
 export function createInitialState(options: InitialStateOptions): AgentState {
+  // 初始值就是「空的 prompt / model 块」—— 内核随后会 dispatch prompt.init 与 model.init
+  // 把真值装进去。构造函数只负责给形状，不负责装载。
+  const emptyPrompt: PromptState = {
+    systemPrompt: options.systemPrompt,
+    tools: [],
+    seeded: false,
+  };
+  const emptyModel: ModelState = {
+    provider: options.providerName,
+    modelId: options.modelId,
+    thinkingLevel: options.thinkingLevel ?? 'off',
+    capabilities: {
+      midConvoSystemMessages: false,
+      midConvoToolAdditions: false,
+      developerRole: false,
+    },
+    seeded: false,
+  };
   return {
     phase: 'idle',
+    prompt: emptyPrompt,
+    model: emptyModel,
     systemPrompt: options.systemPrompt,
     providerName: options.providerName,
     modelId: options.modelId,
-    thinkingLevel: options.thinkingLevel ?? 'off',
+    thinkingLevel: emptyModel.thinkingLevel,
     messages: [],
     toolNames: options.toolNames,
     streamingText: '',

@@ -36,15 +36,23 @@ export interface EffectTable {
   runTools(calls: ToolCall[]): CmdType;
 }
 
-/** 交给 LLM 的工具描述（去掉 execute，只留 schema）。 */
-function toolSchemas(): Tool[] {
-  return getTools().map((tool) => ({
+/**
+ * 交给 LLM 的工具描述 —— **从 state.prompt.tools 读**，不再每次 getTools() 现算。
+ *
+ * `prompt.init` 已经把完整定义装进 state 了，所以这里：
+ *   - 少一次工具注册表的构造（官方工具在构造时读目录、做边界计算）；
+ *   - 回放时不必重新装配工具，就知道当时发给模型的是什么。
+ *
+ * 只留三样（name / description / parameters），因为真正进 LLM 请求的就是这三样。
+ * `execute` 在 `runToolCall` 里按名字从注册表取 —— 执行用的和发给模型的不是一回事。
+ */
+function toolSchemas(state: AgentState): Tool[] {
+  return state.prompt.tools.map((tool) => ({
     name: tool.name,
     description: tool.description,
-    parameters: tool.parameters,
+    parameters: tool.parameters as Tool['parameters'],
   }));
 }
-
 /**
  * pi-ai 版 effect 表：LLM 与工具都自己跑（CLI 用）。
  */
@@ -69,10 +77,14 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
     const state = getState<AgentState>();
     // 记住这次尝试的轨迹节点 id：失败时带着它回来，reducer 才能把 error 挂对地方。
     const nodeId = state.openLlmNodeId;
+    // Context 三样全部**从 state 读**（都由 init 装好了）：
+    //   systemPrompt ← prompt.init
+    //   tools        ← prompt.init（完整定义）
+    //   messages     ← 对话本身（含中途追加的 system/developer 片段）
     const context: Context = {
-      systemPrompt: state.systemPrompt,
+      systemPrompt: state.prompt.systemPrompt,
       messages: state.messages,
-      tools: toolSchemas(),
+      tools: toolSchemas(state),
     };
     const controller = beginRun();
     // 超时闸：到点就 abort 掉这次流。分类是 timeout → 可重试，于是环自己会再试一次。
@@ -87,8 +99,15 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
       const apiKey = await keyOf(model.provider);
       const streamOptions: SimpleStreamOptions = { signal: controller.signal };
       if (apiKey !== undefined) streamOptions.apiKey = apiKey;
-      // 思考级别直接用 pi-ai 的 ModelThinkingLevel；'off' 就是不带 reasoning。
-      if (state.thinkingLevel !== 'off') streamOptions.reasoning = state.thinkingLevel;
+      //
+      // 思考级别（reasoning effort）读 state.model —— 由 model.init 装载，thinking.changed 改。
+      // 取值是 pi-ai 的 ThinkingLevel：minimal|low|medium|high|xhigh|max；'off' 不带 reasoning。
+      //
+      // 它是**请求参数**，不是输出格式：模型回不回馈 thinking 由它自己决定（很多模型不给）。
+      // 回馈时走独立的 thinking content 块（`{type:'thinking', thinking: string}`），
+      // 和正文 text 块分开 —— 所以「思考输出是文本」但**不是** assistant 正文。
+      const thinkingLevel = state.model.thinkingLevel;
+      if (thinkingLevel !== 'off') streamOptions.reasoning = thinkingLevel;
       const stream = streamFn(model, context, streamOptions);
       let final: AssistantMessage | undefined;
       for await (const event of stream) {

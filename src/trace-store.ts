@@ -6,16 +6,55 @@
  *   - 一行一个节点，回放就是逐行重放，天然幂等且能中途接着写；
  *   - 多个进程/多个标签页各写各的也不会互相踩坏已有内容。
  *
- * 同一个文件里既有「新增节点」也有「节点状态变更」，所以每行带一个 op：
- *   - `add`   节点首次出现（带完整字段）
- *   - `close` 节点闭合（只带 id / status / endedAt，回放时打补丁）
+ * 同一个文件里混着四种记录，每行带一个 op：
+ *   - `init`    系统装载（prompt 或 model），**每个会话只有一条**，落在所有节点之前
+ *   - `message` 一条对话消息（user / assistant / toolResult / 中途插的 system 段）
+ *   - `add`     轨迹节点首次出现（带完整字段）
+ *   - `close`   轨迹节点闭合（只带 id / status / endedAt，回放时打补丁）
+ *
+ * 前两种是为了**回放**：读一遍 JSONL 就能把「当时发给模型的是什么」和「模型答了什么」
+ * 全部重建出来，一次 token 都不用花。
  *
  * Node 端落文件，浏览器端落 localStorage，接口一致（都是 append 一个字符串）。
  */
 import { applyTraceRecord, createTraceTree, type SerializedTraceNode, type TraceTree } from './trace';
 
-/** 一行落盘记录。 */
+/**
+ * 装载段的落盘形状（`op: 'init'`）。两种：prompt 与 model，各一条。
+ *
+ * 单独放一个文件（`<id>.init.jsonl`）而不是混进轨迹文件：它们的生命周期不同 ——
+ * 装载是**会话级**的（内核起来时装一次），轨迹节点是**这次对话**的产物。
+ * 混在一起会让「回放一段对话」不得不先跳过一堆与它无关的装载记录。
+ */
+export type InitRecord =
+  | {
+      op: 'prompt.init';
+      systemPrompt: string;
+      tools: { name: string; description: string; parameters: unknown }[];
+    }
+  | {
+      op: 'model.init';
+      provider: string;
+      modelId: string;
+      thinkingLevel: string;
+      capabilities: {
+        midConvoSystemMessages: boolean;
+        midConvoToolAdditions: boolean;
+        developerRole: boolean;
+      };
+    };
+
+/** 回放一份装载段得到的两个块。哪条没读到就是 undefined。 */
+export interface ReplayedInit {
+  prompt: Extract<InitRecord, { op: 'prompt.init' }> | null;
+  model: Extract<InitRecord, { op: 'model.init' }> | null;
+}
+
+/**
+ * 一行轨迹 / 对话记录。`message` 让回放能重建 messages（零 token 复现一轮对话）。
+ */
 export type TraceRecord =
+  | { op: 'message'; message: unknown }
   | { op: 'add'; node: SerializedTraceNode }
   | { op: 'close'; id: string; status: string; endedAt: number | null };
 
@@ -63,10 +102,22 @@ function toRecord(node: SerializedTraceNode): SerializedTraceNode {
 
 // ─── 回放 ───
 
-/** 从 JSONL 文本重建轨迹树。坏行跳过（最后一行可能是崩溃时截断的）。 */
-export function replayTrace(text: string, sessionId: string): TraceTree {
+/** 回放一份轨迹/对话 JSONL。 */
+export interface ReplayedSession {
+  tree: TraceTree;
+  /** 按原顺序重建的对话消息。 */
+  messages: unknown[];
+}
+
+/**
+ * 从 JSONL 文本重建轨迹树**和**对话消息。坏行跳过（最后一行可能是崩溃时截断的）。
+ *
+ * messages 一并重建是「零 token 复现一轮对话」的关键：回放出来的会话里，模型答过什么、
+ * 工具返回了什么，全都在，不必再调一次模型。
+ */
+export function replaySession(text: string, sessionId: string): ReplayedSession {
   let tree = createTraceTree(sessionId);
-  const closed = new Set<string>();
+  const messages: unknown[] = [];
   for (const line of text.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -79,7 +130,6 @@ export function replayTrace(text: string, sessionId: string): TraceTree {
     if (record.op === 'add') {
       tree = applyTraceRecord(tree, record.node);
     } else if (record.op === 'close') {
-      closed.add(record.id);
       const node = tree.nodes[record.id];
       if (node) {
         tree = applyTraceRecord(tree, {
@@ -88,9 +138,37 @@ export function replayTrace(text: string, sessionId: string): TraceTree {
           endedAt: record.endedAt,
         });
       }
+    } else if (record.op === 'message') {
+      messages.push(record.message);
     }
   }
-  return tree;
+  return { tree, messages };
+}
+
+/** 只重建轨迹树（老调用方用它；不认识 message 行）。 */
+export function replayTrace(text: string, sessionId: string): TraceTree {
+  return replaySession(text, sessionId).tree;
+}
+
+/**
+ * 从装载段 JSONL 读回 prompt / model 两块。哪条没读到就是 null。
+ * 读不到就说明这个会话没有 init 段（比如很早的记录）—— 那时只能重新装配。
+ */
+export function replayInit(text: string): ReplayedInit {
+  const result: ReplayedInit = { prompt: null, model: null };
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let record: InitRecord;
+    try {
+      record = JSON.parse(trimmed) as InitRecord;
+    } catch {
+      continue;
+    }
+    if (record.op === 'prompt.init') result.prompt = record;
+    else if (record.op === 'model.init') result.model = record;
+  }
+  return result;
 }
 
 /** 把记录数组渲染成 JSONL 文本。 */
@@ -117,7 +195,12 @@ export interface TracePersistence {
 
 export function createTracePersistence(options: {
   store: {
-    getState(): { trace: TraceTree; persistedSeq: number };
+    getState(): {
+      trace: TraceTree;
+      persistedSeq: number;
+      /** messages 也要读：回放时要靠它零 token 复现一轮对话。 */
+      messages: readonly unknown[];
+    };
     subscribe(listener: () => void): () => void;
     dispatch(action: unknown): unknown;
   };
@@ -129,9 +212,11 @@ export function createTracePersistence(options: {
   const needClose = new Set<string>();
   // 上一轮每个节点的状态，用来发现「pending → 闭合」这种变化。
   let lastStatus = new Map<string, string>();
+  // 已经落过盘的消息条数（新消息 = messages.length 变大了）。
+  let persistedMessages = 0;
 
   const flush = (): void => {
-    const { trace, persistedSeq } = store.getState();
+    const { trace, persistedSeq, messages } = store.getState();
 
     // 先找出状态变了的节点（上一轮 pending，这轮已闭合）。
     for (const id of trace.order) {
@@ -142,10 +227,17 @@ export function createTracePersistence(options: {
       }
     }
 
-    const records = pendingRecords(trace, persistedSeq, needClose);
+    const records: TraceRecord[] = pendingRecords(trace, persistedSeq, needClose);
     for (const record of records) {
       if (record.op === 'close') needClose.delete(record.id);
     }
+
+    // 新消息：每条追加一行。回放时按顺序重放就能重建 messages。
+    for (let i = persistedMessages; i < messages.length; i += 1) {
+      const message = messages[i];
+      if (message !== undefined) records.unshift({ op: 'message', message });
+    }
+
     lastStatus = snapshot(trace);
     if (records.length === 0) return;
 
@@ -156,6 +248,7 @@ export function createTracePersistence(options: {
       return; // 游标不动，下次还会再试
     }
     // 落盘成功才推进游标。
+    if (messages.length > persistedMessages) persistedMessages = messages.length;
     const maxSeq = maxSeqOf(records);
     if (maxSeq > persistedSeq) {
       store.dispatch({ type: 'trace.persisted', upToSeq: maxSeq });

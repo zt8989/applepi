@@ -9,6 +9,34 @@ import type {
 import type { LlmErrorKind } from './state';
 
 /**
+ * 工具的完整定义 —— 落进 state 后回放不必重跑。
+ *
+ * 只留三样：真正进 LLM 请求的就是这三样。`label` 是我们自己界面用的展示名，
+ * 不发给模型，所以不算在这里（state.tools 里另有一份带 label 的清单给 UI）。
+ */
+export interface PromptToolDefinition {
+  name: string;
+  description: string;
+  /** typebox schema，原样透传给 provider。 */
+  parameters: unknown;
+}
+
+/**
+ * 模型能力（pi-ai 的 `Model` 上那几个 supports* 标志）。
+ *
+ * 只收三个**真正影响本项目行为**的：能不能中途插 system/developer、能不能中途加工具、
+ * 支不支持 developer role。其余几十个标志对我们没意义，不搬。
+ */
+export interface ModelCapabilities {
+  /** 对话开始后还能插 system/developer 消息。不支持时 pi-ai 折进开头那条。 */
+  midConvoSystemMessages: boolean;
+  /** system 消息能否中途引入新工具。需要 midConvoSystemMessages。 */
+  midConvoToolAdditions: boolean;
+  /** 用 `developer` 而不是 `system`（OpenAI Responses 一族）。 */
+  developerRole: boolean;
+}
+
+/**
  * 一切皆 Action。
  *
  * Agent 不是一等公民：它只是 `agent.run` 这一个 Action，和 `tool.call`、
@@ -32,10 +60,70 @@ import type { LlmErrorKind } from './state';
  */
 export type AgentAction =
   /**
+   * ═══ prompt 侧 ═══
+   *
+   * 与 model 分开装载：prompt 是「跟模型说什么」，model 是「用哪个模型说」。两者独立变，
+   * 而且将来会有洋葱式 middleware 挂上来（见 src/middleware.ts），它在 action 前后插手，
+   * 对 prompt 和对模型一视同仁 —— 所以 prompt 这块只管装载，不管扩展。
+   */
+  /**
    * 人说了什么。`content` 是可选的：Web 侧带附件时，adapter 会把附件折成
    * text/image content 块一起带进来，消息仍是标准的 pi-ai user 消息。
    */
+  /**
+   * ═══ prompt 侧 ═══
+   *
+   * 这三条独立于 model：system prompt 后面要挂 Hooks（按事件追加片段、改写、注入），
+   * 那属于 prompt 的事，不该和「用哪个模型」混在一起。model.init 只管模型与能力。
+   */
+  /**
+   * 装载 prompt：基础 system prompt + 工具定义 + （将来）hook 产生的片段。
+   *
+   * `tools` 是**完整定义**（name/description/parameters），不只是名字 —— 这些要原样进
+   * LLM 请求，所以落进 state 后回放不必重跑。
+   */
   | {
+      type: 'prompt.init';
+      /** 基础 system prompt（内核装配时定的那段）。 */
+      systemPrompt: string;
+      /** 工具的完整定义。 */
+      tools: PromptToolDefinition[];
+    }
+  /**
+   * 中途追加一段 prompt（`system` 或 `developer` role）。
+   *
+   * 落进 `state.messages` —— 即 Conversation 的一部分，所以它会被一起落盘、一起回放。
+   * 模型支不支持中途插：`ModelCapabilities.midConvoSystemMessages`。不支持时 pi-ai 会把后来的
+   * system 消息折进开头那条，我们不自己折。
+   */
+  | {
+      type: 'prompt.segment.added';
+      role: 'system' | 'developer';
+      text: string;
+      /** 来源标记（哪个 hook / 手动），UI 要显示「这段是哪来的」。 */
+      source?: string | undefined;
+    }
+
+
+  /** ═══ model 侧 ═══ */
+  /**
+   * 装载模型：当前 provider / model / 思考级别，以及这个模型**支持什么**。
+   *
+   * 能力（capabilities）是模型的属性而不是运行时状态，所以随 model.init 一起落盘 ——
+   * 回放时不需要重新去问 provider「这个模型能不能中途插 system」。
+   */
+  | {
+      type: 'model.init';
+      provider: string;
+      modelId: string;
+      thinkingLevel: ModelThinkingLevel;
+      capabilities: ModelCapabilities;
+    }
+  | {
+      /**
+       * 人说了什么。`content` 是可选的：Web 侧带附件时，adapter 会把附件折成
+       * text/image content 块一起带进来，消息仍是标准的 pi-ai user 消息。
+       */
       type: 'user.message';
       text: string;
       content?: (TextContent | ImageContent)[] | undefined;

@@ -10,13 +10,30 @@ import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { TraceSink } from './trace-store';
-import { replayTrace } from './trace-store';
+import {
+  replayInit,
+  replaySession,
+  replayTrace,
+  type ReplayedInit,
+  type ReplayedSession,
+} from './trace-store';
 import type { TraceTree } from './trace';
 
 export const TRACE_DIR = '.trace';
 
 /** 轨迹目录：相对路径（相对进程 cwd）或绝对路径。 */
 export type TraceDir = string;
+
+/**
+ * 装载段的路径 —— 与轨迹分开一个文件。
+ *
+ * 生命周期不同：装载是**会话级**的（内核起来时装一次），轨迹节点是**这次对话**的产物。
+ * 分开之后「回放一段对话」不必先跳过一堆与它无关的装载记录。
+ */
+export function initPath(sessionId: string, dir: string = TRACE_DIR): string {
+  return path.join(dir, `${sessionId}.init.jsonl`);
+}
+
 
 /** 某个会话的 JSONL 路径。 */
 export function tracePath(sessionId: string, dir: string = TRACE_DIR): string {
@@ -55,7 +72,32 @@ export function createFileSink(filePath: string): TraceSink {
   };
 }
 
-/** 读回一个会话的轨迹（`/tree` 的回放用；文件不存在就返回 null）。 */
+/**
+ * 读回一个会话：轨迹树 + 对话消息（零 token 复现一轮对话）。
+ * 文件不存在就返回 null。
+ */
+export async function loadSession(
+  sessionId: string,
+  dir: string = TRACE_DIR,
+): Promise<ReplayedSession | null> {
+  const file = tracePath(sessionId, dir);
+  if (!existsSync(file)) return null;
+  const text = await readFile(file, 'utf8');
+  return replaySession(text, sessionId);
+}
+
+/** 读回一个会话的**装载段**（prompt / model 两块）。文件不存在返回 null。 */
+export async function loadInit(
+  sessionId: string,
+  dir: string = TRACE_DIR,
+): Promise<ReplayedInit | null> {
+  const file = initPath(sessionId, dir);
+  if (!existsSync(file)) return null;
+  const text = await readFile(file, 'utf8');
+  return replayInit(text);
+}
+
+/** 读回一个会话的轨迹树（只要树，不要消息；老调用方用它）。 */
 export async function loadTrace(
   sessionId: string,
   dir: string = TRACE_DIR,

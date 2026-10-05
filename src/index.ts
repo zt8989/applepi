@@ -75,3 +75,23 @@ export {
   type AgentStoreHandle,
 } from './store';
 export { classifyLlmError, isRetryable, DEFAULT_LLM_TIMEOUT_MS } from './state';
+
+// ─── 装载与 middleware ───
+export type { ModelCapabilities, PromptToolDefinition } from './actions';
+export type { ModelState, PromptState } from './state';
+export { createKernel, defaultSystemPrompt, type Kernel, type KernelOptions } from './kernel';
+export {
+  applyMiddleware,
+  promptSegmentMiddleware,
+  type ActionMiddleware,
+  type MiddlewareOptions,
+  type Next,
+} from './middleware';
+export {
+  replayInit,
+  replaySession,
+  type InitRecord,
+  type ReplayedInit,
+  type ReplayedSession,
+} from './trace-store';
+export { initPath, loadInit, loadSession } from './trace-file';

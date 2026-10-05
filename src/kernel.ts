@@ -18,11 +18,39 @@ import {
   type AgentRuntime,
 } from './provider';
 import { createPersistentStore } from './store';
-import { createFileSink, tracePath, type TraceDir } from './trace-file';
+import { createFileSink, initPath, tracePath, type TraceDir } from './trace-file';
 import { newSessionId } from './trace';
 import type { AgentStore } from './store';
-import type { TracePersistence } from './trace-store';
+import type { InitRecord, TracePersistence } from './trace-store';
+import type { Model, ModelThinkingLevel } from '@earendil-works/pi-ai';
+import type { ModelCapabilities } from './actions';
+import path from 'node:path';
+import { getTools } from './tools';
 
+/**
+ * 从 Model 对象上读我们关心的三个能力。
+ *
+ * 位置不一样，所以分开取：
+ *   - `supportsMidConvoSystemMessages` / `supportsMidConvoToolAdditions` 在 **BaseModel** 上（顶层）；
+ *   - `supportsDeveloperRole` 在 **compat** 里，而且只有 openai 一族的 compat 有这个字段。
+ *
+ * 读不到就当 false（保守）—— 详见 reducer.ts 里 UNKNOWN_CAPABILITIES 的理由。
+ */
+
+function readCapabilities(model: Model<any>): ModelCapabilities {
+  // 这两个标志声明在 BaseModel 上，但 pi-ai 的 Model 类型没把它们带进公开面，
+  // 所以这里按「运行时确实有这个字段」来读（模型目录里带就是 true）。
+  const raw = model as Model<any> & {
+    supportsMidConvoSystemMessages?: boolean;
+    supportsMidConvoToolAdditions?: boolean;
+  };
+  const compat = model.compat as { supportsDeveloperRole?: boolean } | undefined;
+  return {
+    midConvoSystemMessages: raw.supportsMidConvoSystemMessages === true,
+    midConvoToolAdditions: raw.supportsMidConvoToolAdditions === true,
+    developerRole: compat?.supportsDeveloperRole === true,
+  };
+}
 export interface KernelOptions {
   provider: string;
   model?: string | undefined;
@@ -31,6 +59,8 @@ export interface KernelOptions {
   cwd: string;
   /** 不打网络，用 pi-ai 的 faux provider。 */
   demo?: boolean | undefined;
+  /** 初始思考级别（reasoning effort）；`off` = 不带 reasoning。 */
+  thinkingLevel?: ModelThinkingLevel | undefined;
   llmTimeoutMs?: number | undefined;
   maxLlmAttempts?: number | undefined;
   maxTurns?: number | undefined;
@@ -71,16 +101,22 @@ export function createKernel(options: KernelOptions): Kernel {
       });
 
   const sessionId = options.sessionId ?? newSessionId();
-  // 工具：官方的 read/write/edit/bash，cwd 限定在 options.cwd。
+  // 两个 sink：轨迹（对话级，追加频繁）与装载段（会话级，只写一次）。
+  // 分开两个文件是因为生命周期不同 —— 回放一段对话不必先跳过一堆装载记录。
   const sink =
     options.traceDir === null
       ? undefined
       : createFileSink(tracePath(sessionId, options.traceDir ?? undefined));
+  const initSink =
+    options.traceDir === null
+      ? undefined
+      : createFileSink(initPath(sessionId, options.traceDir ?? undefined));
+  const cwd = path.resolve(options.cwd ?? process.cwd());
 
   const { store, persistence } = createPersistentStore({
     runtime,
     systemPrompt: options.systemPrompt,
-    cwd: options.cwd,
+    cwd,
     sessionId,
     ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
     ...(options.llmTimeoutMs !== undefined ? { llmTimeoutMs: options.llmTimeoutMs } : {}),
@@ -88,6 +124,52 @@ export function createKernel(options: KernelOptions): Kernel {
     ...(sink ? { traceSink: sink } : {}),
     ...(options.onTraceError ? { onTraceError: options.onTraceError } : {}),
   });
+
+  // ── 装载：prompt 与 model 各走一条 action 打进状态树 ──
+  //
+  // 为什么走 action 而不是直接写进 createInitialState：
+  // 「装载」和「跑一轮对话」是同一类事（都是状态迁移），走 action 才能被落盘、被回放。
+  // 回放时读到 init 段就知道当时发给模型的是什么，不必重装配工具、不必再问 provider 能力。
+  //
+  // 放在 store 建好之后：它们本身就是 dispatch，得走真实的 store。
+  const toolList = getTools(cwd);
+  store.dispatch({
+    type: 'prompt.init',
+    systemPrompt: options.systemPrompt,
+    tools: toolList.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    })),
+  });
+  store.dispatch({
+    type: 'model.init',
+    provider: runtime.spec.provider,
+    modelId: runtime.model.id,
+    thinkingLevel: options.thinkingLevel ?? 'off',
+    capabilities: readCapabilities(runtime.model),
+  });
+
+  // 装载段落盘：与轨迹分开一个文件（会话级 vs 对话级）。
+  // 有了它，回放时不必重装配工具、不必再问 provider「这个模型支持中途插 system 吗」。
+  if (initSink) {
+    const capabilities = readCapabilities(runtime.model);
+    const records: InitRecord[] = [
+      {
+        op: 'prompt.init',
+        systemPrompt: options.systemPrompt,
+        tools: store.getState().prompt.tools,
+      },
+      {
+        op: 'model.init',
+        provider: runtime.spec.provider,
+        modelId: runtime.model.id,
+        thinkingLevel: options.thinkingLevel ?? 'off',
+        capabilities,
+      },
+    ];
+    void initSink.append(records.map((r) => JSON.stringify(r)).join('\n'));
+  }
 
   return {
     store,
@@ -97,6 +179,7 @@ export function createKernel(options: KernelOptions): Kernel {
     dispose(): void {
       persistence?.dispose();
       if (sink?.close) void sink.close();
+      if (initSink?.close) void initSink.close();
     },
   };
 }

@@ -1,6 +1,6 @@
 import { Cmd, loop, type CmdType, type LoopReducer } from 'redux-loop';
 import type { AssistantMessage, Message, ToolCall, ToolResultMessage } from '@earendil-works/pi-ai';
-import type { AgentAction, AgentActionType } from './actions';
+import type { AgentAction, AgentActionType, ModelCapabilities } from './actions';
 import { createInitialState, isRetryable, type AgentState, type LlmErrorKind } from './state';
 import { appendNode, patchNode, type TraceNode } from './trace';
 /**
@@ -110,7 +110,79 @@ function summarize(text: string): string {
   return first.length > 60 ? `${first.slice(0, 59)}…` : first;
 }
 
+/**
+ * 「还不知道这个模型支持什么」时的保守值：全 false。
+ *
+ * 用在两处：`createInitialState` 的空 model 块，以及 `model.changed` 之后等 `model.init` 补上之前。
+ * 取保守值是因为「以为支持但实际不支持」会让 pi-ai 把消息发出去然后被 provider 拒；
+ * 反过来「以为不支持但实际支持」只是少用了个特性。
+ */
+const UNKNOWN_CAPABILITIES: ModelCapabilities = {
+  midConvoSystemMessages: false,
+  midConvoToolAdditions: false,
+  developerRole: false,
+};
+
 const transitions: TransitionHandlers = {
+  // ── prompt 侧装载 ──
+
+  /**
+   * 装载 prompt：基础 system prompt + 工具的**完整定义**。
+   *
+   * tools 落进 state 之后，`effects.ts` 就不用每次 `getTools()` 现算了 —— 既少一次 IO，
+   * 也让回放时不必重新装配工具就能知道当时发给模型的是什么。
+   */
+  'prompt.init': (state, action) => ({
+    ...state,
+    prompt: {
+      systemPrompt: action.systemPrompt,
+      tools: action.tools,
+      seeded: true,
+    },
+    // 扁平别名跟着更新（真相在 prompt 块里）。
+    systemPrompt: action.systemPrompt,
+    toolNames: action.tools.map((tool) => tool.name),
+  }),
+
+  /**
+   * 中途追加一段 prompt。落进 `messages` —— 它是 Conversation 的一部分，所以会被一起
+   * 落盘、一起回放。
+   *
+   * 模型支不支持中途插是**模型**的事（`state.model.capabilities`），我们不自己折：
+   * 不支持时 pi-ai 会把后来的 system 消息折进开头那条。
+   */
+  'prompt.segment.added': (state, action) => {
+    const message: Message = {
+      role: action.role,
+      content: action.text,
+      timestamp: Date.now(),
+      ...(action.source !== undefined ? { source: action.source } : {}),
+    } as Message;
+    return { ...state, messages: [...state.messages, message] };
+  },
+
+  // ── model 侧装载 ──
+
+  /**
+   * 装载模型：provider / model / 思考级别 + 这个模型支持什么。
+   *
+   * 能力随 init 一起落盘：回放时不必再问 provider「这个模型能不能中途插 system」。
+   */
+  'model.init': (state, action) => ({
+    ...state,
+    model: {
+      provider: action.provider,
+      modelId: action.modelId,
+      thinkingLevel: action.thinkingLevel,
+      capabilities: action.capabilities,
+      seeded: true,
+    },
+    // 扁平别名跟着更新。
+    providerName: action.provider,
+    modelId: action.modelId,
+    thinkingLevel: action.thinkingLevel,
+  }),
+
   'user.message': (state, action) => {
     if (state.phase !== 'idle') return state;
     // 有附件时 content 是一组 text/image 块（adapter 折好的）；否则就是纯文本。
@@ -375,24 +447,56 @@ const transitions: TransitionHandlers = {
     };
   },
 
+  /**
+   * 换模型。**能力也要跟着换** —— 新模型可能不支持中途插 system。
+   * 能力从哪来？内核换模型时会重新 dispatch 一条 `model.init`，那条才是权威；
+   * 这条只负责改标识，先把能力**保守地清掉**（标成不支持），等 model.init 补上。
+   */
   'model.changed': (state, action) => ({
     ...state,
+    model: {
+      ...state.model,
+      provider: action.provider,
+      modelId: action.modelId,
+      capabilities: UNKNOWN_CAPABILITIES,
+    },
     providerName: action.provider,
     modelId: action.modelId,
   }),
-  'thinking.changed': (state, action) => ({ ...state, thinkingLevel: action.level }),
+  'thinking.changed': (state, action) => ({
+    ...state,
+    model: { ...state.model, thinkingLevel: action.level },
+    thinkingLevel: action.level,
+  }),
 
-  'conversation.reset': (state) =>
-    createInitialState({
-      systemPrompt: state.systemPrompt,
-      providerName: state.providerName,
-      modelId: state.modelId,
-      thinkingLevel: state.thinkingLevel,
-      toolNames: state.toolNames,
+  /**
+   * 新对话：清空 messages 与轨迹，但**保留**已装载的 prompt / model。
+   *
+   * 它们是**会话级**的（这个内核用哪个模型、跟它说什么），不是这一轮对话的产物。
+   * 换模型请走 `model.changed` + `model.init`，别混在这里。
+   */
+  'conversation.reset': (state) => {
+    const fresh = createInitialState({
+      systemPrompt: state.prompt.systemPrompt,
+      providerName: state.model.provider,
+      modelId: state.model.modelId,
+      ...(state.model.thinkingLevel !== undefined
+        ? { thinkingLevel: state.model.thinkingLevel }
+        : {}),
+      toolNames: state.prompt.tools.map((tool) => tool.name),
       maxTurns: state.maxTurns,
       llmTimeoutMs: state.llmTimeoutMs,
       maxLlmAttempts: state.maxLlmAttempts,
-    }),
+      sessionId: state.trace.sessionId,
+    });
+    return {
+      ...fresh,
+      // 保留装载好的两块（会话级的，不是对话级的）。
+      prompt: state.prompt,
+      model: state.model,
+      persistedSeq: state.persistedSeq,
+    };
+  },
 };
 
 /** 没有登记的 action 就是「纯状态变更」，不产生 Cmd。 */
