@@ -514,10 +514,17 @@ function renderTranscript(state: AgentState, from: number, notice?: { text: stri
   if (state.retrying) {
     lines.push(dim(`  ↻ 上一次失败，正在重试（第 ${state.llmAttempts}/${state.maxLlmAttempts} 次尝试）`));
   }
+  // 收工原因。maxTurns 用「停」而不是「✗」：那是上限收工，不是出错，别吓唬人。
   if (state.phase === 'idle' && state.error) {
+    const capped = state.stopReason === 'maxTurns';
     const node = state.errorNodeId ? `（轨迹节点 ${state.errorNodeId}）` : '';
-    lines.push(`  ${red('✗')} ${red(state.error)} ${dim(node)}`);
-    lines.push(dim('  按 Ctrl+T 看轨迹树'));
+    if (capped) {
+      lines.push(`  ${yellow('■')} ${yellow(state.error)} ${dim(node)}`);
+      lines.push(dim('  这是上限收工，不是出错 —— 继续追问即可，或用 /new 换个会话。'));
+    } else {
+      lines.push(`  ${red('✗')} ${red(state.error)} ${dim(node)}`);
+      lines.push(dim('  按 Ctrl+T 看轨迹树'));
+    }
   }
   return lines.join('\n');
 }

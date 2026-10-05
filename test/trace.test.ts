@@ -226,6 +226,68 @@ test('鉴权失败不重试：错误在树上，但没有分叉，环收工', ()
   assert.equal(siblings.length, 1, '没有第二次尝试，所以没有分叉');
 });
 
+
+test('并行工具调用不算「重试」', () => {
+  // 回归测试：traceStats 曾经把 tool.attempt 和 llm.attempt 一起当「尝试」，
+  // 于是模型一轮里并行发两个工具（两个同父的兄弟 tool.attempt）就被记成一次重试。
+  // 现场表现：顶栏显示「重试 22」，而轨迹里一个 error 节点都没有。
+  const reducer = createAgentReducer({});
+  let state: AgentState = createInitialState({
+    systemPrompt: 's',
+    providerName: 'faux',
+    modelId: 'fake',
+    toolNames: ['bash'],
+    sessionId: 'test',
+  });
+
+  state = reducer(state, { type: 'user.message', text: '并行查两个文件' }) as AgentState;
+  state = reducer(state, { type: 'agent.run' }) as AgentState;
+  // 一条成功的 LLM 轮（推进 tip），它下面挂两个并行的工具调用。
+  state = reducer(state, {
+    type: 'llm.done',
+    message: {
+      role: 'assistant',
+      content: [
+        { type: 'toolCall', id: 'call_1', name: 'bash', arguments: { command: 'ls a' } },
+        { type: 'toolCall', id: 'call_2', name: 'bash', arguments: { command: 'ls b' } },
+      ],
+      api: 'openai-completions',
+      provider: 'faux',
+      model: 'fake',
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: 'toolUse',
+      timestamp: Date.now(),
+    },
+  }) as AgentState;
+  state = reducer(state, {
+    type: 'tool.call',
+    calls: [
+      { type: 'toolCall', id: 'call_1', name: 'bash', arguments: { command: 'ls a' } },
+      { type: 'toolCall', id: 'call_2', name: 'bash', arguments: { command: 'ls b' } },
+    ],
+  }) as AgentState;
+  for (const id of ['call_1', 'call_2']) {
+    state = reducer(state, {
+      type: 'tool/start',
+      call: { type: 'toolCall', id, name: 'bash', arguments: { command: 'ls' } },
+    }) as AgentState;
+  }
+
+  const stats = traceStats(state.trace);
+  assert.equal(
+    stats.retries,
+    0,
+    '两个并行工具调用是兄弟，不是「第一个失败后的重试」',
+  );
+  assert.equal(stats.toolCalls, 0, '工具还没返回，所以 tool.result 是 0');
+});
 test('重试用尽：maxLlmAttempts=2 时只重试一次，第二次失败就收工', () => {
   const reducer = createAgentReducer({});
   let state: AgentState = createInitialState({

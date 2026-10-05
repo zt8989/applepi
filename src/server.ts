@@ -42,11 +42,15 @@ export interface Snapshot {
   thinkingText: string;
   streamSeq: number;
   turns: number;
+  /** 单回合轮数上限（界面提示「已用满 N 轮」时要用）。 */
+  maxTurns: number;
   totalCost: number;
   usage: AgentState['usage'];
   error: string | null;
   errorKind: AgentState['errorKind'];
   errorNodeId: string | null;
+  /** 回合为什么停了：completed / maxTurns / error / aborted。界面据此决定要不要弹提示。 */
+  stopReason: AgentState['stopReason'];
   retrying: boolean;
   aborted: boolean;
   toolNames: readonly string[];
@@ -78,11 +82,13 @@ function snapshot(kernel: Kernel, cwd: string): Snapshot {
     thinkingText: s.thinkingText,
     streamSeq: s.streamSeq,
     turns: s.turns,
+    maxTurns: s.maxTurns,
     totalCost: s.totalCost,
     usage: s.usage,
     error: s.error,
     errorKind: s.errorKind,
     errorNodeId: s.errorNodeId,
+    stopReason: s.stopReason,
     retrying: s.retrying,
     aborted: s.aborted,
     toolNames: s.toolNames,

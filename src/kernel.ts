@@ -18,7 +18,7 @@ import {
   type AgentRuntime,
 } from './provider';
 import { createPersistentStore } from './store';
-import { createFileSink, initPath, tracePath, type TraceDir } from './trace-file';
+import { createFileSink, tracePath, type TraceDir } from './trace-file';
 import { newSessionId } from './trace';
 import type { AgentStore } from './store';
 import type { InitRecord, TracePersistence, TraceSink } from './trace-store';
@@ -124,8 +124,8 @@ export function createKernel(options: KernelOptions): Kernel {
   // 并把一个**转发 sink** 交给 store —— store 建好之后不该再被重建（那会丢状态）。
   interface SessionResources {
     sessionId: string;
+    /** 轨迹 + 装载段（两者同一个文件，见 writeInit）。 */
     sink: TraceSink | undefined;
-    initSink: TraceSink | undefined;
     recorder: SessionRecorder | null;
   }
 
@@ -142,9 +142,7 @@ export function createKernel(options: KernelOptions): Kernel {
     return {
       sessionId: id,
       sink: dir === null ? undefined : createFileSink(tracePath(id, dir ?? undefined)),
-      initSink: dir === null ? undefined : createFileSink(initPath(id, dir ?? undefined)),
       recorder: null, // 由下面的 openRecorder 填（它要等 store 建好）
-      ...(resumeFrom !== undefined ? {} : {}),
     };
   };
 
@@ -189,11 +187,15 @@ export function createKernel(options: KernelOptions): Kernel {
     capabilities: readCapabilities(runtime.model),
   });
 
-  // 装载段落盘：与轨迹分开一个文件（会话级 vs 对话级）。
+  // 装载段落盘：**写进同一个轨迹文件的前两行**（不再单独一个 `<id>.init.jsonl`）。
   // 有了它，回放时不必重装配工具、不必再问 provider「这个模型支持中途插 system 吗」。
+  //
+  // 走 delegator（同一个 sink）而不是另开一个文件：少一半文件，目录里全是 jsonl 很难翻。
+  // 位置在几条 add 记录之后，这是**必然**的：`tools` 要从 store 读（那上面才有完整的工具定义），
+  // 而装载动作本身（prompt.init / model.init）也会各自开出一个轨迹节点并立刻被 flush。
+  // 所以 init 只能写在它们之后 —— 这没问题：回放是按 op 类型收集的，与行的先后无关。
+
   const writeInit = (): void => {
-    const target = current.initSink;
-    if (!target) return;
     const capabilities = readCapabilities(runtime.model);
     const records: InitRecord[] = [
       {
@@ -209,8 +211,9 @@ export function createKernel(options: KernelOptions): Kernel {
         capabilities,
       },
     ];
-    void target.append(records.map((r) => JSON.stringify(r)).join('\n'));
+    void delegator.append(records.map((r) => JSON.stringify(r)).join('\n'));
   };
+
   writeInit();
 
   //
@@ -263,7 +266,7 @@ export function createKernel(options: KernelOptions): Kernel {
       writeInit();
       // 旧 sink 收尾（把缓冲 flush 掉）。
       if (previous.sink?.close) void previous.sink.close();
-      if (previous.initSink?.close) void previous.initSink.close();
+
       return { id };
     },
     /**
@@ -287,7 +290,7 @@ export function createKernel(options: KernelOptions): Kernel {
       // 恢复出来的消息已经在文件里，记录器游标要从这里接着算，别再写一遍。
       openRecorder(id, messages.length);
       if (previous.sink?.close) void previous.sink.close();
-      if (previous.initSink?.close) void previous.initSink.close();
+
       return { id, restored: messages.length };
     },
     restore(messages: Message[]): void {
@@ -299,7 +302,6 @@ export function createKernel(options: KernelOptions): Kernel {
       current.recorder?.dispose();
       persistence?.dispose();
       if (current.sink?.close) void current.sink.close();
-      if (current.initSink?.close) void current.initSink.close();
     },
   };
 }

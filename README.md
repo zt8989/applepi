@@ -35,36 +35,19 @@ agent** —— 循环不是写出来的，是 reducer 与副作用互相 dispatc
   sessions/
     --<cwd 编码>--/<id>.jsonl   会话（可恢复）
   traces/
-    <id>.jsonl                  轨迹树（一次尝试一节点）
-    <id>.init.jsonl             装载段（prompt / model）
+    <id>.jsonl                  轨迹树 + 装载段（prompt / model）
 ```
 
 **目录内部的结构照抄 pi，位置是自己的** —— 名字不带 `pi` 前缀，因为里面没有 pi 的东西。
-初始配置从 clj-harness 迁过来（当前默认 `workbuddy` / `cn:space-bunny`）：
 
-```bash
-npm run config:migrate     # 从 ~/.clj-harness/config.edn + .env 生成上面三个 json
-npm run config:check       # 只看会迁什么，不写文件
-```
+这三个 json 手写或从别处拷进来。`models.json` 放 provider 的 baseUrl / api / 模型目录，
+`auth.json` 只放凭证；`.env` 里的 `<ID>_API_KEY` 也能用（`npm start` 走
+`--env-file-if-exists=.env`）。命令行的 `-P` / `-m` 仍然优先。
 
-`models.json` 放 provider 的 baseUrl / api / 模型目录，`auth.json` 只放凭证；
-`.env` 里的 `<ID>_API_KEY` 也能用（`npm start` 走 `--env-file-if-exists=.env`）。
-
-命令行的 `-P` / `-m` 仍然优先。
-
-**从旧位置搬来的数据**（轨迹本来落在项目的 `.trace/`，现在在家目录）：
-
-```bash
-npm run trace:migrate      # 搬 .trace/ → ~/.redux-agent/traces/，并重建可恢复的会话
-npm run trace:check        # 只看会迁什么
-```
-
-轨迹文件里也记了完整的 message 记录，所以旧轨迹能被重建成会话 —— 不只是能看，还能接着聊。
 ## 运行
 
 ```bash
 npm install
-npm run config:migrate            # 首次：把 provider / 模型配置迁到 ~/.redux-agent
 ```
 **终端界面**（pi-tui）：
 
@@ -152,6 +135,6 @@ src/                    内核（见 docs/architecture.md）
 web/                    浏览器渲染层
 test/                   离线测试
 docs/architecture/      架构现状
-scripts/                配置迁移（config:migrate）
+scripts/                本地开发辅助（dev-web）
 ~/.redux-agent/         运行时状态：配置 / 会话 / 轨迹（不在仓库里）
 ```

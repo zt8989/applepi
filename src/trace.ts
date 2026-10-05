@@ -263,18 +263,23 @@ export function traceStats(tree: TraceTree): TraceStats {
     if (node.kind === 'error') errors += 1;
     if (node.endedAt !== null) durationMs += node.endedAt - node.createdAt;
   }
-  // 「重试」= 同一个父节点下有多个 LLM 尝试（说明前一个没成，走了分支）。
+  // 「重试」= 同一个父节点下有**多个 LLM 尝试**（说明前一个没成，走了分支）。
+  //
+  // 只数 llm.attempt，**不能把 tool.attempt 算进来**：模型一轮里并行发两个工具时，
+  // 这两个 tool.attempt 是同一个 llm.result 下的兄弟节点，按「多兄弟即重试」的判据会被记成一次重试。
+  // 之前把工具也算上，于是每轮并行调用都虚增一个「重试」（实测一轮 2 个 bash 就 +1）。
   let retries = 0;
   for (const id of tree.order) {
     const node = tree.nodes[id];
     if (!node || node.parentId === null) continue;
-    const attempts = childrenOf(tree, node.parentId).filter(
-      (c) => c.kind === 'llm.attempt' || c.kind === 'tool.attempt',
-    );
-    if ((node.kind === 'llm.attempt' || node.kind === 'tool.attempt') && attempts.indexOf(node) > 0) {
+    if (node.kind !== 'llm.attempt') continue;
+    const attempts = childrenOf(tree, node.parentId).filter((c) => c.kind === 'llm.attempt');
+    // index > 0：它是同父下的第 2 个及以后的尝试，也就是「前一个失败后的重试」。
+    if (attempts.indexOf(node) > 0) {
       retries += 1;
     }
   }
+
   return { turns, toolCalls, errors, retries, durationMs };
 }
 

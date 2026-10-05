@@ -20,12 +20,14 @@
 import { applyTraceRecord, createTraceTree, type SerializedTraceNode, type TraceTree } from './trace';
 
 /**
- * 装载段的落盘形状（`op: 'init'`）。两种：prompt 与 model，各一条。
+ * 装载记录（`prompt.init` / `model.init`）。两种，各一条。
  *
- * 单独放一个文件（`<id>.init.jsonl`）而不是混进轨迹文件：它们的生命周期不同 ——
- * 装载是**会话级**的（内核起来时装一次），轨迹节点是**这次对话**的产物。
- * 混在一起会让「回放一段对话」不得不先跳过一堆与它无关的装载记录。
+ * 以前它们单独落一个 `<id>.init.jsonl`，现在**混在轨迹文件的前两行**。
+ * 拆出去的理由（"回放要先跳过无关的装载记录"）不成立 —— 回放只认自己那几种 op，
+ * 其余一律忽略；而且每个会话多一个文件，目录里全是 jsonl 很难翻。
+ * 老会话的 `.init.jsonl` 由一次性迁移脚本合并过（合并后已删除），`loadInit` 也会回退读它。
  */
+
 export type InitRecord =
   | {
       op: 'prompt.init';
@@ -53,10 +55,14 @@ export interface ReplayedInit {
 /**
  * 一行轨迹 / 对话记录。`message` 让回放能重建 messages（零 token 复现一轮对话）。
  */
-export type TraceRecord =
-  | { op: 'message'; message: unknown }
-  | { op: 'add'; node: SerializedTraceNode }
-  | { op: 'close'; id: string; status: string; endedAt: number | null };
+/**
+ * 一行轨迹 / 对话记录。`message` 让回放能重建 messages（零 token 复现一轮对话）。
+ *
+ * `prompt.init` / `model.init` 也在这里面（不再单独一个 `<id>.init.jsonl`）：
+ * 回放只认自己那几种 op、其余忽略，所以装载记录混在前面**不影响**回放，
+ * 而少一半文件对「目录里全是 jsonl」的观感差别很大。
+ */
+export type TraceRecord = InitRecord | { op: 'message'; message: unknown } | { op: 'add'; node: SerializedTraceNode } | { op: 'close'; id: string; status: string; endedAt: number | null };
 
 /** 追加写一个字符串。Node 与浏览器各自实现。 */
 export interface TraceSink {
@@ -107,6 +113,8 @@ export interface ReplayedSession {
   tree: TraceTree;
   /** 按原顺序重建的对话消息。 */
   messages: unknown[];
+  /** 装载段（prompt / model）。回放不必重装配工具、不必再问 provider 能力。 */
+  init: ReplayedInit;
 }
 
 /**
@@ -118,6 +126,7 @@ export interface ReplayedSession {
 export function replaySession(text: string, sessionId: string): ReplayedSession {
   let tree = createTraceTree(sessionId);
   const messages: unknown[] = [];
+  const init: ReplayedInit = { prompt: null, model: null };
   for (const line of text.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -140,9 +149,13 @@ export function replaySession(text: string, sessionId: string): ReplayedSession 
       }
     } else if (record.op === 'message') {
       messages.push(record.message);
+    } else if (record.op === 'prompt.init') {
+      init.prompt = record;
+    } else if (record.op === 'model.init') {
+      init.model = record;
     }
   }
-  return { tree, messages };
+  return { tree, messages, init };
 }
 
 /** 只重建轨迹树（老调用方用它；不认识 message 行）。 */

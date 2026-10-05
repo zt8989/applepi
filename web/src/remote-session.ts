@@ -13,7 +13,7 @@
  * 关键点：`session.state` 每次都返回**新对象 / 新数组**。pi-web-ui 靠引用变化判断
  * 要不要重渲染，直接把远端那份对象原样透出去是不够的。
  */
-
+import type { AssistantMessage } from '@earendil-works/pi-ai';
 /** 服务端推来的那一帧（与 src/server.ts 的 Snapshot 对应，但只声明界面用到的部分）。 */
 export interface RemoteSnapshot {
   type: 'snapshot';
@@ -27,11 +27,15 @@ export interface RemoteSnapshot {
   thinkingText: string;
   streamSeq: number;
   turns: number;
+  /** 单回合轮数上限（提示「已用满 N 轮」时要用）。 */
+  maxTurns: number;
   totalCost: number;
   usage: unknown;
   error: string | null;
   errorKind: string | null;
   errorNodeId: string | null;
+  /** 回合为什么停了。null = 还在跑。 */
+  stopReason: 'completed' | 'maxTurns' | 'error' | 'aborted' | null;
   retrying: boolean;
   aborted: boolean;
   toolNames: readonly string[];
@@ -85,6 +89,8 @@ export function createRemoteSession(options: RemoteSessionOptions = {}) {
   let received = 0;
   /** 上一帧，用来判断「这一帧多了/少了几条消息」。 */
   let previous: RemoteSnapshot | null = null;
+/** 已经画过的错误文案（去重，见 errorNotice）。新对话 / 恢复会话时清掉。 */
+let shownError: string | null = null;
 
   const emit = (event: UiLifecycleEvent): void => {
     for (const listener of listeners) listener(event);
@@ -175,8 +181,60 @@ export function createRemoteSession(options: RemoteSessionOptions = {}) {
    * pi-web-ui 拿到 state 后按引用比较来决定重渲染；如果一直返回同一个对象，
    * 界面就永远不更新（这是 pi-agent-core 那套「就地改数组」的老问题的镜像）。
    */
+/**
+ * 内核的 `error` 折成一条 assistant 消息 —— pi-web-ui 只认这种形状的错误。
+ *
+ * ## 为什么不能只给 session.errorMessage
+ *
+ * pi-web-ui 的 `Messages.ts` 只渲染 `message.stopReason === 'error' && message.errorMessage`
+ * 那个红框。它**从不读** session 上的 `errorMessage` —— 之前我们一直往那个字段写错误，
+ * 于是「撞轮数上限」「LLM 调用失败」在 Web 上一个字都不显示，看上去就是「卡住了不动」。
+ *
+ * ## 为什么由渲染层合成，而不是让内核多存一条消息
+ *
+ * 内核的 `messages` 是要喂回模型的：多塞一条错误助手消息会污染上下文，模型会以为那是他自己说的。
+ * 所以这里只在**交给 UI 的副本**上追加 —— 落盘、回放、下一轮请求看到的都还是干净的消息流。
+ *
+ * 同一个错误只画一次（`shownError` 去重）：内核不会重复推同一个 error，
+ * 但下一条消息进来时 messages 变长，不去重就会把上一条错误重画一遍。
+ */
+const errorNotice = (s: RemoteSnapshot | null): AssistantMessage | null => {
+  const text = s?.error;
+  // 内核把 error 清空（用户又发话了 / 新对话）时，把去重标记也清掉，
+  // 这样下一次**同样**的报错仍然会显示出来。
+  if (!text) {
+    shownError = null;
+    return null;
+  }
+  if (text === shownError) return null;
+  shownError = text;
+  return {
+    role: 'assistant',
+    content: [],
+    api: 'openai-completions',
+    provider: s?.providerName ?? 'unknown',
+    model: s?.modelId ?? 'unknown',
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    // 这两个字段才是 pi-web-ui 画红框的依据。
+    stopReason: 'error',
+    // 撞轮数上限不是故障，是「这一轮到此为止」—— 换个说法，
+    // 免得每次收工都像报了个错。真正的失败才提示「已停止」。
+    errorMessage: s?.stopReason === 'maxTurns' ? `这一轮已用满 ${s.maxTurns} 轮上限，已自动收工。可以直接追问，或用 /new 换个会话继续。` : text,
+    timestamp: Date.now(),
+  } as AssistantMessage;
+};
+
+
   const makeState = (): Record<string, unknown> => {
     const s = snapshot;
+    const notice = errorNotice(s);
     return {
       systemPrompt: s?.systemPrompt ?? '',
       model: s
@@ -184,7 +242,8 @@ export function createRemoteSession(options: RemoteSessionOptions = {}) {
         : undefined,
       thinkingLevel: s?.thinkingLevel ?? 'off',
       // 复制数组：远端那份不能被界面直接改。
-      messages: [...(s?.messages ?? [])],
+      // 末尾那条错误消息只给 UI 看，不回灌给模型（见 errorNotice 的说明）。
+      messages: notice ? [...(s?.messages ?? []), notice] : [...(s?.messages ?? [])],
       tools: [],
       isStreaming: s?.phase === 'thinking' || s?.phase === 'calling-tools',
       streamingText: s?.streamingText ?? '',

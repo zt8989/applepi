@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createKernel } from '../src/kernel';
@@ -357,6 +357,21 @@ test('端到端：装载与对话都落盘，回放时零 token 复现', async (
     assert.ok(init.model, 'model.init 在');
     assert.equal(init.model.provider, 'faux');
     assert.ok(init.model.capabilities, '能力也落盘（回放不必再问 provider）');
+
+    // 装载段不再单独一个文件 —— 它就在轨迹文件的前两行。
+    // （以前每个会话占两个 jsonl，一半内容还是重复的。）
+    const files = (await readdir(dir)).filter((f) => f.endsWith('.jsonl'));
+    assert.deepEqual(
+      files,
+      ['sess-init.jsonl'],
+      '一个会话只应该有一个 jsonl（不该再有 .init.jsonl）',
+    );
+    const raw = await readFile(path.join(dir, 'sess-init.jsonl'), 'utf8');
+    assert.ok(
+      raw.includes('"op":"prompt.init"') && raw.includes('"op":"model.init"'),
+      '装载记录就在这个文件里（位置无所谓：回放按 op 类型收集，与行序无关）',
+    );
+
 
     // 对话 + 轨迹读回
     const session = await loadSession('sess-init', dir);

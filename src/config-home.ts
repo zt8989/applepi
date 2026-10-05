@@ -20,8 +20,8 @@
  *         --<cwd 编码>--/       按工作目录分（编码规则与 pi 相同）
  *           <sessionId>.jsonl 会话：首行 header，其后每行一条 entry
  *       traces/
- *         <sessionId>.jsonl        轨迹树（一次尝试一节点）
- *         <sessionId>.init.jsonl   装载段（prompt / model）
+ *         <sessionId>.jsonl        轨迹树（一次尝试一节点）+ 装载段（prompt / model）
+
  *
  * 轨迹单独放 `traces/` 而不是混进 sessions/：轨迹是**每次对话**的产物（一次尝试一节点、
  * 落盘频繁），会话文件是给人看的历史。分开之后「回放一段对话」不必先跳过一堆与它无关
@@ -101,6 +101,10 @@ export function tracePathFor(sessionId: string): string {
   return path.join(tracesDir(), `${sessionId}.jsonl`);
 }
 
+/**
+ * 老布局的装载段路径。**新代码不再写这个文件** —— 装载记录已并入轨迹文件的前两行。
+ * 留着是为了 `loadInit` 能回退读老会话（见 trace-file.ts）。
+ */
 export function initPathFor(sessionId: string): string {
   return path.join(tracesDir(), `${sessionId}.init.jsonl`);
 }

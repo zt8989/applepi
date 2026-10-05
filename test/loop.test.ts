@@ -131,6 +131,87 @@ test('单回合轮数上限：不再无限调 LLM，而是停下并报错', asyn
   assert.match(state.error ?? '', /上限/);
 });
 
+
+test('轮数上限是「单回合」的：第二次提问仍然拿满额度', async () => {
+  // 回归测试：`turns` 曾经在 user.message 里没归零，于是 maxTurns 变成整个会话累计的上限 ——
+  // 第一问就用光额度，第二问只跑 1 轮就报错，现象是「聊着聊着就停了」。
+  const faux = createFauxRuntime();
+  let calls = 0;
+  const store = createAgentStore({
+    runtime: faux.runtime,
+    systemPrompt: 'test',
+    maxTurns: 1,
+    streamFn: () => {
+      calls += 1;
+      const toolCall: ToolCall = {
+        type: 'toolCall',
+        id: `call_${calls}`,
+        name: 'bash',
+        arguments: { command: 'echo tick' },
+      };
+      const message = assistantMessage([toolCall], 'toolUse');
+      return streamOf([{ type: 'done', reason: 'toolUse', message }]);
+    },
+  });
+
+  store.dispatch({ type: 'user.message', text: '第一问' });
+  const first = await waitForIdle(store);
+  assert.equal(first.turns, 1, '第一问用满了 1 轮');
+
+  const callsAfterFirst = calls;
+  store.dispatch({ type: 'user.message', text: '第二问' });
+  const second = await waitForIdle(store);
+
+  // 关键断言：第二问**又**跑满了 1 轮，而不是被上一问的额度欠着。
+  assert.equal(calls - callsAfterFirst, 1, '第二问应有完整的 1 轮额度');
+  assert.equal(second.turns, 1, 'turns 必须在每次提问时归零');
+  assert.match(second.error ?? '', /上限/);
+});
+
+test('stopReason 区分「正常收工」和「被上限砍」', async () => {
+  // 界面靠 stopReason 决定怎么显示。之前撞上限只写了一句 error 字符串、没有结构化字段，
+  // 于是「上限收工」和「LLM 报错」在界面上长得一样，用户只能猜为什么停了。
+  const faux = createFauxRuntime();
+  let calls = 0;
+  // 显式给了 streamFn 会盖掉 faux 的脚本，所以「说完就收工」那一段靠这个开关换行为。
+  let finish = false;
+  const store = createAgentStore({
+    runtime: faux.runtime,
+    systemPrompt: 'test',
+    maxTurns: 2,
+    streamFn: () => {
+      calls += 1;
+      if (finish) {
+        return streamOf([
+          {
+            type: 'done',
+            reason: 'stop',
+            message: assistantMessage([{ type: 'text', text: '说完了' }], 'stop'),
+          },
+        ]);
+      }
+      const toolCall: ToolCall = {
+        type: 'toolCall',
+        id: `call_${calls}`,
+        name: 'bash',
+        arguments: { command: 'echo tick' },
+      };
+      return streamOf([{ type: 'done', reason: 'toolUse', message: assistantMessage([toolCall], 'toolUse') }]);
+    },
+  });
+
+  store.dispatch({ type: 'user.message', text: '一直调工具' });
+  const capped = await waitForIdle(store);
+  assert.equal(capped.stopReason, 'maxTurns', '撞上限要标成 maxTurns');
+  assert.equal(capped.errorKind, null, '上限收工不是 LLM 错误，errorKind 应为空');
+
+  // 正常说完：不该有 error，也不该被显示成「出错」。
+  finish = true;
+  store.dispatch({ type: 'user.message', text: '打个招呼' });
+  const done = await waitForIdle(store);
+  assert.equal(done.stopReason, 'completed');
+  assert.equal(done.error, null, '正常收工没有 error');
+});
 test('LLM 出错：错误进状态树，相位回 idle', async () => {
   const faux = createFauxRuntime();
   const store = createAgentStore({

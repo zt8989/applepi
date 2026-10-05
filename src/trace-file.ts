@@ -96,16 +96,26 @@ export async function loadSession(
   return replaySession(text, sessionId);
 }
 
-/** 读回一个会话的**装载段**（prompt / model 两块）。文件不存在返回 null。 */
+
+/**
+ * 读回一个会话的**装载段**（prompt / model 两块）。文件不存在返回 null。
+ *
+ * 装载记录现在就在轨迹文件的前两行，所以直接复用 `loadSession` 的结果。
+ * 老会话（合并前写的）额外回退读一次 `.init.jsonl`，这样不合并也能用。
+ */
 export async function loadInit(
   sessionId: string,
   dir?: TraceDir,
 ): Promise<ReplayedInit | null> {
-  const file = initPath(sessionId, dir);
-  if (!existsSync(file)) return null;
-  const text = await readFile(file, 'utf8');
+  const session = await loadSession(sessionId, dir);
+  if (session && (session.init.prompt || session.init.model)) return session.init;
+  // 回退：老布局的独立 init 文件。
+  const legacy = initPath(sessionId, dir);
+  if (!existsSync(legacy)) return session?.init ?? null;
+  const text = await readFile(legacy, 'utf8');
   return replayInit(text);
 }
+
 
 /** 读回一个会话的轨迹树（只要树，不要消息；老调用方用它）。 */
 export async function loadTrace(

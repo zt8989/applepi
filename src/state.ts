@@ -14,6 +14,22 @@ export interface ExecutingTool {
 export type LlmErrorKind = 'timeout' | 'network' | 'auth' | 'model' | 'aborted' | 'unknown';
 
 /**
+ * 回合为什么停了 —— 界面据此区分「正常收工」和「被砍」。
+ *
+ * ## 为什么不能靠 errorKind 猜
+ *
+ * `errorKind` 说的是「LLM 调用失败的原因」，它对「撞轮数上限」这种**根本没失败**的情况没有定义
+ * （一直是 null）。而 `error` 又只是一句给人看的字符串，界面没法拿它做判断。
+ * 结果就是：撞上限、LLM 报错、手动中断在界面上长得一模一样，只能靠猜。
+ *
+ * - `completed`：模型自己说完了，正常的。
+ * - `maxTurns`：撞了单回合轮数上限，被砍。
+ * - `error`：LLM 调用失败（配 `errorKind` 看是哪一类）。
+ * - `aborted`：用户手动中断。
+ */
+export type StopReason = 'completed' | 'maxTurns' | 'error' | 'aborted';
+
+/**
  * prompt 侧状态 —— 与 model 分开装载：prompt 是「跟模型说什么」，model 是「用哪个模型说」。
  * 整块由 `prompt.init` 装载，之后只被 `prompt.segment.added` 追加。
  *
@@ -86,7 +102,14 @@ export interface AgentState {
    */
   errorNodeId: string | null;
   /** 最近一次错误的类别。 */
+  /** 最近一次错误的类别。 */
   errorKind: LlmErrorKind | null;
+  /**
+   * 回合为什么停了。`null` = 还在跑（idle 但没有收工理由 = 空闲，等下一句话）。
+   *
+   * 界面靠它决定怎么显示：`completed` 不该弹红框，`maxTurns` / `error` / `aborted` 要弹。
+   */
+  stopReason: StopReason | null;
   /** 这次失败正在自动重试（UI 显示「重试中…」）。 */
   retrying: boolean;
   aborted: boolean;
@@ -168,6 +191,7 @@ export function createInitialState(options: InitialStateOptions): AgentState {
     error: null,
     errorNodeId: null,
     errorKind: null,
+    stopReason: null,
     retrying: false,
     aborted: false,
     trace: options.trace ?? createTraceTree(options.sessionId ?? newSessionId()),

@@ -58,7 +58,7 @@ const FALLBACK_DEFAULT = { provider: 'workbuddy', model: 'cn:space-bunny' } as c
 /**
  * 默认 provider / 模型。
  *
- * 顺序：`~/.pi/agent/settings.json`（由 `npm run config:migrate` 从 clj-harness 写入）
+ * 顺序：`~/.redux-agent/settings.json`（手写或从别处拷进来的）
  * → 内置兜底 `workbuddy` / `cn:space-bunny`。命令行显式给的参数永远优先。
  */
 export function defaultProviderSpec(): ProviderSpec {
@@ -89,7 +89,7 @@ export function createRuntime(spec: ProviderSpec): AgentRuntime {
   if (modelsOfProvider.length === 0) {
     throw new Error(
       `未知 provider：${spec.provider}。可用：${providerNames().join(', ')}` +
-        `（自定义 provider 来自 ${piModelsPath()}，可用 npm run config:migrate 生成）`,
+        `（自定义 provider 来自 ${piModelsPath()}）`,
     );
   }
   const modelId = spec.model || modelsOfProvider[0]?.id;
@@ -131,14 +131,14 @@ export function resolveApiKey(provider: string): string | undefined {
   const envName = `${provider.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`;
   const fromEnv = process.env[envName];
   if (fromEnv) return fromEnv;
-  // 再看 pi 的 auth.json（`npm run config:migrate` 写的）——
-  // 这样即使项目 .env 里没有那个 key，迁移过来的凭证也能用。
+  // 再看 `~/.redux-agent/auth.json` ——
+  // 这样即使项目 .env 里没有那个 key，配置家目录里的凭证也能用。
   const fromAuth = loadPiAuth()[provider]?.key;
   if (fromAuth) return fromAuth;
   if (KEYLESS_PROVIDERS.has(provider)) return undefined;
   throw new Error(
     `缺少 ${envName}。三处任选其一：` +
-      `项目 .env、shell 环境变量、或 ~/.pi/agent/auth.json（跑 npm run config:migrate 生成）。`,
+      `项目 .env、shell 环境变量、或 ~/.redux-agent/auth.json。`,
   );
 }
 

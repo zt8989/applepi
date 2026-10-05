@@ -129,15 +129,17 @@ dispatch(action)
 测试覆盖了四件事：洋葱顺序（`外前 → 中前 → 内前 → 内后 → 中后 → 外后`）、
 `before` 返回 `null` 丢弃整条 action、`before` 改写、`after` 追加。
 
-## 落盘：两个文件
+## 落盘：一个文件
 
-装载段和轨迹**分开两个文件**，因为生命周期不同：装载是会话级的（起来时装一次），
-轨迹节点是这次对话的产物。混在一起会让「回放一段对话」先跳过一堆无关的装载记录。
-
+装载段写在**同一个轨迹文件里**（新会话落在开头几条之后，回放按 op 类型收集，行序无关）。
+以前是分开两个文件，理由是「生命周期不同」
+（装载是会话级的，轨迹节点是对话级的）—— 但那个理由不成立：回放只认自己那几种 op，
+装载记录它一律忽略，不会让回放多干任何事。而每个会话多一个文件，目录里全是 jsonl 很难翻。
+实测同一台机器上多个会话的 init 文件内容完全相同（prompt 和 tools 没变），一半是重复。
+老会话已由一次性脚本合并（`loadInit` 仍会回退读 `.init.jsonl`）。
 | 文件 | 内容 | 记录类型 |
 | --- | --- | --- |
-| `~/.redux-agent/traces/<id>.init.jsonl` | 装载 | `prompt.init`、`model.init`（各一条） |
-| `~/.redux-agent/traces/<id>.jsonl` | 对话 + 轨迹 | `message`、`add`、`close` |
+| `~/.redux-agent/traces/<id>.jsonl` | 装载 + 对话 + 轨迹 | `prompt.init`、`model.init`、`message`、`add`、`close` |
 
 `message` 记录是**零 token 回放**的关键：每条对话消息（user / assistant / toolResult /
 中途插的 system 段）都追加一行，回放时按顺序重放就重建出 `messages`。

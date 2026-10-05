@@ -26,8 +26,7 @@
   auth.json                       凭证
   settings.json                   默认 provider / model / thinkingLevel
   sessions/--<cwd 编码>--/<id>.jsonl
-  traces/<id>.jsonl               轨迹树
-  traces/<id>.init.jsonl          装载段
+  traces/<id>.jsonl               轨迹树 + 装载段
 ```
 
 **布局照抄 pi，位置是自己的。** 目录名不带 `pi` 前缀 —— 里面没有 pi 的代码，唯一交集是
@@ -87,19 +86,6 @@ kernel.restore(messages);      // 只灌（消息已读出来时）
 恢复之后继续聊，记录器会接着写同一个文件。如果不告诉它「已经有几条了」，它会把刚灌进去的
 历史消息**当成新消息再写一遍**。所以 `createSessionRecorder` 收 `resumeFrom`，游标从那里
 接着算；entry id 也从那个数往后编，避免与文件里已有的撞。
-## 从旧位置迁移
-
-轨迹本来落在**项目**的 `.trace/`（后来搬到家目录）。老数据用：
-
-```bash
-npm run trace:migrate      # .trace/ → ~/.redux-agent/traces/，并重建会话
-```
-
-**能重建会话**是因为轨迹文件里除了节点还记了 `message` 记录（每次 dispatch 把新消息
-追加一行）—— 所以一份旧轨迹里已经有完整的对话内容。反过来不成立：会话文件里没有 attempt
-的时间线，重建不出轨迹。
-
-默认**不覆盖**已有的会话文件（那可能是用户正在用的历史），`--overwrite` 才覆盖。
 
 ## 开新会话
 

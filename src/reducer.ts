@@ -343,9 +343,15 @@ const transitions: TransitionHandlers = {
       error: null,
       errorNodeId: null,
       errorKind: null,
+      // 新一句话 = 上一回合的收工理由作废（这一轮还没停）。
+      stopReason: null,
       retrying: false,
       aborted: false,
       llmAttempts: 0,
+      // `turns` 也必须归零，否则 maxTurns 变成「整个会话累计」的上限。
+      // 归零前这里必须是 0 起步：一次提问 = 一个 turn = 一条 react 循环（LLM→工具→LLM…）。
+      // 漏了这一行，第二次提问就只剩「25 减去前几次累计」那么点额度，于是聊着聊着就停了。
+      turns: 0,
       streamingText: '',
       thinkingText: '',
       pendingToolCalls: [],
@@ -437,6 +443,9 @@ const transitions: TransitionHandlers = {
       pendingToolCalls: toolCalls,
       error: message.errorMessage ?? closed.error,
       phase: toolCalls.length > 0 ? 'calling-tools' : 'idle',
+      // 有工具 = 这一轮还没完（要接着跑下一轮 LLM），所以不是「停」。
+      // 无工具 = 模型自己说完了，这才是真正的收工。
+      stopReason: toolCalls.length > 0 ? null : 'completed',
     };
   },
 
@@ -465,6 +474,8 @@ const transitions: TransitionHandlers = {
       thinkingText: '',
       executing: [],
       aborted: kind === 'aborted',
+      // 还要重试 = 这一轮**没停**，别让界面以为收工了。
+      stopReason: canRetry ? null : kind === 'aborted' ? 'aborted' : 'error',
     };
   },
 
@@ -488,6 +499,7 @@ const transitions: TransitionHandlers = {
       streamingText: '',
       thinkingText: '',
       executing: [],
+      stopReason: action.kind === 'aborted' ? 'aborted' : 'error',
     };
   },
 
@@ -610,6 +622,9 @@ const transitions: TransitionHandlers = {
         trace: tree,
         phase: 'idle',
         error: `已达单回合工具调用上限（${state.maxTurns} 轮），停止。`,
+        errorKind: null,
+        // 「没出错，是被上限砍的」—— 界面靠它把这种情况和真失败区分开（见 StopReason）。
+        stopReason: 'maxTurns',
         llmAttempts: 0,
       };
     }
