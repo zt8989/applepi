@@ -27,7 +27,15 @@
  * 落盘频繁），会话文件是给人看的历史。分开之后「回放一段对话」不必先跳过一堆与它无关
  * 的记录。
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -218,4 +226,83 @@ export function listSessions(): SessionSummary[] {
 
 export function ensureDir(dir: string): void {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+}
+
+// ─── 清理 ───
+
+/**
+ * 清掉一批会话：会话文件 + 对应的轨迹文件。
+ *
+ * ## 为什么两个都要删
+ *
+ * 一个会话在盘上落两处：`sessions/<cwd 编码>/<id>.jsonl`（对话历史）与 `traces/<id>.jsonl`
+ * （执行轨迹）。只删前者的话，`/api/sessions` 列表干净了，但 `traces/` 会一直攒着
+ * 几万个小文件 —— 而且那才是真正占空间的一份。
+ *
+ * ## 为什么不做「物理删除」之外的软标记
+ *
+ * 用户点「清理」就是要磁盘真的少下来。留个 .trash 再定期扫是另一套机制，
+ * 不如直接删：调用方（Web 的确认弹窗）已经问过用户了。
+ *
+ * ## 删不掉的怎么办
+ *
+ * Windows 上文件可能被索引器/编辑器短暂占着。这里**吞掉错误并计数**，
+ * 不让一个顽固文件把整批清理炸掉 —— 用户看到「清了 12 个（1 个没删掉）」比看到报错有用。
+ */
+export interface CleanResult {
+  /** 成功删掉的文件数（会话 + 轨迹都算）。 */
+  removed: number;
+  /** 删掉的会话数。 */
+  sessions: number;
+  /** 删不掉的：`<id>：<原因>`。 */
+  failed: { id: string; reason: string }[];
+}
+
+export function cleanSessions(ids: readonly string[]): CleanResult {
+  const result: CleanResult = { removed: 0, sessions: 0, failed: [] };
+  // 目录名 → 里面的会话 id，避免同一个会话被列两次（listSessions 按目录遍历）。
+  const byId = new Map<string, string>();
+  for (const session of listSessions()) {
+    if (!byId.has(session.id)) byId.set(session.id, session.file);
+  }
+  for (const id of ids) {
+    const file = byId.get(id);
+    if (!file) {
+      result.failed.push({ id, reason: `找不到会话 ${id}` });
+      continue;
+    }
+    const targets = [file, tracePathFor(id)];
+    let ok = true;
+    for (const target of targets) {
+      try {
+        if (existsSync(target)) {
+          rmSync(target, { force: true });
+          result.removed += 1;
+        }
+      } catch (error) {
+        ok = false;
+        result.failed.push({
+          id,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    if (ok) result.sessions += 1;
+  }
+  return result;
+}
+
+/**
+ * 清掉**不在** `keep` 里的全部会话。
+ *
+ * 用途是「一键把测试留下的垃圾扫掉」：测试会话的 cwd 全是临时目录，
+ * 界面上根本没法一个个点。keep 放行当前正在用的那个 id —— 它正在被记录器写着，
+ * 删了会让接下来的消息写进一个已被删掉的文件（Linux 上还会拿到一个「看不见的」句柄）。
+ */
+export function cleanSessionsExcept(keep: readonly string[]): CleanResult {
+  const keepSet = new Set(keep);
+  const ids = listSessions()
+    .map((s) => s.id)
+    .filter((id) => !keepSet.has(id));
+  return cleanSessions(ids);
 }

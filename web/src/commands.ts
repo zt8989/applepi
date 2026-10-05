@@ -15,7 +15,7 @@
  * 这份要喂浏览器的补全层。交集是「名字与语义」，重复几行字符串比跨端共享一份表更省事
  * —— 真要共享得先有个两边都认的中立位置，目前不值得。
  */
-import { listSessions, type SessionSummary } from './session-client';
+import { cleanAllSessions, listSessions, type SessionSummary } from './session-client';
 
 export interface WebCommand {
   name: string;
@@ -31,6 +31,13 @@ export interface CommandContext {
   restoreSession(session: SessionSummary): Promise<void>;
   /** 打开历史会话选择弹窗。 */
   openSessionPicker(): Promise<void>;
+  /**
+   * 清掉除当前会话外的全部历史会话（用户已经在界面上确认过了）。
+   *
+   * 为什么交给宿主而不是命令自己 fetch：清理是**不可逆**的，得先弹窗确认，
+   * 弹窗与确认框都在 main.ts 里，命令不该自己去摸 DOM。
+   */
+  cleanSessions(): Promise<string>;
   /** 在界面上显示一行提示（不发给模型）。 */
   notify(text: string): void;
 }
@@ -54,7 +61,21 @@ export const WEB_COMMANDS: WebCommand[] = [
   },
   {
     name: 'clean',
-    description: '同 /new',
+    description: '**删除**除当前会话外的全部历史会话（不可逆）',
+    async run(context) {
+      return context.cleanSessions();
+    },
+  },
+  {
+    name: 'wipe',
+    description: '同 /clean',
+    async run(context) {
+      return context.cleanSessions();
+    },
+  },
+  {
+    name: 'forget',
+    description: '开新会话（换文件；上一段仍留在 sessions/ 里）',
     async run(context) {
       const created = await context.newSession();
       return `已开新会话 ${created.id}`;

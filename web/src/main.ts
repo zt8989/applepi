@@ -39,7 +39,7 @@ import { createRemoteSession } from './remote-session';
 import { registerUserMessageRenderer } from './user-message';
 import { attachComposerMenu } from './composer-menu';
 import { runCommand, type CommandContext } from './commands';
-import { listSessions, restoreSession } from './session-client';
+import { cleanAllSessions, listSessions, restoreSession } from './session-client';
 import './trace-panel';
 import './app.css';
 
@@ -100,8 +100,44 @@ const commandContext: CommandContext = {
     updateHeader();
   },
   openSessionPicker: () => openSessions(),
+  cleanSessions: () => confirmAndCleanSessions(),
   notify,
 };
+
+/**
+ * 清理历史会话 —— **不可逆**，所以先弹确认框。
+ *
+ * 为什么用 confirm 而不是直接删：这个按钮清的是磁盘上真实的历史文件，
+ * 误触一次的代价是用户没法找回的一段对话。一个 confirm 的成本可以忽略。
+ *
+ * 报数要说清楚「删了多少条」，以及有没有删不掉的（Windows 上文件偶尔被索引器占着）。
+ * 只回一句「清理完成」的话，用户没法判断是不是真删了。
+ */
+async function confirmAndCleanSessions(): Promise<string> {
+  let data: Awaited<ReturnType<typeof listSessions>>;
+  try {
+    data = await listSessions();
+  } catch (error) {
+    return `取会话列表失败：${error instanceof Error ? error.message : String(error)}`;
+  }
+  const others = data.sessions.filter((s) => s.id !== data.current).length;
+  if (others === 0) return '没有可清理的历史会话（只有当前这一段）';
+  if (
+    !window.confirm(
+      `将删除 ${others} 条历史会话（当前这一段保留）。不可撤销，确定吗？`,
+    )
+  ) {
+    return '已取消';
+  }
+  try {
+    const result = await cleanAllSessions();
+    updateHeader();
+    const failed = result.failed.length > 0 ? `，${result.failed.length} 条没删掉` : '';
+    return `已清理 ${result.sessions} 条历史会话（${result.removed} 个文件）${failed}`;
+  } catch (error) {
+    return `清理失败：${error instanceof Error ? error.message : String(error)}`;
+  }
+}
 
 // 先确保元素注册，再 createElement —— 顺序反了拿到的是一个没升级的空标签。
 ensureElementsRegistered();
@@ -180,6 +216,16 @@ function updateHeader(): void {
 
 function newChat(): void {
   void remote.reset().then(updateHeader);
+}
+
+/**
+ * 顶栏「清理历史」按钮：走命令层那套清理（先确认、再报数），结果弹成横幅。
+ *
+ * 不直接调 cleanAllSessions() 是为了**只有一份确认与提示文案** —— 顶栏按钮与
+ * `/cleanup` 命令要给出完全一样的行为与措辞。
+ */
+function cleanFromHeader(): void {
+  void confirmAndCleanSessions().then(notify);
 }
 
 /**
@@ -293,6 +339,13 @@ render(
             @click=${newChat}
           >
             新对话
+          </button>
+          <button
+            class="px-2 py-1 text-sm rounded border border-border text-muted-foreground hover:bg-secondary transition-colors"
+            title="删除除当前会话外的全部历史会话（不可撤销）"
+            @click=${cleanFromHeader}
+          >
+            清理历史
           </button>
         </div>
       </header>

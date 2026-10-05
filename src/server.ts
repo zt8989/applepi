@@ -22,7 +22,7 @@ import path from 'node:path';
 import { createKernel, defaultSystemPrompt, type Kernel, type KernelOptions } from './kernel';
 import { defaultProviderSpec } from './provider';
 import { abortRun } from './run-control';
-import { listSessions } from './config-home';
+import { cleanSessions, cleanSessionsExcept, listSessions } from './config-home';
 import { sessionTitle } from './session-file';
 import { getTools } from './tools';
 import { traceStats } from './trace';
@@ -59,6 +59,13 @@ export interface Snapshot {
   errorNodeId: string | null;
   /** 回合为什么停了：completed / maxTurns / error / aborted。界面据此决定要不要弹提示。 */
   stopReason: AgentState['stopReason'];
+  /**
+   * 停下来的**具体原因**（StopCause）。浏览器照它分色：用户自己按停止是灰的、超时是黄的、
+   * 真故障是红的 —— 这三样在 stopReason 里挤成两种，光看它分不开。
+   */
+  stopCause: AgentState['stopCause'];
+  /** 停止原因的一句人话（「用户手动中断」），直接显示。 */
+  stopCauseDetail: AgentState['stopCauseDetail'];
   retrying: boolean;
   aborted: boolean;
   toolNames: readonly string[];
@@ -97,6 +104,8 @@ function snapshot(kernel: Kernel, cwd: string): Snapshot {
     errorKind: s.errorKind,
     errorNodeId: s.errorNodeId,
     stopReason: s.stopReason,
+    stopCause: s.stopCause,
+    stopCauseDetail: s.stopCauseDetail,
     retrying: s.retrying,
     aborted: s.aborted,
     toolNames: s.toolNames,
@@ -359,6 +368,28 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
         return;
       }
       sendJson(res, 200, kernel.restoreSession(target.file));
+      return;
+    }
+    // ── 清理历史会话（Web 顶栏那个「清理」按钮 / /cleanup 命令） ──
+    //
+    // 两种粒度：给 ids 删指定的；不给就「除当前会话外全删」——
+    // 后者才是有用的那个：测试与试跑会在 ~/.redux-agent/ 里堆出几百个临时目录的会话，
+    // 界面上没法一个个点，而它们对用户毫无价值。
+    if (url.pathname === '/api/sessions/clean' && req.method === 'POST') {
+      const body = (await readJson(req)) as { ids?: unknown; all?: unknown };
+      const ids = Array.isArray(body.ids)
+        ? body.ids.filter((x): x is string => typeof x === 'string')
+        : null;
+      if (ids !== null && ids.length > 0) {
+        sendJson(res, 200, cleanSessions(ids));
+        return;
+      }
+      // all 之外的一切都清；当前会话放行（记录器正开着它的文件，删了等于写到虚空里）。
+      if (body.all !== true) {
+        sendJson(res, 200, { removed: 0, sessions: 0, failed: [] });
+        return;
+      }
+      sendJson(res, 200, { ...cleanSessionsExcept([kernel.sessionId]), current: kernel.sessionId });
       return;
     }
 

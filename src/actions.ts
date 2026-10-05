@@ -7,7 +7,7 @@ import type {
   ToolResultMessage,
 } from '@earendil-works/pi-ai';
 import type { Message } from '@earendil-works/pi-ai';
-import type { LlmErrorKind } from './state';
+import type { LlmErrorKind, StopCause } from './state';
 
 /**
  * 工具的完整定义 —— 落进 state 后回放不必重跑。
@@ -151,9 +151,22 @@ export type AgentAction =
       error: string;
       kind?: LlmErrorKind | undefined;
       nodeId?: string | undefined;
+      /**
+       * 停下来的**具体原因**（见 state.ts 的 `StopCause`）。界面上「用户手动中断」与
+       * 「大模型超时」必须分开显示，而 `kind` 把二者都压成了「失败」这一类 ——
+       * 用户按停止根本不是失败，弹红框会让人以为程序坏了。所以这里单独带一句人类能读的原因。
+       */
+      cause?: StopCause | undefined;
     }
   /** 重试用尽或不该重试：彻底收工，相位回 idle，并在树上留一个 stop/error 节点。 */
-  | { type: 'llm.giveup'; error: string; kind: LlmErrorKind; nodeId?: string | undefined }
+  | {
+      type: 'llm.giveup';
+      error: string;
+      kind: LlmErrorKind;
+      nodeId?: string | undefined;
+      /** 同 `llm.failed.cause`：这一轮最终为什么收工。 */
+      cause?: StopCause | undefined;
+    }
   /** 这些工具调用需要执行。 */
   | { type: 'tool.call'; calls: ToolCall[] }
   /** 一个工具开始执行。 */

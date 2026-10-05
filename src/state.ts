@@ -28,6 +28,61 @@ export type LlmErrorKind = 'timeout' | 'network' | 'auth' | 'model' | 'aborted' 
  * - `aborted`：用户手动中断。
  */
 export type StopReason = 'completed' | 'maxTurns' | 'error' | 'aborted';
+/**
+ * ═══ 停止的**具体原因** ═══
+ *
+ * `StopReason` 只说「这一轮是哪种结局」，它把好几件事压成了一个 `error`：模型超时、网络抖动、
+ * 鉴权失败、工具批次整体挂掉、用户自己按了中断 —— 界面上全都长得一样（一条红字）。
+ *
+ * 这一层把「为什么停」拆细，界面与日志直接念它，不必去猜 `error` 的文案：
+ *
+ *   - `user`：用户手动中断（Ctrl-C / Web 的停止按钮）。**不是故障**，不该弹红框。
+ *   - `timeout` / `network` / `auth` / `model` / `llm-error`：LLM 调用失败，细分到能对上处置办法。
+ *   - `tool-error`：工具批次整体挂掉（LLM 根本没在跑）。
+ *   - `maxTurns`：撞单回合轮数上限。
+ *   - `completed`：模型自己说完了。
+ *   - `shutdown`：进程/内核被关停（主动 abort 的非用户来源）。
+ *
+ * 它由 `llm.failed` / `llm.giveup` 这两条 action 带进来 —— 见 actions.ts 的 `cause` 字段。
+ */
+export type StopCause =
+  | 'completed'
+  | 'maxTurns'
+  | 'user'
+  | 'timeout'
+  | 'network'
+  | 'auth'
+  | 'model'
+  | 'llm-error'
+  | 'tool-error'
+  | 'shutdown';
+
+/** 停止原因 → 一句人话（界面与日志直接用，不必各写一份文案）。 */
+export function stopCauseText(cause: StopCause): string {
+  switch (cause) {
+    case 'user':
+      return '用户手动中断';
+    case 'timeout':
+      return '大模型调用超时';
+    case 'network':
+      return '网络错误';
+    case 'auth':
+      return '鉴权失败（API key 无效或无权限）';
+    case 'model':
+      return '模型侧报错';
+    case 'llm-error':
+      return '大模型调用失败';
+    case 'tool-error':
+      return '工具批次整体失败';
+    case 'maxTurns':
+      return '已达单回合轮数上限';
+    case 'shutdown':
+      return '被内核关闭';
+    case 'completed':
+      return '模型自己说完了';
+  }
+}
+
 
 /**
  * prompt 侧状态 —— 与 model 分开装载：prompt 是「跟模型说什么」，model 是「用哪个模型说」。
@@ -110,6 +165,21 @@ export interface AgentState {
    * 界面靠它决定怎么显示：`completed` 不该弹红框，`maxTurns` / `error` / `aborted` 要弹。
    */
   stopReason: StopReason | null;
+  /**
+   * 停止的**具体原因**（`StopCause`）。`null` = 这一轮还没停。
+   *
+   * 与 `stopReason` 的分工：`stopReason` 给「粗粒度的结局」（要不要弹红框），
+   * 这个给「到底为什么」—— 用户手动中断、超时、鉴权失败在 `stopReason` 里都是 `error`/`aborted`，
+   * 只有这里能分开。界面照它分色（用户中断是灰的、超时是黄的），日志照它写。
+   */
+  stopCause: StopCause | null;
+  /**
+   * 停止原因的一句人话，界面直接显示（免得每个界面各写一份 switch）。
+   *
+   * 为什么存在：`error` 是技术文案（`401 Unauthorized`），用户看不懂也不想看；
+   * 这一句是给他看的（「鉴权失败，API key 无效或无权限」）。
+   */
+  stopCauseDetail: string | null;
   /** 这次失败正在自动重试（UI 显示「重试中…」）。 */
   retrying: boolean;
   aborted: boolean;
@@ -195,6 +265,8 @@ export function createInitialState(options: InitialStateOptions): AgentState {
     errorNodeId: null,
     errorKind: null,
     stopReason: null,
+    stopCause: null,
+    stopCauseDetail: null,
     retrying: false,
     aborted: false,
     trace: options.trace ?? createTraceTree(options.sessionId ?? newSessionId()),

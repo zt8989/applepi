@@ -34,7 +34,7 @@ import { abortRun } from '../run-control';
 import { renderTree, traceStats, type TraceNode, type TraceTree } from '../trace';
 import type { AgentState } from '../state';
 import type { AgentStore } from '../store';
-import type { SessionSummary } from '../config-home';
+import { cleanSessionsExcept, listSessions, type SessionSummary } from '../config-home';
 import { loadSessionMessages, openSessionPicker } from './session-picker';
 import { getTool } from '../tools';
 
@@ -163,7 +163,11 @@ const SLASH_COMMANDS: SlashCommand[] = [
     name: 'new',
     description: '开新会话（换文件；上一段仍留在 sessions/ 里）',
   },
-  { name: 'clean', description: '同 /new' },
+  {
+    name: 'clean',
+    description: '**删除**除当前会话外的全部历史会话（不可逆）',
+  },
+  { name: 'wipe', description: '同 /clean' },
   { name: 'help', description: '列出全部命令' },
 ];
 
@@ -196,10 +200,14 @@ export interface TuiOptions {
    * 不传就退化成「只清对话、沿用原 id」，那样之后的消者会追加进同一个文件。
    */
   newSession?: (() => { id: string }) | undefined;
+  /**
+   * 当前会话 id。`/clean` 要**放行**它 —— 记录器正开着那个文件，删了等于写到虚空里。
+   */
+  sessionId?: (() => string) | undefined;
 }
 
 export async function runTui(options: TuiOptions): Promise<number> {
-  const { store, prompt, newSession } = options;
+  const { store, prompt, newSession, sessionId } = options;
   const terminal = new ProcessTerminal();
   // AltScreen 是 viewport 实现，setLayoutRoot 在 ViewportTUI 上（TUI 接口没有）。
   const tui: ViewportTUI = new TuiAltScreen(terminal, true, undefined, {
@@ -335,8 +343,27 @@ export async function runTui(options: TuiOptions): Promise<number> {
         });
         return;
       }
+      case 'clean':
+      case 'wipe': {
+        // 环在跑时不能删：正在往某个会话文件里写。
+        if (store.getState().phase !== 'idle') {
+          notify(yellow('上一回合还没结束，先 Ctrl-C 中断再清理'));
+          return;
+        }
+        // 当前会话放行：它的文件正被记录器开着。
+        const current = sessionId?.();
+        const result = current ? cleanSessionsExcept([current]) : cleanSessionsExcept([]);
+        const failed = result.failed.length > 0 ? `，${result.failed.length} 条没删掉` : '';
+        notify(
+          dim(
+            `已清理 ${result.sessions} 条历史会话（${result.removed} 个文件）${failed}` +
+              (current ? '（当前这段保留）' : ''),
+          ),
+        );
+        return;
+      }
       case 'new':
-      case 'clean': {
+      case 'forget': {
         // 环在跑时不能换会话（正在写消息）。
         if (store.getState().phase !== 'idle') {
           notify(yellow('上一回合还没结束，先 Ctrl-C 中断再开新会话'));
@@ -517,12 +544,21 @@ function renderTranscript(state: AgentState, from: number, notice?: { text: stri
   // 收工原因。maxTurns 用「停」而不是「✗」：那是上限收工，不是出错，别吓唬人。
   if (state.phase === 'idle' && state.error) {
     const capped = state.stopReason === 'maxTurns';
+    // **用户自己按了停止**不是故障：以前与真错误同一条红字，看上去像程序崩了。
+    // 这里单独走灰色「已停止」，不吓人，也不必让人以为要去看轨迹排查。
+    const stoppedByUser = state.stopCause === 'user';
     const node = state.errorNodeId ? `（轨迹节点 ${state.errorNodeId}）` : '';
-    if (capped) {
+    // 停止原因写在前面：光看 error 那句技术文案（'LLM 调用已中断'）没人知道发生了什么。
+    const cause = state.stopCauseDetail ? `${state.stopCauseDetail}：` : '';
+    if (stoppedByUser) {
+      lines.push(`  ${dim('■')} ${dim(`${cause}${state.error}`)} ${dim(node)}`);
+      lines.push(dim('  已按你的要求停下，模型没写完 —— 追问即可继续。'));
+    } else if (capped) {
       lines.push(`  ${yellow('■')} ${yellow(state.error)} ${dim(node)}`);
       lines.push(dim('  这是上限收工，不是出错 —— 继续追问即可，或用 /new 换个会话。'));
     } else {
-      lines.push(`  ${red('✗')} ${red(state.error)} ${dim(node)}`);
+      // 真失败：带上原因（超时 / 鉴权 / 网络…），免得只看到一句干巴巴的英文。
+      lines.push(`  ${red('✗')} ${red(`${cause}${state.error}`)} ${dim(node)}`);
       lines.push(dim('  按 Ctrl+T 看轨迹树'));
     }
   }

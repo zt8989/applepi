@@ -15,6 +15,7 @@
  */
 import type { AssistantMessage, ImageContent, TextContent } from '@earendil-works/pi-ai';
 import { isImageStub, stubImageData } from '../../src/message-content';
+import type { StopCause } from '../../src/state';
 /** 服务端推来的那一帧（与 src/server.ts 的 Snapshot 对应，但只声明界面用到的部分）。 */
 export interface RemoteSnapshot {
   type: 'snapshot';
@@ -37,6 +38,13 @@ export interface RemoteSnapshot {
   errorNodeId: string | null;
   /** 回合为什么停了。null = 还在跑。 */
   stopReason: 'completed' | 'maxTurns' | 'error' | 'aborted' | null;
+  /**
+   * 停下来的**具体原因**。与 `stopReason` 的差别：后者只说「是失败」，
+   * 这里分得清「用户自己按了停止」/「大模型超时」/「鉴权失败」—— 界面上要分色。
+   */
+  stopCause: StopCause | null;
+  /** 停止原因的一句人话（「用户手动中断」），直接显示给用户。 */
+  stopCauseDetail: string | null;
   retrying: boolean;
   aborted: boolean;
   toolNames: readonly string[];
@@ -309,6 +317,26 @@ let shownError: string | null = null;
  * 同一个错误只画一次（`shownError` 去重）：内核不会重复推同一个 error，
  * 但下一条消息进来时 messages 变长，不去重就会把上一条错误重画一遍。
  */
+/**
+ * 停止时给用户看的那一句话。
+ *
+ * 三种语气，不能混：
+ *   - 撞轮数上限 —— 不是故障，提示「可以直接追问」；
+ *   - 用户自己按了停止 —— 更不是故障，写成「已停止」而不是「出错」，
+ *     否则用户会以为自己把程序弄坏了；
+ *   - 真失败 —— 带上 `stopCauseDetail`（「大模型调用超时」/「鉴权失败…」），
+ *     光看 `LLM 调用已中断` 这种技术文案没人知道发生了什么。
+ */
+function stopNoticeText(s: RemoteSnapshot | null): string {
+  const text = s?.error ?? '';
+  if (s?.stopReason === 'maxTurns') {
+    return `这一轮已用满 ${s.maxTurns} 轮上限，已自动收工。可以直接追问，或用 /new 换个会话继续。`;
+  }
+  if (s?.stopCause === 'user') {
+    return '已按你的要求停止。模型还没写完 —— 追问即可继续。';
+  }
+  return s?.stopCauseDetail ? `${s.stopCauseDetail}：${text}` : text;
+}
 const errorNotice = (s: RemoteSnapshot | null): AssistantMessage | null => {
   const text = s?.error;
   // 内核把 error 清空（用户又发话了 / 新对话）时，把去重标记也清掉，
@@ -337,7 +365,7 @@ const errorNotice = (s: RemoteSnapshot | null): AssistantMessage | null => {
     stopReason: 'error',
     // 撞轮数上限不是故障，是「这一轮到此为止」—— 换个说法，
     // 免得每次收工都像报了个错。真正的失败才提示「已停止」。
-    errorMessage: s?.stopReason === 'maxTurns' ? `这一轮已用满 ${s.maxTurns} 轮上限，已自动收工。可以直接追问，或用 /new 换个会话继续。` : text,
+    errorMessage: stopNoticeText(s),
     timestamp: Date.now(),
   } as AssistantMessage;
 };

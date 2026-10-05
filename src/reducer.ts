@@ -1,7 +1,14 @@
 import { Cmd, loop, type CmdType, type LoopReducer } from 'redux-loop';
 import type { AssistantMessage, Message, ToolCall, ToolResultMessage } from '@earendil-works/pi-ai';
 import type { AgentAction, AgentActionType, ModelCapabilities } from './actions';
-import { createInitialState, isRetryable, type AgentState, type LlmErrorKind } from './state';
+import {
+  createInitialState,
+  isRetryable,
+  stopCauseText,
+  type AgentState,
+  type LlmErrorKind,
+  type StopCause,
+} from './state';
 import { appendNode, patchNode, type TraceNode } from './trace';
 /**
  * 一张纯表：action → (下一个状态, 该发哪些 effect)。
@@ -87,23 +94,40 @@ function closeLlmFailure(
   error: string,
   kind: LlmErrorKind,
   nodeId: string | null,
+  cause: StopCause,
 ): AgentState {
   // effect 若带了自己的 nodeId（它知道自己开的是哪个 attempt），以它为准。
   const openId = nodeId ?? state.openLlmNodeId;
   let { trace } = state;
+  // 用户自己按停止不是故障：标成 aborted（灰的），别和真错误（红的）混为一谈。
   const status = kind === 'aborted' ? 'aborted' : 'error';
   if (openId) trace = patchNode(trace, openId, { status, endedAt: now });
   const { tree, node } = appendNode(trace, openId, 'error', {
     status,
     label: error,
     detail: error,
-    meta: { kind },
+    // cause 一起落进 meta：回放/看树时能分清「超时」与「用户按了停止」—— 二者 kind 都是 aborted。
+    meta: { kind, cause },
     createdAt: now,
     endedAt: now,
   });
   return { ...state, trace: tree, openLlmNodeId: null, errorNodeId: node.id, errorKind: kind };
 }
 
+/**
+ * 从失败的类别推出**停止原因**（`StopCause`）。
+ *
+ * 为什么不让界面自己推：`kind === 'aborted'` 既可能是用户按了停止，
+ * 也可能是内核被关掉时顺手 abort 的 —— 都是 aborted，但前者不该弹红框。
+ * 所以 effect 侧把真实原因（`action.cause`）带进来，这里只做兜底推断：
+ * effect 没带 cause 时（比如老代码路径）至少还能给出一个不至于错的粗分类。
+ */
+export function causeFromKind(kind: LlmErrorKind, cause?: StopCause): StopCause {
+  if (cause !== undefined) return cause;
+  if (kind === 'aborted') return 'user';
+  if (kind === 'timeout' || kind === 'network' || kind === 'auth' || kind === 'model') return kind;
+  return 'llm-error';
+}
 /** 取一段文本的头一行做 label。 */
 function summarize(text: string): string {
   const first = text.trim().split('\n')[0] ?? '';
@@ -345,6 +369,8 @@ const transitions: TransitionHandlers = {
       errorKind: null,
       // 新一句话 = 上一回合的收工理由作废（这一轮还没停）。
       stopReason: null,
+      stopCause: null,
+      stopCauseDetail: null,
       retrying: false,
       aborted: false,
       llmAttempts: 0,
@@ -446,6 +472,9 @@ const transitions: TransitionHandlers = {
       // 有工具 = 这一轮还没完（要接着跑下一轮 LLM），所以不是「停」。
       // 无工具 = 模型自己说完了，这才是真正的收工。
       stopReason: toolCalls.length > 0 ? null : 'completed',
+      // 正常收工的原因也记一份：界面不必再猜「completed」是被砍的还是真说完。
+      stopCause: toolCalls.length > 0 ? null : 'completed',
+      stopCauseDetail: toolCalls.length > 0 ? null : stopCauseText('completed'),
     };
   },
 
@@ -458,7 +487,8 @@ const transitions: TransitionHandlers = {
    */
   'llm.failed': (state, action) => {
     const kind: LlmErrorKind = action.kind ?? 'unknown';
-    const closed = closeLlmFailure(state, Date.now(), action.error, kind, action.nodeId ?? null);
+    const cause = causeFromKind(kind, action.cause);
+    const closed = closeLlmFailure(state, Date.now(), action.error, kind, action.nodeId ?? null, cause);
     // 只有一个确实在跑的 LLM 尝试才谈得上「重试」；工具批次的失败走这里时 openLlmNodeId 已是 null。
     const wasLlmAttempt = state.openLlmNodeId !== null;
     const canRetry =
@@ -476,16 +506,21 @@ const transitions: TransitionHandlers = {
       aborted: kind === 'aborted',
       // 还要重试 = 这一轮**没停**，别让界面以为收工了。
       stopReason: canRetry ? null : kind === 'aborted' ? 'aborted' : 'error',
+      // 还要重试 = 还没停，原因留空；真停了就记**具体**原因（用户手动 / 超时 / 鉴权…）。
+      stopCause: canRetry ? null : cause,
+      stopCauseDetail: canRetry ? null : stopCauseText(cause),
     };
   },
 
   /** 重试用尽：留一个 stop 节点（它是闭合的，所以推进 tip），相位回 idle。 */
   'llm.giveup': (state, action) => {
+    const cause = causeFromKind(action.kind, action.cause);
     const { tree } = appendNode(state.trace, state.trace.tipId, 'stop', {
       status: 'ok',
       label: action.error,
       detail: action.error,
-      meta: { kind: action.kind },
+      // 跟错误节点一样把 cause 记进 meta：树上就能看出「用户主动停了」而不是「模型坏了」。
+      meta: { kind: action.kind, cause },
       createdAt: Date.now(),
       endedAt: Date.now(),
     });
@@ -500,6 +535,8 @@ const transitions: TransitionHandlers = {
       thinkingText: '',
       executing: [],
       stopReason: action.kind === 'aborted' ? 'aborted' : 'error',
+      stopCause: cause,
+      stopCauseDetail: stopCauseText(cause),
     };
   },
 
@@ -625,6 +662,8 @@ const transitions: TransitionHandlers = {
         errorKind: null,
         // 「没出错，是被上限砍的」—— 界面靠它把这种情况和真失败区分开（见 StopReason）。
         stopReason: 'maxTurns',
+        stopCause: 'maxTurns',
+        stopCauseDetail: stopCauseText('maxTurns'),
         llmAttempts: 0,
       };
     }

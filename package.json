@@ -18,7 +18,7 @@
     "web:build": "vite build --config web/vite.config.ts",
     "web:serve": "npm run web:build && npm run serve",
 
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node --import tsx --import ./test/isolated-home.ts --test test/*.test.ts"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "^1.0.2",

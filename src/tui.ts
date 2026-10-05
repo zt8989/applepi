@@ -203,6 +203,9 @@ async function main(): Promise<void> {
     store: kernel.store,
     // 把内核的「开新会话」交进去 —— TUI 只拿 store，换 id（于是换文件）要内核出手。
     newSession: () => kernel.newSession(),
+    // 当前会话 id 也要给：`/clean` 删历史时得放行它（记录器正开着那个文件）。
+    // 注意它是**取值**不是常量：开新会话后 id 会变。
+    sessionId: () => kernel.sessionId,
     ...(prompt !== undefined ? { prompt } : {}),
   });
 }

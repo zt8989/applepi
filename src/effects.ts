@@ -22,9 +22,9 @@ import type {
   ToolResultMessage,
 } from '@earendil-works/pi-ai';
 import type { AgentAction } from './actions';
-import { classifyLlmError, type AgentState, type LlmErrorKind } from './state';
+import { classifyLlmError, type AgentState, type LlmErrorKind, type StopCause } from './state';
 import { getTool, getTools } from './tools';
-import { beginRun, endRun } from './run-control';
+import { beginRun, endRun, lastAbortCause, RunAbortedError } from './run-control';
 import { resolveApiKey, type StreamFn } from './provider';
 import { formatDuration } from './trace';
 
@@ -128,7 +128,10 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
         if (controller.signal.aborted) {
           const reason = abortReason(controller.signal);
           if (reason instanceof LlmTimeoutError) throw reason;
-          throw new Error('LLM 调用已中断');
+          // 手动中断：原因挂在 signal.reason 上（RunAbortedError）。拿不到就退回登记处记的
+          // 那个 —— 至少能分清「用户按了停止」与「内核被关掉」。
+          if (reason instanceof RunAbortedError) throw reason;
+          throw new RunAbortedError(lastAbortCause());
         }
         throw new Error('LLM 流在发出 done/error 之前就结束了');
       }
@@ -184,17 +187,52 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
    * `nodeId` 传 null 表示「这不是某次 LLM 尝试的失败」（比如工具批次整体挂掉），
    * reducer 会据此判定不重试。
    */
-  function failureAction(error: unknown, nodeId: string | null): AgentAction {
+  function failureAction(
+    error: unknown,
+    nodeId: string | null,
+    /** 「这不是某次 LLM 尝试」时传 'tool-error'：工具批次整体挂掉与 LLM 失败要分开记。 */
+    fallbackCause: StopCause = 'llm-error',
+  ): AgentAction {
     const message = error instanceof Error ? error.message : String(error);
+    // 手动中断的文案是中文（「运行被用户中断」），classifyLlmError 认不出 abort ——
+    // 它只按英文关键词猜。所以这里**先认异常类型**，别让文案决定事实。
     const kind: LlmErrorKind =
-      error instanceof LlmTimeoutError ? 'timeout' : classifyLlmError(message);
+      error instanceof LlmTimeoutError
+        ? 'timeout'
+        : error instanceof RunAbortedError
+          ? 'aborted'
+          : classifyLlmError(message);
     const id = nodeIdOf(error) ?? nodeId;
     return {
       type: 'llm.failed',
       error: message,
       kind,
       ...(id !== null ? { nodeId: id } : {}),
+      cause: stopCauseOf(error, kind, fallbackCause),
     };
+  }
+
+  /**
+   * 从异常推出停止原因。
+   *
+   * 超时与手动中断都走 abort，但它们完全是两件事：前者是故障（可重试），后者是用户的选择。
+   * 光看 kind 分不开（都可能是 aborted），所以先认 `RunAbortedError` 上挂的 cause，
+   * 再退回 kind 的粗分类。
+   */
+  function stopCauseOf(
+    error: unknown,
+    kind: LlmErrorKind,
+    fallback: StopCause,
+  ): StopCause {
+    if (error instanceof RunAbortedError) return error.cause;
+    if (error instanceof LlmTimeoutError) return 'timeout';
+    // aborted 不能原样当 StopCause 用：它只说明「被中断了」，没说是谁喊停的。
+    // 真正的来源在 RunAbortedError 上；到这一步还没拿到，就按登记处的（默认用户）。
+    if (kind === 'aborted') return lastAbortCause();
+    if (kind === 'timeout' || kind === 'network' || kind === 'auth' || kind === 'model') {
+      return kind;
+    }
+    return fallback;
   }
 
   function toToolResult(
@@ -292,7 +330,8 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
         // 工具批次整体挂掉（比如 abort）不该被当成 LLM 失败去重试，
         // 所以这里明确给 nodeId: null，让 reducer 看到「没有 LLM 尝试在跑」。
         failActionCreator: (error: unknown): AgentAction =>
-          failureAction(error, null),
+          // 这里 LLM 根本没在跑（openLlmNodeId 已是 null）：不是「大模型失败」，是工具批次挂了。
+          failureAction(error, null, 'tool-error'),
       }),
   };
 }
