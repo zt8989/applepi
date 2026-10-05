@@ -185,7 +185,10 @@ export function createInitialState(options: InitialStateOptions): AgentState {
     pendingToolCalls: [],
     executing: [],
     turns: 0,
-    maxTurns: options.maxTurns ?? 25,
+    // 默认**不设上限**：一次提问就是一条 ReAct 循环，模型要查多少轮由它自己说了算。
+    // 曾经默认 25，表现为「模型正干着活突然停了」—— 但用户只发了一条消息，
+    // 是 25 次 LLM 调用把这个大需求砍断了。命令行的 --max-turns 仍可显式设一个兜底值。
+    maxTurns: options.maxTurns ?? Number.POSITIVE_INFINITY,
     usage: null,
     totalCost: 0,
     error: null,

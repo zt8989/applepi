@@ -203,6 +203,16 @@ export function toJsonl(records: readonly TraceRecord[]): string {
  * 写失败（磁盘满、权限）不会打断环：只报一次警告，游标不动，下次状态变化再试。
  */
 export interface TracePersistence {
+  /**
+   * 恢复历史之后告诉落盘器「前 N 条消息已经在文件里了，别再写一遍」。
+   *
+   * 为什么需要它：`restoreSession` 会 `conversation.reset`（清空 messages）再逐条 `session.restored`
+   * 把 N 条历史灌回来。那些内容**本来就在文件里**，不是新产生的 —— 但落盘器只看 messages 有没有变长，
+   * 于是从游标 0 开始把整批重写一遍，轨迹文件里就出现了「同一批消息出现两次」。
+   *
+   * 与 `dispose` 一样是给内核用的出口：store 只有一个，落盘器也只有这一个，所以由它来归位游标。
+   */
+  skipMessages(count: number): void;
   dispose(): void;
 }
 
@@ -248,7 +258,9 @@ export function createTracePersistence(options: {
     // 新消息：每条追加一行。回放时按顺序重放就能重建 messages。
     for (let i = persistedMessages; i < messages.length; i += 1) {
       const message = messages[i];
-      if (message !== undefined) records.unshift({ op: 'message', message });
+      // push 而不是 unshift：unshift 会把同一批新消息**倒过来**（[a,b,c] 变成 [c,b,a]），
+      // 回放出来的对话顺序就反了。push 保持它们在 messages 里的先后。
+      if (message !== undefined) records.push({ op: 'message', message });
     }
 
     lastStatus = snapshot(trace);
@@ -271,7 +283,18 @@ export function createTracePersistence(options: {
   const unsubscribe = store.subscribe(flush);
   lastStatus = snapshot(store.getState().trace);
   flush();
-  return { dispose: unsubscribe };
+  return {
+    /**
+     * 恢复历史后由内核调用：那 N 条消息已经在文件里，游标直接推过去。
+     *
+     * 必须**在灌消息之前**调 —— flush 是 store 订阅器，`session.restored` 每条都会触发它，
+     * 等灌完再调就晚了（第一批已经写掉了）。见 kernel.ts 的 restoreSession。
+     */
+    skipMessages: (count: number): void => {
+      if (count > persistedMessages) persistedMessages = count;
+    },
+    dispose: unsubscribe,
+  };
 }
 
 function snapshot(trace: TraceTree): Map<string, string> {

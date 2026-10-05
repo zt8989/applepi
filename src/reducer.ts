@@ -621,7 +621,7 @@ const transitions: TransitionHandlers = {
         ...state,
         trace: tree,
         phase: 'idle',
-        error: `已达单回合工具调用上限（${state.maxTurns} 轮），停止。`,
+        error: `已达单回合轮数上限（${state.maxTurns} 轮 LLM 调用），停止。`,
         errorKind: null,
         // 「没出错，是被上限砍的」—— 界面靠它把这种情况和真失败区分开（见 StopReason）。
         stopReason: 'maxTurns',

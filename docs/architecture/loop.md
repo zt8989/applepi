@@ -98,8 +98,16 @@ reducer 里没有一个 `await`、没有一个 `fetch`。真正干活的 `Cmd.ru
 
 ## 轮数上限
 
-`tool.batch.done` 时若 `turns >= maxTurns`（默认 25），开一个 `stop` 节点（它是闭合的，
+`tool.batch.done` 时若 `turns >= maxTurns`，开一个 `stop` 节点（它是闭合的，
 所以推进 tip）、相位 → `idle`。这一步必须在 reducer 里闭合，否则 `waitForIdle` 永远等不到。
+
+**默认不设上限**（`maxTurns = Infinity`，见 `state.ts`）。曾经默认 25，代价很实际：
+一次提问（「把图片上传做完」）触发的 ReAct 循环跑到第 25 轮被砍，现象是「模型干着活突然停了」，
+而用户只发了一条消息 —— 容易被误判成 bug 或模型自己放弃了。
+
+注意 `turns` 数的是**LLM 调用次数**，不是工具调用次数：一次 `llm.done` 加 1，
+哪怕这一轮并行发了 5 个工具调用。`user.message` 时归零，所以它管的是「一个用户消息 + ReAct 循环」。
+需要兜底时用 `--max-turns <n>`。
 
 ## 相关
 

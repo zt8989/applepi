@@ -26,7 +26,7 @@ interface CliArgs {
   provider: string;
   model?: string | undefined;
   system: string;
-  maxTurns: number;
+  maxTurns?: number | undefined;
   prompt?: string;
   apiKey?: string;
   llmTimeoutMs?: number;
@@ -51,7 +51,7 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
   -P, --provider <id>    LLM provider（默认 deepseek；可用: ${providerNames().join(', ')}）
   -m, --model <id>       模型 id（默认取该 provider 的第一个模型）
   -s, --system <text>    覆盖 system prompt
-      --max-turns <n>    单回合最多几轮 LLM 调用（默认 25）
+      --max-turns <n>    单回合最多几轮 LLM 调用（默认不限制）
       --llm-timeout <ms> 一次 LLM 调用的超时（默认 120000）；超时按可重试错误处理
       --attempts <n>     单轮内最多几次 LLM 尝试（含首次，默认 2；超时/网络错会自动重试）
       --api-key <key>    直接给 key（否则读 DEEPSEEK_API_KEY）
@@ -69,12 +69,13 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
 
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
-  // provider/model 留空 → 走 defaultProviderSpec()：先读 ~/.pi/agent/settings.json，
-  // 再退到内置兜底 workbuddy / cn:space-bunny。命令行 -P/-m 仍然优先。
-  provider: '',
-  model: undefined,
+    // provider/model 留空 → 走 defaultProviderSpec()：先读 ~/.pi/agent/settings.json，
+    // 再退到内置兜底 workbuddy / cn:space-bunny。命令行 -P/-m 仍然优先。
+    provider: '',
+    model: undefined,
     system: DEFAULT_SYSTEM_PROMPT,
-    maxTurns: 25,
+    // 不给默认上限：模型要查多少轮由它自己说了算，--max-turns 留给需要兜底的人。
+    maxTurns: undefined,
     help: false,
     demo: false,
     noTrace: false,

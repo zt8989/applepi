@@ -284,6 +284,12 @@ export function createKernel(options: KernelOptions): Kernel {
       previous.recorder?.dispose();
       current = openResources(id);
       store.dispatch({ type: 'conversation.reset', sessionId: id } as AgentAction);
+      // 轨迹落盘器的游标也要跟着推 —— 它只看 messages 有没有变长，看不出这些是「读回来的」
+      // 而不是「新产生的」。不推的话，下面每 dispatch 一条 session.restored 都会触发一次 flush，
+      // 于是整批历史被当成新消息重写一遍 —— 轨迹文件里同一批消息出现两次。
+      //
+      // 必须在灌消息**之前**调：flush 是 store 订阅器，灌第一条就已经晚了。
+      persistence?.skipMessages(messages.length);
       for (const message of messages) {
         store.dispatch({ type: 'session.restored', message } as AgentAction);
       }
