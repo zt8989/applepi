@@ -18,7 +18,7 @@
  *   npm run serve            # 起 Node 内核 + 静态页面 → http://localhost:5273
  *   npm run serve -- --demo  # 用 faux provider，不打网络、不需要 key
  */
-import { html, render } from 'lit';
+import { html, render, type TemplateResult } from 'lit';
 // 关键：pi-web-ui 的自定义元素是靠**模块副作用**注册的（AgentInterface.js 末尾的
 // `customElements.define("agent-interface", ...)`）。如果只把它当类型用、或者让 bundler
 // 认定「只用了类型」，那行 define 会被 tree-shake 掉，页面就只剩一个没升级的空标签。
@@ -40,7 +40,10 @@ import { registerUserMessageRenderer } from './user-message';
 import { attachComposerMenu } from './composer-menu';
 import { runCommand, type CommandContext } from './commands';
 import { cleanAllSessions, listSessions, restoreSession } from './session-client';
+import type { HistoryBrowser } from './history-browser';
+import type { TraceTree } from '../../src/trace';
 import './trace-panel';
+import './history-browser';
 import './app.css';
 
 const params = new URLSearchParams(window.location.search);
@@ -99,7 +102,7 @@ const commandContext: CommandContext = {
     await restoreRemoteSession(target.id);
     updateHeader();
   },
-  openSessionPicker: () => openSessions(),
+  openSessionPicker: async () => openSessions(),
   cleanSessions: () => confirmAndCleanSessions(),
   notify,
 };
@@ -191,12 +194,7 @@ const headerStats = (): string => {
   const s = remote.snapshot;
   if (!s) return '连接中…';
   const cost = s.totalCost > 0 ? ` · $${s.totalCost.toFixed(4)}` : '';
-  const bits = [`${s.providerName}/${s.modelId}`, `${s.turns} 轮`, cost].filter(Boolean);
-  const traceBits: string[] = [`节点 ${Object.keys((s.trace as { nodes?: object })?.nodes ?? {}).length}`];
-  const stats = s.stats as { retries?: number; errors?: number } | null;
-  if (stats?.retries) traceBits.push(`重试 ${stats.retries}`);
-  if (stats?.errors) traceBits.push(`错误 ${stats.errors}`);
-  return `${bits.join(' · ')}   轨迹 ${traceBits.join(' · ')}`;
+  return [`${s.providerName}/${s.modelId}`, `${s.turns} 轮`, cost].filter(Boolean).join(' · ');
 };
 
 const headerNote = (): string => {
@@ -206,13 +204,6 @@ const headerNote = (): string => {
     ? `内核 cwd: ${s.cwd}${DEMO ? '（demo，不打网络）' : ''}`
     : '与内核断开，正在重连…';
 };
-
-function updateHeader(): void {
-  const stats = document.getElementById('stats');
-  if (stats) stats.textContent = headerStats();
-  const note = document.getElementById('kernel-note');
-  if (note) note.textContent = headerNote();
-}
 
 function newChat(): void {
   void remote.reset().then(updateHeader);
@@ -228,15 +219,6 @@ function cleanFromHeader(): void {
   void confirmAndCleanSessions().then(notify);
 }
 
-/**
- * 历史会话选择器。
- *
- * 用 `window.prompt` 之外的原生弹窗没有更好的选择（不引 UI 库），所以用
- * `<dialog>` + 列表：能滚动、能点、能 Esc 关，够用且零依赖。
- *
- * 「只列当前 cwd」的会话在前面（内核标了 `current`）—— 别的目录的历史恢复进来，
- * 工具的文件边界会和对话内容对不上。
- */
 /**
  * 在界面下方弹一行提示（命令结果、错误）。
  *
@@ -260,7 +242,12 @@ function notify(text: string): void {
 }
 let noticeTimer = 0;
 
-/** 恢复一个历史会话（零 token，不重跑模型）。 */
+/**
+ * 恢复一个历史会话（零 token，不重跑模型）。
+ *
+ * 三个入口共用这一份：侧栏那行上的「恢复这一段」、`/sessions` 命令、恢复历史弹窗。
+ * 之前顶栏还有个「历史会话」按钮弹 `dialog`，那份已经删掉（见 openSessions）。
+ */
 async function restoreRemoteSession(id: string): Promise<void> {
   try {
     const result = await restoreSession(id);
@@ -270,91 +257,80 @@ async function restoreRemoteSession(id: string): Promise<void> {
   }
 }
 
-async function openSessions(): Promise<void> {
-  const data = await listSessions();
-
-  const dialog = document.createElement('dialog');
-  dialog.className = 'rounded-lg border border-border p-0 w-[32rem] max-w-[90vw] bg-background text-foreground';
-  const rows = data.sessions
-    .map((s) => {
-      const when = new Date(s.mtimeMs).toLocaleString();
-      const badge = s.current ? '' : '<span class="text-amber-600">（其它目录）</span>';
-      return `<li><button data-id="${s.id}" class="w-full text-left px-3 py-2 hover:bg-secondary transition-colors">
-        <div class="text-sm truncate">${escapeHtml(s.title)} ${badge}</div>
-        <div class="text-xs text-muted-foreground">${escapeHtml(s.id)} · ${s.entries} 条 · ${when}</div>
-      </button></li>`;
-    })
-    .join('');
-  dialog.innerHTML = `
-    <div class="px-3 py-2 border-b border-border text-sm font-semibold">恢复历史会话</div>
-    <ul class="max-h-[60vh] overflow-auto m-0 p-0 list-none">
-      ${rows || '<li class="px-3 py-4 text-sm text-muted-foreground">还没有历史会话</li>'}
-    </ul>
-    <div class="px-3 py-2 border-t border-border text-right">
-      <button data-close class="px-2 py-1 text-sm rounded border border-border hover:bg-secondary">关闭</button>
-    </div>`;
-
-  dialog.addEventListener('click', (event) => {
-    const target = event.target as HTMLElement;
-    if (target.closest('[data-close]') || target === dialog) {
-      dialog.close();
-      return;
-    }
-    const id = target.closest('button[data-id]')?.getAttribute('data-id');
-    if (!id) return;
-    void restoreRemoteSession(id).then(() => dialog.close());
-  });
-
-  document.body.appendChild(dialog);
-  dialog.addEventListener('close', () => dialog.remove());
-  dialog.showModal();
+/**
+ * 「/sessions」与顶栏动作：让**侧栏**那一栏弹到前面来。
+ *
+ * 之前它是 `window.prompt` 之外的 `<dialog>` 列表弹窗。有了常驻的左列表（见
+ * history-browser.ts）之后那套弹窗就是重复实现 —— 两份「选会话」会各自漂移。
+ * 所以这里只做一件事：把右栏的侧栏显示出来（窄屏上它默认收起）。
+ */
+function openSessions(): void {
+  openSessionPicker.hidden = false;
+  openSessionPicker.querySelector<HTMLElement>('.list')?.scrollTo({ top: 0 });
 }
 
-/** 列表里的标题来自会话内容，要转义（不能把用户输入当 HTML 插进去）。 */
-function escapeHtml(text: string): string {
-  return text.replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c,
-  );
-}
+const openSessionPicker = document.createElement('history-browser') as HistoryBrowser;
+openSessionPicker.currentId = remote.snapshot?.sessionId ?? '';
+openSessionPicker.cwd = remote.snapshot?.cwd ?? '';
+// 当前这次对话的轨迹直接给（比读盘新，也省一次请求）；选到别的会话时它自己读文件。
+openSessionPicker.liveTrace = (remote.snapshot?.trace as TraceTree | null) ?? null;
+// 点「恢复这一段」走**同一条** restoreRemoteSession —— 与 /sessions 命令、历史弹窗共用一份逻辑。
+openSessionPicker.addEventListener('restore-session', (event) => {
+  const id = (event as CustomEvent<{ id: string }>).detail?.id;
+  if (id) void restoreRemoteSession(id);
+});
 
 render(
   html`
-    <div class="w-full h-screen flex flex-col bg-background text-foreground overflow-hidden">
-      <header class="flex items-center justify-between border-b border-border shrink-0 px-4 py-2">
-        <div class="flex items-center gap-3">
-          <span class="text-base font-semibold">Redux Loop Agent</span>
-          <span id="kernel-note" class="text-xs text-muted-foreground">连接内核中…</span>
-        </div>
-        <div class="flex items-center gap-3">
-          <span id="stats" class="text-xs text-muted-foreground">连接中…</span>
-          <theme-toggle></theme-toggle>
-          <button
-            class="px-2 py-1 text-sm rounded border border-border hover:bg-secondary transition-colors"
-            @click=${openSessions}
-          >
-            历史会话
-          </button>
-          <button
-            class="px-2 py-1 text-sm rounded border border-border hover:bg-secondary transition-colors"
-            @click=${newChat}
-          >
-            新对话
-          </button>
-          <button
-            class="px-2 py-1 text-sm rounded border border-border text-muted-foreground hover:bg-secondary transition-colors"
-            title="删除除当前会话外的全部历史会话（不可撤销）"
-            @click=${cleanFromHeader}
-          >
-            清理历史
-          </button>
-        </div>
-      </header>
-      ${chat}
-      <trace-panel .store=${traceStoreForPanel()}></trace-panel>
+    <div class="w-full h-screen flex bg-background text-foreground overflow-hidden">
+      <div class="flex-1 flex flex-col min-w-0">
+        <header class="flex items-center justify-between border-b border-border shrink-0 px-4 py-2">
+          <div class="flex items-center gap-3 min-w-0">
+            <span class="text-base font-semibold shrink-0">Redux Loop Agent</span>
+            <span class="text-xs text-muted-foreground truncate">${headerNote()}</span>
+          </div>
+          <div class="flex items-center gap-3 shrink-0">
+            <span id="stats" class="text-xs text-muted-foreground">${headerStats()}</span>
+            <theme-toggle></theme-toggle>
+            <button
+              class="px-2 py-1 text-sm rounded border border-border hover:bg-secondary transition-colors"
+              @click=${newChat}
+            >
+              新对话
+            </button>
+            <button
+              class="px-2 py-1 text-sm rounded border border-border hover:bg-secondary transition-colors"
+              title="删除除当前会话外的全部历史会话（不可撤销）"
+              @click=${cleanFromHeader}
+            >
+              清理历史
+            </button>
+          </div>
+        </header>
+        ${chat}
+        <trace-panel .store=${traceStoreForPanel()}></trace-panel>
+      </div>
+      <!--
+        右栏：**左列表（选会话）/ 右详情（那次执行的轨迹）**。
+        「看历史」不再需要先恢复（恢复会把正在进行的会话换掉），
+        会话 id / cwd 随快照更新，所以换会话与换目录后它自己会跟上。
+      -->
+      ${openSessionPicker}
     </div>
   `,
   document.getElementById('app')!,
 );
+
+// 顶栏 / 面板 / 侧栏都要跟着 SSE 帧走，所以每帧都同步一次这几个值。
+function updateHeader(): void {
+  const stats = document.getElementById('stats');
+  if (stats) stats.textContent = headerStats();
+  const note = document.getElementById('kernel-note');
+  if (note) note.textContent = headerNote();
+  openSessionPicker.currentId = remote.snapshot?.sessionId ?? '';
+  openSessionPicker.cwd = remote.snapshot?.cwd ?? '';
+  openSessionPicker.liveTrace = (remote.snapshot?.trace as TraceTree | null) ?? null;
+}
 
 /**
  * 轨迹面板要一个「有 getState().trace 的 store」。

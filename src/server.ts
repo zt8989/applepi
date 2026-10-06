@@ -26,6 +26,7 @@ import { cleanSessions, cleanSessionsExcept, listSessions } from './config-home'
 import { sessionTitle } from './session-file';
 import { getTools } from './tools';
 import { traceStats } from './trace';
+import { loadSession } from './trace-file';
 import {
   ContentParseError,
   contentText,
@@ -336,6 +337,34 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
       // 走内核的 newSession：**换 sessionId**，于是换文件。
       // 只 dispatch conversation.reset 的话 id 不变，新消息会续写进旧会话文件。
       sendJson(res, 200, { ok: true, ...kernel.newSession() });
+      return;
+    }
+
+    // ── 看一条历史会话的轨迹（只读，零 token） ──
+    //
+    // 与 `/api/sessions/restore` 分开是故意的：**看**不该动当前对话。
+    // 左侧列表点一行是「看看那次的执行过程」，恢复要走那行上的按钮 ——
+    // 误点一下就把正在进行的会话换掉，代价比多一个按钮大得多。
+    const traceMatch = /^\/api\/sessions\/([^/]+)\/trace$/.exec(url.pathname);
+    if (traceMatch) {
+      const id = decodeURIComponent(traceMatch[1] ?? '');
+      if (!listSessions().some((s) => s.id === id)) {
+        sendJson(res, 404, { error: `找不到会话 ${id}` });
+        return;
+      }
+      // 轨迹是**同一个格式的 JSONL**，回放即得树（崩溃截断的半行由 replaySession 跳过）。
+      const loaded = await loadSession(id, options.traceDir ?? undefined);
+      if (!loaded) {
+        sendJson(res, 404, { error: `会话 ${id} 没有轨迹记录` });
+        return;
+      }
+      sendJson(res, 200, {
+        id,
+        tree: loaded.tree,
+        // 消息只报条数：右边的轨迹视图要看的是执行过程，展开每条消息全文是聊天区的活。
+        messages: loaded.messages.length,
+        stats: traceStats(loaded.tree),
+      });
       return;
     }
 

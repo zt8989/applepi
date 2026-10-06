@@ -10,6 +10,7 @@
 import { LitElement, css, html } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { renderTree, traceStats, type TraceTree } from '../../src/trace';
+import { traceRows } from './trace-rows';
 import type { AgentStore } from '../../src/store';
 
 @customElement('trace-panel')
@@ -102,22 +103,16 @@ export class TracePanel extends LitElement {
   /**
    * 逐行渲染 renderTree 的输出，并按节点状态上色。
    *
-   * renderTree 的行格式是固定的（`…<id> <kind>: <label>`），所以能安全地按行解析出
-   * 节点 id，再回到树里查它的状态 —— 不用把渲染逻辑在两边各写一遍。
+   * 逐行解析放在 `trace-rows.ts`（与历史浏览器共用），这里只管上色。
    */
   private renderNodes(tree: TraceTree) {
-    const lines = renderTree(tree, { maxWidth: 0 }).split('\n');
-    return lines.map((line) => {
-      if (line.startsWith('HEAD')) {
-        return html`<div class="head">${line}</div>`;
+    return traceRows(tree).map((row) => {
+      if (row.head !== null) {
+        return html`<div class="head">${row.head}</div>`;
       }
-      const match = /(n\d+) (llm\.attempt|llm\.result|tool\.attempt|tool\.result|user|error|stop):/.exec(
-        line,
-      );
-      const id = match?.[1];
-      const node = id ? tree.nodes[id] : undefined;
+      const node = row.node;
       const cls = !node ? '' : node.status === 'error' ? 'fail' : node.status === 'ok' ? 'ok' : 'pending';
-      return html`<div class=${cls}>${line}</div>`;
+      return html`<div class=${cls}>${row.text}</div>`;
     });
   }
 }

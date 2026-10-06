@@ -253,6 +253,31 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
     };
   }
 
+  /**
+   * 工具「跑完了但其实失败了」——按内容判定，不是按抛异常。
+   *
+   * ## 为什么必须判内容
+   *
+   * pi 的 `bash` 工具执行 `exit 1` 时**不抛异常**：它把
+   * 「Command exited with code 1」当正常结果返回。所以只 catch 异常的话，
+   * 每一个失败的工具都会走进「成功」分支，isError 永远是 false。
+   *
+   * 后果不是小问题：轨迹上把失败画成 ✓（分叉不画出来）、界面不标红、
+   * 而模型拿到的 toolResult 里 isError=false —— 它会以为命令跑成功了。
+   *
+   * ## 判据
+   *
+   * pi 把退出码写进正文，形如 `Command exited with code <非 0>`。
+   * 只认这一种形状：靠猜「输出里有没有 error 字样」会误伤（命令成功但日志里
+   * 恰好有 "error"），宁可漏判也不能把成功判成失败。
+   */
+  function isFailure(content: ToolResultMessage['content']): boolean {
+    const text = Array.isArray(content)
+      ? content.map((c) => (c.type === 'text' ? c.text : '')).join('\n')
+      : String(content);
+    return /Command exited with code [1-9]\d*/i.test(text);
+  }
+
   async function runToolCall(call: ToolCall, signal: AbortSignal): Promise<ToolResultMessage> {
     const tool = getTool(call.name);
     if (!tool) {
@@ -265,7 +290,7 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
     }
     try {
       const result = await tool.execute(call.id, call.arguments ?? {}, signal);
-      return toToolResult(call, result.content, result.details, false);
+      return toToolResult(call, result.content, result.details, isFailure(result.content));
     } catch (error) {
       return toToolResult(
         call,

@@ -325,37 +325,54 @@ function metaSuffix(node: TraceNode): string {
 /**
  * 把树渲染成多行字符串。最后一行是 tip 标记（类似 git log 显示 HEAD）。
  *
- * ## 渲染策略：单链拉平，只在真有分叉时画树
+ * ## 渲染策略：整棵树拉平，**只有错误才画出分叉**
  *
  * 一次**正常**对话在树里是一条长链：user → attempt → result → tool → result →
- * attempt → result …。按 git 那样层层缩进，它会变成 5~7 层的阶梯，右半边全空着，
- * 而它其实**没有任何分支** —— 树形在这里是噪声。
+ * attempt → result …，有时还会并排几个工具（多个 tool.attempt 兄弟）。按 git 那样
+ * 层层缩进，它是 5~7 层的阶梯，右半边全空着，而它**没有任何分支** —— 树形在这里是噪声。
  *
- * 所以规则很简单：**父节点只有一个孩子时，这一层不缩进**（就是列表里的一行）。
- * 只有出现第二个孩子（= 真的有分叉或并列）才切回树枝画法：
+ * 所以规则是：**一组兄弟节点里没有失败，就整组不缩进**（就是一串平铺的行）。
+ * 只有出现了失败，才切回树枝画法：
  *
- *   - 重试：同父下第 2 个及以后的 llm.attempt；
- *   - 并行工具：一个 llm.result 下多个 tool.attempt。
+ *   - 重试：同父下第 2 个及以后的 llm.attempt（前面那次失败）;
+ *   - 并行工具：一个 llm.result 下多个 tool.attempt，**其中至少一个失败**；
+ *   - 失败的工具调用：它和兄弟（哪怕成功的）一起挂成一小棵树。
  *
- * 根节点（prompt.* / model.init / user 那些「各自起头」的节点）一律平铺 ——
- * 它们本来就是并列的一串，缩进它们只会让人误以为有父子关系。
+ * 单孩子永远不缩进 —— 没有分叉就没有要画的树枝。根节点（prompt.* / model.init / user
+ * 那些「各自起头」的节点）也永远平铺：它们本来就是并列的一串，缩进会伪造出父子关系。
  *
- * 效果：正常对话是一张平铺的列表，出问题时才在出问题的那里长出一棵小树。
+ * 于是「正常 = 列表，出错 = 在出错的那里长出一小棵树」：
  *
  * ```
- * ✓ n1 user: 算一下 (3+4)*6
- * ✓ n2 llm.attempt: 第 1 次尝试
- * ✓ n3 llm.result: 我来算。
- * ├── ✓ n4 tool.attempt: bash
- * │   └── ✓ n5 tool.result: 42
- * └── ✓ n6 tool.attempt: read
- *     └── ✓ n7 tool.result: …
- * ✓ n8 llm.attempt: 第 2 次尝试（模型看过工具结果）
- * ✓ n9 llm.result: 42
+ * ✓ n1 user: 今天几号？
+ * ✓ n2 llm.attempt: 第 1 次尝试 407ms
+ * ✗ n3 llm.attempt: 第 2 次尝试（重试） 414ms
+ * │  ✗ n4 error: LLM 调用超时（400ms） (kind=timeout)
+ * ...
  * ```
  *
- * 树本身一点没变（还是同一棵树、同一套父子关系），只是**画法**不同。
+ * 树本身一点没变（还是同一棵树、同一套父子关系），只是**画法**不同 ——
+ * `tipId`、分叉语义、回放全都不受影响。
  */
+
+/** 这个节点算不算「出事了」。kind='error' 与 status='error' 都算（前者是错误节点，后者是失败的 attempt）。 */
+function nodeFailed(node: TraceNode): boolean {
+  return node.kind === 'error' || node.status === 'error';
+}
+
+/**
+ * 一组兄弟节点要不要画树枝（= 是不是一次值得展开的分叉）。
+ *
+ * 判据是**「多于一个孩子，且其中至少一个失败」**，不是「多于一个孩子」：
+ * 一轮里并行发三个工具、三个都成功，那只是「列表里有三行」，不是分叉；缩进它等于
+ * 声称「第二、三个工具依赖第一个」，那是假的结构，用户会照着它推断因果。
+ *
+ * 只有一个孩子也返回 false：没有兄弟就没有分叉可言。
+ */
+export function isForkGroup(children: readonly TraceNode[]): boolean {
+  if (children.length < 2) return false;
+  return children.some(nodeFailed);
+}
 export function renderTree(tree: TraceTree, options: TreeRenderOptions = {}): string {
   // 树枝前缀恒为 3 字符（'├─ '），竖线也画在同一列，所以默认 3。
   const branchWidth = options.branchWidth ?? 3;
@@ -363,40 +380,79 @@ export function renderTree(tree: TraceTree, options: TreeRenderOptions = {}): st
   const marks = options.marks ?? {};
   const lines: string[] = [];
 
-  const walk = (parentId: string | null, prefix: string, isLast: boolean, isRoot: boolean): void => {
-    const children = childrenOf(tree, parentId);
-    children.forEach((node, index) => {
-      const last = index === children.length - 1;
-      //
-      // **这一行到底画不画树枝**，是这套渲染的全部规则：
-      //   - 根：平铺（它们本来就并列，缩进会伪造出父子关系）；
-      //   - 单孩子：继续平铺（一条链，缩进没有信息量）；
-      //   - 多孩子：切回树枝（这里才是真分叉/并列，缩进开始有意义）。
-      const flat = isRoot || children.length === 1;
-      const branch = flat ? '' : last ? `${'└'}${'─'.repeat(branchWidth - 1)} ` : `${'├'}${'─'.repeat(branchWidth - 1)} `;
-      // 续行占位必须与树枝前缀同宽，竖线才不会跟子节点错开。
-      const mark = statusMark(node);
-      const elapsed =
-        node.endedAt === null ? '' : ` ${formatDuration(node.endedAt - node.createdAt)}`;
-      const head =
-        `${prefix}${branch}${mark} ${marks[node.id] ?? ''}${node.id} ${node.kind}: ${node.label}` +
-        `${elapsed}${metaSuffix(node)}`;
-      lines.push(truncate(head, maxWidth));
-      // 平铺时**不给子节点加前缀** —— 缩进必须停在分叉点为止，否则「拉平」就白做了。
-      // 画了树枝才需要给子节点留出竖线的那一列（宽度与 branch 对齐，否则竖线会错开）。
-      const childPrefix = flat
-        ? prefix
-        : `${prefix}${last ? ' '.repeat(branchWidth) : `│${' '.repeat(branchWidth - 1)}`}`;
-      if (options.collapsed?.has(node.id)) {
-        const hidden = childrenOf(tree, node.id).length;
-        if (hidden > 0) lines.push(truncate(`${childPrefix}   … ${hidden} 个子节点（已折叠）`, maxWidth));
-        return;
-      }
-      walk(node.id, childPrefix, last, false);
-    });
+  // 哪些节点是需要画树枝的「分叉组」的孩子。预先算好，别在循环里反复 childrenOf。
+  const isForkChild = new Set<string>();
+  for (const id of tree.order) {
+    const node = tree.nodes[id];
+    if (!node || node.parentId === null) continue;
+    const siblings = childrenOf(tree, node.parentId);
+    if (siblings.length > 1 && isForkGroup(siblings)) isForkChild.add(id);
+  }
+
+  /**
+   * 某个节点该有的行首缩进。
+   *
+   * 规则：沿父链往上走，只数**分叉组**。每经过一个分叉组加一级缩进，中间那些单链的
+   * 祖先**不占缩进** —— 于是正常对话是平铺的列表，只有出错的那一处（以及它下游跟着走的
+   * 那几条线）才长出树枝。
+   *
+   * 注意这里数的是「祖先里的分叉组个数」，不是「祖先个数」：数后者会让一条纯单链
+   * 照样一级一级往下缩 —— 那就等于没拉平。
+   */
+  const prefixOf = (id: string): string => {
+    // 先沿父链收集「祖先里那些分叉组的孩子」（不含自己），从根到近排列。
+    const forks: { last: boolean }[] = [];
+    let cursor: string | null = tree.nodes[id]?.parentId ?? null;
+    while (cursor !== null) {
+      if (isForkChild.has(cursor)) forks.unshift({ last: isLastOf(cursor) });
+      cursor = tree.nodes[cursor]?.parentId ?? null;
+    }
+    // 每个分叉组贡献一级缩进：组内不是最后一个就画竖线（后面还有兄弟），否则画空白。
+    let prefix = '';
+    for (const fork of forks) {
+      prefix += fork.last ? ' '.repeat(branchWidth) : `│${' '.repeat(branchWidth - 1)}`;
+    }
+    // 自己那一级：只有自己也是分叉组的一员才画树枝。
+    if (isForkChild.has(id)) {
+      prefix += `${isLastOf(id) ? '└' : '├'}${'─'.repeat(branchWidth - 1)} `;
+    }
+    return prefix;
   };
 
-  walk(null, '', true, true);
+  /** 它是不是自己那组兄弟里的最后一个（决定 ├─ 还是 └─）。 */
+  const isLastOf = (id: string): boolean => {
+    const parentId = tree.nodes[id]?.parentId ?? null;
+    const siblings = childrenOf(tree, parentId);
+    return siblings.length > 0 && siblings[siblings.length - 1]?.id === id;
+  };
+
+  // ── 按**发生顺序**（tree.order）逐行输出 ──
+  //
+  // 为什么不递归 walk：那会变成深度优先 —— 一个节点有两个孩子（并行工具）时，
+  // 第一个孩子的整条下游（→ 下一轮 LLM → 下一批工具 → … 一直到会话末尾）会全部先打印，
+  // 第二个孩子才轮得到。真实轨迹里这会让**最新的节点出现在中间**、最早的那个反而在底部，
+  // 而用户在界面上看到的是一份时间倒流的记录。
+  //
+  // tree.order 就是落盘顺序，也就是「事情发生的顺序」；节点 id 单调自增，与它一致。
+  // 缩进不改变顺序，只改变每行前面画什么 —— 两者互不干扰。
+  for (const id of tree.order) {
+    const node = tree.nodes[id];
+    if (!node) continue;
+    const mark = statusMark(node);
+    const elapsed = node.endedAt === null ? '' : ` ${formatDuration(node.endedAt - node.createdAt)}`;
+    const head =
+      `${prefixOf(id)}${mark} ${marks[node.id] ?? ''}${node.id} ${node.kind}: ${node.label}` +
+      `${elapsed}${metaSuffix(node)}`;
+    lines.push(truncate(head, maxWidth));
+
+    if (options.collapsed?.has(node.id)) {
+      const hidden = childrenOf(tree, node.id).length;
+      if (hidden > 0) {
+        lines.push(truncate(`${' '.repeat(branchWidth)}   … ${hidden} 个子节点（已折叠）`, maxWidth));
+      }
+    }
+  }
+
   if (lines.length === 0) return '（轨迹为空）';
   if (tree.tipId !== null) {
     lines.push(`HEAD → ${tree.tipId}`);

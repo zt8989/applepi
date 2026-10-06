@@ -610,7 +610,13 @@ const transitions: TransitionHandlers = {
       .join(' ')
       .replace(/\s+/g, ' ');
     let { trace } = state;
-    if (openId) trace = patchNode(trace, openId, { status: 'ok', endedAt: now });
+    // **失败时 attempt 节点本身要标成 error**，不是 ok。
+    //
+    // 为什么：轨迹渲染判断「这组兄弟要不要画分叉」看的是**兄弟节点的 status**
+    // （isForkGroup）。工具报错时 error 节点挂在 attempt *下面*，于是兄弟组里仍然是
+    // 一堆 status='ok' 的 attempt —— 分叉就画不出来了，而那恰恰是最该画的一处。
+    // 失败的事实记在子节点上，父节点却显示「成功」，两边自相矛盾。
+    if (openId) trace = patchNode(trace, openId, { status: result.isError ? 'error' : 'ok', endedAt: now });
     // 工具失败也是一个 error 节点（同样不推进 tip），成功才是 tool.result 推进。
     const { tree, node } = result.isError
       ? appendNode(trace, openId, 'error', {
