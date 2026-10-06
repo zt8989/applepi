@@ -14,25 +14,40 @@
  *
  * 数据都来自内核（`/api/sessions` 与 `/api/sessions/:id/trace`），浏览器不跑环。
  */
-import { LitElement, css, html, nothing, type TemplateResult } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
-import { formatDuration, traceStats, type TraceTree } from '../../src/trace';
-import { traceRows } from './trace-rows';
-import { listSessions, loadSessionTrace, type SessionSummary, type SessionTrace } from './session-client';
+import { LitElement, css, html, nothing, type TemplateResult } from "lit";
+import { customElement, property, state } from "lit/decorators.js";
+import { formatDuration, traceStats, type TraceTree } from "../../src/trace";
+import { traceRows, type TraceRow } from "./trace-rows";
+import {
+  listSessions,
+  loadSessionTrace,
+  type SessionSummary,
+  type SessionTrace,
+} from "./session-client";
 
-const STATUS_CLASS = {
-  ok: 'ok',
-  error: 'fail',
-  aborted: 'stop-mark',
-  pending: 'pending',
-} as const;
+/**
+ * 芯片配色。**集中在一张表**，与 trace-rows 的 KIND_CHIP 同一套语义：
+ * 用户蓝、模型紫、工具橙、上下文绿、系统灰、错误红。
+ *
+ * 为什么芯片按 kind 上色而不是按成功/失败：读者扫一遍列表要能一眼分出
+ * 「哪几行是模型在说话、哪几行是它在调工具」—— 那才是列表的主要用途。
+ * 成功/失败由**图标**（✓ / ✗）单独承担，两者分工不重叠。
+ */
+const CHIP: Record<string, string> = {
+  sky: "chip-sky",
+  violet: "chip-violet",
+  amber: "chip-amber",
+  emerald: "chip-emerald",
+  red: "chip-red",
+  muted: "chip-muted",
+};
 
-@customElement('history-browser')
+@customElement("history-browser")
 export class HistoryBrowser extends LitElement {
   /** 内核当前正在跑哪一段（列表里高亮它）。 */
-  @property({ type: String }) currentId = '';
+  @property({ type: String }) currentId = "";
   /** 换成别的目录时用它整表失效（cwd 变了，列表里全是另一个项目的会话）。 */
-  @property({ type: String }) cwd = '';
+  @property({ type: String }) cwd = "";
   /** 内核推来的当前对话轨迹（由 main.ts 塞进来）。选到「当前」那条时直接用它，省一次读盘。 */
   @property({ attribute: false }) liveTrace: TraceTree | null = null;
 
@@ -51,8 +66,19 @@ export class HistoryBrowser extends LitElement {
   static override styles = css`
     :host {
       display: flex;
+      /*
+       * 固定宽度 + 不伸缩，**不能**写 flex:1。
+       *
+       * 父容器是 display:flex、主轴 row。flex:1 的意思是「按比例瓜分剩下的空间」，
+       * 而同一行里还有聊天区 —— 于是两栏互相抢，聊天区被压到 0 宽，本组件反过来
+       * 铺满整屏，看着像「布局炸了」，其实是我这一栏抢了别人的位置。
+       * min-width:0 让内部两栏能正确收缩。
+       */
+      flex: 0 0 auto;
+      width: min(68rem, 60vw);
+      min-width: 0;
       min-height: 0;
-      flex: 1;
+      overflow: hidden;
       font-size: 13px;
       border-left: 1px solid var(--border);
     }
@@ -112,7 +138,7 @@ export class HistoryBrowser extends LitElement {
     .row:hover {
       background: var(--secondary);
     }
-    .row[aria-selected='true'] {
+    .row[aria-selected="true"] {
       background: var(--accent);
       color: var(--accent-foreground);
     }
@@ -130,7 +156,7 @@ export class HistoryBrowser extends LitElement {
       font-size: 11px;
       color: var(--muted-foreground);
     }
-    .row[aria-selected='true'] .row-meta {
+    .row[aria-selected="true"] .row-meta {
       color: inherit;
       opacity: 0.75;
     }
@@ -151,7 +177,13 @@ export class HistoryBrowser extends LitElement {
       min-height: 0;
       display: flex;
       flex-direction: column;
-      font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+      font-family: var(
+        --font-mono,
+        ui-monospace,
+        SFMono-Regular,
+        Menlo,
+        monospace
+      );
     }
     .detail-head {
       display: flex;
@@ -195,44 +227,144 @@ export class HistoryBrowser extends LitElement {
       overflow: auto;
       min-height: 0;
       flex: 1;
-      padding: 10px 14px 20px;
+      padding: 4px 0 20px;
       line-height: 1.5;
     }
-    .line {
-      white-space: pre;
-      cursor: default;
-      border-radius: 3px;
-    }
-    .line.clickable {
+
+    /* ── 一行一个节点：芯片 + 摘要 ──
+       不再靠等宽字体的空格撑缩进（见 trace-rows.ts 的说明）：
+       缩进是一个 padding-left + 一条左侧竖线，比例字体下也不会错位。 */
+    .row-node {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      width: 100%;
+      text-align: left;
+      border: 0;
+      border-bottom: 1px solid transparent;
+      background: none;
+      color: inherit;
+      padding: 3px 14px 3px calc(14px + var(--indent, 0) * 18px);
       cursor: pointer;
+      border-left: 2px solid transparent;
     }
-    .line.clickable:hover {
+    .row-node:hover {
       background: var(--secondary);
     }
-    .ok {
-      color: #16a34a;
+    .row-node[aria-expanded="true"] {
+      background: var(--secondary);
     }
-    .fail {
+    /* 出问题的那一处：左侧一条实线，一眼扫得出「哪儿出的事」。 */
+    .row-node.failed {
+      border-left-color: #dc2626;
+    }
+
+    /* kind 芯片：按种类上色，读者扫一遍就知道哪几行是模型、哪几行是工具。 */
+    .chip {
+      flex-shrink: 0;
+      align-self: center;
+      border-radius: 3px;
+      padding: 0 5px;
+      font-size: 11px;
+      line-height: 1.5;
+      font-family: var(--default-font-family, system-ui, sans-serif);
+    }
+    .chip-sky {
+      background: rgb(14 165 233 / 0.12);
+      color: #0284c7;
+    }
+    .chip-violet {
+      background: rgb(139 92 246 / 0.12);
+      color: #7c3aed;
+    }
+    .chip-amber {
+      background: rgb(245 158 11 / 0.14);
+      color: #d97706;
+    }
+    .chip-emerald {
+      background: rgb(16 185 129 / 0.12);
+      color: #059669;
+    }
+    .chip-red {
+      background: rgb(239 68 68 / 0.12);
       color: #dc2626;
     }
-    .pending {
+    .chip-muted {
+      background: var(--secondary);
+      color: var(--muted-foreground);
+    }
+
+    .mark {
+      flex-shrink: 0;
+      align-self: center;
+      width: 1em;
+      text-align: center;
+      font-size: 11px;
+    }
+    .mark.ok {
+      color: #16a34a;
+    }
+    .mark.fail {
+      color: #dc2626;
+      font-weight: 700;
+    }
+    .mark.pending {
       color: #ca8a04;
     }
-    .stop-mark {
+
+    .headline {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: var(
+        --font-mono,
+        ui-monospace,
+        SFMono-Regular,
+        Menlo,
+        monospace
+      );
+      font-size: 12px;
+    }
+    .headline.failed {
+      color: #dc2626;
+    }
+    .row-meta {
+      flex-shrink: 0;
+      font-size: 11px;
       color: var(--muted-foreground);
+      font-family: var(
+        --font-mono,
+        ui-monospace,
+        SFMono-Regular,
+        Menlo,
+        monospace
+      );
     }
     .head {
       color: var(--muted-foreground);
-      margin-top: 2px;
+      padding: 6px 14px 2px;
+      font-size: 11px;
+      font-family: var(
+        --font-mono,
+        ui-monospace,
+        SFMono-Regular,
+        Menlo,
+        monospace
+      );
     }
-    .node-head {
-      margin-left: 18px;
-      padding: 2px 6px;
+    .node-detail {
+      margin: 0 14px 6px calc(14px + var(--indent, 0) * 18px);
+      padding: 6px 8px;
       border-left: 2px solid var(--border);
+      background: var(--secondary);
       white-space: pre-wrap;
       word-break: break-word;
       color: var(--muted-foreground);
-      font-size: 12px;
+      font-size: 11px;
+      max-height: 22rem;
+      overflow: auto;
     }
     .hint {
       color: var(--muted-foreground);
@@ -249,8 +381,8 @@ export class HistoryBrowser extends LitElement {
   override updated(changed: Map<PropertyKey, unknown>): void {
     // cwd 变了（内核换目录）→ 列表整表重来。不这么做的话，里面全是上一个项目的会话，
     // 点进去详情是空的。`changed.get('cwd')` 是**旧**值，与新的不同才需要重来。
-    if (!changed.has('cwd')) return;
-    const previous = changed.get('cwd');
+    if (!changed.has("cwd")) return;
+    const previous = changed.get("cwd");
     if (previous === this.cwd) return;
     this.sessions = [];
     this.loaded = null;
@@ -264,7 +396,10 @@ export class HistoryBrowser extends LitElement {
       this.sessions = data.sessions;
       this.error = null;
       // 选中的那条可能被 /clean 删了 —— 详情还开着就会一直显示上一条的内容。
-      if (this.selectedId && !data.sessions.some((s) => s.id === this.selectedId)) {
+      if (
+        this.selectedId &&
+        !data.sessions.some((s) => s.id === this.selectedId)
+      ) {
         this.selectedId = null;
         this.loaded = null;
       }
@@ -287,7 +422,8 @@ export class HistoryBrowser extends LitElement {
       const trace = await loadSessionTrace(id);
       if (seq === this.requestSeq) this.loaded = trace;
     } catch (e) {
-      if (seq === this.requestSeq) this.error = e instanceof Error ? e.message : String(e);
+      if (seq === this.requestSeq)
+        this.error = e instanceof Error ? e.message : String(e);
     } finally {
       if (seq === this.requestSeq) this.loading = false;
     }
@@ -296,7 +432,11 @@ export class HistoryBrowser extends LitElement {
   /** 恢复（换 id、换文件）。走内核的 /sessions/restore，零 token。 */
   private restore(id: string): void {
     this.dispatchEvent(
-      new CustomEvent('restore-session', { detail: { id }, bubbles: true, composed: true }),
+      new CustomEvent("restore-session", {
+        detail: { id },
+        bubbles: true,
+        composed: true,
+      }),
     );
   }
 
@@ -312,19 +452,25 @@ export class HistoryBrowser extends LitElement {
         <div class="list-head">
           <span class="list-title">会话</span>
           <span class="count">${this.sessions.length}</span>
-          <button class="refresh" @click=${() => this.refresh()} title="重新读一次会话列表">刷新</button>
+          <button
+            class="refresh"
+            @click=${() => this.refresh()}
+            title="重新读一次会话列表"
+          >
+            刷新
+          </button>
         </div>
         <div class="rows">
-          ${this.error ? html`<div class="empty">读不到会话列表：${this.error}</div>` : ''}
-          ${!this.error && this.sessions.length === 0 ? html`<div class="empty">还没有历史会话</div>` : ''}
-          ${this.sessions.map((s) => this.renderRow(s))}
+          ${this.error ? html`<div class="empty">读不到会话列表：${this.error}</div>` : ""}
+          ${!this.error && this.sessions.length === 0 ? html`<div class="empty">还没有历史会话</div>` : ""}
+          ${this.sessions.map((s) => this.renderSessionRow(s))}
         </div>
       </aside>
       <section class="detail">${this.renderDetail()}</section>
     `;
   }
 
-  private renderRow(session: SessionSummary): TemplateResult {
+  private renderSessionRow(session: SessionSummary): TemplateResult {
     const tree = this.treeFor(session);
     const stats = tree ? traceStats(tree) : null;
     const when = new Date(session.mtimeMs).toLocaleString();
@@ -332,7 +478,7 @@ export class HistoryBrowser extends LitElement {
       <button
         class="row"
         role="option"
-        aria-selected=${this.selectedId === session.id ? 'true' : 'false'}
+        aria-selected=${this.selectedId === session.id ? "true" : "false"}
         @click=${() => this.select(session.id)}
       >
         <div class="row-title">${session.title || session.id}</div>
@@ -340,7 +486,7 @@ export class HistoryBrowser extends LitElement {
           <span>${session.entries} 条</span>
           <span>·</span>
           <span>${when}</span>
-          ${session.id === this.currentId ? html`<span class="badge">当前</span>` : ''}
+          ${session.id === this.currentId ? html`<span class="badge">当前</span>` : ""}
           ${session.current ? nothing : html`<span class="badge">其它目录</span>`}
           ${stats && stats.retries > 0 ? html`<span>重试 ${stats.retries}</span>` : nothing}
           ${stats && stats.errors > 0 ? html`<span class="stat error">错误 ${stats.errors}</span>` : nothing}
@@ -352,71 +498,109 @@ export class HistoryBrowser extends LitElement {
   private renderDetail(): TemplateResult {
     const session = this.sessions.find((s) => s.id === this.selectedId);
     if (!session) {
-      return html`<div class="hint">左边选一段会话，这里看它的执行过程。<br />（看不会换掉当前对话；要接着聊，点那一行上的「恢复」。）</div>`;
+      return html`<div class="hint">
+        左边选一段会话，这里看它的执行过程。<br />（看不会换掉当前对话；要接着聊，点那一行上的「恢复」。）
+      </div>`;
     }
     const tree = this.treeFor(session);
     const stats = tree ? traceStats(tree) : null;
     return html`
       <div class="detail-head">
-        <span class="detail-title" title=${session.title}>${session.title || session.id}</span>
+        <span class="detail-title" title=${session.title}
+          >${session.title || session.id}</span
+        >
         <span class="stat">${session.id}</span>
-        ${stats
-          ? html`
-              <span class="stat">节点 ${tree?.order.length ?? 0}</span>
-              ${stats.turns > 0 ? html`<span class="stat">${stats.turns} 轮</span>` : nothing}
-              ${stats.toolCalls > 0 ? html`<span class="stat">工具 ${stats.toolCalls}</span>` : nothing}
-              ${stats.retries > 0 ? html`<span class="stat">重试 ${stats.retries}</span>` : nothing}
-              ${stats.errors > 0 ? html`<span class="stat error">错误 ${stats.errors}</span>` : nothing}
-              ${stats.durationMs > 0
-                ? html`<span class="stat">${formatDuration(stats.durationMs)}</span>`
-                : nothing}
-            `
-          : nothing}
-        <button class="restore" @click=${() => this.restore(session.id)}>恢复这一段</button>
+        ${
+          stats
+            ? html`
+                <span class="stat">节点 ${tree?.order.length ?? 0}</span>
+                ${stats.turns > 0 ? html`<span class="stat">${stats.turns} 轮</span>` : nothing}
+                ${stats.toolCalls > 0 ? html`<span class="stat">工具 ${stats.toolCalls}</span>` : nothing}
+                ${stats.retries > 0 ? html`<span class="stat">重试 ${stats.retries}</span>` : nothing}
+                ${stats.errors > 0 ? html`<span class="stat error">错误 ${stats.errors}</span>` : nothing}
+                ${
+                  stats.durationMs > 0
+                    ? html`<span class="stat"
+                        >${formatDuration(stats.durationMs)}</span
+                      >`
+                    : nothing
+                }
+              `
+            : nothing
+        }
+        <button class="restore" @click=${() => this.restore(session.id)}>
+          恢复这一段
+        </button>
       </div>
       <div class="tree">
-        ${this.loading ? html`<div class="hint">读轨迹…</div>` : ''}
-        ${!this.loading && this.error ? html`<div class="hint">${this.error}</div>` : ''}
-        ${!this.loading && tree ? this.renderTree(tree) : ''}
-        ${!this.loading && !tree
-          ? html`<div class="hint">这一段还没有轨迹记录（可能只建了会话、没跑过模型）。</div>`
-          : nothing}
+        ${this.loading ? html`<div class="hint">读轨迹…</div>` : ""}
+        ${!this.loading && this.error ? html`<div class="hint">${this.error}</div>` : ""}
+        ${!this.loading && tree ? this.renderTree(tree) : ""}
+        ${
+          !this.loading && !tree
+            ? html`<div class="hint">
+                这一段还没有轨迹记录（可能只建了会话、没跑过模型）。
+              </div>`
+            : nothing
+        }
       </div>
     `;
   }
 
   /**
-   * 逐行渲染 `renderTree` 的输出。
+   * 轨迹列表 —— **一个扁平的账本**，一行一个节点。
    *
-   * 形状与 TUI 逐字相同（同一个纯函数），只是按行回树里查状态上色，并让有 detail 的行可点开。
-   * 缩进是树的形状（出错才长出分叉），不是样式 —— 所以这里必须用 `white-space: pre`
-   * 原样保留前缀。
+   * ## 为什么不是 ASCII 树
+   *
+   * 以前直接渲染 `renderTree` 那几行（`✓ n2 llm.attempt: …`），靠 `white-space: pre`
+   * 撑住缩进。那是给终端看的：满屏内部 id、等宽字体、颜色只区分成败。搬到网页上
+   * 三样都不成立 —— 满屏 `n123` 对读者没有信息量，比例字体下空格缩进会错位，
+   * 而「哪里出了事」被埋在一串猜不出来的空格里。
+   *
+   * 现在每行是：kind 芯片 + 成败图标 + 一句话摘要 + 耗时。要看全文就点开。
+   *
+   * ## 缩进只出现在异常处
+   *
+   * `row.indent` 只在「一组兄弟里有失败」时才 > 0（判定见 trace-rows.ts 的 computeIndents）。
+   * 于是正常对话是**零缩进**的一列；出问题的那一处往右退一格并带一条红色左边线 ——
+   * 一眼扫得出来，也不用在脑子里重建整棵树。
    */
   private renderTree(tree: TraceTree): TemplateResult[] {
-    return traceRows(tree).map((row) => {
-      if (row.head !== null) return html`<div class="line head">${row.head}</div>`;
-      const cls = row.node ? (STATUS_CLASS[row.node.status] ?? '') : '';
-      const expandable = row.node?.detail !== undefined;
-      const open = expandable && this.openDetail === row.id;
-      const line = html`
-        <div
-          class="line ${cls} ${expandable ? 'clickable' : ''}"
-          @click=${expandable ? () => (this.openDetail = open ? null : (row.id ?? null)) : undefined}
-          title=${expandable ? (open ? '收起' : '展开') : ''}
+    return traceRows(tree).map((row) => this.renderRow(row));
+  }
+
+  /** 一行。缩进用 padding + 左边线（不是空格），比例字体下也不会错位。 */
+  private renderRow(row: TraceRow): TemplateResult {
+    if (row.head !== null) return html`<div class="head">${row.head}</div>`;
+
+    const open = row.expandable && this.openDetail === row.id;
+    const pending = row.node?.status === "pending";
+    const mark = row.failed ? "✗" : pending ? "·" : "✓";
+    const markCls = row.failed ? "fail" : pending ? "pending" : "ok";
+    const style = `--indent:${row.indent}`;
+
+    return html`
+      <button
+        class="row-node ${row.failed ? "failed" : ""}"
+        style=${style}
+        aria-expanded=${row.expandable ? String(open) : "false"}
+        @click=${row.expandable ? () => (this.openDetail = open ? null : row.id) : undefined}
+        title=${row.expandable ? (open ? "收起" : "展开看全文") : ""}
+      >
+        <span class="chip ${CHIP[row.chip] ?? "chip-muted"}">${row.kind}</span>
+        <span class="mark ${markCls}">${mark}</span>
+        <span class="headline ${row.failed ? "failed" : ""}"
+          >${row.headline}</span
         >
-          ${row.text}
-        </div>
-        ${open
-          ? html`<div class="node-head">${row.node?.detail}</div>`
-          : html``}
-      `;
-      return line;
-    });
+        ${row.meta === "" ? nothing : html`<span class="row-meta">${row.meta}</span>`}
+      </button>
+      ${open ? html`<div class="node-detail" style=${style}>${row.detail}</div>` : nothing}
+    `;
   }
 }
 
 declare global {
   interface HTMLElementTagNameMap {
-    'history-browser': HistoryBrowser;
+    "history-browser": HistoryBrowser;
   }
 }
