@@ -25,6 +25,12 @@ import {
   VStack,
   matchesKey,
   CombinedAutocompleteProvider,
+  backgroundAnsi,
+  getTerminalColorMode,
+  rgbColor,
+  truncateToWidth,
+  visibleWidth,
+  type RgbColorValue,
   type SlashCommand,
   type ViewportTUI,
   type EditorTheme,
@@ -37,6 +43,8 @@ import type { AgentStore } from '../store';
 import { cleanSessionsExcept, listSessions, type SessionSummary } from '../config-home';
 import { loadSessionMessages, openSessionPicker } from './session-picker';
 import { getTool } from '../tools';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 
 const useColor = !process.env.NO_COLOR;
 const paint = (code: string, text: string) => (useColor ? `\x1b[${code}m${text}\x1b[0m` : text);
@@ -48,6 +56,37 @@ const blue = (t: string) => paint('34', t);
 const magenta = (t: string) => paint('35', t);
 const cyan = (t: string) => paint('36', t);
 const bold = (t: string) => paint('1', t);
+
+/**
+ * 工具调用块的底色。
+ *
+ * ## 为什么要底色
+ *
+ * pi 把工具调用渲染成**一整块带底色的矩形**（截图里是深绿），而我们原来是一行
+ * `✓ 执行命令 › echo 123`。差别不只是好看：底色块有明确的左右边界，长输出被折到
+ * 块里时（`... (31 earlier lines, ctrl+o to expand)`）仍然看得出「这段是工具输出」，
+ * 一行式则会被误读成模型说的话。
+ *
+ * ## 为什么用真彩而不是 ANSI 256 色号
+ *
+ * `backgroundAnsi()` 接受 `#rrggbb`，pi-tui 会根据终端能力降级到 256 色或 16 色
+ * （`getTerminalColorMode()` 告诉你当前是哪种）。直接写死 `\x1b[48;5;22m` 在不支持的
+ * 终端上会出现难看的色块。让官方函数处理降级。
+ *
+ * 色值是照 pi 截图取的深绿（不是纯黑底 —— 纯黑在很多终端上与背景同色，块就“消失”了）。
+ */
+const TOOL_BLOCK_BG = rgbColor(0x12, 0x26, 0x1a);
+const TOOL_ERROR_BLOCK_BG = rgbColor(0x2a, 0x14, 0x14);
+
+/** 给一行文字铺底色。宽度不够时先截断，否则底色会溢出到下一行。 */
+function block(text: string, bg: RgbColorValue, width: number): string {
+  // width <= 0 = 不知道终端多宽（一次性模式）。这时**不能截断**：`truncateToWidth(text, 0)`
+  // 返回空串，会把整段工具输出吃掉。直接返回原文，让终端自己折行。
+  if (width <= 0) return text;
+  const mode = getTerminalColorMode();
+  const prefix = backgroundAnsi(bg, mode);
+  return `${prefix}${truncateToWidth(text, width)}\x1b[0m`;
+}
 
 /** 节点配色：一眼能看出这条线上哪段失败了。 */
 function nodeColor(node: TraceNode): (t: string) => string {
@@ -111,25 +150,140 @@ export function renderColoredTree(tree: TraceTree, maxWidth: number): string {
     .join('\n');
 }
 
-/** 顶栏：模型 / 轮数 / 花费 / 轨迹统计。 */
-function statusLine(state: AgentState): string {
+/**
+ * 顶栏一行：轨迹统计（**刻意精简**）。
+ *
+ * ## 为什么这么少
+ *
+ * pi 的顶栏只有 logo + 版本 + 快捷键提示，模型/上下文用量都在**底栏**。我们反过来：
+ * 原来顶栏塞了「provider/model · N 轮 · $花费 · 轨迹 节点 N」，一条顶栏混了四类信息，
+ * 读起来像日志。现在顶栏只留轨迹统计（它与对话内容直接相关：节点数/重试/错误），
+ * 模型与用量挪到底栏 —— 与 pi 一致。
+ */
+export function statusLine(state: AgentState): string {
   const stats = traceStats(state.trace);
-  const cost = state.totalCost > 0 ? ` · $${state.totalCost.toFixed(4)}` : '';
-  const bits = [
-    `${state.providerName}/${state.modelId}`,
-    `${state.turns} 轮`,
-    cost,
-  ];
   const traceBits = [`节点 ${state.trace.order.length}`];
+  if (stats.turns > 0) traceBits.push(`${stats.turns} 轮`);
   if (stats.retries > 0) traceBits.push(`重试 ${stats.retries}`);
   if (stats.errors > 0) traceBits.push(red(`错误 ${stats.errors}`));
-  return `${dim(bits.filter(Boolean).join(' · '))}   ${dim('轨迹')} ${traceBits.join(dim(' · '))}`;
+  const cost = state.totalCost > 0 ? ` · $${state.totalCost.toFixed(4)}` : '';
+  return `${dim('轨迹')} ${traceBits.join(dim(' · '))}${cost}`;
+}
+
+/**
+ * 底栏左：工作目录（相对 cwd）+ git 分支。
+ *
+ * pi 显示 `~\Documents\workspace\event-loop-agent (main)`，我们用同样的形状。
+ * 路径太长时从**中间**省略（保留盘符/开头与最后两级），那两段才是定位信息。
+ */
+export function cwdLine(cwd: string, branch: string | undefined): string {
+  let shown = cwd;
+  if (shown.length > 48) {
+    const parts = shown.split(/[/\\]/);
+    const tail = parts.slice(-2).join('\\');
+    shown = `…\\${tail}`;
+  }
+  return branch ? `${shown} (${branch})` : shown;
+}
+
+/**
+ * 底栏右：`(provider) model` —— 与 pi 完全同形。
+ *
+ * 左边是「你以为自己用的是谁」，右边是「实际用的哪个模型」。分开是因为换 provider
+ * （走网关）时最容易出的错就是以为还在用原厂模型。
+ */
+export function modelLine(state: AgentState): string {
+  return `(${state.providerName}) ${state.modelId}`;
+}
+
+/**
+ * 工具调用的参数摘要（给块标题行用）。
+ *
+ * ## 参数在 assistant 消息里，不在 toolResult 里
+ *
+ * `toolResult` 只有 `toolName` / `content` / `details`，而 `details` 是**工具的返回值**
+ * （读文件时是文件内容），不是调用参数。参数在对应 assistant 消息的 `toolCall` 块上，
+ * 靠 `toolCallId` 关联 —— 所以这里要拿整个 `state.messages` 去配对。
+ *
+ * 挑的是「一眼认出这次调用在干什么」的那个字段，而不是把整个 params JSON 搬上去：
+ *   - read/edit/write → 文件路径
+ *   - bash → 命令
+ *   - 其余 → 参数数量（完整 JSON 在展开后可见）
+ *
+ * 为什么不全 JSON：截图里 pi 的标题就是 `read  docs/architecture/overview.md`，
+ * 一个文件名。JSON 会把行占满，真正的信息（读了哪个文件）反而被挤掉。
+ */
+export function toolArgs(
+  state: AgentState,
+  message: Extract<AgentState['messages'][number], { role: 'toolResult' }>,
+): string {
+  // 找发出这次调用的那条 assistant 消息。
+  let params: Record<string, unknown> = {};
+  for (const m of state.messages) {
+    if (m.role !== 'assistant') continue;
+    for (const c of m.content) {
+      if (c.type === 'toolCall' && c.id === message.toolCallId) {
+        params = c.arguments as Record<string, unknown>;
+      }
+    }
+  }
+  const pick = (...keys: string[]): string | undefined => {
+    for (const key of keys) {
+      const value = params[key];
+      if (typeof value === 'string' && value.trim() !== '') return value;
+    }
+    return undefined;
+  };
+  const keys = Object.keys(params);
+  const candidate =
+    pick('path', 'file_path', 'filePath', 'command', 'cmd', 'pattern', 'url') ??
+    (keys.length > 0 ? `${keys.length} 个参数` : '');
+  return candidate.length > 90 ? `${candidate.slice(0, 90)}…` : candidate;
+}
+
+/**
+ * 工具输出的折叠。
+ *
+ * 形状照抄 pi：`... (31 earlier lines, ctrl+o to expand)` —— 关键是**告知有省略**并
+ * 告知怎么展开。早先的实现是硬截 200 字加个 `…`，用户不知道后面还有内容、也不知道
+ * 能不能看到，于是只能去翻会话文件。
+ *
+ * `expanded`（Ctrl+O）时返回全文，同时把总行数报出来，好知道到底有多长。
+ */
+const FOLD_AFTER_LINES = 12;
+export function foldOutput(text: string, expanded: boolean): string {
+  const rows = text.split('\n');
+  if (expanded) {
+    return rows.length > FOLD_AFTER_LINES ? `${text}\n  （共 ${rows.length} 行）` : text;
+  }
+  if (rows.length <= FOLD_AFTER_LINES) return text;
+  const hidden = rows.length - FOLD_AFTER_LINES;
+  return `${rows.slice(0, FOLD_AFTER_LINES).join('\n')}\n... (${hidden} earlier lines, ctrl+o to expand)`;
 }
 
 /** 去掉 ANSI 序列，拿到可见宽度。 */
 function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex
   return text.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+}
+
+/**
+ * 底栏那行：左边路径 / 右边 `(provider) model`，中间空格补齐。
+ *
+ * ## 为什么用 visibleWidth 而不是 stripAnsi().length
+ *
+ * ANSI 序列是零宽的，但**中文是双宽**。`stripAnsi().length` 会把「一个汉字」当成一个字符，
+ * 于是含中文的右半边会往左飘、盖到左边。`visibleWidth`（pi-tui 自己的实现）按终端
+ * 的实际列宽算，这是底栏能贴右边的前提。
+ */
+export function twoColumn(left: string, right: string, width: number): string {
+  const leftWidth = visibleWidth(left);
+  const rightWidth = visibleWidth(right);
+  if (leftWidth + rightWidth + 1 > width) {
+    // 放不下就右边优先（模型名是定位信息，路径可以靠 /pwd 看）。
+    return truncateToWidth(`${left} ${right}`, width);
+  }
+  return `${left}${' '.repeat(width - leftWidth - rightWidth)}${right}`;
 }
 
 /**
@@ -204,10 +358,34 @@ export interface TuiOptions {
    * 当前会话 id。`/clean` 要**放行**它 —— 记录器正开着那个文件，删了等于写到虚空里。
    */
   sessionId?: (() => string) | undefined;
+  /**
+   * 工作目录（底栏显示用）。传了就显示，不传就 `process.cwd()`。
+   */
+  cwd?: string | undefined;
+}
+
+/**
+ * 当前 git 分支，读不到就返回 undefined（不在仓库里 / 没装 git 都会这样）。
+ *
+ * 为什么每次 refresh 都重读而不在启动时算一次：分支会变（用户切了分支、或我们自己在
+ * 会话里执行了 git 命令）。每帧读一次 `.git/HEAD` 便宜到可以忽略，而缓存了就意味着
+ * “底栏在说谎”。
+ */
+function gitBranch(cwd: string): string | undefined {
+  try {
+    const head = readFileSync(path.join(cwd, '.git', 'HEAD'), 'utf8').trim();
+    // 两种形状：`ref: refs/heads/main`（分支）或一串 sha（detached HEAD）。
+    const match = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
+    if (match) return match[1];
+    return head ? 'detached' : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function runTui(options: TuiOptions): Promise<number> {
   const { store, prompt, newSession, sessionId } = options;
+  const cwd = options.cwd ?? process.cwd();
   const terminal = new ProcessTerminal();
   // AltScreen 是 viewport 实现，setLayoutRoot 在 ViewportTUI 上（TUI 接口没有）。
   const tui: ViewportTUI = new TuiAltScreen(terminal, true, undefined, {
@@ -216,6 +394,14 @@ export async function runTui(options: TuiOptions): Promise<number> {
   });
 
   const header = new Text('', 0, 0);
+  /**
+   * 底栏：左边 cwd (+git 分支)，右边 `(provider) model`。
+   *
+   * 为什么要它：模型与用量是「我在跟谁说话」，与对话内容无关，放顶栏会干扰读对话；
+   * 而它们又不能删 —— 换 provider 时最容易出的错就是以为还在用原厂模型。
+   * 形状照抄 pi（`~\path (main)` …… `(workbuddy) cn:space-bunny`）。
+   */
+  const footer = new Text('', 0, 0);
   const transcript = new Text('', 0, 0);
   const tracePanel = new Text('', 0, 0);
   const loader = new CancellableLoader(tui, (s) => cyan(s), (s) => dim(s), '');
@@ -242,6 +428,14 @@ export async function runTui(options: TuiOptions): Promise<number> {
   });
 
   let showTrace = false;
+  /**
+   * 工具输出是否全部展开（Ctrl+O 切换）。
+   *
+   * 为什么需要它：工具输出动辄几百行（读个文件、跑个 grep），全部铺开会把对话区冲走。
+   * 折叠时留 `... (N earlier lines, ctrl+o to expand)` —— 与 pi 同形。**不展开就没法
+   * 看到完整结果**，而截断到看不见东西等于工具白跑。
+   */
+  let expanded = false;
   let loading = false;
   let lastLoaderMessage = '';
   /** 命令反馈：插在对话区顶部，6 秒后自动消失（不占输入区）。 */
@@ -252,13 +446,24 @@ export async function runTui(options: TuiOptions): Promise<number> {
     const state = store.getState();
     // 补到全宽：顶栏长度变化会让 pi-tui 的增量重绘留下残影（见 padToWidth 的注释）。
     header.setText(padToWidth(statusLine(state), terminal.columns ?? 100));
+    // 底栏同理：模型名 / 节点数会变，必须补齐到全宽，否则残影会叠出来。
+    footer.setText(
+      padToWidth(
+        twoColumn(
+          cwdLine(cwd, gitBranch(cwd)),
+          modelLine(state),
+          terminal.columns ?? 100,
+        ),
+        terminal.columns ?? 100,
+      ),
+    );
     // 整段重渲染：ScrollView 自己管滚动与跟随，我们每次给它完整的对话文本。
     // （早前这里只渲染「新增的那几条」，靠 renderedMessages 游标 —— 那个游标每帧都被
     //  推到最新，等于永远从末尾开始渲染，于是对话区什么都不显示。ScrollView 只重画
     //  变化区域，这个 bug 才暴露出来。）
     // 提示过期就清掉（6 秒后自动消失，不留一行孤儿文本）。
     if (notice.text !== '' && Date.now() > noticeUntil) notice.text = '';
-    transcript.setText(renderTranscript(state, 0, notice));
+    transcript.setText(renderTranscript(state, 0, terminal.columns ?? 100, expanded, notice));
     if (showTrace) {
       tracePanel.setText(
         state.trace.order.length === 0
@@ -299,6 +504,12 @@ export async function runTui(options: TuiOptions): Promise<number> {
     if (matchesKey(data, 'ctrl+t')) {
       showTrace = !showTrace;
       applyLayout();
+      refresh();
+      return { consume: true };
+    }
+    // Ctrl+O：展开/收起工具输出的完整内容。与 pi 同键。
+    if (matchesKey(data, 'ctrl+o')) {
+      expanded = !expanded;
       refresh();
       return { consume: true };
     }
@@ -450,6 +661,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
       ...(showTrace ? [{ component: tracePanel, minSize: 1 }] : []),
       { component: loader, minSize: 1 },
       { component: editor, minSize: 3 },
+      { component: footer, basis: 1, grow: 0, minSize: 1 },
     ]);
     tui.setLayoutRoot(
       new VStack([
@@ -471,7 +683,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
     tui.stop();
     store.dispatch({ type: 'user.message', text: prompt });
     await waitForIdleOrExit(store);
-    process.stdout.write(`${renderTranscript(store.getState(), 0)}\n`);
+    // 一次性模式没有终端尺寸（不走 TUI），给 0 = 不折行、不截断（truncateToWidth 的约定）。
+    const plain = renderTranscript(store.getState(), 0, 0, true);
+    process.stdout.write(`${plain}\n`);
     process.stdout.write(`\n${renderColoredTree(store.getState().trace, 0)}\n`);
     return store.getState().error ? 1 : 0;
   }
@@ -497,7 +711,13 @@ function waitForIdleOrExit(store: AgentStore): Promise<void> {
 }
 
 /** 把整段对话渲染成文本块（`from` 恒为 0：滚动交给 ScrollView）。 */
-function renderTranscript(state: AgentState, from: number, notice?: { text: string }): string {
+export function renderTranscript(
+  state: AgentState,
+  from: number,
+  width: number,
+  expanded: boolean,
+  notice?: { text: string },
+): string {
   const lines: string[] = [];
   // 命令反馈贴在最上面，6 秒后自动消失。
   if (notice && notice.text !== '') lines.push(notice.text, '');
@@ -530,8 +750,18 @@ function renderTranscript(state: AgentState, from: number, notice?: { text: stri
         .replace(/\s+/g, ' ');
       const label = getTool(message.toolName)?.label ?? message.toolName;
       const mark = message.isError ? red('✗') : green('✓');
-      const preview = text.length > 200 ? `${text.slice(0, 200)}…` : text;
-      lines.push(`  ${mark} ${dim(`${label} ›`)} ${dim(preview)}`);
+      // 工具块：标题行 + 输出行，都铺底色（形状照抄 pi）。
+      // 标题只给 `工具名 参数` —— 参数是定位信息，而截图里 pi 恰恰把**文件名/命令**
+      // 显示在标题行（`read  docs/architecture/overview.md`），参数太长就截断。
+      const args = toolArgs(state, message);
+      const title = `${mark} ${bold(label)} ${dim(args)}`;
+      // 输出：超长时折成「... (N earlier lines, ctrl+o to expand)」，与 pi 同形。
+      const body = foldOutput(text, expanded);
+      const bg = message.isError ? TOOL_ERROR_BLOCK_BG : TOOL_BLOCK_BG;
+      lines.push(block(title, bg, width));
+      if (body) {
+        for (const row of body.split('\n')) lines.push(block(`  ${row}`, bg, width));
+      }
     }
   }
   // 正在流式生成的这一段也画出来。

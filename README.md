@@ -67,7 +67,9 @@ npm start -- --llm-timeout 30000 --attempts 3   # 短超时 + 三次尝试，好
 npm start -- --cwd ../other                # 工具的文件操作边界换到别的目录
 ```
 
-界面里：`Ctrl+T` 切换轨迹面板，`Ctrl+C` 中断当前回合（空闲时退出）。
+界面里：`Ctrl+T` 切换轨迹面板，`Ctrl+O` 展开/收起工具输出，`Ctrl+C` 中断当前回合
+（空闲时退出）。布局照抄 pi 的终端界面：顶栏只放轨迹统计，模型与工作目录在底栏，
+工具调用是带底色的整块。
 
 界面支持斜杠命令，在输入框里打 `/` 弹补全：
 
@@ -91,7 +93,7 @@ auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 prov
 ## 测试
 
 ```bash
-npm test           # 111 个离线测试，不打网络
+npm test           # 127 个离线测试，不打网络
 npm run typecheck  # tsc --noEmit（src + test）
 ```
 

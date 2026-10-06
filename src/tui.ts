@@ -64,6 +64,7 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
 
 界面里:
   Ctrl+T                切换轨迹面板（git log --graph 那棵树，错误也在上面）
+  Ctrl+O                展开/收起工具输出的完整内容（默认只留前 12 行）
   Ctrl+C                环在跑时中断这一轮；空闲时退出
 `;
 
@@ -201,6 +202,8 @@ async function main(): Promise<void> {
   const prompt = args.prompt ?? (args.demo ? '算一下 (3+4)*6' : undefined);
   process.exitCode = await runTui({
     store: kernel.store,
+    // 底栏显示工作目录（与工具的文件边界同一个）。
+    cwd: args.cwd,
     // 把内核的「开新会话」交进去 —— TUI 只拿 store，换 id（于是换文件）要内核出手。
     newSession: () => kernel.newSession(),
     // 当前会话 id 也要给：`/clean` 删历史时得放行它（记录器正开着那个文件）。
