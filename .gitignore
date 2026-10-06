@@ -2,7 +2,6 @@ node_modules/
 dist/
 .env
 *.log
-web/dist/
 
 # 会话与轨迹不再落在仓库里（在 ~/.redux-agent/），所以这里没有条目。
 .playwright-mcp/

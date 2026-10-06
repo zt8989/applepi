@@ -101,14 +101,10 @@ kernel.restore(messages);      // 只灌（消息已读出来时）
 
 同理 `restoreSession()` 也换 id —— 之后的消息要追加进**那个**会话的文件。
 
-## 两个界面的入口
-| | 交互 |
-| --- | --- |
-| TUI | `/sessions` → `SelectList` 弹窗（覆盖层，输入即筛、上下键、回车选定） |
-| Web | 顶栏「历史会话」按钮 → `<dialog>` + 列表，`POST /api/sessions/restore` |
+## 界面的入口
 
-两边的接口一致（`config-home.listSessions()` + `session-file.readSessionMessages()`），
-只是渲染方式跟着各自的技术栈走。
+`/sessions` → `SelectList` 弹窗（覆盖层，输入即筛、上下键、回车选定），背后走
+`config-home.listSessions()` + `session-file.readSessionMessages()`，**零 token**。
 
 ### 跨目录的会话
 

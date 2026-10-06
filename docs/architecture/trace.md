@@ -74,12 +74,7 @@ HEAD → n7
 ## 渲染
 
 `renderTree()` 输出一段 ASCII 树（`--graph` 风格），最后一行是 `HEAD → <tipId>`。
-两个界面都调它：
-
-- TUI：`renderColoredTree()`（`src/tui/app.ts`）按节点状态上色，失败的加粗
-- Web：`trace-panel.ts` 逐行解析出节点 id，回树里查状态上色
-
-有测试断言「去掉 ANSI 序列后两者逐字相同」，保证两个界面不会各画各的。
+`renderColoredTree()`（`src/tui/app.ts`）调它，再按节点状态上色（失败的加粗）。
 
 ## 落盘与回放
 

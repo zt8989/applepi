@@ -10,13 +10,7 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env --import tsx src/tui.ts",
     "agent": "node --env-file-if-exists=.env --import tsx src/tui.ts",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p web",
-    "serve": "node --env-file-if-exists=.env --import tsx src/serve.ts",
-    "web": "vite --config web/vite.config.ts",
-    "web:kernel": "node --env-file-if-exists=.env --import tsx src/serve.ts --dev",
-    "web:dev": "node scripts/dev-web.mjs",
-    "web:build": "vite build --config web/vite.config.ts",
-    "web:serve": "npm run web:build && npm run serve",
+    "typecheck": "tsc --noEmit",
 
     "test": "node --import tsx --import ./test/isolated-home.ts --test test/*.test.ts"
   },
@@ -25,17 +19,12 @@
     "@earendil-works/pi-ai": "^1.0.2",
     "@earendil-works/pi-coding-agent": "^1.0.2",
     "@earendil-works/pi-tui": "^1.0.2",
-    "@earendil-works/pi-web-ui": "^0.75.3",
-    "@mariozechner/mini-lit": "^0.2.1",
-    "lit": "^3.3.3",
     "redux": "^4.2.1",
     "redux-loop": "^6.2.0"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^24.0.0",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2",
-    "vite": "^8.3.2"
+    "typescript": "^5.7.2"
   }
 }

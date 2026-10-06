@@ -167,8 +167,8 @@ async function main(): Promise<void> {
     process.env[`${args.provider.toUpperCase().replace(/-/g, '_')}_API_KEY`] = args.apiKey;
   }
 
-  // 内核：和 `npm run serve`（Web）用的是**同一个** createKernel()。
-  // 两个界面只是同一个环的两个渲染层 —— 没有第二份 store，也没有第二份环。
+  // 内核：整个应用里唯一的一次 createKernel() 装配，界面只拿到它的 store。
+  // 没有第二份 store，也没有第二份环。
   let kernel: Kernel;
   try {
     kernel = createKernel({

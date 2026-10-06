@@ -346,7 +346,7 @@ const transitions: TransitionHandlers = {
 
   'user.message': (state, action) => {
     if (state.phase !== 'idle') return state;
-    // 有附件时 content 是一组 text/image 块（adapter 折好的）；否则就是纯文本。
+    // 有附件时 content 是一组 text/image 块；否则就是纯文本。
     const message: Message = {
       role: 'user',
       content: action.content ?? action.text,

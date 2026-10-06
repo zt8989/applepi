@@ -4,7 +4,7 @@
 
 ```
                       dispatch(Action)
-  TUI / Web UI ─────────────────────────────► agentReducer（纯函数）
+  界面（TUI） ────────────────────────────►  agentReducer（纯函数）
        ▲                                          │
        │                                          │ 算状态 + 查「这个 action 的 effect 是谁」
        │  store.subscribe(state)                   ▼
