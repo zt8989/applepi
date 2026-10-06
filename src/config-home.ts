@@ -109,14 +109,6 @@ export function tracePathFor(sessionId: string): string {
   return path.join(tracesDir(), `${sessionId}.jsonl`);
 }
 
-/**
- * 老布局的装载段路径。**新代码不再写这个文件** —— 装载记录已并入轨迹文件的前两行。
- * 留着是为了 `loadInit` 能回退读老会话（见 trace-file.ts）。
- */
-export function initPathFor(sessionId: string): string {
-  return path.join(tracesDir(), `${sessionId}.init.jsonl`);
-}
-
 // ─── 列会话 ───
 
 /** 一个会话的摘要（列表里显示用；细节要读文件）。 */

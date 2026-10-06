@@ -136,7 +136,8 @@ dispatch(action)
 （装载是会话级的，轨迹节点是对话级的）—— 但那个理由不成立：回放只认自己那几种 op，
 装载记录它一律忽略，不会让回放多干任何事。而每个会话多一个文件，目录里全是 jsonl 很难翻。
 实测同一台机器上多个会话的 init 文件内容完全相同（prompt 和 tools 没变），一半是重复。
-老会话已由一次性脚本合并（`loadInit` 仍会回退读 `.init.jsonl`）。
+老会话已由一次性迁移脚本合并，回退读的代码路径（`loadInit` / `initPath` / `initPathFor`）一并删掉了。
+
 | 文件 | 内容 | 记录类型 |
 | --- | --- | --- |
 | `~/.redux-agent/traces/<id>.jsonl` | 装载 + 对话 + 轨迹 | `prompt.init`、`model.init`、`message`、`add`、`close` |
@@ -146,12 +147,14 @@ dispatch(action)
 
 ## 零 token 回放
 
+装载段和对话**在同一个文件里，所以也只有一次读取**：
+
 ```ts
-const init = await loadInit(sessionId);      // { prompt, model }
-const session = await loadSession(sessionId); // { tree, messages }
+const session = await loadSession(sessionId);
+// { tree, messages, init: { prompt, model } }
 ```
 
-有了这两个：
+一个对象里就有了：
 
 - 当时发给模型的是什么（prompt + tools 定义）—— 不用重装配工具
 - 这个模型支持什么（capabilities）—— 不用再问 provider
@@ -160,7 +163,7 @@ const session = await loadSession(sessionId); // { tree, messages }
 **一条 token 都不花**，一整轮对话连同轨迹树原样复现。回放跳过的坏行只有一种：
 崩溃时截断的半行（`JSON.parse` 失败直接丢）。
 
-`loadTrace()` 保留着（只要树不要消息），给不想重建 messages 的调用方用。
+`loadTrace()` 保留着（只要树不要消息和装载段），给不想重建 messages 的调用方用。
 
 ## 相关
 

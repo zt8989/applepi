@@ -7,7 +7,7 @@ import { createKernel } from '../src/kernel';
 import { createInitialState, type AgentState } from '../src/state';
 import { createAgentReducer } from '../src/reducer';
 import { applyMiddleware, promptSegmentMiddleware, type ActionMiddleware } from '../src/middleware';
-import { loadInit, loadSession } from '../src/trace-file';
+import { loadSession } from '../src/trace-file';
 import { traceStats } from '../src/trace';
 import type { AgentAction, ModelCapabilities, PromptToolDefinition } from '../src/actions';
 
@@ -343,9 +343,12 @@ test('端到端：装载与对话都落盘，回放时零 token 复现', async (
       await new Promise((r) => setTimeout(r, 200));
     }
 
+    // 一个 loadSession 就够了：装载段、对话消息、轨迹树都在同一个文件里。
+    const session = await loadSession('sess-init', dir);
+    assert.ok(session, '会话在');
+
     // 装载段读回
-    const init = await loadInit('sess-init', dir);
-    assert.ok(init, 'init 段在');
+    const init = session.init;
     assert.ok(init.prompt, 'prompt.init 在');
     assert.equal(init.prompt.systemPrompt, '你是测试助手');
     assert.deepEqual(
@@ -358,7 +361,7 @@ test('端到端：装载与对话都落盘，回放时零 token 复现', async (
     assert.equal(init.model.provider, 'faux');
     assert.ok(init.model.capabilities, '能力也落盘（回放不必再问 provider）');
 
-    // 装载段不再单独一个文件 —— 它就在轨迹文件的前两行。
+    // 装载段不再单独一个文件 —— 它就在同一个轨迹文件里。
     // （以前每个会话占两个 jsonl，一半内容还是重复的。）
     const files = (await readdir(dir)).filter((f) => f.endsWith('.jsonl'));
     assert.deepEqual(
@@ -372,10 +375,7 @@ test('端到端：装载与对话都落盘，回放时零 token 复现', async (
       '装载记录就在这个文件里（位置无所谓：回放按 op 类型收集，与行序无关）',
     );
 
-
-    // 对话 + 轨迹读回
-    const session = await loadSession('sess-init', dir);
-    assert.ok(session, '会话在');
+    // 对话 + 轨迹读回（同一个 loadSession 的结果）
     assert.deepEqual(
       (session.messages as { role: string }[]).map((m) => m.role),
       ['user', 'assistant', 'toolResult', 'assistant'],

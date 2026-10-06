@@ -57,6 +57,7 @@ export {
 export {
   createTracePersistence,
   pendingRecords,
+  replaySession,
   replayTrace,
   toJsonl,
   type TracePersistence,
@@ -66,9 +67,8 @@ export {
 export {
   createFileSink,
   listSessions,
-  loadTrace,
+  loadSession,
   tracePath,
-
 } from './trace-file';
 export {
   createPersistentStore,
@@ -87,11 +87,4 @@ export {
   type MiddlewareOptions,
   type Next,
 } from './middleware';
-export {
-  replayInit,
-  replaySession,
-  type InitRecord,
-  type ReplayedInit,
-  type ReplayedSession,
-} from './trace-store';
-export { initPath, loadInit, loadSession } from './trace-file';
+export type { InitRecord, ReplayedInit, ReplayedSession } from './trace-store';

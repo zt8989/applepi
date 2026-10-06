@@ -6,13 +6,13 @@
  *   - 一行一个节点，回放就是逐行重放，天然幂等且能中途接着写；
  *   - 多个进程/多个标签页各写各的也不会互相踩坏已有内容。
  *
- * 同一个文件里混着四种记录，每行带一个 op：
- *   - `init`    系统装载（prompt 或 model），**每个会话只有一条**，落在所有节点之前
- *   - `message` 一条对话消息（user / assistant / toolResult / 中途插的 system 段）
- *   - `add`     轨迹节点首次出现（带完整字段）
- *   - `close`   轨迹节点闭合（只带 id / status / endedAt，回放时打补丁）
+ * 同一个文件里混着五类记录，每行带一个 op：
+ *   - `prompt.init` / `model.init` 系统装载，各一条，落在所有节点之前
+ *   - `message`    一条对话消息（user / assistant / toolResult / 中途插的 system 段）
+ *   - `add`        轨迹节点首次出现（带完整字段）
+ *   - `close`      轨迹节点闭合（只带 id / status / endedAt，回放时打补丁）
  *
- * 前两种是为了**回放**：读一遍 JSONL 就能把「当时发给模型的是什么」和「模型答了什么」
+ * 前三种是为了**回放**：读一遍 JSONL 就能把「当时发给模型的是什么」和「模型答了什么」
  * 全部重建出来，一次 token 都不用花。
  *
  * Node 端落文件，浏览器端落 localStorage，接口一致（都是 append 一个字符串）。
@@ -22,10 +22,10 @@ import { applyTraceRecord, createTraceTree, type SerializedTraceNode, type Trace
 /**
  * 装载记录（`prompt.init` / `model.init`）。两种，各一条。
  *
- * 以前它们单独落一个 `<id>.init.jsonl`，现在**混在轨迹文件的前两行**。
- * 拆出去的理由（"回放要先跳过无关的装载记录"）不成立 —— 回放只认自己那几种 op，
+ * 它们**混在轨迹文件的前几行**，不另开文件。
+ * 拆出去过的理由（"回放要先跳过无关的装载记录"）不成立 —— 回放只认自己那几种 op，
  * 其余一律忽略；而且每个会话多一个文件，目录里全是 jsonl 很难翻。
- * 老会话的 `.init.jsonl` 由一次性迁移脚本合并过（合并后已删除），`loadInit` 也会回退读它。
+ * 老会话的 `.init.jsonl` 已由一次性迁移脚本合并，不再有回退读的代码路径。
  */
 
 export type InitRecord =
@@ -54,11 +54,8 @@ export interface ReplayedInit {
 
 /**
  * 一行轨迹 / 对话记录。`message` 让回放能重建 messages（零 token 复现一轮对话）。
- */
-/**
- * 一行轨迹 / 对话记录。`message` 让回放能重建 messages（零 token 复现一轮对话）。
  *
- * `prompt.init` / `model.init` 也在这里面（不再单独一个 `<id>.init.jsonl`）：
+ * `prompt.init` / `model.init` 也在这里面（不另开 `<id>.init.jsonl`）：
  * 回放只认自己那几种 op、其余忽略，所以装载记录混在前面**不影响**回放，
  * 而少一半文件对「目录里全是 jsonl」的观感差别很大。
  */
@@ -161,27 +158,6 @@ export function replaySession(text: string, sessionId: string): ReplayedSession 
 /** 只重建轨迹树（老调用方用它；不认识 message 行）。 */
 export function replayTrace(text: string, sessionId: string): TraceTree {
   return replaySession(text, sessionId).tree;
-}
-
-/**
- * 从装载段 JSONL 读回 prompt / model 两块。哪条没读到就是 null。
- * 读不到就说明这个会话没有 init 段（比如很早的记录）—— 那时只能重新装配。
- */
-export function replayInit(text: string): ReplayedInit {
-  const result: ReplayedInit = { prompt: null, model: null };
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let record: InitRecord;
-    try {
-      record = JSON.parse(trimmed) as InitRecord;
-    } catch {
-      continue;
-    }
-    if (record.op === 'prompt.init') result.prompt = record;
-    else if (record.op === 'model.init') result.model = record;
-  }
-  return result;
 }
 
 /** 把记录数组渲染成 JSONL 文本。 */

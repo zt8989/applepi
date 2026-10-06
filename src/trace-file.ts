@@ -9,13 +9,11 @@
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import type { TraceSink } from './trace-store';
 import {
-  replayInit,
   replaySession,
   replayTrace,
-  type ReplayedInit,
   type ReplayedSession,
+  type TraceSink,
 } from './trace-store';
 import type { TraceTree } from './trace';
 import { tracesDir } from './config-home';
@@ -33,16 +31,6 @@ export type TraceDir = string | null;
 function resolveDir(dir?: TraceDir): string {
   if (dir) return path.resolve(dir);
   return tracesDir();
-}
-
-/**
- * 装载段的路径 —— 与轨迹分开一个文件。
- *
- * 生命周期不同：装载是**会话级**的（内核起来时装一次），轨迹节点是**这次对话**的产物。
- * 分开之后「回放一段对话」不必先跳过一堆与它无关的装载记录。
- */
-export function initPath(sessionId: string, dir?: TraceDir): string {
-  return path.join(resolveDir(dir), `${sessionId}.init.jsonl`);
 }
 
 /** 某个会话的轨迹 JSONL 路径。 */
@@ -95,27 +83,6 @@ export async function loadSession(
   const text = await readFile(file, 'utf8');
   return replaySession(text, sessionId);
 }
-
-
-/**
- * 读回一个会话的**装载段**（prompt / model 两块）。文件不存在返回 null。
- *
- * 装载记录现在就在轨迹文件的前两行，所以直接复用 `loadSession` 的结果。
- * 老会话（合并前写的）额外回退读一次 `.init.jsonl`，这样不合并也能用。
- */
-export async function loadInit(
-  sessionId: string,
-  dir?: TraceDir,
-): Promise<ReplayedInit | null> {
-  const session = await loadSession(sessionId, dir);
-  if (session && (session.init.prompt || session.init.model)) return session.init;
-  // 回退：老布局的独立 init 文件。
-  const legacy = initPath(sessionId, dir);
-  if (!existsSync(legacy)) return session?.init ?? null;
-  const text = await readFile(legacy, 'utf8');
-  return replayInit(text);
-}
-
 
 /** 读回一个会话的轨迹树（只要树，不要消息；老调用方用它）。 */
 export async function loadTrace(
