@@ -8,13 +8,13 @@ import {
   cwdLine,
   dim,
   dimLine,
-  foldOutput,
   modelLine,
+  renderTranscript,
   statsLine,
   statusLine,
-  toolArgs,
   twoColumn,
 } from '../src/tui/app';
+import { resolveThemeName, setupTheme } from '../src/tui/theme';
 import type { AgentState } from '../src/state';
 import type { Message } from '@earendil-works/pi-ai';
 
@@ -85,104 +85,237 @@ test('cwdLine：不在家目录里时保持绝对路径（~ 只会骗人）', ()
   assert.ok(out.includes('some'), out);
 });
 
-// ─── 长输出折叠（pi 的 `... (N earlier lines, ctrl+o to expand)`） ───
+// ─── 对话区：现在直接用 pi 官方的渲染组件 ───
+//
+// 下面这批断言盯的是「**用官方组件渲染出来的东西**」而不是「自己拼的字符串」：
+// 参数摘要与输出折叠都已经交给 pi 的 `ToolExecutionComponent`，我们自己只负责把
+// toolCallId 配到参数上、把耗时塞进去。
+//
+// 但这批退化**不会抛错**，只会让界面读起来别扭（工具块没底色、标题成了一行
+// `执行命令`、思考不显示），所以正适合用测试钉住。
 
-const FOLD_LIMIT = 12;
-
-test('foldOutput：不超折叠阈值时原样返回', () => {
-  const text = Array.from({ length: 5 }, (_, i) => `line ${i}`).join('\n');
-  assert.equal(foldOutput(text, false), text);
-});
-
-test('foldOutput：超长时折起，并写明省略了多少行与怎么展开', () => {
-  const text = Array.from({ length: 31 }, (_, i) => `line ${i}`).join('\n');
-  const out = foldOutput(text, false);
-  assert.ok(out.includes(`${31 - FOLD_LIMIT} earlier lines`), `省略行数要写对：${out.slice(-60)}`);
-  assert.ok(out.includes('ctrl+o to expand'), '必须告诉用户怎么展开');
-  assert.ok(out.startsWith('line 0'), '前几行要留着');
-  assert.ok(!out.includes('line 30'), '被折掉的行不该出现');
-});
-
-test('foldOutput：expanded=true 时给全文并报总行数（用户要知道到底有多长）', () => {
-  const text = Array.from({ length: 31 }, (_, i) => `line ${i}`).join('\n');
-  const out = foldOutput(text, true);
-  assert.ok(out.includes('line 30'), '展开后要看到最后一行');
-  assert.ok(out.includes('共 31 行'));
-});
-
-// ─── 工具块标题的参数摘要 ───
-
-test('toolArgs：参数取自 assistant 的 toolCall，不是 toolResult.details', () => {
-  // details 是**返回值**（read 回来的是文件内容），不是调用参数。
-  // 早先版本读错了这里，所有工具块标题都显示「0 个参数」。
-  const state = {
+/** 造一个只有一条 assistant(toolCall) + 一条 toolResult 的会话。 */
+function toolState(args: {
+  toolName: string;
+  args: Record<string, unknown>;
+  resultText?: string;
+  isError?: boolean;
+  timings?: Record<string, number>;
+}): AgentState {
+  const id = 'call-1';
+  return {
     messages: [
-      { role: 'assistant', content: [{ type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: 'src/state.ts' } }], timestamp: 0 },
       {
-        role: 'toolResult',
-        toolCallId: 'call-1',
-        toolName: 'read',
-        content: [{ type: 'text', text: '文件内容' }],
-        details: { path: '不该用这个' },
-        isError: false,
+        role: 'assistant',
+        content: [{ type: 'toolCall', id, name: args.toolName, arguments: args.args }],
         timestamp: 0,
       },
+      {
+        role: 'toolResult',
+        toolCallId: id,
+        toolName: args.toolName,
+        content: [{ type: 'text', text: args.resultText ?? '' }],
+        details: undefined,
+        isError: args.isError ?? false,
+        // 用固定时刻：官方 bash 渲染器会拿它算 `Took x.xs`，变动的时刻会让断言不稳。
+        timestamp: 1_700_000_000_000,
+      },
     ],
+    toolTimings: args.timings ?? {},
   } as unknown as AgentState;
-  const result = state.messages[1] as Extract<Message, { role: 'toolResult' }>;
-  assert.equal(toolArgs(state, result), 'src/state.ts');
+}
+
+// 每帧都渲染一次，主题必须先装上（见 src/tui/theme.ts：没 initTheme 读 theme 会抛）。
+setupTheme(undefined, 'dark');
+
+test('工具块：标题行是英文工具名 + 参数（pi 形状，不是中文 label）', () => {
+  const state = toolState({ toolName: 'read', args: { path: 'package.json' } });
+  const out = stripTerminalSequences(renderTranscript(state, 0, 80, false));
+  assert.ok(out.includes('read'), `标题要有工具名：${out}`);
+  assert.ok(out.includes('package.json'), `标题要有文件名：${out}`);
+  // 中文 label 是我们自己发明的形状，pi 用的是工具名本身。
+  assert.ok(!out.includes('读文件'), `不该出现中文 label：${out}`);
 });
 
-test('toolArgs：bash 显示命令、read/write 显示路径（pi 标题行就是文件名）', () => {
-  const mk = (id: string, args: Record<string, unknown>) => {
-    const state = {
-      messages: [
-        { role: 'assistant', content: [{ type: 'toolCall', id, name: 't', arguments: args }], timestamp: 0 },
-        { role: 'toolResult', toolCallId: id, toolName: 't', content: [], isError: false, timestamp: 0 },
-      ],
-    } as unknown as AgentState;
-    return toolArgs(state, state.messages[1] as Extract<Message, { role: 'toolResult' }>);
-  };
-  assert.equal(mk('c1', { command: 'ls -la' }), 'ls -la');
-  assert.equal(mk('c2', { path: 'a/b.txt', content: 'x' }), 'a/b.txt', '有 path 就用 path');
+test('工具块：read 的路径取自 assistant 的 toolCall，不是 toolResult.details', () => {
+  // details 是**返回值**（read 回来的是文件内容），不是调用参数。
+  // 早先版本读错了这里，所有工具块标题都显示「0 个参数」。
+  const state = toolState({ toolName: 'read', args: { path: 'src/state.ts' } });
+  state.messages[1] = {
+    ...(state.messages[1] as Extract<Message, { role: 'toolResult' }>),
+    details: { path: '不该用这个' },
+  } as Message;
+  const out = stripTerminalSequences(renderTranscript(state, 0, 80, false));
+  assert.ok(out.includes('src/state.ts'), out);
+  assert.ok(!out.includes('不该用这个'), `不该拿 details 当参数：${out}`);
 });
 
-test('toolArgs：没有可识别字段时退化成参数个数', () => {
-  const state = {
-    messages: [
-      { role: 'assistant', content: [{ type: 'toolCall', id: 'c', name: 't', arguments: { foo: 1, bar: 2 } }], timestamp: 0 },
-      { role: 'toolResult', toolCallId: 'c', toolName: 't', content: [], isError: false, timestamp: 0 },
-    ],
-  } as unknown as AgentState;
-  assert.equal(
-    toolArgs(state, state.messages[1] as Extract<Message, { role: 'toolResult' }>),
-    '2 个参数',
-  );
-});
-
-test('toolArgs：参数过长截断（标题行不能占满整行）', () => {
-  const state = {
-    messages: [
-      { role: 'assistant', content: [{ type: 'toolCall', id: 'c', name: 'bash', arguments: { command: 'x'.repeat(200) } }], timestamp: 0 },
-      { role: 'toolResult', toolCallId: 'c', toolName: 'bash', content: [], isError: false, timestamp: 0 },
-    ],
-  } as unknown as AgentState;
-  const out = toolArgs(state, state.messages[1] as Extract<Message, { role: 'toolResult' }>);
-  assert.ok(out.length <= 91, `应该截断，实际 ${out.length}`);
-  assert.ok(out.endsWith('…'));
-});
-
-test('toolArgs：找不到对应 toolCall 时不崩（会话被裁剪后可能配不上）', () => {
+test('工具块：找不到对应 toolCall 时不崩也不画空块（会话被裁剪后可能配不上）', () => {
   const state = {
     messages: [
       { role: 'toolResult', toolCallId: 'orphan', toolName: 'read', content: [], isError: false, timestamp: 0 },
     ],
+    toolTimings: {},
   } as unknown as AgentState;
-  assert.equal(
-    toolArgs(state, state.messages[0] as Extract<Message, { role: 'toolResult' }>),
-    '',
-    '配不上就留空，不显示「0 个参数」这种废话',
-  );
+  const out = stripTerminalSequences(renderTranscript(state, 0, 80, false));
+  // 工具块的全部信息都在参数里（`read <path>` / `$ <cmd>`），没参数就只能是一行空底色。
+  assert.equal(out.trim(), '', `配不上就不该画东西，实际：${JSON.stringify(out)}`);
+});
+
+test('工具块：bash 成功是绿底、失败是红底（与 pi 的 toolSuccessBg/toolErrorBg 同源）', () => {
+  const ok = toolState({ toolName: 'bash', args: { command: 'git status' }, resultText: 'clean' });
+  const bad = toolState({ toolName: 'bash', args: { command: 'boom' }, resultText: 'err', isError: true });
+  const okRaw = renderTranscript(ok, 0, 80, false);
+  const badRaw = renderTranscript(bad, 0, 80, false);
+  // 底色是 ANSI 48;2;r;g;b。dark 主题下：成功 rgb(37,65,49)、失败 rgb(91,40,42)。
+  assert.ok(okRaw.includes('48;2;37;65;49'), `成功块应为深绿底：${JSON.stringify(okRaw)}`);
+  assert.ok(badRaw.includes('48;2;91;40;42'), `失败块应为暗红底：${JSON.stringify(badRaw)}`);
+});
+
+test('工具块：bash 折叠时保留**尾部**（报错在最后，保留头部等于把结论折掉）', () => {
+  const lines = Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n');
+  const state = toolState({ toolName: 'bash', args: { command: 'x' }, resultText: lines });
+  const out = stripTerminalSequences(renderTranscript(state, 0, 100, false));
+  assert.ok(out.includes('line 39'), `最后一行要留着：${out.slice(-200)}`);
+  assert.ok(!out.includes('line 0\n'), `头部应被折掉：${out.slice(0, 300)}`);
+  assert.ok(/earlier lines/.test(out), `要告知省略了多少行：${out.slice(-200)}`);
+});
+
+test('工具块：Ctrl+O 展开后给全文', () => {
+  const lines = Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n');
+  const state = toolState({ toolName: 'bash', args: { command: 'x' }, resultText: lines });
+  const out = stripTerminalSequences(renderTranscript(state, 0, 100, true));
+  assert.ok(out.includes('line 0'), '展开后要看到第一行');
+  assert.ok(out.includes('line 39'), '展开后要看到最后一行');
+});
+
+test('工具块：bash 显示 Took x.xs（耗时来自 reducer 记的 toolTimings）', () => {
+  const state = toolState({ toolName: 'bash', args: { command: 'x' }, resultText: 'out', timings: { 'call-1': 520 } });
+  const out = stripTerminalSequences(renderTranscript(state, 0, 80, false));
+  assert.match(out, /Took 0\.5s/, `要显示耗时：${out}`);
+});
+
+test('工具块：write 展示**文件内容**而不是工具输出（pi 的形状）', () => {
+  // pi 的 write 块里是把刚写进去的内容预览出来（前 10 行），不是回显工具输出。
+  // 这是 write 与其他工具最容易看出差别的地方。
+  const state = toolState({
+    toolName: 'write',
+    args: { path: 'demo.md', content: '# 标题\n第一行\n第二行' },
+    resultText: 'File written',
+  });
+  const out = stripTerminalSequences(renderTranscript(state, 0, 80, false));
+  assert.ok(out.includes('第一行'), `块里应是文件内容：${out}`);
+});
+
+test('工具块：edit 渲染彩色 diff，且底色只铺一层', () => {
+  // details.diff 是 pi 自己的**展示用** diff（`-1 原行` / `+1 新行` / ` 2 上下文`），
+  // 不是 unified patch —— 后者会整个落成灰色，连改了什么都看不出来。
+  const state = {
+    messages: [
+      {
+        role: 'assistant',
+        timestamp: 0,
+        content: [{ type: 'toolCall', id: 'c1', name: 'edit', arguments: { path: 'demo.md', edits: [{ oldText: 'a', newText: 'b' }] } }],
+      },
+      {
+        role: 'toolResult',
+        toolCallId: 'c1',
+        toolName: 'edit',
+        content: [{ type: 'text', text: 'Success' }],
+        details: { diff: '-1 # 标题\n+1 # 标题 v2\n 2 正文\n' },
+        isError: false,
+        timestamp: 1_700_000_000_000,
+      },
+    ],
+    toolTimings: {},
+  } as unknown as AgentState;
+  const raw = renderTranscript(state, 0, 76, false);
+  // 改动行用 toolDiffRemoved(red) / toolDiffAdded(green)，上下文用 muted。
+  assert.ok(raw.includes('38;2;234;127;129'), `删除行要红色：${JSON.stringify(raw)}`);
+  assert.ok(raw.includes('38;2;104;183;141'), `新增行要绿色：${JSON.stringify(raw)}`);
+  // 底色只该有一层：`edit` 的 renderShell 是 "self"，它自己铺底色。
+  // 早先用 createAllToolRenderers()（renderShell=undefined）时，组件又套了一层 Box，
+  // 于是 `48;2;37;65;49` 出现两次。
+  const perLine = raw.split('\n').filter((l) => l.includes('48;2;37;65;49'));
+  for (const line of perLine) {
+    const occurrences = line.split('48;2;37;65;49').length - 1;
+    assert.equal(occurrences, 1, `底色只能一层：${JSON.stringify(line)}`);
+  }
+});
+
+test('用户消息：整块蓝底铺满，且**没有**「你 ›」前缀', () => {
+  const state = { messages: [{ role: 'user', content: '演示一遍', timestamp: 0 }] } as unknown as AgentState;
+  const raw = renderTranscript(state, 0, 40, false);
+  // dark 主题的 userMessageBg = rgb(33,59,73)。
+  assert.ok(raw.includes('48;2;33;59;73'), `用户块要有蓝底：${JSON.stringify(raw)}`);
+  const plain = stripTerminalSequences(raw);
+  assert.ok(!plain.includes('你 ›'), `不该有角色前缀：${plain}`);
+  assert.ok(!plain.includes('用户'), `不该有角色前缀：${plain}`);
+});
+
+test('思考：灰色斜体（thinkingText + italic），不是普通文字', () => {
+  const state = {
+    messages: [
+      { role: 'assistant', content: [{ type: 'thinking', thinking: 'The user wants a demo' }], timestamp: 0 },
+    ],
+  } as unknown as AgentState;
+  const raw = renderTranscript(state, 0, 60, false);
+  // italic = SGR 3；thinkingText 在 dark 主题下是 rgb(150,160,164)。
+  assert.ok(raw.includes('\u001b[3m'), `思考要斜体：${JSON.stringify(raw)}`);
+  assert.ok(raw.includes('38;2;150;160;164'), `思考要用 thinkingText 的灰色：${JSON.stringify(raw)}`);
+  assert.ok(stripTerminalSequences(raw).includes('The user wants a demo'));
+});
+
+test('助手文字：无底色、无前缀（与 pi 一致）', () => {
+  const state = { messages: [{ role: 'assistant', content: [{ type: 'text', text: '好，我按工具逐个演示。' }], timestamp: 0 }] } as unknown as AgentState;
+  const raw = renderTranscript(state, 0, 60, false);
+  const plain = stripTerminalSequences(raw);
+  assert.ok(plain.includes('好，我按工具逐个演示。'));
+  assert.ok(!plain.includes('助手 ›'), `不该有角色前缀：${plain}`);
+  assert.ok(!raw.includes('48;2;'), `助手文字不该铺底色：${JSON.stringify(raw)}`);
+});
+
+test('纯 toolCall 的助手消息不产生空行（它由紧跟的 toolResult 块负责）', () => {
+  const state = {
+    messages: [
+      { role: 'assistant', content: [{ type: 'toolCall', id: 'c', name: 'read', arguments: { path: 'a' } }], timestamp: 0 },
+      { role: 'toolResult', toolCallId: 'c', toolName: 'read', content: [{ type: 'text', text: 'x' }], isError: false, timestamp: 0 },
+    ],
+    toolTimings: {},
+  } as unknown as AgentState;
+  const out = renderTranscript(state, 0, 60, false);
+  // 官方组件对空内容返回 []；若我们自己把空块也 push 进去，这里会多出空行。
+  assert.ok(!out.includes('\n\n\n'), `不该有多余空行：${JSON.stringify(stripTerminalSequences(out))}`);
+});
+
+test('一次性模式（管道输出）不吐控制序列：OSC 8 超链接会被终端当乱码', () => {
+  // 官方渲染器给文件路径加超链接（renderToolPath → linkPath），而管道里那些
+  // `]8;;file:///…\…]8;;` 是**肉眼可见的乱码**。一次性模式承诺的是「纯文本」。
+  const state = toolState({ toolName: 'read', args: { path: 'package.json' } });
+  const raw = renderTranscript(state, 0, 0, false);
+  assert.ok(raw.includes('\x1b]8;'), `前置条件：确实产生了超链接，实际没有：${JSON.stringify(raw)}`);
+  const plain = stripTerminalSequences(raw);
+  assert.ok(!plain.includes('\x1b]'), `剥完不该还有 OSC 序列：${JSON.stringify(plain)}`);
+  assert.ok(plain.includes('read package.json'), `内容要还在：${plain}`);
+});
+
+test('主题：没配 theme 时跟随终端深浅色（写死 dark 会让浅色终端出现黑底块）', () => {
+  assert.equal(resolveThemeName(undefined, 'dark'), 'dark');
+  assert.equal(resolveThemeName(undefined, 'light'), 'light');
+});
+
+test('主题：显式配置与 auto 形式都走 pi 的解析', () => {
+  assert.equal(resolveThemeName('light', 'dark'), 'light', '显式名字优先于终端外观');
+  // auto：浅底终端用 light、深底终端用 dark。
+  assert.equal(resolveThemeName('auto', 'light'), 'light');
+  assert.equal(resolveThemeName('auto', 'dark'), 'dark');
+});
+
+test('主题：system 不直接用（终端没上报颜色时它会退化成灰度，底色全黑）', () => {
+  // 这是实测过的坑：不带参数 initTheme() 时 toolSuccessBg 解析成 rgb(0,0,0)，
+  // 「工具块有底色」就静默失效了。
+  assert.notEqual(resolveThemeName('system', 'dark'), 'system');
+  assert.equal(resolveThemeName('system', 'dark'), 'dark');
 });
 
 // ─── 顶栏 / 底栏的分工 ───

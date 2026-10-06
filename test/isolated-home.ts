@@ -20,6 +20,8 @@
  * 为什么用「整个进程一个目录」而不是「每个测试一个」：进程级更简单，也不会漏掉
  * 任何**没经过某个 helper** 的测试（以后新写的测试默认就隔离了，这是重点）。
  * 目录名里带 pid，撞车不了。
+ *
+ * 同理，本文件还会在 chalk 加载前打开颜色（见文件末尾），因为 pi 主题的斜体靠 chalk。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -41,3 +43,17 @@ process.once('SIGINT', () => {
   cleanup();
   process.exit(130);
 });
+
+/**
+ * 打开颜色（让 chalk 的 bold/italic 在测试里真的产生转义序列）。
+ *
+ * 必须在**任何 import 求值之前**设好 —— chalk 只在模块加载时读一次环境变量。
+ * 放在文件末尾但仍然是顶层语句：本文件没有 import chalk，而测试模块是在本文件
+ * 全部求值完之后才被加载的，所以顺序是对的。
+ *
+ * 值取 3（truecolor）：与真终端上 `getTerminalColorMode()` 的返回值一致，
+ * 免得测试里出现 256 色降级后的色号，断言却按真彩写。
+ * 已有的 `NO_COLOR` 优先于它（chalk 里 NO_COLOR 赢）—— 想测「完全不上色」时
+ * 显式设 `NO_COLOR=1` 即可。
+ */
+process.env['FORCE_COLOR'] = '3';

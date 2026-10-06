@@ -25,12 +25,9 @@ import {
   VStack,
   matchesKey,
   CombinedAutocompleteProvider,
-  backgroundAnsi,
-  getTerminalColorMode,
-  rgbColor,
+  stripTerminalSequences,
   truncateToWidth,
   visibleWidth,
-  type RgbColorValue,
   type SlashCommand,
   type ViewportTUI,
   type EditorTheme,
@@ -42,15 +39,34 @@ import type { AgentState } from '../state';
 import type { AgentStore } from '../store';
 import { cleanSessionsExcept, listSessions, type SessionSummary } from '../config-home';
 import { loadSessionMessages, openSessionPicker } from './session-picker';
-import { getTool } from '../tools';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
-// pi 底栏的官方实现（靠 pnpm patch 打开的子路径）。数字格式与算法都与 pi 一致 ——
+// ─── pi 官方的对话/工具渲染器 ───
+//
+// 用户蓝底、思考灰斜体、工具块的绿/红底色、write 的内容预览、edit 的彩色 diff、
+// bash 的 `Took 0.5s` 与「保留尾部 5 行」的折叠 —— 这些**全部**来自 pi 自己的组件。
+// 自己照着截图重画过一次，结果每个工具的折叠策略、底色边界都对不齐；
+// 直接用官方组件后，形状与 pi 逐行一致（截图里深绿 rgb(37,65,49) 就是
+// `theme.colors.toolSuccessBg` 的值）。
+//
+// 依赖内部子路径（`dist/...`）需要 pnpm patch，见 docs/architecture/provider.md。
+// theme 必须先 setupTheme()，否则这里读 theme.colors 会抛（见 src/tui/theme.ts）。
+import { AssistantMessageComponent } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/assistant-message.js';
+import { UserMessageComponent } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/user-message.js';
+import { ToolExecutionComponent } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js';
+import {
+  createBashToolDefinition,
+  createEditToolDefinition,
+  createReadToolDefinition,
+  createWriteToolDefinition,
+} from '@earendil-works/pi-coding-agent';
+import { getMarkdownTheme } from '@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';// pi 底栏的官方实现（靠 pnpm patch 打开的子路径）。数字格式与算法都与 pi 一致 ——
 // 两边对不上会让人以为算错了。
 // 见 docs/architecture/provider.md「为什么要 pnpm patch」。
 import { formatCwdForFooter, formatTokens } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js';
 import { addUsageToTotals, createUsageTotals } from '@earendil-works/pi-coding-agent/dist/core/usage-totals.js';
+import { setupTheme } from './theme';
 
 const useColor = !process.env.NO_COLOR;
 const paint = (code: string, text: string) => (useColor ? `\x1b[${code}m${text}\x1b[0m` : text);
@@ -91,36 +107,13 @@ const magenta = (t: string) => paint('35', t);
 const cyan = (t: string) => paint('36', t);
 const bold = (t: string) => paint('1', t);
 
-/**
- * 工具调用块的底色。
- *
- * ## 为什么要底色
- *
- * pi 把工具调用渲染成**一整块带底色的矩形**（截图里是深绿），而我们原来是一行
- * `✓ 执行命令 › echo 123`。差别不只是好看：底色块有明确的左右边界，长输出被折到
- * 块里时（`... (31 earlier lines, ctrl+o to expand)`）仍然看得出「这段是工具输出」，
- * 一行式则会被误读成模型说的话。
- *
- * ## 为什么用真彩而不是 ANSI 256 色号
- *
- * `backgroundAnsi()` 接受 `#rrggbb`，pi-tui 会根据终端能力降级到 256 色或 16 色
- * （`getTerminalColorMode()` 告诉你当前是哪种）。直接写死 `\x1b[48;5;22m` 在不支持的
- * 终端上会出现难看的色块。让官方函数处理降级。
- *
- * 色值是照 pi 截图取的深绿（不是纯黑底 —— 纯黑在很多终端上与背景同色，块就“消失”了）。
- */
-const TOOL_BLOCK_BG = rgbColor(0x12, 0x26, 0x1a);
-const TOOL_ERROR_BLOCK_BG = rgbColor(0x2a, 0x14, 0x14);
-
-/** 给一行文字铺底色。宽度不够时先截断，否则底色会溢出到下一行。 */
-function block(text: string, bg: RgbColorValue, width: number): string {
-  // width <= 0 = 不知道终端多宽（一次性模式）。这时**不能截断**：`truncateToWidth(text, 0)`
-  // 返回空串，会把整段工具输出吃掉。直接返回原文，让终端自己折行。
-  if (width <= 0) return text;
-  const mode = getTerminalColorMode();
-  const prefix = backgroundAnsi(bg, mode);
-  return `${prefix}${truncateToWidth(text, width)}\x1b[0m`;
-}
+// 工具块的底色、边框色、路径色、diff 绿/红……全部由 pi 的 theme 给（见 src/tui/theme.ts），
+// 不在这里手写 `rgbColor(0x12, 0x26, 0x1a)` 了。
+//
+// 为什么删：早先按截图取了一个深绿当底色，看着差不多，但有三个问题：亮色终端上这块深绿
+// 变成一坨脏东西；用户蓝底只能用 ANSI 34（不透明、不会铺满整行）；思考的斜体根本没有对应色。
+// 统一交给 theme 之后，四个 token 都是**跟着终端深浅色走**的，而且降级（真彩 → 256 → 16）
+// 由 pi-tui 处理 —— 手写 `\x1b[48;5;22m` 在不支持的终端上会出难看的色块。
 
 /** 节点配色：一眼能看出这条线上哪段失败了。 */
 function nodeColor(node: TraceNode): (t: string) => string {
@@ -293,71 +286,6 @@ export function statsLine(state: AgentState): StatsLine {
   return { text: parts.join(' '), warnings };
 }
 
-/**
- * 工具调用的参数摘要（给块标题行用）。
- *
- * ## 参数在 assistant 消息里，不在 toolResult 里
- *
- * `toolResult` 只有 `toolName` / `content` / `details`，而 `details` 是**工具的返回值**
- * （读文件时是文件内容），不是调用参数。参数在对应 assistant 消息的 `toolCall` 块上，
- * 靠 `toolCallId` 关联 —— 所以这里要拿整个 `state.messages` 去配对。
- *
- * 挑的是「一眼认出这次调用在干什么」的那个字段，而不是把整个 params JSON 搬上去：
- *   - read/edit/write → 文件路径
- *   - bash → 命令
- *   - 其余 → 参数数量（完整 JSON 在展开后可见）
- *
- * 为什么不全 JSON：截图里 pi 的标题就是 `read  docs/architecture/overview.md`，
- * 一个文件名。JSON 会把行占满，真正的信息（读了哪个文件）反而被挤掉。
- */
-export function toolArgs(
-  state: AgentState,
-  message: Extract<AgentState['messages'][number], { role: 'toolResult' }>,
-): string {
-  // 找发出这次调用的那条 assistant 消息。
-  let params: Record<string, unknown> = {};
-  for (const m of state.messages) {
-    if (m.role !== 'assistant') continue;
-    for (const c of m.content) {
-      if (c.type === 'toolCall' && c.id === message.toolCallId) {
-        params = c.arguments as Record<string, unknown>;
-      }
-    }
-  }
-  const pick = (...keys: string[]): string | undefined => {
-    for (const key of keys) {
-      const value = params[key];
-      if (typeof value === 'string' && value.trim() !== '') return value;
-    }
-    return undefined;
-  };
-  const keys = Object.keys(params);
-  const candidate =
-    pick('path', 'file_path', 'filePath', 'command', 'cmd', 'pattern', 'url') ??
-    (keys.length > 0 ? `${keys.length} 个参数` : '');
-  return candidate.length > 90 ? `${candidate.slice(0, 90)}…` : candidate;
-}
-
-/**
- * 工具输出的折叠。
- *
- * 形状照抄 pi：`... (31 earlier lines, ctrl+o to expand)` —— 关键是**告知有省略**并
- * 告知怎么展开。早先的实现是硬截 200 字加个 `…`，用户不知道后面还有内容、也不知道
- * 能不能看到，于是只能去翻会话文件。
- *
- * `expanded`（Ctrl+O）时返回全文，同时把总行数报出来，好知道到底有多长。
- */
-const FOLD_AFTER_LINES = 12;
-export function foldOutput(text: string, expanded: boolean): string {
-  const rows = text.split('\n');
-  if (expanded) {
-    return rows.length > FOLD_AFTER_LINES ? `${text}\n  （共 ${rows.length} 行）` : text;
-  }
-  if (rows.length <= FOLD_AFTER_LINES) return text;
-  const hidden = rows.length - FOLD_AFTER_LINES;
-  return `${rows.slice(0, FOLD_AFTER_LINES).join('\n')}\n... (${hidden} earlier lines, ctrl+o to expand)`;
-}
-
 /** 去掉 ANSI 序列，拿到可见宽度。 */
 function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex
@@ -483,6 +411,13 @@ function gitBranch(cwd: string): string | undefined {
 export async function runTui(options: TuiOptions): Promise<number> {
   const { store, prompt, newSession, sessionId } = options;
   const cwd = options.cwd ?? process.cwd();
+  // 主题**必须先于一切渲染**装上：pi 的 `theme` 是个 globalThis 上的 Proxy，
+  // 没 initTheme() 时读它任何属性都抛 `Theme not initialized`。
+  // 而对话区那三个官方组件（User/Assistant/ToolExecution）每一个都在 render 里读 theme。
+  //
+  // 为什么不能在模块顶层调：那时终端还没起来，`getTerminalTheme()` 拿不到深浅色，
+  // 只能猜一个 —— 猜错就是浅色终端上出现黑底块。
+  setupTheme();
   const terminal = new ProcessTerminal();
   // AltScreen 是 viewport 实现，setLayoutRoot 在 ViewportTUI 上（TUI 接口没有）。
   const tui: ViewportTUI = new TuiAltScreen(terminal, true, undefined, {
@@ -827,7 +762,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
     store.dispatch({ type: 'user.message', text: prompt });
     await waitForIdleOrExit(store);
     // 一次性模式没有终端尺寸（不走 TUI），给 0 = 不折行、不截断（truncateToWidth 的约定）。
-    const plain = renderTranscript(store.getState(), 0, 0, true);
+    //
+    // **必须剥掉控制序列**：这一段是管道/重定向的接收方，拿到 OSC 8 超链接（文件路径那行
+    // `]8;;file:///…\…]8;;`）只会得到一团乱码。官方渲染器对文件路径默认加超链接
+    // （`renderToolPath` → `linkPath`），而 `getCapabilities().hyperlinks` 在
+    // 「终端没被认出来」时是 true，所以管一次输出才靠谱。
+    // 注意是连 OSC 133 区域标记一起剥 —— pi-tui 的 `stripTerminalSequences` 两者都吃。
+    const plain = stripTerminalSequences(renderTranscript(store.getState(), 0, 0, true));
     process.stdout.write(`${plain}\n`);
     process.stdout.write(`\n${renderColoredTree(store.getState().trace, 0)}\n`);
     return store.getState().error ? 1 : 0;
@@ -853,7 +794,220 @@ function waitForIdleOrExit(store: AgentStore): Promise<void> {
   });
 }
 
-/** 把整段对话渲染成文本块（`from` 恒为 0：滚动交给 ScrollView）。 */
+// ══════════════════════════ 对话区的四类渲染 ══════════════════════════
+//
+// 四个函数都返回**已上好色、已铺好底色**的行数组。分成四个而不是写在一个 switch 里，
+// 是因为它们各自要处理的边界完全不同：用户块要铺满整行蓝底，思考块要斜体，
+// 工具块要按成败切绿/红底色，而普通助手文字什么都不用做。
+
+/**
+ * 宽度兜底。
+ *
+ * 官方组件都拿 `width` 去折行与补底色，传 0 会算出「宽度 -1」那类怪值
+ * （`Text.render` 里 `Math.max(1, width - paddingX*2)` 还能活，但 Box 补底色那步会错位）。
+ *
+ * 一次性模式（`npm run agent -- "提问"`）走的就是这条路：那里根本没启动 TUI，
+ * 也就没有终端尺寸。给个够大的宽度让终端自己折行，比「猜一个宽度」安全 ——
+ * 猜窄了会截断内容，猜宽了底色会超出屏幕。
+ */
+const FALLBACK_WIDTH = 200;
+
+function usableWidth(width: number): number {
+  return width > 0 ? width : FALLBACK_WIDTH;
+}
+
+/**
+ * 工具渲染器表。**按官方工具名索引**。
+ *
+ * ## 为什么用 `create*ToolDefinition()` 而不是 `createAllToolRenderers()`
+ *
+ * 后者返回的表里 `edit` 的 `renderShell` 是 `undefined`，而工具**定义**上是 `"self"`。
+ * `ToolExecutionComponent` 靠这个字段决定外壳：非 `"self"` 时它用自己的 `Box` 给整块
+ * 铺底色，而 `edit` 的渲染器**自己**已经铺了一层（`getEditHeaderBg`）。
+ *
+ * 漏掉的后果很隐蔽：edit 块**底色被套了两层**（`48;2;37;65;49` 出现两次），
+ * 在大多数终端上看不出来，但在浅色/高对比主题下边界会错位；而 `renderShell` 错了
+ * 还会让 `edit` 走错代码路径（`selfRenderContainer` vs `contentBox`），将来官方改形状时
+ * 我们跟错还不报错。
+ *
+ * 顺带一说：为什么标题是英文工具名 —— 官方 `label` 字段本身就是 `"edit"`/`"read"`
+ * （见 `createEditToolDefinition` 的 `label: "edit"`），pi 界面显示的就是它。
+ * 我们另起了一套中文 label（`读文件`/`执行命令`），那是**二次翻译**：既多一层维护，
+ * 也让界面与 pi 对不上。现在直接显示工具名。
+ */
+const TOOL_RENDERERS: Record<string, unknown> = Object.fromEntries(
+  [
+    ['read', createReadToolDefinition(process.cwd())],
+    ['write', createWriteToolDefinition(process.cwd())],
+    ['edit', createEditToolDefinition(process.cwd())],
+    ['bash', createBashToolDefinition(process.cwd())],
+  ].map(([name, definition]) => [name, definition]),
+);
+
+/**
+ * 官方 `ToolExecutionComponent` 只需要一个能收下 `requestRender()` 的对象。
+ *
+ * 为什么不把真的 `tui` 传进去：它只在 bash 块跑流式计时器时用来发重绘请求
+ * （`renderResult` 里那个每秒一次的 `setInterval`）。我们是一次性渲染整段文本
+ * （`renderTranscript` 的输出直接进 `Text.setText`），没有帧循环可言，
+ * 所以一个空实现就够了。传 null 会在执行到 `ui.requestRender()` 时崩。
+ */
+const TOOL_UI = { requestRender: () => {}, invalidate: () => {} };
+
+/** system 消息：pi 没有专门的样式，用淡色表示「这不是谁在说话」。 */
+function renderPlain(text: string): string[] {
+  if (text.trim() === '') return [];
+  // 直接按 \n 拆行而不走 Markdown：system 提示是配置里的一段话（常带路径与代码），
+  // 走 Markdown 会把缩进代码块、标题符号全吃掉，反而看不清。
+  return text.split('\n').map((row) => dim(row));
+}
+
+/** 用户消息：整块蓝底铺满。 */
+function renderUser(text: string, width: number): string[] {
+  if (text.trim() === '') return [];
+  return new UserMessageComponent(text, getMarkdownTheme(), 1).render(usableWidth(width));
+}
+
+/**
+ * 助手消息：文字 + 灰色斜体的思考。
+ *
+ * ## 为什么必须把 thinking 块原样交给官方组件
+ *
+ * `state.thinkingText` 只在**流式过程中**有值，一轮结束 `llm.done` 就把它清空了；
+ * 真正的思考内容在 `message.content` 里的 `type: 'thinking'` 块。早先的渲染只认
+ * `type: 'text'`，于是**所有思考都丢了** —— 而思考是这类界面里最该被看见的一部分
+ * （它告诉你模型为什么这么干）。
+ *
+ * `AssistantMessageComponent` 另外还处理两件事，都不能自己重写：连续多个 thinking 块
+ * 合并成一段；后面没有可见内容时不多插空行。截图里「思考段落之间有间隔，
+ * 但工具块之前没有多余空行」就是这个逻辑的结果。
+ */
+function renderAssistant(
+  content: readonly unknown[],
+  width: number,
+  isStreaming = false,
+): string[] {
+  // 先筛掉空的：Markdown 对空白文本返回 []，而 toolCall 块在这里不画
+  // （它由紧接着的 toolResult 消息负责）—— 不筛的话每条纯工具调用消息会多出空行。
+  const visible = content.filter((raw) => {
+    const c = raw as { type?: string; text?: string; thinking?: string };
+    if (c.type === 'text') return (c.text ?? '').trim() !== '';
+    if (c.type === 'thinking') return (c.thinking ?? '').trim() !== '';
+    return false;
+  });
+  if (visible.length === 0) return [];
+  const message = { role: 'assistant', content: visible } as never;
+  const component = new AssistantMessageComponent(message, false, getMarkdownTheme(), 'Thinking…', 1);
+  // 构造器已经渲染过一次；显式再调一次是为了把「是否还在流式」告诉它 ——
+  // 官方用它决定列表编号等细节要不要稳定。
+  component.updateContent(message, isStreaming);
+  return component.render(usableWidth(width));
+}
+
+/**
+ * 工具块。
+ *
+ * ## `Took 0.5s` 的时间从哪来
+ *
+ * pi 的 bash 块底部那行耗时，是**渲染器自己记的**：`ToolExecutionComponent.markExecutionStarted()`
+ * 在 `rendererState.startedAt` 打点，拿到结果时补 `endedAt`。我们执行工具走自己的 effect，
+ * 不会去调 `markExecutionStarted()`，所以耗时得从 `state.toolTimings`（reducer 记的）取，
+ * 再手动塞进 `rendererState`。
+ *
+ * 直接改 `rendererState` 是伸手进了官方组件的私有字段 —— 但这是唯一能拿到那行 `Took`
+ * 的办法：它是**纯展示**的（只影响那一行文字），错了也只错在显示上。
+ * 替代方案是自己重写整个 bash 渲染器，那要重新对上一堆底色/折行细节，不划算。
+ *
+ * 注意 `endedAt` 要在 `updateResult()` **之前**写：否则渲染器会自己取 `Date.now()`，
+ * 那算的是「渲染时刻」而不是「命令跑完时刻」—— 差值虽小，但反复重绘时那个数字会一直跳。
+ */
+function renderTool(
+  state: AgentState,
+  message: Extract<AgentState['messages'][number], { role: 'toolResult' }>,
+  width: number,
+  expanded: boolean,
+): string[] {
+  const args = toolCallArgs(state, message.toolCallId);
+  // 找不到对应的 toolCall（会话被裁剪/恢复后可能配不上）就**什么都不画**，
+  // 也不要编一个标题：工具块的全部信息都在参数里（`read <path>`、`$ <command>`），
+  // 没参数的块只会是一行空底色，看着像程序坏了。
+  if (args === null) return [];
+  const component = new ToolExecutionComponent(
+    message.toolName,
+    message.toolCallId,
+    args,
+    { showImages: false, imageWidthCells: usableWidth(width) },
+    TOOL_RENDERERS[message.toolName] as never,
+    TOOL_UI as never,
+    process.cwd(),
+  );
+  const elapsed = state.toolTimings[message.toolCallId];
+  if (elapsed !== undefined) {
+    // 用「结束时刻 = 开始时刻 + 耗时」反推：官方渲染器只认绝对时刻，而 reducer
+    // 存的是时长（那样不依赖两端时刻是否都拿得到）。
+    const endedAt = message.timestamp;
+    const startedAt = endedAt - elapsed;
+    component.markExecutionStarted();
+    (component as unknown as { rendererState: Record<string, unknown> }).rendererState.startedAt = startedAt;
+    (component as unknown as { rendererState: Record<string, unknown> }).rendererState.endedAt = endedAt;
+  }
+  component.setArgsComplete();
+  // 组件是每次重建的，不显式设就是默认折叠 —— Ctrl+O 会永远不生效。
+  component.setExpanded(expanded);
+  component.updateResult(
+    {
+      content: message.content.map((c) =>
+        c.type === 'text'
+          ? { type: 'text', text: c.text }
+          : { type: 'image', data: c.data, mimeType: c.mimeType },
+      ),
+      details: message.details ?? undefined,
+      isError: message.isError,
+    },
+    false,
+  );
+  return component.render(usableWidth(width));
+}
+
+/** 把 toolCallId 配到那条 assistant 消息的调用参数上。配不上就返回 null。 */
+function toolCallArgs(state: AgentState, toolCallId: string): Record<string, unknown> | null {
+  for (const m of state.messages) {
+    if (m.role !== 'assistant') continue;
+    for (const c of m.content) {
+      if (c.type === 'toolCall' && c.id === toolCallId) {
+        return c.arguments as Record<string, unknown>;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * 把整段对话渲染成文本块（`from` 恒为 0：滚动交给 ScrollView）。
+ *
+ * ## 不加「你 ›」「助手 ›」这类前缀
+ *
+ * 这是与 pi 最早的一处形状分歧：我们在每条消息前面加了一个带颜色的角色名，
+ * pi 没有任何前缀 —— 角色靠**底色与字体形状**区分：
+ *
+ *   - 用户：整块蓝底（`userMessageBg`）铺满整行
+ *   - 助手：默认前景色、无底色
+ *   - 思考：灰色**斜体**（`thinkingText`）
+ *
+ * 加前缀的代价不只是「多了两个字」：用户那块蓝底（截图中一整条深蓝带）会变成
+ * 「`你 ›` + 白字」，而模型说的话（白字无底）与提示（灰斜体）挤在同一行里，
+ * 斜体失效。一句话能认出是模型说的还是你自己说的，底色比前缀准。
+ *
+ * ## 直接用 pi 的组件，而不是照着截图重画
+ *
+ * `UserMessageComponent` / `AssistantMessageComponent` / `ToolExecutionComponent`
+ * 加上 `createAllToolRenderers()` 是 pi 官方那套渲染器（靠 pnpm patch 打开的子路径）。
+ * 用它们而不是手写，是因为里面有一堆「眼睛看不出来但错了很难受」的细节：
+ * bash 折叠**保留尾部** 5 行（头部是命令，尾部才是报错）而 read/write 保留头部 10 行；
+ * write 的块里是**文件内容**而不是工具输出；edit 渲染的是**彩色 diff**；
+ * 每个工具块用 `Box` 把底色补到整行（手写时宽度差一列底色就断一截）。
+ * 这些各自都不难，但**一起对**才和截图一致。
+ */
 export function renderTranscript(
   state: AgentState,
   from: number,
@@ -871,7 +1025,7 @@ export function renderTranscript(
     // 先按 role 收窄，再把 content 归一成「文本片段数组」再渲染。
     if (message.role === 'system') {
       const text = typeof message.content === 'string' ? message.content : '';
-      if (text) lines.push(`${dim('系统 ›')} ${dim(text)}`);
+      if (text) lines.push(...renderPlain(text));
     } else if (message.role === 'user') {
       const text =
         typeof message.content === 'string'
@@ -879,37 +1033,18 @@ export function renderTranscript(
           : message.content
               .map((c) => (c.type === 'text' ? c.text : '[image]'))
               .join(' ');
-      lines.push(`${cyan('你 ›')} ${text}`);
+      lines.push(...renderUser(text, width));
     } else if (message.role === 'assistant') {
-      const text = message.content
-        .map((c) => (c.type === 'text' ? c.text : c.type === 'toolCall' ? `[调用 ${c.name}]` : ''))
-        .join(' ')
-        .trim();
-      if (text) lines.push(`${bold('助手 ›')} ${text}`);
+      // 助手消息：**只有可见内容才占行**。一条纯 toolCall 的消息如果硬渲染会得到
+      // 一段空白（Markdown 组件对空文本返回 []），而它紧跟着就有工具块要画。
+      lines.push(...renderAssistant(message.content, width));
     } else {
-      const text = message.content
-        .map((c) => (c.type === 'text' ? c.text : '[image]'))
-        .join(' ')
-        .replace(/\s+/g, ' ');
-      const label = getTool(message.toolName)?.label ?? message.toolName;
-      const mark = message.isError ? red('✗') : green('✓');
-      // 工具块：标题行 + 输出行，都铺底色（形状照抄 pi）。
-      // 标题只给 `工具名 参数` —— 参数是定位信息，而截图里 pi 恰恰把**文件名/命令**
-      // 显示在标题行（`read  docs/architecture/overview.md`），参数太长就截断。
-      const args = toolArgs(state, message);
-      const title = `${mark} ${bold(label)} ${dim(args)}`;
-      // 输出：超长时折成「... (N earlier lines, ctrl+o to expand)」，与 pi 同形。
-      const body = foldOutput(text, expanded);
-      const bg = message.isError ? TOOL_ERROR_BLOCK_BG : TOOL_BLOCK_BG;
-      lines.push(block(title, bg, width));
-      if (body) {
-        for (const row of body.split('\n')) lines.push(block(`  ${row}`, bg, width));
-      }
+      lines.push(...renderTool(state, message, width, expanded));
     }
   }
   // 正在流式生成的这一段也画出来。
   if (state.phase === 'thinking' && state.streamingText) {
-    lines.push(`${bold('助手 ›')} ${state.streamingText}`);
+    lines.push(...renderAssistant([{ type: 'text', text: state.streamingText }], width, true));
   }
   if (state.retrying) {
     lines.push(dim(`  ↻ 上一次失败，正在重试（第 ${state.llmAttempts}/${state.maxLlmAttempts} 次尝试）`));

@@ -254,6 +254,14 @@ export interface PiSettings {
   defaultProvider?: string;
   defaultModel?: string;
   defaultThinkingLevel?: string;
+  /**
+   * 界面主题。与 pi 用**同一个键、同一个配置文件**（`~/.pi/agent/settings.json`）。
+   *
+   * 认这些形式：`"dark"` / `"light"` / `"auto"` / `"light:dark, dark:light"`，
+   * 也可以是 pi 自定义主题目录里的主题名。解析规则在 `src/tui/theme.ts` 里，
+   * 与 pi 的 `resolveThemeSetting()` 同一条代码路径。
+   */
+  theme?: string;
 }
 
 export function loadPiSettings(): PiSettings {

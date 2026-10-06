@@ -197,6 +197,23 @@ export interface AgentState {
   openLlmNodeId: string | null;
   /** 正在执行的工具 → 它的 attempt 节点 id。 */
   openToolNodeIds: Readonly<Record<string, string>>;
+  /**
+   * 已完成工具的**耗时**（毫秒），key 是 toolCallId。
+   *
+   * ## 为什么单独存一份，而不是去轨迹树上刨
+   *
+   * 界面要显示 `Took 0.5s`（pi 的 bash 块底部那行）。轨迹树上其实也有时间戳
+   * （`tool.attempt.createdAt` / `endedAt`），但那条路要「按 toolName 猜是哪个节点」——
+   * 同名工具连着调两次就猜错了，而猜错的表现是**显示一个错的数字**，不报错，最难发现。
+   *
+   * reducer 的 `tool.result` 拿得到这次调用的 id 与时刻，直接记一份即可：
+   * **唯一真相、零猜测**。它只进界面，不进 prompt（`details` 那条路才进 prompt），
+   * 所以不会污染发给模型的上下文，也不会被写进会话文件。
+   *
+   * 会话文件里不带它：恢复历史时 `state` 是从消息重建的，这些耗时显示不出来就显示不出来
+   * （显示 `Took` 一个假数字比不显示更糟）。
+   */
+  toolTimings: Readonly<Record<string, number>>;
   /** 本轮（从 user.message 起）已发起的 LLM 尝试次数；用来判「还有没有重试机会」。 */
   llmAttempts: number;
   /** 允许的最大 LLM 尝试次数（含首次），2 = 失败后重试一次。 */
@@ -280,6 +297,7 @@ export function createInitialState(options: InitialStateOptions): AgentState {
     trace: options.trace ?? createTraceTree(options.sessionId ?? newSessionId()),
     openLlmNodeId: null,
     openToolNodeIds: {},
+    toolTimings: {},
     llmAttempts: 0,
     maxLlmAttempts: options.maxLlmAttempts ?? 2,
     llmTimeoutMs: options.llmTimeoutMs ?? DEFAULT_LLM_TIMEOUT_MS,

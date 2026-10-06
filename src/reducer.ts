@@ -638,10 +638,21 @@ const transitions: TransitionHandlers = {
         });
     const openToolNodeIds = { ...state.openToolNodeIds };
     delete openToolNodeIds[result.toolCallId];
+    // 耗时记在这里（见 AgentState.toolTimings 的注释）：`tool/start` 打的点在这条
+    // action 到达时已经过去一会儿了，而这是唯一同时拿到「开始 id」与「结束时刻」的地方。
+    // 取 startedAt 走 openToolNodeIds：它还没被删（上两行才删），所以拿得到。
+    const startedAt = state.openToolNodeIds[result.toolCallId] !== undefined
+      ? state.trace.nodes[state.openToolNodeIds[result.toolCallId] ?? '']?.createdAt
+      : undefined;
     return {
       ...state,
       trace: tree,
       openToolNodeIds,
+      // 负数/NaN 一律不记：界面会拿它算 `Took x.xs`，一个 NaN 会显示成 "Took NaNs"。
+      toolTimings:
+        startedAt !== undefined && Number.isFinite(startedAt) && now >= startedAt
+          ? { ...state.toolTimings, [result.toolCallId]: now - startedAt }
+          : state.toolTimings,
       errorNodeId: result.isError ? node.id : state.errorNodeId,
       executing: state.executing.filter((t) => t.call.id !== result.toolCallId),
       pendingToolCalls: state.pendingToolCalls.filter((c) => c.id !== result.toolCallId),

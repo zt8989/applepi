@@ -37,10 +37,14 @@ execute(toolCallId, params, signal?, onUpdate?) => Promise<AgentToolResult>
 `src/tools.ts` 的 `adapt()` 做两件事：
 
 1. **签名收窄** —— 丢掉 `onUpdate`，成本项目的 `AgentTool` 形状
-2. **补两个字段** —— `label`（官方给的是英文工具名，界面要中文展示名）；
+2. **补两个字段** —— `label`（官方给的是英文工具名；界面现在也显示英文工具名，
+   详见 [surfaces](surfaces.md#为什么不自己画这四种样式)，所以这个 label 只留在本项目内部）；
    `details` 归一（官方有些工具返回 `undefined`，本项目要求有值）
 
 逻辑一行不改。于是 `effects.ts` 完全不知道 pi-coding-agent 存在，环的逻辑一行都不用改。
+
+> 界面渲染用的是 `create*ToolDefinition()`（`src/tui/app.ts`），不是这里的 `AgentTool` ——
+> 前者带 `renderShell`（`edit` 是 `"self"`），后者不带。两者形状不同，别混用。
 
 ## 五个参数不是公开契约
 
