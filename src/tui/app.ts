@@ -54,7 +54,35 @@ import { addUsageToTotals, createUsageTotals } from '@earendil-works/pi-coding-a
 
 const useColor = !process.env.NO_COLOR;
 const paint = (code: string, text: string) => (useColor ? `\x1b[${code}m${text}\x1b[0m` : text);
-const dim = (t: string) => paint('2', t);
+export const dim = (t: string) => paint('2', t);
+
+/**
+ * 底箱那种「整块变淡，但里面某几段要保留告警色」的场景。
+ *
+ * ## 为什么要单独一个函数
+ *
+ * `paint()` 用 `\x1b[0m` 收尾（重置所有属性）。直接 `dim(red(x))` 的话，内层的
+ * `\x1b[0m` 会把外层的 dim 提前关掉 —— 结果是「x 之后的所有内容都不淡了」。
+ *
+ * 这里改成：整行包一次 dim，里面的告警色段用 **dim + 颜色**（而不是纯颜色），
+ * 而告警段结束后**重新开一次 dim**。也就是把 dim 当成「默认态」，告警色当成
+ * 「临时换掉又换回来」，而不是嵌套。
+ *
+ * @param text      整行内容
+ * @param segments  哪些子串要上告警色（其余保持 dim）
+ */
+export function dimLine(text: string, ...segments: { find: string; paint: (s: string) => string }[]): string {
+  let out = text;
+  // 从后往前替换，这样前面的位置不会因长度变化而失效。
+  for (const { find, paint: colorFn } of [...segments].reverse()) {
+    if (find === '') continue;
+    const at = out.indexOf(find);
+    if (at < 0) continue;
+    const repaint = colorFn(dim(find)); // dim 重新包上（因为 colorFn 内部的 0m 会关掉它）
+    out = out.slice(0, at) + repaint + dim(out.slice(at + find.length));
+  }
+  return dim(out);
+}
 const red = (t: string) => paint('31', t);
 const green = (t: string) => paint('32', t);
 const yellow = (t: string) => paint('33', t);
@@ -214,7 +242,15 @@ export function modelLine(state: AgentState): string {
  * 所以从 `state.messages` 里把所有 assistant 消息的 usage 累加。这是每帧 O(消息数) ——
  * 消息多了会略慢，但换来与 pi 一致的口径。
  */
-export function statsLine(state: AgentState): string {
+/** 底箱第二行算出来的结果。 */
+export interface StatsLine {
+  /** 整行文本，**不带任何 ANSI**（颜色由调用方用 `dimLine()` 统一处理）。 */
+  text: string;
+  /** 要在 dim 底箱里保持告警色的子段。 */
+  warnings: { find: string; paint: (s: string) => string }[];
+}
+
+export function statsLine(state: AgentState): StatsLine {
   const totals = createUsageTotals();
   let latestCacheHitRate: number | undefined;
   for (const message of state.messages) {
@@ -228,6 +264,7 @@ export function statsLine(state: AgentState): string {
   }
 
   const parts: string[] = [];
+  const warnings: StatsLine['warnings'] = [];
   if (totals.input > 0) parts.push(`↑${formatTokens(totals.input)}`);
   if (totals.output > 0) parts.push(`↓${formatTokens(totals.output)}`);
   if (totals.cacheRead > 0) parts.push(`R${formatTokens(totals.cacheRead)}`);
@@ -239,15 +276,21 @@ export function statsLine(state: AgentState): string {
 
   // 上下文占用：已用 / 窗口。超过 70% 转黄、90% 转红 —— 快满时模型会开始丢东西，
   // 要提前看见而不是等它开始表现变差。
+  //
+  // 这里**不自己上色**，而是把告警信息一起返回（`warning`）：整行底箱会被包进 dim，
+  // 而 dim 里再嵌一个 `\x1b[0m` 结尾的颜色段会把 dim 提前关掉（见 dimLine 的注释）。
   const contextWindow = state.model.contextWindow;
   if (contextWindow > 0) {
     const used = totals.input + totals.cacheRead + totals.cacheWrite;
     const percentValue = (used / contextWindow) * 100;
     const percent = percentValue < 1 ? percentValue.toFixed(1) : Math.round(percentValue);
     const display = `${percent}%/${formatTokens(contextWindow)}`;
-    parts.push(percentValue > 90 ? red(display) : percentValue > 70 ? yellow(display) : display);
+    parts.push(display);
+    if (percentValue > 70) {
+      warnings.push({ find: display, paint: percentValue > 90 ? red : yellow });
+    }
   }
-  return parts.join(' ');
+  return { text: parts.join(' '), warnings };
 }
 
 /**
@@ -528,13 +571,24 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // 补到全宽：顶栏长度变化会让 pi-tui 的增量重绘留下残影（见 padToWidth 的注释）。
     header.setText(padToWidth(statusLine(state), terminal.columns ?? 100));
     // 底栏同理：模型名 / 节点数会变，必须补齐到全宽，否则残影会叠出来。
-    // 底箱两行：**模型那行只占第一行**（pi 就是这么排的 —— 右上角贴着第一行），
-    // 第二行只放左边的用量。所以不能对整块文本做 twoColumn，要逐行拼。
+    // 底箱两行（形状拄 pi 截图）：
+    //   第一行：`~\Documents\workspace\event-loop-agent (main)`            —— 左边
+    //   第二行：`↑6.8k ↓49 R143 CH2.1% 0.7%/1.0M      (workbuddy) cn:space-bunny`
+    //
+    // 模型那行贴在**第二行**右侧（不是第一行）—— 之前我放错了行，pi 是用量与模型并排。
+    // 整块上 dim（=\x1b[2m）：底箱是背景信息，不该跟对话内容抢注意力。
+    //
+    // dim 要包住**整行**而不是每段单独包：`twoColumn` 靠 visibleWidth 算空白，
+    // 已经上了色的那段会算错宽度。做法是先用无色文本算好对齐，再整体包 dim。
     const width = terminal.columns ?? 100;
+    const stats = statsLine(state);
+    const statsRow = twoColumn(stats.text, modelLine(state), width);
     footer.setText(
-      padToWidth(twoColumn(cwdLine(cwd, gitBranch(cwd)), modelLine(state), width), width) +
+      dim(padToWidth(cwdLine(cwd, gitBranch(cwd)), width)) +
         '\n' +
-        padToWidth(statsLine(state), width),
+        // dimLine 而不是 dim：上下文超 70%/90% 时那一小段要保持黄/红。
+        // 直接 dim(带色文本) 的话，内层的 \x1b[0m 会把外层 dim 提前关掉。
+        dimLine(padToWidth(statsRow, width), ...stats.warnings),
     );
     // 整段重渲染：ScrollView 自己管滚动与跟随，我们每次给它完整的对话文本。
     // （早前这里只渲染「新增的那几条」，靠 renderedMessages 游标 —— 那个游标每帧都被

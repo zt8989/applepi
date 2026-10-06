@@ -6,6 +6,8 @@ import { stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
 import { formatCwdForFooter } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js';
 import {
   cwdLine,
+  dim,
+  dimLine,
   foldOutput,
   modelLine,
   statsLine,
@@ -214,7 +216,7 @@ function assistantWithUsage(usage: Record<string, unknown>): Message {
 
 test('statsLine：没有任何用量时是空串（不画 0↑0↓0R 噪声）', () => {
   const state = { messages: [], model: { contextWindow: 0 } } as unknown as AgentState;
-  assert.equal(statsLine(state), '');
+  assert.equal(statsLine(state).text, '');
 });
 
 test('statsLine：累计多轮的 token（不是只显示最后一轮）', () => {
@@ -226,7 +228,7 @@ test('statsLine：累计多轮的 token（不是只显示最后一轮）', () =>
     ],
     model: { contextWindow: 0 },
   } as unknown as AgentState;
-  const out = statsLine(state);
+  const out = statsLine(state).text;
   assert.ok(out.includes('↑6.8k'), `input 应累计为 6.8k：${out}`);
   assert.ok(out.includes('↓49'), `output 应累计为 49：${out}`);
 });
@@ -237,7 +239,7 @@ test('statsLine：缓存命中率 CH = cacheRead / (input+cacheRead+cacheWrite)'
     messages: [assistantWithUsage({ input: 6800, output: 49, cacheRead: 143, cacheWrite: 0, totalTokens: 6992 })],
     model: { contextWindow: 0 },
   } as unknown as AgentState;
-  assert.ok(statsLine(state).includes('CH2.1%'), statsLine(state));
+  assert.ok(statsLine(state).text.includes('CH2.1%'), statsLine(state).text);
 });
 
 test('statsLine：没有缓存就不显示 CH（0% 是噪声）', () => {
@@ -245,7 +247,7 @@ test('statsLine：没有缓存就不显示 CH（0% 是噪声）', () => {
     messages: [assistantWithUsage({ input: 100, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 110 })],
     model: { contextWindow: 0 },
   } as unknown as AgentState;
-  assert.ok(!statsLine(state).includes('CH'), statsLine(state));
+  assert.ok(!statsLine(state).text.includes('CH'), statsLine(state).text);
 });
 
 test('statsLine：上下文占用 = 已用/窗口（窗口取自 model.init）', () => {
@@ -253,7 +255,7 @@ test('statsLine：上下文占用 = 已用/窗口（窗口取自 model.init）',
     messages: [assistantWithUsage({ input: 700_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 700_000 })],
     model: { contextWindow: 1_000_000 },
   } as unknown as AgentState;
-  assert.ok(statsLine(state).includes('70%/1.0M'), statsLine(state));
+  assert.ok(statsLine(state).text.includes('70%/1.0M'), statsLine(state).text);
 });
 
 test('statsLine：窗口未知（0）时不画百分比，而不是画个猜的值', () => {
@@ -261,10 +263,54 @@ test('statsLine：窗口未知（0）时不画百分比，而不是画个猜的�
     messages: [assistantWithUsage({ input: 700_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 700_000 })],
     model: { contextWindow: 0 },
   } as unknown as AgentState;
-  assert.ok(!statsLine(state).includes('%'), statsLine(state));
+  assert.ok(!statsLine(state).text.includes('%'), statsLine(state).text);
 });
 
 test('statsLine：窗口为 0 时不崩（contextWindow 还没装载的启动瞬间）', () => {
   const state = { messages: [], model: { contextWindow: 0 } } as unknown as AgentState;
   assert.doesNotThrow(() => statsLine(state));
+});
+
+// ─── dimLine：整行变淡，但告警段保持颜色 ───
+
+test('dimLine：整行都变淡（底栏是背景信息，不该跟对话抢注意力）', () => {
+  const out = dimLine('abc def');
+  assert.ok(out.startsWith('\x1b[2m'), `整行应被 dim 包住：${JSON.stringify(out)}`);
+  assert.equal(stripTerminalSequences(out), 'abc def', '内容不能变');
+});
+
+test('dimLine：告警段变色的同时，后面仍然是 dim（嵌套色的经典坑）', () => {
+  // paint() 用 \x1b[0m 收尾，会把外层 dim 关掉。所以告警段之后必须**重新开 dim**。
+  // 这个 bug 表现为「上下文占用变黄了，但它右边的模型名突然变亮」。
+  const out = dimLine('70%/1.0M  model', { find: '70%/1.0M', paint: (s) => `\x1b[33m${s}\x1b[0m` });
+  // 去掉所有 ANSI 后内容要对。
+  assert.equal(stripTerminalSequences(out), '70%/1.0M  model');
+  // 告警段之后要有 dim 重新开启的序列。
+  const after = out.slice(out.indexOf('70%/1.0M') + '70%/1.0M'.length);
+  assert.ok(after.includes('\x1b[2m'), `告警段之后要重开 dim：${JSON.stringify(after)}`);
+});
+
+test('dimLine：找不到告警段时就是普通 dim（不崩、不多包）', () => {
+  const out = dimLine('abc', { find: '不存在', paint: (s) => `\x1b[33m${s}\x1b[0m` });
+  assert.equal(stripTerminalSequences(out), 'abc');
+  // 没找到就不该有任何额外处理：只多一个 dim 包裹，没有黄色也没有重开 dim。
+  assert.equal(out, '\x1b[2mabc\x1b[0m', JSON.stringify(out));
+});
+
+test('dimLine：多个告警段都要处理', () => {
+  const out = dimLine('A B', { find: 'A', paint: (s) => `\x1b[31m${s}\x1b[0m` }, { find: 'B', paint: (s) => `\x1b[32m${s}\x1b[0m` });
+  assert.equal(stripTerminalSequences(out), 'A B');
+});
+
+test('statsLine：上下文超 70% 时给出告警段（而不是自己上色）', () => {
+  // 上色要交给 dimLine：整行会被包进 dim，内嵌的 \x1b[0m 会提前关掉它。
+  const state = {
+    messages: [assistantWithUsage({ input: 800_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 800_000 })],
+    model: { contextWindow: 1_000_000 },
+  } as unknown as AgentState;
+  const out = statsLine(state);
+  assert.equal(out.warnings.length, 1, '应该有一段告警');
+  assert.ok(out.warnings[0]?.find.includes('%'), out.warnings[0]?.find);
+  // text 本身必须是无色的（否则 twoColumn 的宽度会算错）。
+  assert.ok(!/\x1b/.test(out.text), `text 不该含 ANSI：${JSON.stringify(out.text)}`);
 });

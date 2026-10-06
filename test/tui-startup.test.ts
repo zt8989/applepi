@@ -43,9 +43,40 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 /** 剥掉所有 ANSI 序列与 OSC 控制串，只留可见文本。 */
 function visible(output: string): string {
   return output
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC（标题等）
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC（超链接/标题）
     .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '') // CSI（颜色/光标）
     .replace(/\x1b[()][B0]/g, ''); // 字符集切换
+}
+
+/**
+ * 判断两个片段是否在**同一屏幕行**上。
+ *
+ * ## 为什么要这么麻烦
+ *
+ * pi-tui 是差分重绘：它不用 `\n` 换行，而是用**绝对光标定位**跳到下一行重画。实测底栏
+ * 两行之间的分隔是 `ESC[30;1H`（第 30 行第 1 列）—— 既不是 `\n` 也不是 `\r`。
+ * 所以 `split('\n')` 会把两行并成一行，「模型与 cwd 不同行」这种断言会**假失败**
+ * （我为此花了一轮排查：程序输出明明是三行，测试却说同一行）。
+ *
+ * ## 为什么不做完整的光标模拟
+ *
+ * 试过（按 `ESC[行;列H` 重建一个行数组），但多次重绘会让内容**累积**：同一行被
+ * `ESC[2K` 擦掉再重画，历史帧与新帧都进了数组，断言照样被污染。而这些断言真正想问的
+ * 只是「这两个东西挨在一起吗」—— 所以直接看**两者之间有没有换行类控制序列**，那才是
+ * 「pi 认为它们不同行」的确切证据。
+ *
+ * @param a 第一个片段（如 `(main)`）
+ * @param b 第二个片段（如 `(workbuddy)`）
+ */
+function onSameScreenLine(output: string, a: string, b: string): boolean {
+  const ia = output.indexOf(a);
+  const ib = output.indexOf(b);
+  if (ia < 0 || ib < 0) return false;
+  const [from, to] = ia < ib ? [ia, ib] : [ib, ia];
+  const between = output.slice(from, to);
+  // 光标绝对/相对定位到别的行、或换行/回车 + 纵向移动 —— 都算「不同行」。
+  const breaksLine = /\x1b\[\d*;?\d*[Hf]|\x1b\[\d*[ABCDEFG]|\n|\r/;
+  return !breaksLine.test(between);
 }
 
 /**
@@ -53,7 +84,7 @@ function visible(output: string): string {
  *
  * @param ms 存活多久（首帧很快，但 tsx 转译 + 启动有开销，给宽一点）
  */
-async function firstFrame(ms = 9000): Promise<string> {
+async function firstFrame(ms = 9000): Promise<{ text: string; raw: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn('node', ['--import', 'tsx', 'src/tui.ts'], {
       cwd: ROOT,
@@ -68,7 +99,7 @@ async function firstFrame(ms = 9000): Promise<string> {
       child.kill();
       // kill 之后 stdout 可能还有数据在管道里：等它排空再 resolve，
       // 否则会拿到半截输出（表现为“顶栏不见了”的假失败）。
-      setTimeout(() => resolve(visible(out)), 300);
+      setTimeout(() => resolve({ text: visible(out), raw: out }), 300);
     }, ms);
     child.on('error', (error) => {
       clearTimeout(timer);
@@ -76,17 +107,18 @@ async function firstFrame(ms = 9000): Promise<string> {
     });
     child.on('exit', () => {
       clearTimeout(timer);
-      resolve(visible(out));
+      resolve({ text: visible(out), raw: out });
     });
   });
 }
 
 test('TUI 首帧：顶栏与底栏都要有内容（空组件会量出 0 高度而消失）', async () => {
-  const frame = await firstFrame();
+  const { text: frame, raw } = await firstFrame();
   assert.ok(
     frame.includes('轨迹'),
     `首帧应该有顶栏（轨迹统计）。实际首屏前 400 字：\n${frame.slice(0, 400)}`,
   );
+  // 底栏两行：cwd 在第一行，模型在**第二行**右侧。所以不能断言 cwd 行里就有模型。
   assert.ok(
     frame.includes('cn:space-bunny') || frame.includes('(workbuddy)'),
     '首帧应该有底栏的 (provider) model',
@@ -96,7 +128,7 @@ test('TUI 首帧：顶栏与底栏都要有内容（空组件会量出 0 高度�
 test('TUI 首帧：空闲时 loader 不转圈', async () => {
   // Loader.setIndicator() 内部会 start()，所以「设一次 frames」就等于「开动画」。
   // 空闲界面有个一直转的圈，看着像正在处理，其实什么都没跑。
-  const frame = await firstFrame();
+  const { text: frame, raw } = await firstFrame();
   const spinner = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
   assert.ok(
     !spinner.test(frame),
@@ -105,19 +137,20 @@ test('TUI 首帧：空闲时 loader 不转圈', async () => {
 });
 
 test('TUI 首帧：底栏把 cwd 与模型分列两端', async () => {
-  const frame = await firstFrame();
+  const { text: frame, raw } = await firstFrame();
   // 找带 (main) 的那行（cwd 行）。
   const cwdRow = frame.split('\n').find((l) => l.includes('(main)'));
   assert.ok(cwdRow, `底栏应该有 cwd + git 分支。首屏：\n${frame.slice(0, 400)}`);
   // pi 的口径是「家目录缩成 ~」，不是盘符开头。
   assert.ok(
     /~|\/home\/|[A-Za-z]:\\/.test(cwdRow),
-    `底栏左侧应是工作目录路径：${JSON.stringify(cwdRow)}`,
+    `底栏左侧应是工作目录路径：${JSON.stringify(cwdRow.slice(0, 70))}`,
   );
-  // 模型在同一行靠右（模型名可能因宽屏被截断，只断言 provider 标记）。
+  // 模型在**第二行**右侧（pi 的排法：用量与模型并排，cwd 独占第一行）。
+  // 用原始输出判断同行与否 —— 差分重绘里两者之间是光标定位序列，不是换行。
   assert.ok(
-    cwdRow.includes('(workbuddy)') || frame.includes('(workbuddy)'),
-    '模型 (provider) 应与 cwd 同一行',
+    !onSameScreenLine(raw, '(main)', '(workbuddy)'),
+    '模型不该与 cwd 同一行（那是上一版的错误排法）',
   );
 });
 
@@ -129,7 +162,7 @@ test('TUI 首帧：底栏占两行（第二行是空的用量行）', async () =
   // 用量会被挤到屏幕外（AltScreen 不会像普通终端那样滚出去，只能看不见）。
   // 这里只验一个弱一些但稳定的性质：cwd 行不在倒数第一、二行 —— 下面至少要有
   // 屏幕的边界。
-  const frame = await firstFrame();
+  const { text: frame, raw } = await firstFrame();
   const rows = frame.split('\n').map((l) => l.trimEnd());
   const cwdIndex = rows.findIndex((l) => l.includes('(main)'));
   assert.ok(cwdIndex >= 0, '找不到底栏第一行');
