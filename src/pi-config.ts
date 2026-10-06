@@ -57,15 +57,22 @@ import { streamSimple as openaiResponsesStreamSimple } from '@earendil-works/pi-
  * 配置家目录。默认与 pi 同址（`~/.pi/agent`），`REDUX_AGENT_DIR` 优先于
  * `PI_CODING_AGENT_DIR`。见 `config-home.ts`。
  *
- * ## 与 pi 的 `getAgentDir()` 刻意保持一致
+ * ## 现在直接用 pi 的 `getAgentDir()`
+ *
+ * 之前这里是手抄的 `join(homedir(), '.pi', 'agent')`（因为 pi-coding-agent 的
+ * `exports` 封了内部路径，只能从主入口拿，而主入口拿不到 `getAgentDir`）。
+ * 有了 pnpm patch 打开 `./dist/*` 之后，直接引官方的：
+ *
+ * ```ts
+ * import { getAgentDir } from '@earendil-works/pi-coding-agent/dist/config.js';
+ * ```
  *
  * 两边必须指向同一个目录，否则 models.json / auth.json / sessions/ 会分家。
- * pi 的实现（`config.ts`）是：认 `PI_CODING_AGENT_DIR`，否则 `join(homedir(), '.pi', 'agent')`。
- * 我们多认一个 `REDUX_AGENT_DIR`（本项目自己的名字，给测试隔离用），优先级更高。
+ * 抄一份的风险是 pi 改了实现（tilde 展开、换目录名）而我们静默地指向别处 ——
+ * 症状是「改了一边另一边读不到」，很难查。
  *
- * 为什么不直接调 pi 导出的 `getAgentDir()`：它不认 `REDUX_AGENT_DIR`，
- * 而测试必须能把自己从真实家目录里摘出去（否则测试会往用户的历史里堆会话）。
- * 两行路径推导不值得为它引一整个 CLI 包进配置模块。
+ * `REDUX_AGENT_DIR` 仍然优先：pi 的 `getAgentDir()` 不认它，而测试必须能把自己
+ * 从真实家目录里摘出去（否则每跑一次测试就往用户历史里堆会话）。
  */
 export function piAgentDir(): string {
   return configHome();
@@ -197,6 +204,48 @@ export function loadPiModelsNormalized(): PiModelsFile | null {
   return file;
 }
 
+/**
+ * 用 pi 自己的 `ModelConfig` 校验 models.json。
+ *
+ * ## 为什么要这一步
+ *
+ * 归一（`normalizeModels()`）只处理「旧的对象 map」这一种历史形状，而 pi 的 schema
+ * 还有别的约束（`id` 非空、`api` 是字符串、……）。形状再出问题的话，pi 读同一个文件时
+ * 会**整个文件作废**（一个 provider 都不装），症状是「怎么一个 provider 都没有」——
+ * 很难往配置格式上想。
+ *
+ * `ModelConfig.load()` 用的就是 pi 那份 TypeBox schema，报错精确到 provider 的字段：
+ *
+ *     Invalid models.json schema:
+ *       - providers.workbuddy.models: must be array
+ *
+ * 所以这里**先让官方校验器看一眼**，把话说清楚，再决定要不要继续用这份配置。
+ * 主路径（`createPiModelRuntime()`）本来就会校验并抛错；这里是给降级路径用的 ——
+ * 它要的是「尽量能用」，所以只警告不抛。
+ *
+ * @returns 校验错误文本；`undefined` = 通过（或文件不存在）。
+ */
+export async function validateModelsFile(): Promise<string | undefined> {
+  const file = piModelsPath();
+  if (!existsSync(file)) return undefined;
+  try {
+    const { ModelConfig } = await import('@earendil-works/pi-coding-agent/dist/core/model-config.js');
+    const config = await ModelConfig.load(file);
+    const error = config.getError();
+    if (error) {
+      process.stderr.write(
+        `models.json 校验未通过（pi 会拒绝整个文件，下面这些 provider 可能都用不了）：\n${error}\n`,
+      );
+    }
+    return error;
+  } catch (error) {
+    // 校验器自己坏了不该连带配置也用不了 —— 记一句继续。
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`models.json 校验器不可用（跳过校验）：${message}\n`);
+    return undefined;
+  }
+}
+
 export function loadPiAuth(): PiAuthFile {
   return readJsonIfExists<PiAuthFile>(piAuthPath()) ?? {};
 }
@@ -314,9 +363,14 @@ export function buildProvider(
  *
  * 所以它**故意不注册内置 provider 目录** —— 那正是 `ModelRuntime` 的价值所在，
  * 手写一遍既慢又会过期。调用方要内置 provider 就自己传 `extra`。
+ *
+ * 异步：里面会 `await validateModelsFile()`（pi 的 `ModelConfig.load()` 是 Promise）。
  */
-export function createModelsWithPiConfig(extra: (() => Provider<any>)[] = []): Models {
+export async function createModelsWithPiConfig(extra: (() => Provider<any>)[] = []): Promise<Models> {
   const models = createModels();
+  // 先让 pi 的校验器看一眼（只警告不抛 —— 这条路径的宗旨是「尽量能用」）。
+  // 不校验的话，配置形状再出问题时的症状是「一个 provider 都没有」，很难往格式上想。
+  await validateModelsFile();
   // 走 loadPiModelsNormalized：顺手把旧形状的 models 改成 pi 现在的数组形状。
   const file = loadPiModelsNormalized();
   if (file) {

@@ -3,5 +3,8 @@ dist/
 .env
 *.log
 
-# 会话与轨迹不再落在仓库里（在 ~/.redux-agent/），所以这里没有条目。
+# pnpm patch 的临时工作区（`pnpm patch` 创建，`pnpm patch-commit` 后可以删）。
+node_modules/.pnpm_patches/
+
+# 会话与轨迹不再落在仓库里（在 ~/.pi/agent/），所以这里没有条目。
 .playwright-mcp/

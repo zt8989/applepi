@@ -50,16 +50,22 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
 import path from 'node:path';
+import {
+  CONFIG_DIR_NAME as PI_DIR_NAME,
+  ENV_AGENT_DIR,
+  getAgentDir,
+} from '@earendil-works/pi-coding-agent/dist/config.js';
 
-export const CONFIG_DIR_NAME = '.redux-agent';
-/** pi 自己的配置目录名（`pi-coding-agent` 的 `getAgentDir()` 用的就是这个）。 */
-export const PI_CONFIG_DIR = '.pi';
+/** pi 自己的配置目录名（`.pi`）。从官方常量拿，不手写字符串。 */
+export const PI_CONFIG_DIR: string = PI_DIR_NAME;
 /** 本项目的搬家环境变量（测试隔离用）。 */
 export const ENV_HOME = 'REDUX_AGENT_DIR';
 /** pi 的官方搬家环境变量（与它自己同名同义）。 */
-export const ENV_PI_HOME = 'PI_CODING_AGENT_DIR';
+export const ENV_PI_HOME: string = ENV_AGENT_DIR;
+
+/** 旧目录名（迁移脚本 `scripts/migrate-config-dir.ts` 的源）。 */
+export const CONFIG_DIR_NAME = '.redux-agent';
 
 /**
  * 配置家目录：**默认与 pi 同址**（`~/.pi/agent`）。
@@ -71,10 +77,23 @@ export const ENV_PI_HOME = 'PI_CODING_AGENT_DIR';
  * 早先这里是 `~/.redux-agent`。换到同址是为了让配置只有一份，见文件头的理由。
  */
 export function configHome(): string {
-  const env = process.env[ENV_HOME] ?? process.env[ENV_PI_HOME];
-  return env ? path.resolve(env) : path.join(homedir(), PI_CONFIG_DIR, 'agent');
+  // 优先认本项目自己的变量（测试靠它隔离）；没设就**直接用 pi 的 getAgentDir()**。
+  //
+  // 为什么不手写 `join(homedir(), '.pi', 'agent')`：那是抄 pi 的实现，而 pi 改了
+  // （比如支持 tilde 展开、换目录名）我们就会静默地指向另一个地方 —— 症状是
+  // “改了一边另一边读不到”，很难查。现在两者是同一份代码。
+  const own = process.env[ENV_HOME];
+  if (own) return path.resolve(own);
+  return getAgentDir();
 }
 
+/**
+ * `<家目录>/models.json`。
+ *
+ * pi 那边有 `getModelsPath()`，但它**不认** `REDUX_AGENT_DIR`（只认自己的
+ * `PI_CODING_AGENT_DIR`）。测试要能把自己从真实家目录里摘出去，所以路径仍从
+ * `configHome()` 推 —— 只是目录名与文件名与 pi 一致。
+ */
 export function modelsPath(): string {
   return path.join(configHome(), 'models.json');
 }

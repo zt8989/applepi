@@ -1,0 +1,17 @@
+# pnpm 的构建脚本白名单。
+#
+# pnpm 10+ 默认**拦截所有依赖的 postinstall**（供应链安全）。不放行的话每次 pnpm 命令
+# 都会先触发一次 install 并以 ERR_PNPM_IGNORED_BUILDS 失败 —— 变成死循环。
+#
+# 键名是 `allowBuilds`（不是旧版的 `onlyBuiltDependencies`，也不是 npm 的
+# `onlyBuiltDependencies`）。用 `pnpm approve-builds <包名>` 生成最保险。
+#
+#   - esbuild           必须：装平台二进制，否则 tsx 起不来
+#   - protobufjs        需要：按 descriptor 生成代码
+#   - '@google/genai'   pi-ai 的可选 provider（YAML 里 @ 开头必须加引号）
+allowBuilds:
+  '@google/genai': true
+  esbuild: true
+  protobufjs: true
+patchedDependencies:
+  '@earendil-works/pi-coding-agent': patches/@earendil-works__pi-coding-agent.patch

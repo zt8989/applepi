@@ -122,14 +122,14 @@ test('loadPiModelsNormalized：没有 models.json 也不抛（配置目录可能
   assert.equal(loadPiModelsNormalized(), null);
 });
 
-test('createModelsWithPiConfig：两种形状的 models.json 都能装出 provider', () => {
+test('createModelsWithPiConfig：两种形状的 models.json 都能装出 provider', async () => {
   withModelsFile({
     providers: {
       asArray: { baseUrl: 'http://a/v1', api: 'openai-completions', models: [{ id: 'a1' }] },
       asMap: { baseUrl: 'http://b/v1', api: 'openai-completions', models: { b1: { id: 'b1' } } },
     },
   });
-  const models = createModelsWithPiConfig();
+  const models = await createModelsWithPiConfig();
   assert.deepEqual(models.getModels('asArray').map((m) => m.id), ['a1']);
   assert.deepEqual(models.getModels('asMap').map((m) => m.id), ['b1']);
 });

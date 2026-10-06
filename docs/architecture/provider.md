@@ -66,6 +66,32 @@ pi 现在要求 `models` 是**数组**，旧版（本项目早期写的）是**�
 `PI_CODING_AGENT_DIR`（pi 官方名）。比 pi 多认前一个，是为了让测试能把自己从真实家目录里
 摘出去。详见 [sessions](sessions.md)。
 
+## 为什么要 pnpm patch
+
+pi-coding-agent 的 `exports` 只开放 4 个入口（`.`、`./rpc-entry`、`./client`、
+`./experimental/plugin`），`dist/**` 下的东西全被封住。而我们需要其中几个：
+
+| 子路径 | 用来做什么 |
+| --- | --- |
+| `dist/config.js` | `getAgentDir()` / `CONFIG_DIR_NAME` / `ENV_AGENT_DIR` —— 配置家目录的**唯一真相** |
+| `dist/core/model-config.js` | `ModelConfig` —— models.json 的官方 TypeBox 校验 |
+| `dist/core/model-runtime.js` | `ModelRuntime`（主入口也有，但子路径能顺带拿别的） |
+| `dist/modes/interactive/*` | pi 自己的 TUI（见 [surfaces](surfaces.md)） |
+
+解法是 `patches/@earendil-works__pi-coding-agent.patch`：给 `exports` 加
+`./dist/*` 与 `./dist/*.js` 两条通配符。**12 行 diff，只动 `package.json`**。
+
+## 为什么 `REDUX_AGENT_DIR` 仍然优先
+
+`getAgentDir()` 只认 `PI_CODING_AGENT_DIR`，而测试必须能把自己从真实家目录里摘出去
+（否则每跑一次测试就往用户历史里堆一批会话，见 `test/isolated-home.ts`）。所以顺序是：
+
+```ts
+process.env.REDUX_AGENT_DIR ?? getAgentDir()
+```
+
+目录名、文件名、环境变量名全部取自 pi 的官方常量，**只有优先级是本项目加的**。
+
 ## 相关
 
 - 内核装配 → [kernel](kernel.md)

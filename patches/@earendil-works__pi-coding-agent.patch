@@ -1,0 +1,21 @@
+diff --git a/package.json b/package.json
+index ae973a6c40df359e12788670d5abab89b31c9db4..a3804b0913c06d5587eecf07a16b7f04deed823f 100644
+--- a/package.json
++++ b/package.json
+@@ -25,6 +25,16 @@
+ 		"./experimental/plugin": {
+ 			"source": "./src/experimental/plugin.ts"
+ 		}
++		,
++		"./dist/*": {
++			"types": "./dist/*.d.ts",
++			"import": "./dist/*.js"
++		}
++		,
++		"./dist/*.js": {
++			"types": "./dist/*.d.ts",
++			"import": "./dist/*.js"
++		}
+ 	},
+ 	"files": [
+ 		"dist",

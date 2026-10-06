@@ -121,7 +121,7 @@ export async function createRuntime(spec: ProviderSpec): Promise<AgentRuntime> {
         error instanceof Error ? error.message : String(error)
       }\n`,
     );
-    models = createModelsWithPiConfig(Object.values(PROVIDER_FACTORIES));
+    models = await createModelsWithPiConfig(Object.values(PROVIDER_FACTORIES));
   }
 
   const modelsOfProvider = models.getModels(spec.provider);
