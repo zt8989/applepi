@@ -405,7 +405,22 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const transcript = new Text('', 0, 0);
   const tracePanel = new Text('', 0, 0);
   const loader = new CancellableLoader(tui, (s) => cyan(s), (s) => dim(s), '');
-  loader.setIndicator({ frames: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] });
+  /**
+   * 空闲时**不显示**转圈。
+   *
+   * ## 坑：setIndicator() 自己会 start()
+   *
+   * pi-tui 的 `Loader.setIndicator()` 实现里最后一行是 `this.start()`（见它的
+   * `loader.js`），也就是**只要调一次 setIndicator，动画就开始转了**，与有没有消息无关。
+   * 之前那行 `loader.setIndicator({frames: [...]})` 于是让空闲界面一直有个圈在转 ——
+   * 看着像「正在处理」，其实什么都没在跑。
+   *
+   * `frames: []` 是官方给的「隐藏」方式（`LoaderIndicatorOptions.frames` 的注释：
+   * "Use an empty array to hide the indicator"）。空闲用空数组，生成中才给真 frames。
+   */
+  const IDLE_FRAMES: string[] = [];
+  const BUSY_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  loader.setIndicator({ frames: IDLE_FRAMES });
 
   const editor = new Editor(tui, EDITOR_THEME);
   // 补全：`/` 触发命令列表（带说明），路径位置触发文件补全。
@@ -485,6 +500,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
       // stop() 只停动画，**不清那一行文字** —— 不置空的话「思考中…」会一直留在屏幕上转，
       // 看起来像还在跑（这是「TUI 不可用」最容易被误判的地方）。
       loader.setMessage('');
+      // 还要把 frames 换回空：setIndicator() 自己会 start()，不换的话下一轮空闲时
+      // 那个圈又会自己转起来。
+      loader.setIndicator({ frames: IDLE_FRAMES });
       lastLoaderMessage = '';
     }
     refresh();
@@ -635,6 +653,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const send = (text: string): void => {
     loading = true;
     lastLoaderMessage = '';
+    // 生成中才真的转：setIndicator 内部会 start()，所以这里换 frames 就等于「开动画」。
+    loader.setIndicator({ frames: BUSY_FRAMES });
     loader.setMessage(yellow('思考中…'));
     loader.start();
     store.dispatch({ type: 'user.message', text });
@@ -674,6 +694,11 @@ export async function runTui(options: TuiOptions): Promise<number> {
   applyLayout();
 
   tui.setFocus(editor);
+  // **先填内容再 start()**：header / footer 初始是空串，pi-tui 量高度时得到 0，
+  // 于是那两行在布局里塌掉 —— 屏幕上只剩编辑器那两条横线，顶栏与底栏都不见了。
+  // （首帧必须可见，所以这里就要有内容；不能指望「用户发一条消息后 store 变化触发
+  //  refresh」—— 启动时 store 根本没变。）
+  refresh();
   tui.start();
 
   if (prompt !== undefined) {
