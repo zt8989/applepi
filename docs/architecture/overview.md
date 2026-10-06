@@ -15,6 +15,10 @@ store、也跑环，就会出现两处都发起 LLM 调用、消息流不一致�
 
 - `npm start` 读 `kernel.store`，界面只订阅、只 dispatch，**不自己跑环**。
 
+配置这一层**直接用 pi-coding-agent 的 `ModelRuntime`**（它自己读 `~/.pi/agent` 的
+models.json / auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 provider 的
+完整目录）。我们不手写那套，只保留手写路径作降级与离线测试。见 [provider](provider.md)。
+
 ### 2. reducer 里没有 `if (kind === 'agent')`
 
 Agent 只是一个 Action（`agent.run`），和 `tool.call`、`user.message` 完全平级。谁执行它，

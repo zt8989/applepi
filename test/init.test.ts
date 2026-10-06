@@ -321,7 +321,7 @@ test('middleware：promptSegmentMiddleware 在 user.message 之后追加一段 p
 test('端到端：装载与对话都落盘，回放时零 token 复现', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'init-'));
   try {
-    const kernel = createKernel({
+    const kernel = await createKernel({
       provider: 'deepseek',
       systemPrompt: '你是测试助手',
       cwd: dir,
@@ -392,7 +392,7 @@ test('端到端：装载与对话都落盘，回放时零 token 复现', async (
 test('回放出的树与内存里的一致（tip 相同）', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'replay-'));
   try {
-    const kernel = createKernel({
+    const kernel = await createKernel({
       provider: 'deepseek',
       systemPrompt: 'p',
       cwd: dir,

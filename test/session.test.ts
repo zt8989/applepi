@@ -363,7 +363,7 @@ test('conversation.reset 不带 sessionId：沿用原 id（只清对话）', () 
 test('内核 newSession：换 id、清对话、保留装载的 prompt / model', async () => {
   await withHome(async () => {
     const { createKernel } = await import('../src/kernel');
-    const kernel = createKernel({
+    const kernel = await createKernel({
       provider: 'deepseek',
       systemPrompt: '装载过的 prompt',
       cwd: '/proj',
@@ -390,7 +390,7 @@ test('内核 newSession：换 id、清对话、保留装载的 prompt / model', 
 test('开新会话后，两段对话落在**两个文件**里（旧的不被续写）', async () => {
   await withHome(async () => {
     const { createKernel } = await import('../src/kernel');
-    const kernel = createKernel({
+    const kernel = await createKernel({
       provider: 'deepseek',
       systemPrompt: 'p',
       cwd: '/proj',

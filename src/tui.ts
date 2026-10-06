@@ -171,7 +171,7 @@ async function main(): Promise<void> {
   // 没有第二份 store，也没有第二份环。
   let kernel: Kernel;
   try {
-    kernel = createKernel({
+    kernel = await createKernel({
       // 没给 -P/-m 就用默认（settings.json → 兜底 workbuddy/cn:space-bunny）
       ...defaultProviderSpec(),
       ...(args.provider ? { provider: args.provider } : {}),

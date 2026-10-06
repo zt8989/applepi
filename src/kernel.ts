@@ -105,14 +105,14 @@ export function defaultSystemPrompt(): string {
   return DEFAULT_SYSTEM_PROMPT;
 }
 
-export function createKernel(options: KernelOptions): Kernel {
+export async function createKernel(options: KernelOptions): Promise<Kernel> {
   const runtime = options.demo
     ? (() => {
         const faux = createFauxRuntime();
         faux.setResponses(demoResponses());
         return faux.runtime;
       })()
-    : createRuntime({
+    : await createRuntime({
         provider: options.provider,
         ...(options.model ? { model: options.model } : {}),
       });

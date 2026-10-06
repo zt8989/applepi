@@ -22,10 +22,12 @@ import { anthropicProvider } from '@earendil-works/pi-ai/providers/anthropic';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
 import {
   createModelsWithPiConfig,
+  createPiModelRuntime,
   loadPiAuth,
   loadPiModels,
   loadPiSettings,
   piModelsPath,
+  type PiModelRuntime,
 } from './pi-config';
 
 export interface ProviderSpec {
@@ -36,15 +38,24 @@ export interface ProviderSpec {
 }
 
 export interface AgentRuntime {
+  /**
+   * 请求用的 Models。**主路径下就是 ModelRuntime 自己**（它 implements pi-ai 的 `Models`）。
+   * 降级 / 测试下是手写装配的那个（见 pi-config.ts 的说明）。
+   */
   models: Models;
   spec: ProviderSpec;
   /** 解析后的具体模型对象。 */
   model: Model<any>;
+  /** 底下那个 ModelRuntime（仅主路径有；降级时 undefined）。 */
+  runtime?: PiModelRuntime;
 }
 
 /**
- * 内置 provider 工厂（pi-ai 自带）。**自定义 provider 不在这里** —— 它们来自
- * `~/.pi/agent/models.json`，由 `createModelsWithPiConfig()` 装配。
+ * 内置 provider 工厂（pi-ai 自带）。**只用于降级路径**。
+ *
+ * 主路径不用它们 —— `ModelRuntime` 自带 44 个内置 provider、1500+ 个模型目录
+ * （anthropic / openai / deepseek / … 全带正确的 baseUrl、协议、价目表），
+ * 比这里手列三个强得多，也不容易过期。
  */
 const PROVIDER_FACTORIES: Record<string, () => Provider<any>> = {
   deepseek: deepseekProvider as () => Provider<any>,
@@ -70,25 +81,53 @@ export function defaultProviderSpec(): ProviderSpec {
 }
 
 /**
- * 可用的 provider 名 = 内置的 + models.json 里的。
+ * 可用的 provider 名。
  *
+ * 主路径下就是 `ModelRuntime` 自带的 44 个 + models.json 里的自定义；
+ * 降级路径下是手列的三个内置 + models.json 里的自定义。
  * 读 models.json 失败不算错（可能还没迁移过），只是少列几个。
  */
-export function providerNames(): string[] {
+export function providerNames(runtime?: PiModelRuntime): string[] {
   const custom = Object.keys(loadPiModels()?.providers ?? {});
-  return [...new Set([...Object.keys(PROVIDER_FACTORIES), ...custom])];
+  const builtins = runtime
+    ? runtime.getProviders().map((p) => p.id)
+    : Object.keys(PROVIDER_FACTORIES);
+  return [...new Set([...builtins, ...custom])];
 }
 
-/** 建运行时：注册 provider，按 spec 解析出 Model。 */
-export function createRuntime(spec: ProviderSpec): AgentRuntime {
-  // 先把 models.json 里的自定义 provider 全装上，再装内置的 ——
-  // 内置的放在后面，同名时以内置为准（内置的模型目录更全）。
-  const models = createModelsWithPiConfig(Object.values(PROVIDER_FACTORIES));
+/**
+ * 建运行时：注册 provider，按 spec 解析出 Model。
+ *
+ * ## 主路径：`ModelRuntime`
+ *
+ * 它自己读 models.json / auth.json、校验 schema、拼好凭证优先级，并自带 44 个内置
+ * provider 的完整目录 —— 这些全是手写维护不来的。
+ *
+ * ## 降级：手写装配
+ *
+ * `ModelRuntime.create()` 失败时（配置坏到连它都起不来、版本不兼容等）退回
+ * `createModelsWithPiConfig()`：至少还能用 models.json 里的自定义 provider，
+ * 而不是整个起不来。降级信息写 stderr。
+ */
+export async function createRuntime(spec: ProviderSpec): Promise<AgentRuntime> {
+  let models: Models;
+  let runtime: PiModelRuntime | undefined;
+  try {
+    runtime = await createPiModelRuntime();
+    models = runtime as unknown as Models;
+  } catch (error) {
+    process.stderr.write(
+      `ModelRuntime 不可用，降级为手写装配（provider 会少很多）：${
+        error instanceof Error ? error.message : String(error)
+      }\n`,
+    );
+    models = createModelsWithPiConfig(Object.values(PROVIDER_FACTORIES));
+  }
 
   const modelsOfProvider = models.getModels(spec.provider);
   if (modelsOfProvider.length === 0) {
     throw new Error(
-      `未知 provider：${spec.provider}。可用：${providerNames().join(', ')}` +
+      `未知 provider：${spec.provider}。可用：${providerNames(runtime).join(', ')}` +
         `（自定义 provider 来自 ${piModelsPath()}）`,
     );
   }
@@ -100,7 +139,7 @@ export function createRuntime(spec: ProviderSpec): AgentRuntime {
       `provider ${spec.provider} 下找不到模型 ${spec.model ?? '(默认)'}。可用：${known || '（无）'}`,
     );
   }
-  return { models, spec: { ...spec, model: model.id }, model };
+  return { models, spec: { ...spec, model: model.id }, model, ...(runtime ? { runtime } : {}) };
 }
 
 /**

@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   buildProvider,
   createModelsWithPiConfig,
+  createPiModelRuntime,
   loadPiModels,
   loadPiModelsNormalized,
   normalizeModels,
@@ -13,7 +14,8 @@ import {
 import { migrateModelsConfig } from '../scripts/migrate-models';
 
 /**
- * 配置兼容：与 pi 共用 `~/.pi/agent` 之后的形状与迁移。
+ * 配置兼容：与 pi 共用 `~/.pi/agent` 之后的形状与迁移，以及主路径复用
+ * pi-coding-agent 的 `ModelRuntime`。
  *
  * ## 背景
  *
@@ -168,4 +170,49 @@ test('migrateModelsConfig：map 的 key 用来兵底缺失的 id', () => {
 test('migrateModelsConfig：没有 providers 的文件不炸，也不改', () => {
   assert.equal(migrateModelsConfig({}), false);
   assert.equal(migrateModelsConfig(null), false);
+});
+// ─── 主路径：复用 pi-coding-agent 的 ModelRuntime ───
+
+test('createPiModelRuntime：内置 provider 目录能装出来（不读 models.json 也能用）', async () => {
+  // modelsPath: null = 只用内置目录，不碰用户家目录。
+  const runtime = await createPiModelRuntime({ modelsPath: null });
+  assert.equal(runtime.getError(), undefined, '不该有配置错误');
+  // 内置目录里 deepseek / anthropic / openai 一定在 —— 这是复用换来的核心好处：
+  // 手写时我们只列了三个，而且它们的模型目录（baseUrl/协议/价目表）全靠手抄。
+  for (const providerId of ['deepseek', 'anthropic', 'openai']) {
+    assert.ok(runtime.getModels(providerId).length > 0, `${providerId} 应该有内置模型`);
+  }
+});
+
+test('createPiModelRuntime：内置目录远多于我们手列的三个', async () => {
+  const runtime = await createPiModelRuntime({ modelsPath: null });
+  assert.ok(
+    runtime.getProviders().length >= 20,
+    `内置 provider 应该至少有几十个，实际 ${runtime.getProviders().length}`,
+  );
+});
+
+test('createPiModelRuntime：模型对象的字段是齐的（baseUrl/contextWindow/maxTokens）', async () => {
+  const runtime = await createPiModelRuntime({ modelsPath: null });
+  const model = runtime.getModel('deepseek', runtime.getModels('deepseek')[0]!.id);
+  assert.ok(model, '应该能按 id 取到模型');
+  // 这些字段是我们调用方真正依赖的（effects.ts 要 contextWindow 算轮数，
+  // provider.ts 要 baseUrl 发请求）；ModelRuntime 装出来就该有。
+  assert.equal(typeof model.baseUrl, 'string');
+  assert.equal(typeof model.contextWindow, 'number');
+  assert.equal(typeof model.maxTokens, 'number');
+});
+
+test('createPiModelRuntime：models.json 形状坏了时报错，而不是静默起一个空环境', async () => {
+  // 派上用场的原因：pi 校验不过时是**整个文件作废**，不报就会变成
+  // 「怎么一个 provider 都没有」这种难查的现象。
+  const dir = mkdtempSync(path.join(tmpdir(), 'redux-agent-bad-'));
+  process.env['REDUX_AGENT_DIR'] = dir;
+  const file = path.join(dir, 'models.json');
+  writeFileSync(file, JSON.stringify({ providers: { p: { models: 'not-an-array' } } }), 'utf8');
+  await assert.rejects(
+    () => createPiModelRuntime({ modelsPath: file }),
+    /ModelRuntime 读配置失败|schema/i,
+    '坏掉的 models.json 必须报出来',
+  );
 });

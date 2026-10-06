@@ -1,56 +1,48 @@
 /**
- * 从 pi 的配置目录加载自定义 provider。
+ * 配置目录：读 ~/.pi/agent/ 下的 provider / 凭证 / 默认值。
  *
- * ## 为什么要自己加载
+ * ## 主路径：直接用 pi-coding-agent 的 ModelRuntime
  *
- * 本项目直接用 `pi-ai` 的 `createModels()`，不像 pi-coding-agent 那样经过
- * `ModelRuntime`（它会去读 `~/.pi/agent/models.json`）。所以这里补上那一层：
- * 读同一份 `models.json`、同一份 `auth.json`，用同样的路径规则
- * （`PI_CODING_AGENT_DIR` 可搬，默认 `~/.pi/agent`），然后用 pi-ai 的
- * `createProvider()` 把每个条目装配成真正的 `Provider`。
+ * pi-coding-agent 从主入口导出了 `ModelRuntime`，它就是「读 models.json + auth.json +
+ * 装配 provider」这整套东西的官方实现。所以这里**不再自己读、自己装配**，直接：
  *
- * 换句话说：**配置格式与路径跟 pi 完全一致**，只是读取代码是我们自己写的
- * —— 因为本项目不引 pi-agent-core 那套运行时。
- *
- * ## models.json 的形状
- *
- * pi 新版要求 `models` 是**数组**：
- *
- * ```json
- * { "providers": { "<id>": {
- *      "baseUrl": "http://…/v1",
- *      "api": "openai-completions",
- *      "models": [ { "id": "…", "api": "openai-completions",
- *                    "contextWindow": 1000000, "maxTokens": 524288,
- *                    "input": ["text"], "output": ["text"] } ] } } }
+ * ```ts
+ * const runtime = await ModelRuntime.create();
+ * runtime.getModel('workbuddy', 'cn:space-bunny');
+ * await runtime.getAuth(model);        // models.json > auth.json > <ID>_API_KEY
+ * runtime.streamSimple(model, ctx);   // 连 api 名 → streamSimple 的映射也是它做的
  * ```
  *
- * 旧版（以及本项目早期）是**对象 map**：
+ * 换来的东西比自己写多得多，而且不会过期：
+ * - **44 个内置 provider、1543 个模型目录**（anthropic / openai / deepseek / … 全带
+ *   正确的 baseUrl、协议、价目表），我们手写时只有 3 个；
+ * - models.json 的 **TypeBox schema 校验**（形状不对会报哪个 provider 的哪个字段）；
+ * - 凭证优先级、OAuth、`getAuth()` 的 `source`；
+ * - 内置 provider 的协议适配（responses / anthropic-messages / openai-completions …）。
+ *
+ * 代价：`import` 整个包要 ~2.6s（它把 TUI 与终端组件也拉进来了），比手写的 ~0.2s 慢。
+ * 对一个交互式 CLI 来说可以接受 —— 换来的是配置正确性不用我们自己维护。
+ *
+ * ## 手写路径还在（`createModelsWithPiConfig`）
+ *
+ * 两个用途，不是「没删干净的旧代码」：
+ * 1. **测试**：离线测试要一个不碰网络、不依赖真实家目录的 Models，`ModelRuntime.create()`
+ *    会读真实的 `~/.pi/agent`（测试里虽然隔离了家目录，但那样就没有 provider 了）。
+ * 2. **降级**：万一 `ModelRuntime` 构造失败（配置坏了、版本不兼容），退回手写路径，
+ *    至少还能用 models.json 里自定义的 provider，而不是整个起不来。
+ *
+ * ## models.json 的两种形状
+ *
+ * pi 新版要求 `models` 是**数组**，旧版（本项目早期写的）是**对象 map**：
  *
  * ```json
- * "models": { "<modelId>": { "id": "…", … } }
+ * "models": [ { "id": "…", "contextWindow": 1000000 } ]      ← 现在
+ * "models": { "some-id": { "id": "…", "contextWindow": 1000000 } }  ← 旧
  * ```
  *
- * 两种都收（见 `normalizeModels()`）：pi 自己已经不支持后者，所以照抄 pi 的配置时
- * 只会碰到前者；而本项目的历史文件、以及给别的工具写的文件可能还是后者。
- * 搞错形状的表现是 pi 整个文件作废（一个 provider 都不装），不是某一个失败。
- *
- * ## auth.json 的形状
- *
- * ```json
- * { "<id>": { "type": "api_key", "key": "sk-…" } }
- * ```
- *
- * ## 与 pi 共用配置目录
- *
- * 配置家目录默认就是 pi 的 `~/.pi/agent`（`REDUX_AGENT_DIR` / `PI_CODING_AGENT_DIR`
- * 都能搬）。同一份 `models.json` / `auth.json` / `sessions/` 两边都能读写，
- * 改一边不会让另一边读不到 —— 格式与路径规则都照抄 pi（见 `config-home.ts`）。
- *
- * 代价是我们得自己读 `models.json`（pi-coding-agent 的 `ModelConfig` 有 `exports` 限制），
- * 所以校验也得自己做一层：读的时候容忍数组/对象两种形状，写的时候按 pi 现在的形状来。
- *
- * 注意 baseUrl 不在这里 —— 它在 models.json 里。auth.json 只放凭证。
+ * `ModelRuntime` 只认数组。所以手写路径与 `normalizeModels()` 负责归一（数组原样、
+ * 对象 map 展平，map 的 key 当 id 兵底），并在读时顺手把盘上那份改成数组 ——
+ * 否则 pi 自己读同一个文件时整个文件作废。
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { authPath, configHome, modelsPath, settingsPath, writeJson } from './config-home';
@@ -64,19 +56,32 @@ import { streamSimple as openaiResponsesStreamSimple } from '@earendil-works/pi-
 /**
  * 配置家目录。默认与 pi 同址（`~/.pi/agent`），`REDUX_AGENT_DIR` 优先于
  * `PI_CODING_AGENT_DIR`。见 `config-home.ts`。
+ *
+ * ## 与 pi 的 `getAgentDir()` 刻意保持一致
+ *
+ * 两边必须指向同一个目录，否则 models.json / auth.json / sessions/ 会分家。
+ * pi 的实现（`config.ts`）是：认 `PI_CODING_AGENT_DIR`，否则 `join(homedir(), '.pi', 'agent')`。
+ * 我们多认一个 `REDUX_AGENT_DIR`（本项目自己的名字，给测试隔离用），优先级更高。
+ *
+ * 为什么不直接调 pi 导出的 `getAgentDir()`：它不认 `REDUX_AGENT_DIR`，
+ * 而测试必须能把自己从真实家目录里摘出去（否则测试会往用户的历史里堆会话）。
+ * 两行路径推导不值得为它引一整个 CLI 包进配置模块。
  */
 export function piAgentDir(): string {
   return configHome();
 }
 
+/** `<家目录>/models.json`（与 pi 的 `getModelsPath()` 同一路径规则）。 */
 export function piModelsPath(): string {
   return modelsPath();
 }
 
+/** `<家目录>/auth.json`（与 pi 的 `getAuthPath()` 同一路径规则）。 */
 export function piAuthPath(): string {
   return authPath();
 }
 
+/** `<家目录>/settings.json`（与 pi 的 `getSettingsPath()` 同一路径规则）。 */
 export function piSettingsPath(): string {
   return settingsPath();
 }
@@ -296,8 +301,19 @@ export function buildProvider(
 /**
  * 把 models.json 里的**全部** provider 装进一个 `Models`。
  *
- * 返回的 Models 里既有自定义 provider（workbuddy 等），也已经有内置的
- * deepseek / anthropic / openai —— 调用方可以按 id 取。
+ * 返回的 Models 里既有自定义 provider（workbuddy 等），也已经有传入的
+ * `extra` 内置 provider。
+ *
+ * ## 这是降级/测试路径，不是主路径
+ *
+ * 主路径是 `createPiModelRuntime()`（直接用 pi-coding-agent 的 `ModelRuntime`）。
+ * 这个手写版本保留在两个地方：
+ *   - **测试**：离线测试要一个不碰网络、不依赖真实家目录的 Models；
+ *   - **降级**：`ModelRuntime.create()` 失败时至少还能用 models.json 里的自定义
+ *     provider，而不是整个起不来。
+ *
+ * 所以它**故意不注册内置 provider 目录** —— 那正是 `ModelRuntime` 的价值所在，
+ * 手写一遍既慢又会过期。调用方要内置 provider 就自己传 `extra`。
  */
 export function createModelsWithPiConfig(extra: (() => Provider<any>)[] = []): Models {
   const models = createModels();
@@ -321,4 +337,52 @@ export function createModelsWithPiConfig(extra: (() => Provider<any>)[] = []): M
     models.setProvider(provider);
   }
   return models;
+}
+
+// ─── 主路径：pi-coding-agent 的 ModelRuntime ───
+
+/**
+ * ModelRuntime 的最小面。只声明本项目真正用到的那几个方法，
+ * 而不是把整个 pi-ai `Models` 接口搬过来 —— 好处是接口加了新方法时我们不受影响。
+ */
+export interface PiModelRuntime {
+  /** 列出某 provider 的模型；不传 providerId 则列全部。 */
+  getModels(providerId?: string): readonly { id: string; provider: string }[];
+  getModel(providerId: string, modelId: string): Model<any> | undefined;
+  /** 某 provider 是否已配到凭证（models.json > auth.json > <ID>_API_KEY）。 */
+  hasConfiguredAuth(providerId: string): boolean;
+  /** 取这个模型该用的凭证（含 OAuth）。 */
+  getAuth(model: Model<any>): Promise<{ auth: Record<string, unknown>; source?: string } | undefined>;
+  /** 发起一次流式请求。api 名 → 协议的映射是它做的。 */
+  streamSimple(
+    model: Model<any>,
+    context: unknown,
+    options?: unknown,
+  ): AsyncIterable<{ type: string; [key: string]: unknown }>;
+  /** 全部 provider 的 id（含内置的 44 个与 models.json 里的自定义）。 */
+  getProviders(): readonly { id: string }[];
+  /** models.json 的加载错误（形状不对等），undefined = 正常。 */
+  getError(): string | undefined;
+  /** 当前可用模型快照。 */
+  getAvailableSnapshot(): readonly Model<any>[];
+}
+
+/**
+ * 建 ModelRuntime —— **主装配路径**，读 ~/.pi/agent 的 provider / 凭证。
+ *
+ * 传 `modelsPath: null` 表示「不读 models.json，只用内置 provider 目录」——
+ * 离线测试用这个，它不碰用户家目录。
+ */
+export async function createPiModelRuntime(options: { modelsPath?: string | null } = {}): Promise<PiModelRuntime> {
+  // 动态 import：这个包会把整个 pi CLI（含 TUI）拉进来（约 2.6s），
+  // 而测试里走手写路径根本不需要它。静态 import 会让每次启动都付这个代价。
+  const { ModelRuntime } = await import('@earendil-works/pi-coding-agent');
+  const runtime = await ModelRuntime.create({
+    ...(options.modelsPath !== undefined ? { modelsPath: options.modelsPath } : {}),
+  });
+  const error = runtime.getError();
+  if (error) {
+    throw new Error(`ModelRuntime 读配置失败：${error}（文件：${piModelsPath()}）`);
+  }
+  return runtime as unknown as PiModelRuntime;
 }

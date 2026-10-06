@@ -46,10 +46,11 @@ agent** —— 循环不是写出来的，是 reducer 与副作用互相 dispatc
 `auth.json` 只放凭证；`.env` 里的 `<ID>_API_KEY` 也能用（`npm start` 走
 `--env-file-if-exists=.env`）。命令行的 `-P` / `-m` 仍然优先。
 
-**`models` 的形状**：pi 现在要求**数组**（`[{"id": "…"}]`），旧版是对象 map
-（`{"<modelId>": {"id": "…"}}`）。本项目两种都读，且读到旧形状会**顺手把盘上那份改成数组** ——
-pi 校验不过时是**整个文件作废**（一个 provider 都不装），不是某一个失败。已从旧的
-`~/.redux-agent/` 搬过来的配置可以运行 `npm run config:migrate` 手动处理。
+- `-P/--provider`：models.json 里自定义的 provider，或 pi 自带的 44 个内置 provider
+  （`anthropic` / `openai` / `deepseek` / …）。凭证优先级：models.json > auth.json >
+  `<ID>_API_KEY` 环境变量（与 pi 一致）。
+- `models.json` 的形状：pi 要求 `models` 是**数组**。本项目两种都读，读到旧的对象 map
+  会顺手把盘上那份改成数组 —— 否则 pi 自己读同一个文件时整个文件作废。
 
 ## 运行
 
@@ -83,10 +84,14 @@ npm start -- --cwd ../other                # 工具的文件操作边界换到�
 `--llm-timeout`、`--attempts`、`--api-key`、`--demo`、`--no-trace`、`--session`、
 `--cwd`、`--trace-dir`、`-h/--help`。
 
+配置/provider 这一层**直接用 pi-coding-agent 的 `ModelRuntime`**（它自己读 models.json /
+auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 provider、1500+ 模型目录）。
+详见 [`docs/architecture/provider.md`](docs/architecture/provider.md)。
+
 ## 测试
 
 ```bash
-npm test           # 107 个离线测试，不打网络
+npm test           # 111 个离线测试，不打网络
 npm run typecheck  # tsc --noEmit（src + test）
 ```
 
