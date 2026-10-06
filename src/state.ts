@@ -109,6 +109,12 @@ export interface ModelState {
   thinkingLevel: ModelThinkingLevel;
   /** 这个模型支持什么（中途插 system / developer role / 中途加工具）。 */
   capabilities: ModelCapabilities;
+  /**
+   * 上下文窗口（token）。底箱用它算「已用 / 窗口」。
+   *
+   * 不知道就是 0（而不是猜一个值）：底箱会据此决定画不画那个百分比。
+   */
+  contextWindow: number;
   seeded: boolean;
 }
 
@@ -237,6 +243,8 @@ export function createInitialState(options: InitialStateOptions): AgentState {
       midConvoToolAdditions: false,
       developerRole: false,
     },
+    // 不知道就是 0：底箱会不画那个百分比，而不是画一个猜的值。
+    contextWindow: 0,
     seeded: false,
   };
   return {

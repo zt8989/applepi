@@ -185,6 +185,8 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     modelId: runtime.model.id,
     thinkingLevel: options.thinkingLevel ?? 'off',
     capabilities: readCapabilities(runtime.model),
+    // 底箱的「已用 / 1.0M」要用。取不到就 0，底箱会不画那个百分比。
+    contextWindow: runtime.model.contextWindow ?? 0,
   });
 
   // 装载段落盘：**写进同一个轨迹文件的前两行**（不再单独一个 `<id>.init.jsonl`）。

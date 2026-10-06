@@ -44,7 +44,13 @@ import { cleanSessionsExcept, listSessions, type SessionSummary } from '../confi
 import { loadSessionMessages, openSessionPicker } from './session-picker';
 import { getTool } from '../tools';
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
+// pi 底栏的官方实现（靠 pnpm patch 打开的子路径）。数字格式与算法都与 pi 一致 ——
+// 两边对不上会让人以为算错了。
+// 见 docs/architecture/provider.md「为什么要 pnpm patch」。
+import { formatCwdForFooter, formatTokens } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js';
+import { addUsageToTotals, createUsageTotals } from '@earendil-works/pi-coding-agent/dist/core/usage-totals.js';
 
 const useColor = !process.env.NO_COLOR;
 const paint = (code: string, text: string) => (useColor ? `\x1b[${code}m${text}\x1b[0m` : text);
@@ -171,29 +177,77 @@ export function statusLine(state: AgentState): string {
 }
 
 /**
- * 底栏左：工作目录（相对 cwd）+ git 分支。
+ * 底栏左上行：工作目录（家目录缩成 `~`）+ git 分支。
  *
- * pi 显示 `~\Documents\workspace\event-loop-agent (main)`，我们用同样的形状。
- * 路径太长时从**中间**省略（保留盘符/开头与最后两级），那两段才是定位信息。
+ * 路径处理直接用 pi 的 `formatCwdForFooter()`：它把家目录换成 `~`（`~\Documents\…`），
+ * home 之外的目录保持绝对路径。这正是截图里的形状。
  */
 export function cwdLine(cwd: string, branch: string | undefined): string {
-  let shown = cwd;
-  if (shown.length > 48) {
-    const parts = shown.split(/[/\\]/);
-    const tail = parts.slice(-2).join('\\');
-    shown = `…\\${tail}`;
-  }
+  const shown = formatCwdForFooter(cwd, homedir());
   return branch ? `${shown} (${branch})` : shown;
 }
 
 /**
- * 底栏右：`(provider) model` —— 与 pi 完全同形。
+ * 底栏右栏：`(provider) model` —— 与 pi 完全同形。
  *
  * 左边是「你以为自己用的是谁」，右边是「实际用的哪个模型」。分开是因为换 provider
  * （走网关）时最容易出的错就是以为还在用原厂模型。
  */
 export function modelLine(state: AgentState): string {
   return `(${state.providerName}) ${state.modelId}`;
+}
+
+/**
+ * 底栏左下行：token 用量 + 上下文占用。
+ *
+ * 形状照抄 pi：`↑6.8k ↓49 R143 CH2.1% 0.7%/1.0M`
+ *
+ * ## 数字格式与算法都用 pi 的
+ *
+ * `formatTokens` / `addUsageToTotals` / `formatCwdForFooter` 都是从
+ * `pi-coding-agent/dist/...` 直接 import 的。两边显示的数字对不上会让人以为算错了，
+ * 宁可完全一致也不要各写一套。
+ *
+ * ## 累计 vs 最近一轮
+ *
+ * `state.usage` 只是**最近一次** LLM 调用的用量，而底箱要的是**本次会话累计**。
+ * 所以从 `state.messages` 里把所有 assistant 消息的 usage 累加。这是每帧 O(消息数) ——
+ * 消息多了会略慢，但换来与 pi 一致的口径。
+ */
+export function statsLine(state: AgentState): string {
+  const totals = createUsageTotals();
+  let latestCacheHitRate: number | undefined;
+  for (const message of state.messages) {
+    if (message.role !== 'assistant' || !message.usage) continue;
+    addUsageToTotals(totals, message.usage);
+    // CH = 本次 prompt 里有多少 token 来自缓存（pi 的算法，见它的 footer.js）：
+    // cacheRead / (input + cacheRead + cacheWrite)，取**最近一次**。
+    const promptTokens = message.usage.input + message.usage.cacheRead + message.usage.cacheWrite;
+    latestCacheHitRate =
+      promptTokens > 0 ? (message.usage.cacheRead / promptTokens) * 100 : undefined;
+  }
+
+  const parts: string[] = [];
+  if (totals.input > 0) parts.push(`↑${formatTokens(totals.input)}`);
+  if (totals.output > 0) parts.push(`↓${formatTokens(totals.output)}`);
+  if (totals.cacheRead > 0) parts.push(`R${formatTokens(totals.cacheRead)}`);
+  if (totals.cacheWrite > 0) parts.push(`W${formatTokens(totals.cacheWrite)}`);
+  if ((totals.cacheRead > 0 || totals.cacheWrite > 0) && latestCacheHitRate !== undefined) {
+    parts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
+  }
+  if (totals.cost > 0) parts.push(`$${totals.cost.toFixed(3)}`);
+
+  // 上下文占用：已用 / 窗口。超过 70% 转黄、90% 转红 —— 快满时模型会开始丢东西，
+  // 要提前看见而不是等它开始表现变差。
+  const contextWindow = state.model.contextWindow;
+  if (contextWindow > 0) {
+    const used = totals.input + totals.cacheRead + totals.cacheWrite;
+    const percentValue = (used / contextWindow) * 100;
+    const percent = percentValue < 1 ? percentValue.toFixed(1) : Math.round(percentValue);
+    const display = `${percent}%/${formatTokens(contextWindow)}`;
+    parts.push(percentValue > 90 ? red(display) : percentValue > 70 ? yellow(display) : display);
+  }
+  return parts.join(' ');
 }
 
 /**
@@ -401,6 +455,18 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 而它们又不能删 —— 换 provider 时最容易出的错就是以为还在用原厂模型。
    * 形状照抄 pi（`~\path (main)` …… `(workbuddy) cn:space-bunny`）。
    */
+  /**
+   * 底栏：**两行**（与 pi 同形）。
+   *
+   *     ~\Documents\workspace\event-loop-agent (main)
+   *     ↑6.8k ↓49 R143 CH2.1% 0.7%/1.0M        (workbuddy) cn:space-bunny
+   *
+   * 为什么要它：模型与用量是「我在跟谁说话、说了多少」，与对话内容无关；堆在顶箱
+   * 会干扰读对话。而它们又不能删 —— 换 provider 时最容易出的错就是以为还在用原厂模型。
+   *
+   * 一个 Text 组件装两行（内部用 `\n` 分行），而不是两个组件：布局里只占一个 slot，
+   * 也不用管两行之间的高度分配。
+   */
   const footer = new Text('', 0, 0);
   const transcript = new Text('', 0, 0);
   const tracePanel = new Text('', 0, 0);
@@ -462,15 +528,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // 补到全宽：顶栏长度变化会让 pi-tui 的增量重绘留下残影（见 padToWidth 的注释）。
     header.setText(padToWidth(statusLine(state), terminal.columns ?? 100));
     // 底栏同理：模型名 / 节点数会变，必须补齐到全宽，否则残影会叠出来。
+    // 底箱两行：**模型那行只占第一行**（pi 就是这么排的 —— 右上角贴着第一行），
+    // 第二行只放左边的用量。所以不能对整块文本做 twoColumn，要逐行拼。
+    const width = terminal.columns ?? 100;
     footer.setText(
-      padToWidth(
-        twoColumn(
-          cwdLine(cwd, gitBranch(cwd)),
-          modelLine(state),
-          terminal.columns ?? 100,
-        ),
-        terminal.columns ?? 100,
-      ),
+      padToWidth(twoColumn(cwdLine(cwd, gitBranch(cwd)), modelLine(state), width), width) +
+        '\n' +
+        padToWidth(statsLine(state), width),
     );
     // 整段重渲染：ScrollView 自己管滚动与跟随，我们每次给它完整的对话文本。
     // （早前这里只渲染「新增的那几条」，靠 renderedMessages 游标 —— 那个游标每帧都被
@@ -681,7 +745,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
       ...(showTrace ? [{ component: tracePanel, minSize: 1 }] : []),
       { component: loader, minSize: 1 },
       { component: editor, minSize: 3 },
-      { component: footer, basis: 1, grow: 0, minSize: 1 },
+      { component: footer, basis: 2, grow: 0, minSize: 2 },
     ]);
     tui.setLayoutRoot(
       new VStack([

@@ -119,6 +119,16 @@ export type AgentAction =
       modelId: string;
       thinkingLevel: ModelThinkingLevel;
       capabilities: ModelCapabilities;
+      /**
+       * 上下文窗口（token）。底箱要算「已用 / 窗口」的百分比。
+       *
+       * **可选**：省略就是 0，底箱会不画那个百分比。真实运行时内核一定会给
+       * （它从模型对象读），但测试里造 action 不用关心这个。
+       *
+       * 为什么存在 action 里而不让界面去查模型：模型可能换，而这个值随 model.init
+       * 落盘 —— 回放时不用重新去问 provider 它的窗口有多大。
+       */
+      contextWindow?: number;
     }
   | {
       /**

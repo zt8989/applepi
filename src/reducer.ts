@@ -335,6 +335,7 @@ const transitions: TransitionHandlers = {
         modelId: action.modelId,
         thinkingLevel: action.thinkingLevel,
         capabilities: action.capabilities,
+        contextWindow: action.contextWindow ?? 0,
         seeded: true,
       },
       // 扁平别名跟着更新。

@@ -1,10 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { homedir } from 'node:os';
+import path from 'node:path';
 import { stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
+import { formatCwdForFooter } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js';
 import {
   cwdLine,
   foldOutput,
   modelLine,
+  statsLine,
   statusLine,
   toolArgs,
   twoColumn,
@@ -56,20 +60,27 @@ test('twoColumn：放不下时截断而不是溢出（溢出会换行，把输�
 
 // ─── cwd 行（底栏左侧） ───
 
-test('cwdLine：短路径原样显示', () => {
-  assert.equal(cwdLine('C:\\proj', 'main'), 'C:\\proj (main)');
+test('cwdLine：家目录缩成 ~（pi 的口径）', () => {
+  // 路径处理已改为直接用 pi 的 formatCwdForFooter()，home 取的是**真实的** homedir()
+  // （函数内部自己读，不接受传入），所以测试得用真实 home 算期望值。
+  const expected = formatCwdForFooter(String.raw`C:\proj`, homedir());
+  assert.equal(cwdLine(String.raw`C:\proj`, 'main'), `${expected} (main)`);
 });
 
-test('cwdLine：长路径从中间省略（保留最后两级，那才是定位信息）', () => {
-  // 阈值是 48 列，所以这条得真的够长（早先的测试数据只有 33 字符，根本没触发省略，
-  // 断言失败时容易误以为是省略逻辑坏了）。
-  const out = cwdLine('C:\\a\\very\\long\\chain\\of\\dirs\\final\\nested\\project', 'main');
-  assert.ok(out.includes('…'), `应该被省略过：${out}`);
-  assert.ok(out.includes('nested\\project'), `最后两级要留着：${out}`);
+test('cwdLine：家目录里的路径会缩成 ~（与 pi 截图同形）', () => {
+  // 直接验函数链路的形状：cwd 在 home 之下 → 以 ~ 开头。
+  const home = homedir();
+  const under = path.join(home, 'Documents', 'workspace', 'event-loop-agent');
+  const out = cwdLine(under, 'main');
+  assert.ok(out.startsWith('~'), `家目录之下应以 ~ 开头：${out}`);
+  assert.ok(out.endsWith('(main)'), out);
 });
 
-test('cwdLine：不在 git 仓库时没有 (branch) 后缀', () => {
-  assert.equal(cwdLine('C:\\proj', undefined), 'C:\\proj');
+test('cwdLine：不在家目录里时保持绝对路径（~ 只会骗人）', () => {
+  // D: 盘肯定不在 C:\Users\... 之下（除非有人把 home 设成 D 根）。
+  const out = cwdLine(String.raw`D:\some\proj`, 'main');
+  assert.ok(!out.startsWith('~'), `家目录之外不该缩成 ~：${out}`);
+  assert.ok(out.includes('some'), out);
 });
 
 // ─── 长输出折叠（pi 的 `... (N earlier lines, ctrl+o to expand)`） ───
@@ -183,4 +194,77 @@ test('statusLine：顶栏只讲轨迹（模型信息已挪到底栏）', () => {
 test('modelLine：底栏右栏是 (provider) model 形状（与 pi 同形）', () => {
   const state = { providerName: 'workbuddy', modelId: 'cn:space-bunny' } as unknown as AgentState;
   assert.equal(modelLine(state), '(workbuddy) cn:space-bunny');
+});
+
+// ─── 底栏第二行：token 用量（数字格式与算法都取自 pi） ───
+
+/** 造一条带 usage 的 assistant 消息。 */
+function assistantWithUsage(usage: Record<string, unknown>): Message {
+  return {
+    role: 'assistant',
+    content: [{ type: 'text', text: 'x' }],
+    usage: {
+      input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      ...usage,
+    },
+    timestamp: 0,
+  } as unknown as Message;
+}
+
+test('statsLine：没有任何用量时是空串（不画 0↑0↓0R 噪声）', () => {
+  const state = { messages: [], model: { contextWindow: 0 } } as unknown as AgentState;
+  assert.equal(statsLine(state), '');
+});
+
+test('statsLine：累计多轮的 token（不是只显示最后一轮）', () => {
+  // 这是最容易搞错的地方：state.usage 只是最近一轮，而底栏要的是会话累计。
+  const state = {
+    messages: [
+      assistantWithUsage({ input: 5000, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 5020 }),
+      assistantWithUsage({ input: 1800, output: 29, cacheRead: 0, cacheWrite: 0, totalTokens: 1829 }),
+    ],
+    model: { contextWindow: 0 },
+  } as unknown as AgentState;
+  const out = statsLine(state);
+  assert.ok(out.includes('↑6.8k'), `input 应累计为 6.8k：${out}`);
+  assert.ok(out.includes('↓49'), `output 应累计为 49：${out}`);
+});
+
+test('statsLine：缓存命中率 CH = cacheRead / (input+cacheRead+cacheWrite)', () => {
+  // 143 / (6800 + 143) ≈ 2.06% —— 与 pi 截图里的 CH2.1% 同口径。
+  const state = {
+    messages: [assistantWithUsage({ input: 6800, output: 49, cacheRead: 143, cacheWrite: 0, totalTokens: 6992 })],
+    model: { contextWindow: 0 },
+  } as unknown as AgentState;
+  assert.ok(statsLine(state).includes('CH2.1%'), statsLine(state));
+});
+
+test('statsLine：没有缓存就不显示 CH（0% 是噪声）', () => {
+  const state = {
+    messages: [assistantWithUsage({ input: 100, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 110 })],
+    model: { contextWindow: 0 },
+  } as unknown as AgentState;
+  assert.ok(!statsLine(state).includes('CH'), statsLine(state));
+});
+
+test('statsLine：上下文占用 = 已用/窗口（窗口取自 model.init）', () => {
+  const state = {
+    messages: [assistantWithUsage({ input: 700_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 700_000 })],
+    model: { contextWindow: 1_000_000 },
+  } as unknown as AgentState;
+  assert.ok(statsLine(state).includes('70%/1.0M'), statsLine(state));
+});
+
+test('statsLine：窗口未知（0）时不画百分比，而不是画个猜的值', () => {
+  const state = {
+    messages: [assistantWithUsage({ input: 700_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 700_000 })],
+    model: { contextWindow: 0 },
+  } as unknown as AgentState;
+  assert.ok(!statsLine(state).includes('%'), statsLine(state));
+});
+
+test('statsLine：窗口为 0 时不崩（contextWindow 还没装载的启动瞬间）', () => {
+  const state = { messages: [], model: { contextWindow: 0 } } as unknown as AgentState;
+  assert.doesNotThrow(() => statsLine(state));
 });

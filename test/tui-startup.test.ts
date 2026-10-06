@@ -109,9 +109,33 @@ test('TUI 首帧：底栏把 cwd 与模型分列两端', async () => {
   // 找带 (main) 的那行（cwd 行）。
   const cwdRow = frame.split('\n').find((l) => l.includes('(main)'));
   assert.ok(cwdRow, `底栏应该有 cwd + git 分支。首屏：\n${frame.slice(0, 400)}`);
-  // 同一个 Text 里右边是模型（可能因为宽屏被截断到别处），至少路径要带上省略号或盘符。
+  // pi 的口径是「家目录缩成 ~」，不是盘符开头。
   assert.ok(
-    /[A-Za-z]:\\|…/.test(cwdRow),
+    /~|\/home\/|[A-Za-z]:\\/.test(cwdRow),
     `底栏左侧应是工作目录路径：${JSON.stringify(cwdRow)}`,
+  );
+  // 模型在同一行靠右（模型名可能因宽屏被截断，只断言 provider 标记）。
+  assert.ok(
+    cwdRow.includes('(workbuddy)') || frame.includes('(workbuddy)'),
+    '模型 (provider) 应与 cwd 同一行',
+  );
+});
+
+test('TUI 首帧：底栏占两行（第二行是空的用量行）', async () => {
+  // 底栏是 basis 2 的两行：cwd(+model) / 用量。启动时还没发过消息所以第二行是空的，
+  // 但**必须占住一行** —— 少一行就意味着 footer 的 basis 写错、以后用量会把它顶没。
+  //
+  // 怎么验「占了但空」：看 cwd 行后面还有没有可容内容的空间。真被压成一行的话，
+  // 用量会被挤到屏幕外（AltScreen 不会像普通终端那样滚出去，只能看不见）。
+  // 这里只验一个弱一些但稳定的性质：cwd 行不在倒数第一、二行 —— 下面至少要有
+  // 屏幕的边界。
+  const frame = await firstFrame();
+  const rows = frame.split('\n').map((l) => l.trimEnd());
+  const cwdIndex = rows.findIndex((l) => l.includes('(main)'));
+  assert.ok(cwdIndex >= 0, '找不到底栏第一行');
+  // 底栏是屏幕最下面的块，所以它离末尾很近；多给几行余量给终端自身的空行。
+  assert.ok(
+    rows.length - cwdIndex <= 3,
+    `底栏应该贴着屏幕底部（实际距末尾 ${rows.length - cwdIndex} 行）：\n${rows.slice(-5).join('\n')}`,
   );
 });
