@@ -14,15 +14,26 @@
  *
  * ## models.json 的形状
  *
+ * pi 新版要求 `models` 是**数组**：
+ *
  * ```json
  * { "providers": { "<id>": {
  *      "baseUrl": "http://…/v1",
  *      "api": "openai-completions",
- *      "models": { "<modelId>": {
- *          "id": "…", "api": "openai-completions",
- *          "contextWindow": 1000000, "maxTokens": 524288,
- *          "input": ["text"], "output": ["text"] } } } } }
+ *      "models": [ { "id": "…", "api": "openai-completions",
+ *                    "contextWindow": 1000000, "maxTokens": 524288,
+ *                    "input": ["text"], "output": ["text"] } ] } } }
  * ```
+ *
+ * 旧版（以及本项目早期）是**对象 map**：
+ *
+ * ```json
+ * "models": { "<modelId>": { "id": "…", … } }
+ * ```
+ *
+ * 两种都收（见 `normalizeModels()`）：pi 自己已经不支持后者，所以照抄 pi 的配置时
+ * 只会碰到前者；而本项目的历史文件、以及给别的工具写的文件可能还是后者。
+ * 搞错形状的表现是 pi 整个文件作废（一个 provider 都不装），不是某一个失败。
  *
  * ## auth.json 的形状
  *
@@ -30,10 +41,19 @@
  * { "<id>": { "type": "api_key", "key": "sk-…" } }
  * ```
  *
- * 注意 **baseUrl 不在这里** —— 它在 models.json 里。auth.json 只放凭证。
+ * ## 与 pi 共用配置目录
+ *
+ * 配置家目录默认就是 pi 的 `~/.pi/agent`（`REDUX_AGENT_DIR` / `PI_CODING_AGENT_DIR`
+ * 都能搬）。同一份 `models.json` / `auth.json` / `sessions/` 两边都能读写，
+ * 改一边不会让另一边读不到 —— 格式与路径规则都照抄 pi（见 `config-home.ts`）。
+ *
+ * 代价是我们得自己读 `models.json`（pi-coding-agent 的 `ModelConfig` 有 `exports` 限制），
+ * 所以校验也得自己做一层：读的时候容忍数组/对象两种形状，写的时候按 pi 现在的形状来。
+ *
+ * 注意 baseUrl 不在这里 —— 它在 models.json 里。auth.json 只放凭证。
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { authPath, configHome, modelsPath, settingsPath } from './config-home';
+import { authPath, configHome, modelsPath, settingsPath, writeJson } from './config-home';
 import path from 'node:path';
 import { createProvider, createModels, type Model, type Models, type Provider } from '@earendil-works/pi-ai';
 import { envApiKeyAuth } from '@earendil-works/pi-ai';
@@ -42,10 +62,8 @@ import { streamSimple as anthropicStreamSimple } from '@earendil-works/pi-ai/api
 import { streamSimple as openaiResponsesStreamSimple } from '@earendil-works/pi-ai/api/openai-responses';
 
 /**
- * 配置家目录。**格式照抄 pi，位置是自己的** —— 见 `src/config-home.ts` 头部。
- *
- * 这三个函数保留旧名是为了少改调用点；语义上它们现在指向 `~/.redux-agent/`，不再是
- * `~/.pi/agent/`。新代码直接用 config-home 里的 `modelsPath()` / `authPath()`。
+ * 配置家目录。默认与 pi 同址（`~/.pi/agent`），`REDUX_AGENT_DIR` 优先于
+ * `PI_CODING_AGENT_DIR`。见 `config-home.ts`。
  */
 export function piAgentDir(): string {
   return configHome();
@@ -63,14 +81,19 @@ export function piSettingsPath(): string {
   return settingsPath();
 }
 
-/** models.json 里的一个 provider 条目（只声明我们真会用到的字段）。 */
+/**
+ * models.json 里的一个 provider 条目（只声明我们真会用到的字段）。
+ *
+ * `models` 两种形状都收，见文件头的说明。
+ */
 export interface PiProviderConfig {
   name?: string;
   baseUrl?: string;
   api?: string;
   apiKey?: string;
   headers?: Record<string, string>;
-  models?: Record<string, PiModelConfig>;
+  /** pi 新版：数组。旧版：`<modelId> → 定义` 的对象 map。 */
+  models?: PiModelConfig[] | Record<string, PiModelConfig>;
 }
 
 export interface PiModelConfig {
@@ -89,6 +112,31 @@ export interface PiModelsFile {
   providers: Record<string, PiProviderConfig>;
 }
 
+/**
+ * 归一成数组。**两种形状都收**：
+ *
+ *   数组（pi 新版）：`[{ "id": "…" }, …]`
+ *   对象 map（旧版）：`{ "<modelId>": { "id": "…" }, … }`
+ *
+ * 为什么要收旧形状：pi 自己已经只认数组，所以搞错的后果是**整个 models.json 作废**
+ * （`ModelConfig.load()` 报 schema 错误，一个 provider 都不装）。而本项目历史上写的
+ * 配置、以及别人手写的配置都可能是 map。读的时候宽松一点，少一个「整个文件不可用」
+ * 的坑；map 的 key 本来就等于 `id`，所以以 key 兜底、值里的 `id` 优先。
+ */
+export function normalizeModels(
+  models: PiProviderConfig['models'],
+): PiModelConfig[] {
+  if (!models) return [];
+  if (Array.isArray(models)) {
+    return models.filter((m): m is PiModelConfig => !!m && typeof m === 'object');
+  }
+  return Object.entries(models).map(([modelId, model]) => {
+    const value = model && typeof model === 'object' ? model : ({} as PiModelConfig);
+    // 值里的 id 优先（它才是权威）；漏写时用 map 的 key 兵底。
+    return value.id ? value : { ...value, id: modelId };
+  });
+}
+
 /** auth.json：`{ "<providerId>": { "type": "api_key", "key": "…" } }` */
 export type PiAuthFile = Record<string, { type: string; key?: string }>;
 
@@ -103,6 +151,45 @@ function readJsonIfExists<T>(file: string): T | null {
 
 export function loadPiModels(): PiModelsFile | null {
   return readJsonIfExists<PiModelsFile>(piModelsPath());
+}
+
+/**
+ * 读 models.json 并把它**归一 + 落盘**。
+ *
+ * 为什么要写回盘：旧的 `models: { map }` 形状 pi 不认，而 pi 读同一个文件
+ * （配置家目录已改成与 pi 同址）—— 我们的文件用旧形状就会让 pi 整个加载失败。
+ * 与其赌用户手写的是哪种，不如读的时候顺手改成 pi 现在的形状，一次性了事。
+ *
+ * 幂等：已是数组就什么都不做。写回失败也不抛 —— 内存里的配置已经能用（我们读的是
+ * `normalizeModels()` 的结果），落盘只是为了下次和 pi 都能用。
+ */
+export function loadPiModelsNormalized(): PiModelsFile | null {
+  const file = loadPiModels();
+  if (!file) return null;
+  let needsRewrite = false;
+  for (const provider of Object.values(file.providers ?? {})) {
+    if (provider?.models && !Array.isArray(provider.models)) needsRewrite = true;
+  }
+  if (needsRewrite) {
+    try {
+      writeJson(piModelsPath(), {
+        ...file,
+        providers: Object.fromEntries(
+          Object.entries(file.providers ?? {}).map(([providerId, provider]) => [
+            providerId,
+            { ...provider, models: normalizeModels(provider.models) },
+          ]),
+        ),
+      });
+    } catch (error) {
+      process.stderr.write(
+        `models.json 形状已归一，但写回失败（不影响本次运行）：${
+          error instanceof Error ? error.message : String(error)
+        }\n`,
+      );
+    }
+  }
+  return file;
 }
 
 export function loadPiAuth(): PiAuthFile {
@@ -161,7 +248,7 @@ export function buildProvider(
   auth: PiAuthFile,
 ): Provider<any> {
   const api = config.api ?? 'openai-completions';
-  const models: Model<any>[] = Object.values(config.models ?? {}).map((m) => ({
+  const models: Model<any>[] = normalizeModels(config.models).map((m) => ({
     ...m,
     id: m.id,
     provider: providerId,
@@ -214,7 +301,8 @@ export function buildProvider(
  */
 export function createModelsWithPiConfig(extra: (() => Provider<any>)[] = []): Models {
   const models = createModels();
-  const file = loadPiModels();
+  // 走 loadPiModelsNormalized：顺手把旧形状的 models 改成 pi 现在的数组形状。
+  const file = loadPiModelsNormalized();
   if (file) {
     const auth = loadPiAuth();
     for (const [providerId, config] of Object.entries(file.providers ?? {})) {

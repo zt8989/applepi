@@ -1,31 +1,45 @@
 /**
  * 配置家目录 —— 本项目**唯一**的全局状态位置。
  *
- * 位置：`~/.redux-agent/`（可用 `REDUX_AGENT_DIR` 搬走）。
+ * 位置：默认就是 pi 的 `~/.pi/agent`（见 `configHome()`）。
  *
- * ## 为什么不叫 `pi-…`
+ * ## 为什么与 pi 同址（而不是自己的 ~/.redux-agent）
  *
- * 目录里没有一行 pi 的代码，唯一的交集是**布局照抄 pi**（models.json / auth.json /
- * settings.json / sessions/ 这套结构是照着 pi-coding-agent 的 `getAgentDir()` 抄的）。
- * 名字带 `pi` 前缀会让人误以为这里存着 pi 的东西或依赖 pi —— 所以前缀去掉，
- * 「照抄了 pi 的布局」这件事写在注释和 README 里，不写在目录名里。
+ * 之前用 `~/.redux-agent/`，现在**默认与 pi 共用** —— 两边读写同一份 `models.json` /
+ * `auth.json` / `settings.json` / `sessions/`。理由是这两个都是配置**一份**就够的东西：
+ * provider 目录改一次两边都得知道，key 改一次两边都得用，pi 是官方工具、我们只是另一个
+ * 前端。分两个目录的代价是每次改配置都得同步两次，收益仅仅是一个命名上的所有权标记。
  *
- * ## 结构
+ * 环境变量兼容两个（前者优先，因为那是本项目自己的名字）：
+ *   - `REDUX_AGENT_DIR`      本项目拼的，给测试隔离用
+ *   - `PI_CODING_AGENT_DIR`  pi 的官方名（`getAgentDir()` 也认它）
  *
- *     ~/.redux-agent/
- *       models.json            provider / 模型目录（格式与 pi 相同）
- *       auth.json              凭证（格式与 pi 相同；只放 key，baseUrl 在 models.json）
+ * 两个都没设时跟 pi 一样：`~/.pi/agent`。
+ *
+ * ## 结构（与 pi 一致）
+ *
+ *     ~/.pi/agent/
+ *       models.json            provider / 模型目录
+ *       auth.json              凭证（只放 key，baseUrl 在 models.json）
  *       settings.json          默认 provider / model / thinkingLevel
  *       sessions/
  *         --<cwd 编码>--/       按工作目录分（编码规则与 pi 相同）
  *           <sessionId>.jsonl 会话：首行 header，其后每行一条 entry
- *       traces/
- *         <sessionId>.jsonl        轨迹树（一次尝试一节点）+ 装载段（prompt / model）
-
  *
- * 轨迹单独放 `traces/` 而不是混进 sessions/：轨迹是**每次对话**的产物（一次尝试一节点、
- * 落盘频繁），会话文件是给人看的历史。分开之后「回放一段对话」不必先跳过一堆与它无关
- * 的记录。
+ * `traces/` 是我们**多出来的**一个目录（pi 没有）：轨迹树（一次尝试一节点）+ 装载段
+ * （prompt / model）。它不能混进 sessions/ —— 轨迹是每次对话的产物、落盘频繁，
+ * 会话文件是给人看的历史，混在一起「读一个会话」得先跳过一堆与它无关的记录。
+ *
+ * ## 会话怎么与 pi 互通
+ *
+ * 目录名（`--<cwd>--` 编码）与 header 形状与 pi 一致，所以 pi 的 `/resume` 能看到我们的
+ * 会话，我们的 `/sessions` 也能看到 pi 的。两个已知差异，都不影响读：
+ *   - **文件名**：pi 写 `<ISO 时间戳>_<id>.jsonl`，我们写 `<id>.jsonl`。pi 按 header
+ *     里的 `id` 识别会话（不是文件名），所以两边都能列出来；反之我们读 pi 的文件时
+ *     取 header 的 id，同样不靠文件名（见 `listSessions()`）。
+ *   - **version**：我们写 `1`，pi 当前是 `3`。pi 会把 v1 升到 v3（补 `id`/`parentId`
+ *     树、把 `hookMessage` 改成 `custom`）并重写文件；那些字段我们写的时候本来就有，
+ *     所以升完不会丢东西。
  */
 import {
   existsSync,
@@ -40,12 +54,25 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 
 export const CONFIG_DIR_NAME = '.redux-agent';
-/** 搬家用目录的环境变量（与 pi 的 `PI_CODING_AGENT_DIR` 同构）。 */
+/** pi 自己的配置目录名（`pi-coding-agent` 的 `getAgentDir()` 用的就是这个）。 */
+export const PI_CONFIG_DIR = '.pi';
+/** 本项目的搬家环境变量（测试隔离用）。 */
 export const ENV_HOME = 'REDUX_AGENT_DIR';
+/** pi 的官方搬家环境变量（与它自己同名同义）。 */
+export const ENV_PI_HOME = 'PI_CODING_AGENT_DIR';
 
+/**
+ * 配置家目录：**默认与 pi 同址**（`~/.pi/agent`）。
+ *
+ * 优先级 `REDUX_AGENT_DIR` > `PI_CODING_AGENT_DIR` > `~/.pi/agent`。
+ * 认 pi 的那个变量是为了「在 pi 那边搬了目录，这边也跟着走」—— 不然会出现
+ * 我们与 pi 各读各的，改了 key 只有一边生效。
+ *
+ * 早先这里是 `~/.redux-agent`。换到同址是为了让配置只有一份，见文件头的理由。
+ */
 export function configHome(): string {
-  const env = process.env[ENV_HOME];
-  return env ? path.resolve(env) : path.join(homedir(), CONFIG_DIR_NAME);
+  const env = process.env[ENV_HOME] ?? process.env[ENV_PI_HOME];
+  return env ? path.resolve(env) : path.join(homedir(), PI_CONFIG_DIR, 'agent');
 }
 
 export function modelsPath(): string {

@@ -33,7 +33,7 @@ export function createKernel(options: KernelOptions): Kernel {
 createKernel
 ├── runtime          provider.ts：createModels + deepseekProvider，或 demo 的 faux
 ├── sessionId        trace.ts 的 newSessionId()
-├── sink             trace-file.ts：追加写 ~/.redux-agent/traces/<id>.jsonl
+├── sink             trace-file.ts：追加写 ~/.pi/agent/traces/<id>.jsonl
 └── createPersistentStore
     ├── store         createStore + redux-loop 的 install()
     ├── trace         trace.ts 的 createTraceTree（sessionId 相同）

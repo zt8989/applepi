@@ -24,24 +24,32 @@ agent** —— 循环不是写出来的，是 reducer 与副作用互相 dispatc
 - **npm**
 - 真实跑模型时需要对应 provider 的 API key
 
-所有全局状态都在**配置家目录** `~/.redux-agent/`（`REDUX_AGENT_DIR` 可搬家）：
+所有全局状态都在**配置家目录** `~/.pi/agent/` —— 与 pi 同址，两边共用同一份配置与历史。
+可搬家：`REDUX_AGENT_DIR`（本项目优先）或 `PI_CODING_AGENT_DIR`（pi 的官方名）。
 
 ```text
-~/.redux-agent/
-  models.json            provider / 模型目录
+~/.pi/agent/
+  models.json            provider / 模型目录（pi 当前要求 models 是数组）
   auth.json              凭证
   settings.json          默认 provider / model
   sessions/
-    --<cwd 编码>--/<id>.jsonl   会话（可恢复）
-  traces/
+    --<cwd 编码>--/<id>.jsonl   会话（可恢复；pi 的 /resume 也能看到）
+  traces/                        ← 只有本项目写，pi 没这个目录
     <id>.jsonl                  轨迹树 + 装载段（prompt / model）
 ```
 
-**目录内部的结构照抄 pi，位置是自己的** —— 名字不带 `pi` 前缀，因为里面没有 pi 的东西。
+**为什么与 pi 同址**：provider 目录改一次两边都得知道，key 改一次两边都得用。分两个目录的
+代价是每次改配置要同步两次，收益仅仅是一个命名上的所有权标记。会话目录名（`--<cwd>--` 编码）
+与 header 形状也照抄 pi，所以历史两边互通；`traces/` 是我们多出来的，单独放。
 
-这三个 json 手写或从别处拷进来。`models.json` 放 provider 的 baseUrl / api / 模型目录，
+三个 json 手写或从别处拷进来。`models.json` 放 provider 的 baseUrl / api / 模型目录，
 `auth.json` 只放凭证；`.env` 里的 `<ID>_API_KEY` 也能用（`npm start` 走
 `--env-file-if-exists=.env`）。命令行的 `-P` / `-m` 仍然优先。
+
+**`models` 的形状**：pi 现在要求**数组**（`[{"id": "…"}]`），旧版是对象 map
+（`{"<modelId>": {"id": "…"}}`）。本项目两种都读，且读到旧形状会**顺手把盘上那份改成数组** ——
+pi 校验不过时是**整个文件作废**（一个 provider 都不装），不是某一个失败。已从旧的
+`~/.redux-agent/` 搬过来的配置可以运行 `npm run config:migrate` 手动处理。
 
 ## 运行
 
@@ -78,7 +86,7 @@ npm start -- --cwd ../other                # 工具的文件操作边界换到�
 ## 测试
 
 ```bash
-npm test           # 93 个离线测试，不打网络
+npm test           # 107 个离线测试，不打网络
 npm run typecheck  # tsc --noEmit（src + test）
 ```
 
@@ -92,5 +100,6 @@ reducer 纯性、轨迹树的不变量（**超时后重试的父 id 指向超时
 src/                    内核 + pi-tui 界面（见 docs/architecture.md）
 test/                   离线测试
 docs/architecture/      架构现状
-~/.redux-agent/         运行时状态：配置 / 会话 / 轨迹（不在仓库里）
+~/.pi/agent/       运行时状态：配置 / 会话 / 轨迹（与 pi 共用，不在仓库里）
+scripts/           配置迁移（migrate-config-dir / migrate-models）
 ```

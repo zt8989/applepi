@@ -18,23 +18,39 @@
 
 ## 家目录
 
-全部全局状态在 `~/.redux-agent/`（`REDUX_AGENT_DIR` 可搬家）：
+全部全局状态在 `~/.pi/agent/` —— **与 pi 同址**（可搬家：`REDUX_AGENT_DIR` 优先于
+pi 的 `PI_CODING_AGENT_DIR`，都没设就用 `~/.pi/agent`）：
 
 ```text
-~/.redux-agent/
+~/.pi/agent/
   models.json                     provider / 模型目录
   auth.json                       凭证
   settings.json                   默认 provider / model / thinkingLevel
   sessions/--<cwd 编码>--/<id>.jsonl
-  traces/<id>.jsonl               轨迹树 + 装载段
+  traces/<id>.jsonl               轨迹树 + 装载段（pi 没这个目录）
 ```
 
-**布局照抄 pi，位置是自己的。** 目录名不带 `pi` 前缀 —— 里面没有 pi 的代码，唯一交集是
-这套结构（`models.json` / `auth.json` / `settings.json` / `sessions/`）照着
-pi-coding-agent 的 `getAgentDir()` 抄的。那件事写在[这个文件的头部注释]和 README 里，
-不写在目录名里。
+**为什么同址**：provider 目录改一次两边都得知道，key 改一次两边都得用。分两个目录的代价
+是每次改配置要同步两次，收益仅仅是一个命名上的所有权标记。所以 `models.json` /
+`auth.json` / `settings.json` / `sessions/` 两边共用，`traces/` 是我们多出来的（pi 没有，
+单独放的理由见 [trace](trace.md)）。
 
 会话按 cwd 分目录（`encodeCwd`：`--` 包起来，`/` `\` `:` 换成 `-`）—— 与 pi 同一套编码。
+
+## 与 pi 的会话互通
+
+同址之后会话历史是**双向可见**的，pi 的 `/resume` 能看到我们的，我们的 `/sessions` 也能
+看到 pi 的。两个已知差异，都不影响读：
+
+| | 我们 | pi |
+| --- | --- | --- |
+| 文件名 | `<id>.jsonl` | `<时间戳>_<id>.jsonl` |
+| header `version` | `1` | `3` |
+
+两边都不靠文件名识别会话，而是读 header 里的 `id`（pi 的 `SessionManager.list()` 与
+`findById()` 都是这样），所以文件名不一样也照样列得出来。version 那边 pi 会自动把 v1 升到
+v3（`migrateV1ToV2` 补 `id`/`parentId` 树、`migrateV2ToV3` 把 `hookMessage` 改成 `custom`）
+并重写文件；那些字段我们写的时候本来就有，所以升级不丢东西。
 
 ## 会话文件的形状
 
@@ -49,8 +65,8 @@ pi-coding-agent 的 `getAgentDir()` 抄的。那件事写在[这个文件的头�
 `id` / `parentId` 串成链（pi 用这条链做 session tree）。另有两种 entry 现在也写：
 `model_change`、`thinking_level_change`。
 
-字段名与 pi 的 `SessionHeader` / `SessionEntryBase` 一致，**但不要求 pi 能读我们的会话**
-—— 抄格式是为了「目录长得一样」和「不自己发明 header 定义」，不是为了互通。
+字段名与 pi 的 `SessionHeader` / `SessionEntryBase` 一致，所以同址之后两边能互相读到对方的
+会话（差异见上面的「与 pi 的会话互通」）。
 
 ### 空会话不落盘
 

@@ -12,6 +12,9 @@
     "agent": "node --env-file-if-exists=.env --import tsx src/tui.ts",
     "typecheck": "tsc --noEmit",
 
+    "config:migrate": "node --import tsx scripts/migrate-config-dir.ts",
+    "models:migrate": "node --import tsx scripts/migrate-models.ts",
+
     "test": "node --import tsx --import ./test/isolated-home.ts --test test/*.test.ts"
   },
   "dependencies": {
