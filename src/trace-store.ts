@@ -18,6 +18,7 @@
  * Node 端落文件，浏览器端落 localStorage，接口一致（都是 append 一个字符串）。
  */
 import { applyTraceRecord, createTraceTree, type SerializedTraceNode, type TraceTree } from './trace';
+import type { SkillInfo } from './skills';
 
 /**
  * 装载记录（`prompt.init` / `model.init`）。两种，各一条。
@@ -33,6 +34,13 @@ export type InitRecord =
       op: 'prompt.init';
       systemPrompt: string;
       tools: { name: string; description: string; parameters: unknown }[];
+      /**
+       * 装进来的 skill 清单（可选 —— 旧会话没这个字段）。
+       *
+       * 它们已经拼进 `systemPrompt` 了（reducer 的 prompt.init 干的），所以回放时
+       * **不重扫 skill 目录** —— 当时的目录内容可能已经变了，重扫得到的是另一个 prompt。
+       */
+      skills?: SkillInfo[];
     }
   | {
       op: 'model.init';

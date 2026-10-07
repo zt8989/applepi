@@ -10,6 +10,7 @@ import {
   type StopCause,
 } from './state';
 import { appendNode, patchNode, type TraceNode } from './trace';
+import { skillsPrompt } from './skills';
 /**
  * 一张纯表：action → (下一个状态, 该发哪些 effect)。
  *
@@ -234,17 +235,25 @@ const transitions: TransitionHandlers = {
    */
   'prompt.init': (state, action) => {
     const now = Date.now();
+    // skill 清单接在**基础** system prompt 后面（官方 `formatSkillsForPrompt()` 的输出）。
+    //
+    // 为什么要在这里拼而不在内核里：prompt 与 tools 一样是**装载**的一部分，
+    // 走 action 才能被落盘、被回放 —— 回放时读到 init 段就知道当时发给模型的完整
+    // prompt 是什么，不必重新扫 skill 目录（那时的目录内容可能已经变了）。
+    const skillsBlock = skillsPrompt(action.skills ?? []);
+    const systemPrompt =
+      skillsBlock === '' ? action.systemPrompt : `${action.systemPrompt}${skillsBlock}`;
     // 装载也进轨迹树：树上要能看见「提示词是怎么来的」。
     // 用 appendNode 而不是 patchNode —— 重复装载（比如热重载）是追加一条新的，不是改旧的。
     const { tree: afterBase, node: baseNode } = appendNode(state.trace, state.trace.tipId, 'prompt.base', {
       status: 'ok',
       label: summarize(action.systemPrompt),
-      detail: action.systemPrompt,
+      detail: systemPrompt,
       createdAt: now,
       endedAt: now,
     });
     // 工具定义单独一个节点：它和 system prompt 是两回事（一个是「说什么」，一个是「能做什么」）。
-    const { tree } = appendNode(
+    const { tree: afterTools } = appendNode(
       afterBase,
       // parent 用 base 节点的 **id**（不是它的 tipId —— prompt.base 不推进 tip，
       // 那样取会拿到装载前的 tip，两兄弟就散了）。
@@ -259,16 +268,32 @@ const transitions: TransitionHandlers = {
         endedAt: now,
       },
     );
+    // skill 清单第三个节点：与 prompt / tools 平级，都是「装了什么」。
+    // **只在有 skill 时才建节点** —— 零 skill 的会话多一个空节点是噪声。
+    const tree =
+      action.skills && action.skills.length > 0
+        ? appendNode(afterTools, baseNode.id, 'prompt.skills', {
+            status: 'ok',
+            label: action.skills.map((s) => s.name).join(', '),
+            detail: action.skills
+              .map((s) => `${s.name}（${s.scope}）: ${s.description}\n  ${s.filePath}`)
+              .join('\n'),
+            meta: { count: String(action.skills.length) },
+            createdAt: now,
+            endedAt: now,
+          }).tree
+        : afterTools;
     return {
       ...state,
       trace: tree,
       prompt: {
-        systemPrompt: action.systemPrompt,
+        systemPrompt,
         tools: action.tools,
+        ...(action.skills ? { skills: action.skills } : {}),
         seeded: true,
       },
       // 扁平别名跟着更新（真相在 prompt 块里）。
-      systemPrompt: action.systemPrompt,
+      systemPrompt,
       toolNames: action.tools.map((tool) => tool.name),
     };
   },

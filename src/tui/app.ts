@@ -54,6 +54,7 @@ import path from 'node:path';
 // 依赖内部子路径（`dist/...`）需要 pnpm patch，见 docs/architecture/provider.md。
 // theme 必须先 setupTheme()，否则这里读 theme.colors 会抛（见 src/tui/theme.ts）。
 import { AssistantMessageComponent } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/assistant-message.js';
+import { SkillInvocationMessageComponent } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/skill-invocation-message.js';
 import { UserMessageComponent } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/user-message.js';
 import { ToolExecutionComponent } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js';
 import {
@@ -68,6 +69,7 @@ import { getMarkdownTheme } from '@earendil-works/pi-coding-agent/dist/modes/int
 import { formatCwdForFooter, formatTokens } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js';
 import { addUsageToTotals, createUsageTotals } from '@earendil-works/pi-coding-agent/dist/core/usage-totals.js';
 import { setupTheme } from './theme';
+import { expandSkillCommand, parseSkillMessage, skillCommands, skillsInPrompt, type SkillInfo } from '../skills';
 
 const useColor = !process.env.NO_COLOR;
 const paint = (code: string, text: string) => (useColor ? `\x1b[${code}m${text}\x1b[0m` : text);
@@ -140,6 +142,10 @@ function nodeColor(node: TraceNode): (t: string) => string {
       return dim;
     case 'prompt.segment':
       return blue;
+    // skill 与 tools 同级（都是「装了什么」），但用 cyan 与 tools 的 dim 区分开 ——
+    // 两者都在树上很淡，而 skill 往往是模型能不能做对事的关键，值得一眼看到。
+    case 'prompt.skills':
+      return cyan;
     case 'model.init':
       return dim;
   }
@@ -164,7 +170,7 @@ export function renderColoredTree(tree: TraceTree, maxWidth: number): string {
     .map((line) => {
       // 节点 kind 的全集。**漏一个就等于那个 kind 整族不上色**（静默退化，最难发现的一种 bug）。
       const match =
-        /^(.*?)(n\d+) (llm\.attempt|llm\.result|tool\.attempt|tool\.result|user|error|stop|prompt\.base|prompt\.tools|prompt\.segment|model\.init):/.exec(
+        /^(.*?)(n\d+) (llm\.attempt|llm\.result|tool\.attempt|tool\.result|user|error|stop|prompt\.base|prompt\.tools|prompt\.segment|prompt\.skills|model\.init):/.exec(
           line,
         );
       if (!match) return line.startsWith('HEAD') ? bold(line) : line;
@@ -551,15 +557,43 @@ export async function runTui(options: TuiOptions): Promise<number> {
   // 看起来就像补全根本没装上 —— 这个坑很隐蔽。
   // 类上没声明 `triggerCharacters`（接口上才有），所以用一层薄包装把它补上 ——
   // 其余方法原样转发。
+  /**
+   * 补全用的命令表 = 固定命令 + **skill 命令**。
+   *
+   * 写成函数而不是常量：skill 是装载时才有的，而补全 provider 在编辑器建好时就装上了。
+   * 每次 `getSuggestions()` 现取 —— 那时读的是最新的 state（`/new` 之后换了会话也准）。
+   *
+   * 形状与 pi 一致：skill 叫 `skill:<name>`，描述就是它的 description（`skillCommands()`）。
+   */
+  const commandTable = (): SlashCommand[] => [
+    ...SLASH_COMMANDS,
+    ...skillCommands(stateSkills()).map(
+      (c): SlashCommand => ({ name: c.name, description: c.description }),
+    ),
+  ];
+
   const base = new CombinedAutocompleteProvider(SLASH_COMMANDS, process.cwd());
-  editor.setAutocompleteProvider({
+  // provider 装上之后 skill 可能才被装载（或者 /new 换了会话），所以每次取建议都重建表。
+  const withFreshCommands = {
     triggerCharacters: ['/', '@'],
-    getSuggestions: (...args) => base.getSuggestions(...args),
-    applyCompletion: (...args) => base.applyCompletion(...args),
-    shouldTriggerFileCompletion: (...args) => base.shouldTriggerFileCompletion?.(...args) ?? false,
-  });
+    getSuggestions: (...args: Parameters<typeof base.getSuggestions>) =>
+      new CombinedAutocompleteProvider(commandTable(), process.cwd()).getSuggestions(...args),
+    applyCompletion: (...args: Parameters<typeof base.applyCompletion>) =>
+      base.applyCompletion(...args),
+    shouldTriggerFileCompletion: (...args: Parameters<typeof base.shouldTriggerFileCompletion>) =>
+      base.shouldTriggerFileCompletion?.(...args) ?? false,
+  };
+  editor.setAutocompleteProvider(withFreshCommands);
 
   let showTrace = false;
+  /**
+   * 这一轮真的进了 system prompt 的 skill 清单。
+   *
+   * 读 `state.prompt.skills` 而不是重新扫目录：prompt 是 `prompt.init` 时定下的，
+   * 之后目录变了（新增了 skill）也不会自动生效 —— 重新扫会得到一个**模型看不到**的清单，
+   * 于是 `/skill:x` 展开过去模型却不认识它。
+   */
+  const stateSkills = (): SkillInfo[] => skillsInPrompt(store.getState());
   /**
    * 工具输出是否全部展开（Ctrl+O 切换）。
    *
@@ -662,6 +696,17 @@ export async function runTui(options: TuiOptions): Promise<number> {
     if (!input) return;
     // 斜杠命令：不发给模型。
     if (input.startsWith('/')) {
+      // **`/skill:name` 不是命令**，它要展开成 `<skill>` 块发给模型 ——
+      // 与 pi 一致（它的 `_expandSkillCommand()` 在 prompt 里展开，不走命令表）。
+      // 所以先问一句「是不是 skill」，不是才当命令处理。
+      if (expandSkillCommand(input, stateSkills()).startsWith('<skill ')) {
+        if (store.getState().phase !== 'idle') {
+          notify(yellow('上一回合还没结束（Ctrl-C 可中断）'));
+          return;
+        }
+        send(expandSkillCommand(input, stateSkills()));
+        return;
+      }
       runCommand(input.slice(1));
       return;
     }
@@ -681,6 +726,33 @@ export async function runTui(options: TuiOptions): Promise<number> {
     const [name = '', ...rest] = raw.trim().split(/\s+/);
     const arg = rest.join(' ');
     switch (name) {
+      case 'skills': {
+        // 列出这一轮真的进了 prompt 的 skill（不是磁盘上全部）。
+        //
+        // 为什么只报「进了 prompt 的」：`/skill:x` 展开后模型能不能用，取决于清单里有没有它。
+        // 报磁盘上的全集会骗人 —— 那些被 `disable-model-invocation` 挡住的、或者 prompt
+        // 还没重装的，看着能调用，实际模型不知道它们存在。
+        const skills = stateSkills();
+        if (skills.length === 0) {
+          notify(
+            dim(
+              '没找到 skill。放 ~/.pi/agent/skills/<名字>/SKILL.md 或 <工作目录>/.pi/skills/…，' +
+                '然后 /new 换个会话（system prompt 在装载时定下，重开一卷才生效）。',
+            ),
+          );
+          return;
+        }
+        notify(
+          skills
+            .map(
+              (s) =>
+                `${cyan(s.name)}${dim(`（${s.scope}）`)} ${dim(s.description)}\n${dim('  ' + s.filePath)}`,
+            )
+            .join('\n') +
+            `\n${dim(`用 /skill:${skills[0]?.name ?? '<名字>'} [你的问题] 调用；清单已进 system prompt。`)}`,
+        );
+        return;
+      }
       case 'sessions':
       case 'resume': {
         // 环在跑时不能换会话（正在写消息）。
@@ -734,9 +806,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
         return;
       }
       case 'help':
-        // 念同一份 SLASH_COMMANDS —— 手抄一份迟早会和补全列表漂移。
+        // 念同一份命令表 —— 手抄一份迟早会和补全列表漂移。
         notify(
-          SLASH_COMMANDS.map(
+          commandTable().map(
             (c) =>
               `${bold(`/${c.name}`)}${' '.repeat(Math.max(1, 10 - c.name.length))}${c.description ?? ''}`,
           ).join('\n'),
@@ -975,6 +1047,22 @@ function renderPlain(text: string): string[] {
   return text.split('\n').map((row) => dim(row));
 }
 
+/**
+ * Skill 块：`/skill:<name>` 展开出来的那一段 `<skill …>…</skill>`。
+ *
+ * 用 pi 官方的 `SkillInvocationMessageComponent`（与 `parseSkillBlock()` 同源）——
+ * 折叠态是「[skill] name」一行，Ctrl+O 展开是全文。形状与官方一致，不自己画。
+ *
+ * 认不出来就画普通用户消息（不是 `[]`）：宁可多显示一点，也不要把内容吞掉。
+ */
+function renderSkillBlock(text: string, width: number, expanded: boolean): string[] {
+  const block = parseSkillMessage(text.trim());
+  if (!block) return renderUser(text, width);
+  const component = new SkillInvocationMessageComponent(block, getMarkdownTheme());
+  component.setExpanded(expanded);
+  return component.render(usableWidth(width));
+}
+
 /** 用户消息：整块蓝底铺满。 */
 function renderUser(text: string, width: number): string[] {
   if (text.trim() === '') return [];
@@ -1178,6 +1266,9 @@ export function renderMessage(
         : message.content
             .map((c) => (c.type === 'text' ? c.text : '[image]'))
             .join(' ');
+    // **`/skill:x` 展开出来的那一段**画成可折叠的 skill 块，而不是蓝底用户消息 ——
+    // 它是「参考资料」而不是「人说的话」。形状与 pi 一致（同一个 SkillInvocationMessageComponent）。
+    if (text.startsWith('<skill ')) return renderSkillBlock(text, width, expanded);
     return renderUser(text, width);
   }
   if (message.role === 'assistant') {

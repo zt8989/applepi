@@ -37,6 +37,8 @@ interface CliArgs {
   sessionId?: string;
   /** 工具的工作目录（文件操作边界）。 */
   cwd: string;
+  /** 额外的 skill 路径（文件或目录），可重复。 */
+  skillPaths: string[];
   traceDir?: string;
 }
 
@@ -58,6 +60,7 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
       --demo             不打网络：用 pi-ai 自带的 faux provider 跑一遍完整环
       --no-trace         不把轨迹落盘到 .trace/
       --session <id>     指定会话 id（决定 .trace/<id>.jsonl 的文件名）
+      --skill <path>     额外的 skill 文件或目录（可重复；默认扫 ~/.pi/agent/skills 与 <cwd>/.pi/skills）
       --cwd <dir>       工具的工作目录（文件操作边界，默认当前目录）
       --trace-dir <dir> 轨迹目录（默认 .trace）
   -h, --help             显示本帮助
@@ -66,6 +69,8 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
   Ctrl+T                切换轨迹面板（git log --graph 那棵树，错误也在上面）
   Ctrl+O                展开/收起工具输出的完整内容（默认只留前 12 行）
   Ctrl+C                环在跑时中断这一轮；空闲时退出
+  /skills               列出已装载的 skill
+  /skill:<名字> [问题]  把某个 skill 的正文展开后连同你的问题一起发给模型
 `;
 
 function parseArgs(argv: string[]): CliArgs {
@@ -81,6 +86,7 @@ function parseArgs(argv: string[]): CliArgs {
     demo: false,
     noTrace: false,
     cwd: process.cwd(),
+    skillPaths: [],
   };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -122,6 +128,10 @@ function parseArgs(argv: string[]): CliArgs {
         break;
       case '--session':
         args.sessionId = next();
+        break;
+      case '--skill':
+        // 可重复：--skill a --skill b
+        args.skillPaths.push(next());
         break;
       case '--cwd':
         // 工具的文件操作边界由它决定。
@@ -179,6 +189,7 @@ async function main(): Promise<void> {
       ...(args.model ? { model: args.model } : {}),
       systemPrompt: args.system,
       cwd: args.cwd,
+      ...(args.skillPaths.length > 0 ? { skillPaths: args.skillPaths } : {}),
       demo: args.demo,
       maxTurns: args.maxTurns,
       llmTimeoutMs: args.llmTimeoutMs,

@@ -107,13 +107,37 @@ pnpm start --cwd ../other                  # 工具的文件操作边界换到�
 | `/sessions` | 弹窗选一个历史会话恢复。**零 token** —— 不重跑模型，只把消息读回来 |
 | `/new` | 开**新会话**：换 id → 换文件。上一段完整留在 `sessions/` 里 |
 | `/clean`（或 `/wipe`） | **删除**除当前会话外的全部历史会话（连同轨迹文件）。不可逆 |
+| `/skills` | 列出已装载的 skill（**已进 system prompt** 的那批） |
+| `/skill:<名字>` | 把某个 skill 的正文展开后，连同你写的问题一起发给模型 |
 | `/help` | 命令列表 |
 
-命令**不发给模型** —— 那是给界面/内核的管理动作。
+命令**不发给模型** —— 那是给界面/内核的管理动作。**`/skill:` 是例外**：它展开成一段
+`<skill>` 块真的发给模型（形状与 pi 相同）。
+
+### Skill
+
+一个 skill = 一个带 frontmatter 的 `SKILL.md`（`name` + `description` + 正文）。
+prompt 里只列一张清单（名字/描述/位置），模型对上号时自己调 `read` 去读正文 ——
+少花 token 是这一层的全部意义。
+
+```text
+~/.pi/agent/skills/<名字>/SKILL.md    ← 用户级
+<工作目录>/.pi/skills/<名字>/SKILL.md ← 项目级
+```
+
+```bash
+pnpm start --skill ./docs/my-skill.md    # 额外指定，可重复
+```
+
+目录扫描、frontmatter 解析、prompt 里的 XML 格式**全部复用 pi 官方**
+（`loadSkills` / `formatSkillsForPrompt`），本项目不维护副本。详见
+[`docs/architecture/tools.md`](docs/architecture/tools.md#skill--也在-pi-那一侧-srctskills)。
+
+> 清单是会话**装载时**定下的。事后新增 skill 要 `/new` 换个会话才生效。
 
 选项：`-p/--print`、`-P/--provider`、`-m/--model`、`-s/--system`、`--max-turns`、
 `--llm-timeout`、`--attempts`、`--api-key`、`--demo`、`--no-trace`、`--session`、
-`--cwd`、`--trace-dir`、`-h/--help`。
+`--skill`、`--cwd`、`--trace-dir`、`-h/--help`。
 
 配置/provider 这一层**直接用 pi-coding-agent 的 `ModelRuntime`**（它自己读 models.json /
 auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 provider、1500+ 模型目录）。
@@ -122,7 +146,7 @@ auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 prov
 ## 测试
 
 ```bash
-pnpm test           # 183 个离线测试，不打网络
+pnpm test           # 206 个离线测试，不打网络
 pnpm run typecheck  # tsc --noEmit（src + test + scripts）
 ```
 

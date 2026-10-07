@@ -1,5 +1,6 @@
 import type { Message, ModelThinkingLevel, ToolCall, Usage } from '@earendil-works/pi-ai';
 import type { ModelCapabilities, PromptToolDefinition } from './actions';
+import type { SkillInfo } from './skills';
 import { createTraceTree, newSessionId, type TraceTree } from './trace';
 
 /** 相位：只描述「现在在等谁」，不含任何驱动方式的信息。 */
@@ -97,6 +98,13 @@ export interface PromptState {
   systemPrompt: string;
   /** 工具的完整定义（原样进 LLM 请求的那三样）。 */
   tools: PromptToolDefinition[];
+  /**
+   * 装进来的 skill 清单（`skills.ts` + 官方 `loadSkills()`）。
+   *
+   * **可选**而不是必填：旧轨迹回放与测试的 init 段里没有这个字段，所以判据要用
+   * `undefined`（没装）而不是空数组（装了但一个都没有）。
+   */
+  skills?: SkillInfo[];
   /** 是否已经装载过。回放时据此判断「init 段读到了没有」。 */
   seeded: boolean;
 }

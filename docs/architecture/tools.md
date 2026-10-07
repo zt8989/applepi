@@ -112,3 +112,53 @@ const myTool: AgentTool = {
 
 `details` 必须是 `JsonValue`（pi-ai 1.x 收紧了）—— 它要进消息流、存盘、发给 provider，
 所以本来就得能真的 JSON 序列化。
+
+## Skill —— 也在 pi 那一侧（`src/skills.ts`）
+
+skill **不是工具**，是给模型看的「遇到这类任务怎么做」的说明书：一个带 frontmatter
+（`name` + `description`）的 `SKILL.md`，正文是说明书。
+
+模型**不会自动加载**正文 —— prompt 里只列一张清单（名字 + 描述 + 文件位置），任务对上号时
+它自己调 `read` 去读那个文件。省 token 是这一层的全部意义。
+
+目录与 pi 完全一致：
+
+```
+~/.pi/agent/skills/<名字>/SKILL.md    ← 用户级
+<工作目录>/.pi/skills/<名字>/SKILL.md ← 项目级
+```
+
+再加 `--skill <路径>`（可重复）。
+
+### 复用了 pi 的什么
+
+整套都是官方的，本项目只做三件薄薄的事：
+
+| 本项目 | 直接调 pi 的 |
+| --- | --- |
+| `loadSkillRegistry()` | `loadSkills()` |
+| `skillsPrompt()` | `formatSkillsForPrompt()`（Agent Skills 标准的 XML） |
+| `expandSkillCommand()` | 与 pi 的 `_expandSkillCommand()` 逐字同形 |
+
+**不自己扫目录、不自己解析 frontmatter、不自己拼 XML。** 那样只会得到一个会漂移的副本：
+pi 改了标准的细节，我们这边不会跟着动。
+
+`/skill:<名字> [问题]` 展开成 `<skill name=… location=…>正文</skill>` 加在问题前面 ——
+所以官方 `parseSkillBlock()` 能还原，界面用官方 `SkillInvocationMessageComponent`
+画成可折叠块（Ctrl+O 展开）。形状与 pi 一致。
+
+### 两个坑
+
+- **家目录走 `configHome()`**（它转发 pi 的 `getAgentDir()`），而不是各处自己拼路径。
+  早先本项目另有 `REDUX_AGENT_DIR` 且优先级高于 pi 的那个，而 pi 不认它 —— 那个状态下
+  skill 会永远从真实家目录加载。现在只剩一个变量，两边不可能分家。
+- **清单是 `prompt.init` 时定下的。** 之后往目录里加 skill 不会自动生效，要 `/new`
+  换个会话（system prompt 在装载时拼好）。界面因此只认 `state.prompt.skills`，
+  不重新扫目录 —— 重新扫会得到一个**模型看不到**的清单。
+
+### 与 prompt 的关系
+
+`formatSkillsForPrompt()` 的输出**接在基础 system prompt 后面**，由 reducer 在
+`prompt.init` 时拼（`src/reducer.ts`）。走 action 而不是内核里拼，是因为这样会被落盘、
+被回放 —— 回放时读到 init 段就知道当时发给模型的完整 prompt 是什么，不必重新扫目录
+（那时的目录内容可能已经变了）。轨迹树上也有一个 `prompt.skills` 节点。

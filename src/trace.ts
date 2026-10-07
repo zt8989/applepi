@@ -57,6 +57,8 @@ export type TraceNodeKind =
   | 'prompt.tools'
   /** 中途追加的一段 prompt（prompt.segment.added）。 */
   | 'prompt.segment'
+  /** 装载的 skill 清单（prompt.init 的 skills）。 */
+  | 'prompt.skills'
   /** 装载的模型与它的能力（model.init）。 */
   | 'model.init'
 

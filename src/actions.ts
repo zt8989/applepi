@@ -8,6 +8,7 @@ import type {
 } from '@earendil-works/pi-ai';
 import type { Message } from '@earendil-works/pi-ai';
 import type { LlmErrorKind, StopCause } from './state';
+import type { SkillInfo } from './skills';
 
 /**
  * 工具的完整定义 —— 落进 state 后回放不必重跑。
@@ -89,6 +90,17 @@ export type AgentAction =
       systemPrompt: string;
       /** 工具的完整定义。 */
       tools: PromptToolDefinition[];
+      /**
+       * 装进来的 skill 清单（`skills.ts` 加载，官方 `loadSkills()`）。
+       *
+       * 与 `systemPrompt` 一起定下来 —— 因为 `formatSkillsForPrompt()` 的输出是
+       * system prompt 的一部分。单独存一份是为了界面能画清单、能判「这个 skill 这一轮
+       * 到底在不在 prompt 里」（`/skill:x` 之前要查）。
+       *
+       * 没有就是没装（旧轨迹回放、测试）—— 判据是 `undefined`，不是空数组：
+       * 空数组也可能意味着「装了但一个都没有」。
+       */
+      skills?: SkillInfo[] | undefined;
     }
   /**
    * 中途追加一段 prompt（`system` 或 `developer` role）。

@@ -28,6 +28,7 @@ import { createSessionRecorder, type SessionRecorder } from './session-recorder'
 import { readSession, readSessionMessages } from './session-file';
 import path from 'node:path';
 import { getTools } from './tools';
+import { loadSkillRegistry } from './skills';
 /**
  * 从 Model 对象上读我们关心的三个能力。
  *
@@ -73,6 +74,12 @@ export interface KernelOptions {
   writeSession?: boolean | undefined;
   /** 恢复已有会话时传「已经灌进去多少条消息」，记录器的游标要接着算，否则会重写一遍。 */
   resumeFrom?: number | undefined;
+  /**
+   * 额外的 skill 路径（文件或目录），对应 pi 的 `--skill`。
+   *
+   * 与默认目录（`~/.pi/agent/skills` 与 `<cwd>/.pi/skills`）**叠加**，不是替换。
+   */
+  skillPaths?: readonly string[] | undefined;
 }
 
 export interface Kernel {
@@ -170,6 +177,15 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   //
   // 放在 store 建好之后：它们本身就是 dispatch，得走真实的 store。
   const toolList = getTools(cwd);
+  // Skill 清单：官方 `loadSkills()` 扫 `~/.pi/agent/skills` 与 `<cwd>/.pi/skills`，
+  // 再由 reducer 拼进 system prompt（走 prompt.init，所以会被落盘、被回放）。
+  //
+  // 加载**失败不能拖垮启动**：一个写坏 frontmatter 的 skill 不该让整个界面起不来
+  // （loadSkillRegistry 已经把异常收成 diagnostics 了）。
+  const skillRegistry = loadSkillRegistry({ cwd, ...(options.skillPaths ? { paths: options.skillPaths } : {}) });
+  for (const diagnostic of skillRegistry.diagnostics) {
+    options.onTraceError?.(new Error(`skill: ${diagnostic}`));
+  }
   store.dispatch({
     type: 'prompt.init',
     systemPrompt: options.systemPrompt,
@@ -178,6 +194,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       description: tool.description,
       parameters: tool.parameters,
     })),
+    skills: skillRegistry.skills,
   });
   store.dispatch({
     type: 'model.init',
@@ -204,6 +221,8 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         op: 'prompt.init',
         systemPrompt: options.systemPrompt,
         tools: store.getState().prompt.tools,
+        // skills 一并落：回放时要知道当时有哪些 skill（它们拼进了 prompt）。
+        ...(skillRegistry.skills.length > 0 ? { skills: skillRegistry.skills } : {}),
       },
       {
         op: 'model.init',
