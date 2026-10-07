@@ -1096,6 +1096,35 @@ function toolCallArgs(state: AgentState, toolCallId: string): Record<string, unk
 }
 
 /**
+ * 用户消息**上面**那一行空隙（非首条时才有）。
+ *
+ * ## 为什么必须自己插
+ *
+ * `UserMessageComponent` 的 `paddingY=1` 确实会产生两行空白，但它们是**带蓝底**的
+ * （pi-tui 的 `Markdown.render` 里 `emptyLines` 走 `applyBackgroundToLine`）——
+ * 蓝块往上多出一行同色边，而上面那行本身是满宽的，于是蓝块与上一条内容之间
+ * 看不到任何空隙。实测就是「工具调用之间都有间隔，用户的蓝块却直接贴上来」。
+ *
+ * 助手块 / 工具块的空行是**无底色**的，所以那些地方本来就是真空隙 —— 不一致就在这里。
+ *
+ * ## 与 pi 一致
+ *
+ * `interactive-mode.js` 的 `addMessageToChat`：
+ *
+ *     case "user":
+ *         if (this.chatContainer.children.length > 0) this.chatContainer.addChild(new Spacer(1));
+ *         this.chatContainer.addChild(new UserMessageComponent(...));
+ *
+ * 即非首条才插。我们没有 `children.length` 可看，用「已经有内容画上去了」（`at > 0`）
+ * 等价 —— 首条消息前面不需要空隙。
+ *
+ * @param at 这条消息之前已经画了多少行（用来判断是不是首条）
+ */
+function userSpacer(message: { role: string }, at: number): string[] {
+  return message.role === 'user' && at > 0 ? [''] : [];
+}
+
+/**
  * 把整段对话渲染成文本块（`from` 恒为 0：滚动交给 ScrollView）。
  *
  * ## 不加「你 ›」「助手 ›」这类前缀
@@ -1320,9 +1349,10 @@ export class TranscriptChunks {
     expanded: boolean,
     widthChanged: boolean,
   ): string[] {
-    const cached = this.chunkLines(message, key, () =>
-      renderMessage(state, message, width, expanded),
-    );
+    const cached = this.chunkLines(message, key, () => [
+      ...userSpacer(message, index),
+      ...renderMessage(state, message, width, expanded),
+    ]);
     let block = this.blocks[index];
     if (!block) {
       // **必须新建而不是复用**：pi-tui 的布局按「组件对象 + 宽度」缓存（layout.js 的
@@ -1422,10 +1452,14 @@ export function renderTranscript(
   const lines: string[] = [];
   // 命令反馈贴在最上面，6 秒后自动消失。
   if (notice && notice.text !== '') lines.push(notice.text, '');
+  // `offset` 跟着实际插进去的行数走 —— 用户消息前面多了一行空隙，下标才不会错位。
+  let offset = lines.length;
   for (let i = from; i < state.messages.length; i += 1) {
     const message = state.messages[i];
     if (!message) continue;
+    lines.push(...userSpacer(message, offset));
     lines.push(...renderMessage(state, message, width, expanded));
+    offset = lines.length;
   }
   // 正在流式生成的这一段。**`renderTail` 里刻意不含它**（那边由独立的一块负责，
   // 合成一个就会画两遍）—— 一次性模式不走 TranscriptChunks，所以要在这里补上，

@@ -288,6 +288,96 @@ test('纯 toolCall 的助手消息不产生空行（它由紧跟的 toolResult �
   assert.ok(!out.includes('\n\n\n'), `不该有多余空行：${JSON.stringify(stripTerminalSequences(out))}`);
 });
 
+// ─── 用户蓝块与上一条之间要有真空隙 ───
+//
+// `UserMessageComponent` 的 paddingY=1 会产生上下两行空白，但它们是**带蓝底**的
+// （pi-tui 的 Markdown.render 里 emptyLines 走 applyBackgroundToLine）——
+// 蓝块与上一条内容之间**看不到空隙**，而助手块/工具块的空行是无底色的，所以那些地方
+// 有空隙、用户块没有。pi 官方的解法是在用户消息前插一个 Spacer(1)。
+//
+// 判据：蓝块**第一行**的**上一行**必须是无底色的空行。组件自己那两行 paddingY 也在
+// 「上一行」之列，所以要先定位块首行（有 OSC133;A 的那行；工具块没这个标记，退化成
+// 「第一行带底色的行」），再往前看一行。
+
+/** 找某段文字所在块的起始下标（首行带 OSC 133 A 区域标记）。 */
+function blockStartOf(lines: string[], text: string): number {
+  const at = lines.findIndex((l) => stripTerminalSequences(l).includes(text));
+  assert.ok(at >= 0, `找不到 ${text}`);
+  for (let i = at; i >= 0; i -= 1) {
+    if (lines[i]?.includes('\x1b]133;A')) return i;
+  }
+  // 工具块**没有** OSC 133 区域标记（只有 user / assistant 有）：往上找第一行带底色的，
+  // 那就是它 paddingY 的顶行。
+  for (let i = at; i >= 0; i -= 1) {
+    if (/\x1b\[4[78];/.test(lines[i] ?? '')) return i;
+  }
+  return at;
+}
+
+test('用户蓝块上面有一行无底色空隙（蓝块自身的 paddingY 带底色，不算空隙）', () => {
+  const state = {
+    messages: [
+      { role: 'assistant', content: [{ type: 'text', text: '上一条回答' }] } as Message,
+      { role: 'user', content: '用户问题' } as Message,
+    ],
+    toolTimings: {},
+  } as unknown as AgentState;
+  const lines = renderTranscript(state, 0, 60, false).split('\n');
+  const start = blockStartOf(lines, '用户问题');
+  assert.ok(start > 0, '用户消息应该在后面');
+  const above = lines[start - 1] ?? '';
+  assert.equal(stripTerminalSequences(above).trim(), '', '蓝块上面要是空的');
+  // 关键：那一行**不能带底色**，否则看着还是贴着。
+  assert.ok(!/\x1b\[4[78];/.test(above), `蓝块上面那行不该有底色：${JSON.stringify(above)}`);
+});
+
+test('首条用户消息前面不加空隙（开头凭空一段会看到）', () => {
+  const state = {
+    messages: [{ role: 'user', content: '第一句' } as Message],
+    toolTimings: {},
+  } as unknown as AgentState;
+  const lines = renderTranscript(state, 0, 60, false).split('\n');
+  const start = blockStartOf(lines, '第一句');
+  // 组件自己的 paddingY 会给上下各一行（都带底色），但**它之前**不该再多一行。
+  assert.equal(start, 0, `首条之前不该有空行，实际块首行下标 ${start}`);
+});
+
+test('多条用户消息之间都有空隙（每个蓝块上方都要，不只第二个）', () => {
+  const state = {
+    messages: [
+      { role: 'user', content: '问题一' } as Message,
+      { role: 'assistant', content: [{ type: 'text', text: '回答一' }] } as Message,
+      { role: 'user', content: '问题二' } as Message,
+      { role: 'assistant', content: [{ type: 'text', text: '回答二' }] } as Message,
+      { role: 'user', content: '问题三' } as Message,
+    ],
+    toolTimings: {},
+  } as unknown as AgentState;
+  const lines = renderTranscript(state, 0, 60, false).split('\n');
+  for (const text of ['问题一', '问题二', '问题三']) {
+    const start = blockStartOf(lines, text);
+    const above = lines[start - 1];
+    if (start === 0) continue; // 首条不需要空隙
+    assert.equal(stripTerminalSequences(above ?? '').trim(), '', `${text} 上方要空`);
+    assert.ok(!/\x1b\[4[78];/.test(above ?? ''), `${text} 上方那行不该有底色`);
+  }
+});
+
+test('工具块上方本来就有空隙（用户块现在与它们一致了）', () => {
+  const state = {
+    messages: [
+      { role: 'assistant', content: [{ type: 'text', text: '回答' }] } as Message,
+      { role: 'assistant', content: [{ type: 'toolCall', id: 'c', name: 'bash', arguments: { command: 'ls' } }] } as unknown as Message,
+      { role: 'toolResult', toolCallId: 'c', toolName: 'bash', content: [{ type: 'text', text: 'x' }], isError: false, timestamp: 0 } as unknown as Message,
+    ],
+    toolTimings: {},
+  } as unknown as AgentState;
+  const lines = renderTranscript(state, 0, 60, false).split('\n');
+  const start = blockStartOf(lines, '$ ls');
+  const above = lines[start - 1] ?? '';
+  assert.equal(stripTerminalSequences(above).trim(), '', '工具块上方要空');
+  assert.ok(!/\x1b\[4[78];/.test(above), `工具块上方不该有底色：${JSON.stringify(above)}`);
+});
 test('一次性模式（管道输出）不吐控制序列：OSC 8 超链接会被终端当乱码', () => {
   // 官方渲染器给文件路径加超链接（renderToolPath → linkPath），而管道里那些
   // `]8;;file:///…\…]8;;` 是**肉眼可见的乱码**。一次性模式承诺的是「纯文本」。
