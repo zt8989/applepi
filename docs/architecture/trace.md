@@ -145,8 +145,13 @@ HEAD → n7
 
 ### reset 会清掉它们
 
-`conversation.reset` 清空树（连同 prompt.* / model.init），但保留 `state.prompt` /
-`state.model` —— 那两块是会话级状态。见 [init](init.md)。
+`conversation.reset` 与 `conversation.restored` 都清空树（连同 prompt.* / model.init），
+但保留 `state.prompt` / `state.model` —— 那两块是会话级状态。见 [init](init.md)。
+
+`conversation.restored` 额外把「正在跑」的现场（`phase` / `streamingText` /
+`thinkingText` / `openLlmNodeId`）带着走，不重置成 `idle`：万一恢复动作发生在环还在跑的时候，
+把相位清成 idle 会让那条还在等 token 的流回来时被当成过期丢弃，而新的输入又能发出去 ——
+两处都跑，消息流会交叉。
 
 ### 统计不计入
 

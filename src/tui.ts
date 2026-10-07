@@ -206,6 +206,8 @@ async function main(): Promise<void> {
     cwd: args.cwd,
     // 把内核的「开新会话」交进去 —— TUI 只拿 store，换 id（于是换文件）要内核出手。
     newSession: () => kernel.newSession(),
+    // 恢复历史：也必须走内核（换 id + 记录器游标对齐），界面自己做会把历史重写一遍。
+    restoreSession: (file: string) => kernel.restoreSession(file),
     // 当前会话 id 也要给：`/clean` 删历史时得放行它（记录器正开着那个文件）。
     // 注意它是**取值**不是常量：开新会话后 id 会变。
     sessionId: () => kernel.sessionId,

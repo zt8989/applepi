@@ -21,7 +21,7 @@
  * 的产物、落盘频繁；会话文件是给人读的历史。混在一起的话「读一个会话」要先跳过一堆
  * 与它无关的记录。
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { ensureDir, sessionPath } from './config-home';
 import type { Message } from '@earendil-works/pi-ai';
@@ -221,6 +221,70 @@ export function readSessionMessages(file: string): Message[] {
     }
   }
   return out;
+}
+
+/**
+ * 只读 JSONL 的开头若干字节，逐行解析。
+ *
+ * ## 为什么需要它
+ *
+ * 会话文件里一条 toolResult 能有几百 KB（一次 `ls -la` 的输出、一次 grep 的全部命中），
+ * 而**列表界面要的只是首条用户消息** —— 它在文件的前几行。为了显示 124 个会话的标题
+ * 而把 18MB 全 parse 一遍（那是早先 `sessionTitle()` 干的事），就是「打开 /sessions 等一分钟」。
+ *
+ * `stopAfter` 是真正的省法：拿到想要的 entry 就不再往下读。标题那条路上第一条 user 消息
+ * 一命中就停，于是实际读量与**第一个问题有多长**成正比，与这个会话聊了多久无关。
+ *
+ * @param bytes     最多读多少字节（至少读到一整行，不截半行）
+ * @param stopAfter 返回 true 就停：不再解析后面的行，也不再继续读盘
+ */
+export function readJsonlHead(
+  file: string,
+  bytes: number,
+  options: { stopAfter?: (entry: SessionEntry) => boolean } = {},
+): { header: SessionHeader | null; content: SessionEntry[] } {
+  let fd: number | undefined;
+  let text: string;
+  try {
+    fd = openSync(file, 'r');
+    const buf = Buffer.allocUnsafe(bytes);
+    const read = readSync(fd, buf, 0, bytes, 0);
+    text = buf.toString('utf8', 0, read);
+  } catch {
+    return { header: null, content: [] };
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // 读失败后的清理失败不值得抛。
+      }
+    }
+  }
+
+  // 末尾那一行可能被截断了（读盘只取了前 N 字节），不能当半行 JSON.parse ——
+  // 截断的行本来就可能 parse 失败，而让它「失败就被跳过」等于把一行正常内容丢掉。
+  const lastNewline = text.lastIndexOf('\n');
+  const usable = lastNewline < 0 ? '' : text.slice(0, lastNewline);
+
+  let header: SessionHeader | null = null;
+  const content: SessionEntry[] = [];
+  for (const line of usable.split('\n')) {
+    if (line.trim() === '') continue;
+    let parsed: SessionEntry;
+    try {
+      parsed = JSON.parse(line) as SessionEntry;
+    } catch {
+      continue; // 崩溃截断的半行：跳过，不让整个会话读不出来。
+    }
+    if (parsed.type === 'session') {
+      header = header ?? (parsed as unknown as SessionHeader);
+      continue;
+    }
+    content.push(parsed);
+    if (options.stopAfter?.(parsed)) break;
+  }
+  return { header, content };
 }
 
 /** 会话的第一句话（列表里做标题用）。 */

@@ -326,6 +326,74 @@ test('session.restored 只加消息，**不动相位也不动轨迹树**', () =>
   assert.equal(state.trace.order.length, nodesBefore, '轨迹树不动（历史属于那一轮）');
 });
 
+// ── conversation.restored：一次 dispatch 恢复整批（恢复必须**快**） ──
+
+test('conversation.restored：一次 dispatch 灌完整批（逐条灌是 O(N²) 重渲染）', () => {
+  const reducer = createAgentReducer({});
+  let state: AgentState = createInitialState({
+    systemPrompt: 'p',
+    providerName: 'p',
+    modelId: 'm',
+    toolNames: [],
+    sessionId: 'old',
+  });
+  state = reducer(state, { type: 'user.message', text: '当前会话的对话' }) as AgentState;
+  const phaseBefore = state.phase;
+
+  const history = [userMessage('旧的甲'), assistantMessage('旧的乙'), userMessage('旧的丙')];
+  let dispatches = 0;
+  const counted = (a: AgentAction): AgentState => {
+    dispatches += 1;
+    return reducer(state, a) as AgentState;
+  };
+  state = counted({ type: 'conversation.restored', sessionId: 'restored', messages: history });
+
+  assert.equal(dispatches, 1, '恢复整批只 dispatch 一次');
+  assert.deepEqual(
+    state.messages.map((m) => m.role),
+    ['user', 'assistant', 'user'],
+    '整批按原顺序进了 messages',
+  );
+  assert.equal(state.trace.sessionId, 'restored', '恢复也换会话 id（之后的消息写进那个文件）');
+  assert.equal(
+    state.phase,
+    phaseBefore,
+    '相位**带着走**（不重置成 idle）：万一环正在跑，清成 idle 会让那条流回来时被当过期丢弃',
+  );
+  assert.equal(state.trace.sessionId, 'restored', '恢复也换会话 id（之后的消息写进那个文件）');
+  assert.equal(state.trace.order.length, 0, '轨迹树换成新的空树（落盘换文件，不混上一轮的节点）');
+});
+
+test('conversation.restored 与「逐条版」状态等价（除了刻意换掉的 sessionId）', () => {
+  const reducer = createAgentReducer({});
+  const history = [userMessage('甲'), assistantMessage('乙'), userMessage('丙')];
+  const mk = (): AgentState =>
+    createInitialState({
+      systemPrompt: 'p',
+      providerName: 'p',
+      modelId: 'm',
+      toolNames: [],
+      sessionId: 'old',
+    });
+
+  // 旧路：conversation.reset（不带 id）+ 逐条 session.restored。
+  let old = mk();
+  old = reducer(old, { type: 'conversation.reset' }) as AgentState;
+  for (const message of history) {
+    old = reducer(old, { type: 'session.restored', message }) as AgentState;
+  }
+
+  const now = reducer(mk(), {
+    type: 'conversation.restored',
+    sessionId: 'old',
+    messages: history,
+  }) as AgentState;
+
+  assert.deepEqual(now.messages, old.messages, 'messages 完全一致');
+  assert.equal(now.phase, old.phase, '相位一致');
+  assert.equal(now.persistedSeq, old.persistedSeq, '轨迹落盘游标要带着走（别把旧轨迹重写一遍）');
+});
+
 // ── 开新会话：必须换文件 ──
 
 test('conversation.reset 带 sessionId 时轨迹树也换 id（于是换文件）', () => {

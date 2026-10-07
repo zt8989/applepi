@@ -749,6 +749,59 @@ const transitions: TransitionHandlers = {
       persistedSeq: state.persistedSeq,
     };
   },
+
+  /**
+   * 恢复历史：清对话 + 换会话 id + **一次**灌完整批消息。
+   *
+   * 结果与「`conversation.reset` + N 条 `session.restored`」完全一样，但只 dispatch 一次
+   * —— 界面每 dispatch 一次就重渲染整段对话，逐条灌是 O(N²)，一条灌是 O(N)。
+   *
+   * 为什么 `conversation.reset` 的那些字段一个都不能少：轨迹树要换 id（于是换落盘文件）、
+   * `persistedSeq` 要带过来（那条游标属于轨迹文件，不是这次对话的）。漏掉任一个，
+   * 恢复之后发出去的第一句话要么写进旧轨迹文件、要么把旧轨迹重写一遍。
+   *
+   * 不动 `phase` / `trace`（除了换 id 之外）：这些消息是「上次发生的」，开新节点或推进 tip
+   * 会把历史伪装成这一轮 —— 与 `session.restored` 同一个理由。
+   *
+   * ## 相位为什么要带着走（不能只靠 createInitialState）
+   *
+   * `createInitialState` 给的是 `idle`。如果恢复动作把相位一并清成 idle，而恢复之前环
+   * 正在跑（比如「上一回合没结束就切会话」），那么：正在等 token 的那条流回来时看到
+   * 相位是 idle → 当成过期丢弃；而新的输入又可以发出去 —— 于是**两处都跑**，
+   * 消息流会交叉。
+   *
+   * 恢复历史在界面上确实要求相位是 idle（`/sessions` 里「上一回合没结束」会先拒绝），
+   * 但那条守卫属于界面与内核的入口策略，不是这条迁移的职责 —— reducer 不该假设
+   * 「没人会趁环在跑的时候恢复」。所以这里原样带着走。
+   */
+  'conversation.restored': (state, action) => {
+    const fresh = createInitialState({
+      systemPrompt: state.prompt.systemPrompt,
+      providerName: state.model.provider,
+      modelId: state.model.modelId,
+      ...(state.model.thinkingLevel !== undefined
+        ? { thinkingLevel: state.model.thinkingLevel }
+        : {}),
+      toolNames: state.prompt.tools.map((tool) => tool.name),
+      maxTurns: state.maxTurns,
+      llmTimeoutMs: state.llmTimeoutMs,
+      maxLlmAttempts: state.maxLlmAttempts,
+      sessionId: action.sessionId,
+    });
+    return {
+      ...fresh,
+      // 会话级的三块带着走：换会话不等于换模型/系统提示。
+      prompt: state.prompt,
+      model: state.model,
+      persistedSeq: state.persistedSeq,
+      // 「正在跑」的现场也带着走（见上面的注释）。
+      phase: state.phase,
+      streamingText: state.streamingText,
+      thinkingText: state.thinkingText,
+      openLlmNodeId: state.openLlmNodeId,
+      messages: action.messages,
+    };
+  },
 };
 
 /** 没有登记的 action 就是「纯状态变更」，不产生 Cmd。 */

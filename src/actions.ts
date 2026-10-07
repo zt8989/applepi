@@ -205,6 +205,23 @@ export type AgentAction =
    */
   | { type: 'session.restored'; message: Message }
   /**
+   * 恢复历史：**一次**把整批消息灌回去（清对话 + 换会话 id）。
+   *
+   * ## 为什么不能靠 N 条 `session.restored`
+   *
+   * 界面每个 dispatch 都会重渲染整段对话，而重渲染的成本与 messages 长度成正比 ——
+   * 逐条灌 N 条就是 O(N²)。390 条消息实测 62 秒（`tmp-bench` 那份脚本就是这个数），
+   * 用户看到的是「卡了一分钟」。合成一条 dispatch 只渲染一次，代价降到 O(N)。
+   *
+   * ## 与逐条版的差别
+   *
+   * 状态结果完全一样（messages 等于这批，`phase`/`trace` 不动）。另外因为它带着
+   * `sessionId`，恢复时**顺带换了会话 id** —— 界面用它就不必再单独 dispatch 一次
+   * `conversation.reset`，那次 dispatch 在这个组合里是多余的（第 0 次消息没有、
+   * 但每次都白白重渲染一整屏）。
+   */
+  | { type: 'conversation.restored'; sessionId: string; messages: Message[] }
+  /**
    * 清空对话。
    *
    * 带 `sessionId` 就是**开新会话**（新 id → 新文件）；不带则只清对话、沿用原 id

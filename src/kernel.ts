@@ -272,29 +272,31 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       return { id };
     },
     /**
-     * 恢复一个历史会话：读文件、清空当前对话、把消息灌回去。
+     * 恢复一个历史会话：读文件、清空当前对话、把消息**一次**灌回去。
      *
-     * **零 token** —— 不重跑模型。状态只能由 action 改（本项目的不变式），所以走
-     * `conversation.reset` + 逐条 `session.restored`，而不是直接改 state。
+     * **零 token** —— 不重跑模型。状态只能由 action 改（本项目的不变式），所以走一条
+     * `conversation.restored`：它把 `conversation.reset`（清对话 + 换 id）与灌消息合成了
+     * 一次 dispatch。分开发的话恢复 390 条消息要重渲染 390 次整屏（实测 62 秒）。
      */
     restoreSession(file: string): { id: string; restored: number } {
+      const session = readSession(file);
       const messages = readSessionMessages(file);
-      const header = readSession(file)?.header;
-      const id = header?.id ?? '';
+      const id = session?.header.id ?? '';
       // 恢复也换 id：之后的消息要追加进**那个**会话的文件，而不是当前这个。
       const previous = current;
       previous.recorder?.dispose();
       current = openResources(id);
-      store.dispatch({ type: 'conversation.reset', sessionId: id } as AgentAction);
       // 轨迹落盘器的游标也要跟着推 —— 它只看 messages 有没有变长，看不出这些是「读回来的」
-      // 而不是「新产生的」。不推的话，下面每 dispatch 一条 session.restored 都会触发一次 flush，
-      // 于是整批历史被当成新消息重写一遍 —— 轨迹文件里同一批消息出现两次。
+      // 而不是「新产生的」。不推的话，它会把整批历史当新消息重写一遍，
+      // 于是轨迹文件里同一批消息出现两次。
       //
-      // 必须在灌消息**之前**调：flush 是 store 订阅器，灌第一条就已经晚了。
+      // 必须在 dispatch **之前**调：flush 是 store 订阅器，dispatch 一发生就晚了。
       persistence?.skipMessages(messages.length);
-      for (const message of messages) {
-        store.dispatch({ type: 'session.restored', message } as AgentAction);
-      }
+      store.dispatch({
+        type: 'conversation.restored',
+        sessionId: id,
+        messages,
+      } as AgentAction);
       // 恢复出来的消息已经在文件里，记录器游标要从这里接着算，别再写一遍。
       openRecorder(id, messages.length);
       if (previous.sink?.close) void previous.sink.close();

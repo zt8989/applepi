@@ -8,13 +8,59 @@
  */
 import { SelectList, Text, type SelectItem, type TuiInputListener, type ViewportTUI } from '@earendil-works/pi-tui';
 import { listSessions, type SessionSummary } from '../config-home';
-import { readSessionMessages, sessionTitle } from '../session-file';
+import { readJsonlHead, readSessionMessages, type MessageEntry } from '../session-file';
 
 const useColor = !process.env.NO_COLOR;
 const paint = (code: string, text: string) => (useColor ? `\x1b[${code}m${text}\x1b[0m` : text);
 const dim = (t: string) => paint('2', t);
 const cyan = (t: string) => paint('36', t);
 const bold = (t: string) => paint('1', t);
+
+/**
+ * 首条用户消息的文本 —— 会话标题。
+ *
+ * ## 为什么**只能读文件开头那一截**
+ *
+ * 标题是「用户说的第一句话」，而第一句 user 消息在**文件的前几行**：一条 user 消息通常
+ * 几十到几百字节，往后才是那些几百 KB 的 toolResult。
+ *
+ * 早先这里是 `sessionTitle(file)` → `readSessionMessages(file)` → **把整个会话 parse 一遍**，
+ * 而且是对 `listSessions()` 里的**每一个**会话都做一遍。18MB 的 sessions/ 就是 18MB 的
+ * JSON.parse，而且全在弹窗弹出前的同步路径上 —— 于是「打开 /sessions 要等一分钟」。
+ *
+ * 现在只读前 512KB，并且**遇到第一条 user 消息就停**（不数后面还有几行），
+ * 标题拿不到就退回 `(空会话)`—— 列表那一行的副标题本来就是参考信息，不值得为它读整个文件。
+ */
+const TITLE_HEAD_BYTES = 512 * 1024;
+
+/** content 可能是纯字符串或片段数组；取纯文本（图片只占位）。 */
+function contentToText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((c) => (c && typeof c === 'object' && 'text' in c ? String((c as { text: unknown }).text) : '[image]'))
+      .join(' ');
+  }
+  return '';
+}
+
+/** 会话的第一句话（列表里做标题用）。只读文件开头。 */
+function sessionTitleFromHead(file: string): string {
+  const { content } = readJsonlHead(file, TITLE_HEAD_BYTES, {
+    stopAfter: (entry) =>
+      entry.type === 'message' &&
+      (entry as MessageEntry).message?.role === 'user',
+  });
+  for (const entry of content) {
+    if (entry.type !== 'message') continue;
+    const message = (entry as MessageEntry).message;
+    if (!message || message.role !== 'user') continue;
+    const text = typeof message.content === 'string' ? message.content : contentToText(message.content);
+    const line = text.trim().split('\n')[0] ?? '';
+    return line.length > 40 ? `${line.slice(0, 39)}…` : line;
+  }
+  return '(空会话)';
+}
 
 /** 相对时间（「3 分钟前」）；超过 7 天就显示日期。 */
 function whenLabel(mtimeMs: number, now = Date.now()): string {
@@ -55,7 +101,7 @@ export function openSessionPicker(options: SessionPickerOptions): () => void {
 
   const items: SelectItem[] = sessions.map((s) => ({
     value: s.id,
-    label: sessionTitle(s.file),
+    label: sessionTitleFromHead(s.file),
     // 副标题：时间 + cwd 末段 + 条数 —— 光看标题分不清是哪次。
     description: `${whenLabel(s.mtimeMs)}  ${dim(shortCwd(s.cwd))}  ${dim(`${s.entries} 条`)}`,
   }));
