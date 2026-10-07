@@ -8,7 +8,7 @@
 | 包 | 给模型什么 |
 | --- | --- |
 | `@juicesharp/rpiv-ask-user-question` | 结构化多选对话框（多问题 tab、notes、`preview` 侧栏、折叠） |
-| `pi-web-access` | web 搜索 / 抓取 / PDF 提取 / GitHub / 视频理解（5 个工具） |
+| `pi-web-access` | web 搜索 / 抓取 / PDF 提取 / GitHub / 视频理解（5 个工具；答案与摘要要自己调模型） |
 
 ```bash
 pi install npm:@juicesharp/rpiv-ask-user-question   # 与 pi 共用同一份 settings.json
@@ -81,12 +81,65 @@ typebox                     => NOT RESOLVABLE
 `setWidget` / `setFooter` / `setHeader`（要接 pi 的应用层布局，见
 [surfaces](surfaces.md)「为什么不用 pi 自己的 InteractiveMode」）。
 
-## 第二个扩展要到的另两样
+## 三个接缝
 
-`pi-web-access` 比第一个重得多（110 个源文件、209 个依赖、编译成 1MB bundle），而且
-要了第一样**没要过**的东西。
+`pi-web-access` 比第一个重得多（110 个源文件、209 个依赖、编译成 1MB bundle），
+要了第一批**没要过**的东西。
 
-### `pi.getAllTools()`：得给真的
+| 它要什么 | 早先的错法 | 症状 |
+| --- | --- | --- |
+| `getAllTools()` | `[]` | 「模型永远调不了 web_search」，看不出哪里不对 |
+| `modelRegistry` | `undefined` | 摘要/答案一触发就 TypeError |
+| `ctx.model` | `undefined` | 「当前模型不合格」，而真因是宿主没给 |
+
+### ① `ctx.modelRegistry`（摘要/答案要自己调模型）
+
+`pi-web-access` 的**答案与摘要**要自己调模型（抓完页面要一个模型来读它、搜索结果要一个
+模型来总结）。它拿凭证**只认** `ctx.modelRegistry`：
+
+```js
+const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+if (!auth.ok || !auth.apiKey) throw new Error(`No API key available for ${model.provider}/${model.id}`);
+```
+
+那个 ctx 早先是 `undefined`（pi 的 runner 构造器第 4、5 个参数），于是这些功能一被触发就是
+`Cannot read properties of undefined (reading 'getApiKeyAndHeaders')`。
+
+**用官方的 `ModelRegistry`，不自己实现。** pi 自己的说明写着它是「给扩展用的同步兼容
+门面」，内部就是一层薄薄的方法转发。而我们**已经有**那个 `ModelRuntime`
+（`provider.ts` 的主路径，自带 44 个内置 provider 与 1500+ 模型目录，见
+[provider](provider.md)）。所以 `extension-models.ts` 全文就是：
+
+```ts
+new ModelRegistry(runtime.runtime)
+```
+
+凭证优先级、OAuth、`baseUrl` 拼接、headers —— 全是官方那份逻辑。自己写一遍就是一份会漂移的
+副本，而漂移的代价是「pi 那边能拿到 key，这边拿不到」。
+
+实测（主路径 + 真配置）：
+
+```
+getAll().length                  = 1545
+find(workbuddy, cn:space-bunny)  = workbuddy/cn:space-bunny
+getApiKeyAndHeaders(当前模型)      = { ok: true, hasKey: true }
+```
+
+**`ctx.model` 也给真的**（之前 `undefined`）：扩展用它判**能不能用当前模型自带的 web 搜索**
+（OpenAI 的 hosted search 只对 `openai` / `openai-codex` 那些开放），还拿它算 opencode 的
+session header。给 `undefined` 的话那些功能一律「当前模型不合格」—— 而用户看不出是自己
+模型的问题。
+
+`ctx.scopedModels` 保持 `[]`：扩展的 `isModelInScope` 是 `scopedModels.length === 0 || 匹配`，
+也就是 `[]` 的语义是**不限制**，与本项目不接 pi 的 `--models` scoping 一致。
+**不是**「一个模型都没有」。
+
+**降级路径上不造它**：`ModelRuntime.create()` 失败时 `provider.ts` 会退回手写装配
+（`runtime.runtime` 是 `undefined`）。那时返回 `undefined` 而不是「一个说没有 key 的
+registry」—— 后者会让扩展回一句「No API key available for …」，而真因是**降级了**。
+前者让它在真用的时候炸在一个说人话的地方。
+
+### ② `pi.getAllTools()`（`web_enable` 的前提）
 
 它有个 `web_enable`（「动态启用 web 工具」的 loader）内部这么写：
 
@@ -120,6 +173,16 @@ pi.setActiveTools([...new Set([...pi.getActiveTools(), ...names])]);
 `toolSchemas()` 原样读它）。早先在探针里读到空数组，于是误报「still inactive」。
 
 这不是巧合而是设计：扩展问「现在有哪些工具」，答案必须是「模型看得见哪些」。
+
+### ③ `ctx.sessionManager`：仍然不接
+
+pi 的会话层是它的**应用层**，本项目刻意不接（见
+[surfaces](surfaces.md)「为什么不用 pi 自己的 InteractiveMode」）。
+
+扩展若去读那个 ctx 的成员（`pi-web-access` 用它读会话条目以重建上下文、算
+opencode 的 session header），会在那里炸出「cannot read property of undefined」—— 那比
+给一个**会静默说谎**的空实现好得多：后者会让扩展以为「会话里什么都没有」而改走另一条
+路，症状离真因很远。
 
 ## 不接的：命令与快捷键
 
@@ -240,20 +303,21 @@ ask_user_question
 （官方语义：`buildSystemPrompt` 会过滤掉没有 snippet 的工具）。那与「工具在注册表里」
 矛盾 —— 用户会以为能用，模型那边根本没这个工具。所以那时报出来。
 
-| 扩展 | 工具 | UI | 命令/快捷键 |
-| --- | --- | --- | --- |
-| `rpiv-ask-user-question` | ✅ | ✅ `ui.custom()` overlay | — |
-| `pi-web-access` | ✅ | — | ❌ 明说不接 |
+| 扩展 | 工具 | UI | 模型/凭证 | 命令/快捷键 |
+| --- | --- | --- | --- | --- |
+| `rpiv-ask-user-question` | ✅ | ✅ `ui.custom()` overlay | — | — |
+| `pi-web-access` | ✅ | — | ✅ `modelRegistry` / `ctx.model` | ❌ 明说不接 |
 
-## 五个文件
+## 六个文件
 
 | 文件 | 干什么 |
 | --- | --- |
 | `src/extension-host.ts` | 装扩展：解包路径、`loadExtensions`、runner 绑定、工具适配 |
 | `src/extension-ui.ts` | `ctx.ui`：`custom()` 的 overlay 宿主、`notify`、raw input |
 | `src/extension-tools.ts` | pi `ToolDefinition` → 本项目 `AgentTool`；工具集读/写 |
+| `src/extension-models.ts` | `ctx.modelRegistry`：官方的 `ModelRegistry` 门面 |
 | `src/extension-prompt.ts` | `before_agent_start` 的接线与两条守卫 |
-| `test/extension-host.test.ts` | 用**真扩展**测（见下） |
+| `test/extension-host.test.ts` | 用**真扩展** + 一个探针工具测（见下） |
 
 ## 测试为什么用真扩展
 
@@ -285,7 +349,13 @@ ask_user_question
 
 `pi-web-access` 那几条里最关键的是 `getAllTools` 那条：它走 `web_enable` 的**真实**
 路径（`getAllTools()` → `setActiveTools()` → 回头 `getActiveTools()` 核对），
-断言结果里**不出现** `unavailable` 与 `still inactive`。那正是两个真实回归。
+断言结果里**不出现** `unavailable` 与 `still inactive`。那正是那个真实回归。
+
+`ctx.model` / `ctx.modelRegistry` 那条用**内联扩展工厂 + 一个探针工具**问「你那个
+registry 能不能拿到凭证」——因为真扩展把摘要模型解析包在一个 UI 面板里（点「生成摘要」
+才走），而那条路要有真 key + 真页面。探针拿到的 ctx 与真扩展**逐字同形**（都由
+`ExtensionRunner.createToolContext` 造），测的是同一段宿主代码。断言里有 `hasKey`
+——「真的拿到一个 key」而不只是「拿到一个对象」。
 
 ## 相关
 
