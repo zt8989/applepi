@@ -51,11 +51,12 @@ import { DefaultPackageManager } from '@earendil-works/pi-coding-agent/dist/core
 import { SettingsManager } from '@earendil-works/pi-coding-agent';
 import type { AgentStore } from './store';
 import type { AgentTool, AgentToolResult } from './agent-tool';
-import { getTool, registerExtraTools } from './tools';
+import { getTool, getTools, registerExtraTools } from './tools';
 import { adaptExtensionTool, activeToolsFromState, applyActiveTools } from './extension-tools';
 import { createHostUi, type ExtensionHostUi, type HostUiOptions } from './extension-ui';
 import { notifyBeforeAgentStart, type BeforeAgentStartHandler } from './extension-prompt';
 import { configHome } from './config-home';
+import type { ToolInfo } from '@earendil-works/pi-coding-agent';
 import type { PromptToolLike } from './system-prompt';
 
 /** 装好的扩展宿主。 */
@@ -316,7 +317,11 @@ function bindCore(
       getSessionName: () => undefined,
       setLabel: () => {},
       getActiveTools: () => activeToolsFromState(store.getState()),
-      getAllTools: () => [],
+      // **真的有**，不是 `[]`。`pi-web-access` 的 `web_enable`（动态启用 web 工具的
+      // loader 工具）就靠它判断「这些工具到底在不在」：`[]` 会让它以为一个都没有，
+      // 于是回一句「Cannot enable unavailable tools: web_search, ...」——
+      // 而那些工具明明就在注册表里。症状是「模型永远调不了 web_search」。
+      getAllTools: () => allToolsInfo(),
       getSettings: () => ({}) as never,
       setActiveTools: (names: string[]) => {
         applyActiveTools(store, names);
@@ -356,6 +361,27 @@ function bindCore(
     // 藏起来 —— 而它已经写在本文件与 `extension-ui.ts` 的注释里了。
     runner.setUIContext(createHostUi(uiOptions) as never, 'tui');
   }
+}
+
+/**
+ * 官方的 `getAllTools()` 该看到什么 —— 就是**本项目的工具注册表**。
+ *
+ * 官方那份 `ToolInfo` 还带 `exposure` / `namespace` / `annotations` / `sourceInfo`。
+ * 本项目只给 `exposure` 真的有意义的那个值（`direct`），其余给中性值：
+ *
+ * - `namespace` / `annotations`：MCP 与 codemode 那些机制的输入，本项目不接。
+ * - `sourceInfo`：只用于显示（「这个工具来自哪个扩展」）。给一个合法形状就行 ——
+ *   给 undefined 会让扩展在 `getAllTools().find(...)` 之后去读 `.sourceInfo.…`
+ *   时炸在一个假字段上，而那个堆栈与真因隔了三层。
+ */
+function allToolsInfo(): ToolInfo[] {
+  return getTools().map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters as ToolInfo['parameters'],
+    exposure: 'direct' as const,
+    sourceInfo: { source: 'local' } as ToolInfo['sourceInfo'],
+  }));
 }
 
 /** 目录的短一点显示（错误信息里全路径太长，没人读得下去）。 */

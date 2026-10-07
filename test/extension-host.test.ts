@@ -25,7 +25,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { mkdtempSync } from 'node:fs';
@@ -49,16 +49,22 @@ const restoreHome = (): void => {
   if (isolatedDir !== undefined) process.env['PI_CODING_AGENT_DIR'] = isolatedDir;
 };
 
-const PACKAGE_ENTRY = path.join(
-  realAgentDir,
-  'npm',
-  'node_modules',
-  '@juicesharp',
-  'rpiv-ask-user-question',
-  'index.ts',
-);
-/** 扩展真的装着吗？离线机器上跳过，而不是让 CI 看起来代码坏了。 */
-const hasPackage = existsSync(PACKAGE_ENTRY);
+/**
+ * 某个扩展包**真的装着**吗？离线机器上要 skip，而不是硬失败 ——
+ * 那会让人以为代码坏了，而这个文件里一半的断言是关于「装着的扩展」。
+ *
+ * `rpiv-ask-user-question` 是**源码**分发（入口 `index.ts`），`pi-web-access` 是
+ * **编译后的 bundle**（入口 `dist/index.js`）。两者都认 —— 「扩展可能是 TS 也可能是
+ * 编译产物」这件事本身就该由这段代码说清楚。
+ */
+function hasPackage(...names: string[]): boolean {
+  return names.some((n) => existsSync(path.join(realAgentDir, 'npm', 'node_modules', n)));
+}
+
+/** `rpiv-ask-user-question`（结构化多选对话框）。 */
+const hasAskUser = hasPackage('@juicesharp', 'rpiv-ask-user-question');
+/** `pi-web-access`（web 搜索 / 抓取 / PDF / GitHub）。 */
+const hasWebAccess = hasPackage('pi-web-access');
 
 /** 装扩展前的工具表（测试要反复清干净，所以先存一份）。 */
 function freshStore(): ReturnType<typeof createAgentStoreWith> {
@@ -203,14 +209,15 @@ test('扩展：execute 的第五个参数 ctx 是真的（扩展靠它开对话�
   assert.equal(adaptHasCtxParam, true);
 });
 
-test('扩展：ask_user_question 真的装上了、进了 prompt 片段', { skip: !hasPackage && '没装 @juicesharp/rpiv-ask-user-question（离线机器）' }, async () => {
+test('扩展：ask_user_question 真的装上了、进了 prompt 片段', { skip: !hasAskUser && '没装 @juicesharp/rpiv-ask-user-question（离线机器）' }, async () => {
   useRealHome();
   try {
     const { store } = freshStore();
     const host = await loadExtensionHost({ store, cwd: process.cwd() });
     registerExtraTools([]); // 别让这次的注册表状态漏到别的测试
 
-    assert.equal(host.loaded, 1, `应装上 1 个扩展，实际：${JSON.stringify(host.errors)}`);
+    // 装的**不止**一个时用 includes 而不是等���；两个扩展都装着是正常配置。
+    assert.ok(host.loaded >= 1, `应装上 ≥1 个扩展，实际 0：${JSON.stringify(host.errors)}`);
     assert.deepEqual([...host.errors], [], '装载不该有诊断');
 
     const names = host.tools.map((t) => t.name);
@@ -232,7 +239,7 @@ test('扩展：ask_user_question 真的装上了、进了 prompt 片段', { skip
   }
 });
 
-test('扩展：无 UI 时 ask_user_question 自己降级（而不是崩）', { skip: !hasPackage && '没装 @juicesharp/rpiv-ask-user-question' }, async () => {
+test('扩展：无 UI 时 ask_user_question 自己降级（而不是崩）', { skip: !hasAskUser && '没装 rpiv-ask-user-question' }, async () => {
   useRealHome();
   try {
     const { store } = freshStore();
@@ -271,7 +278,7 @@ test('扩展：无 UI 时 ask_user_question 自己降级（而不是崩）', { s
   }
 });
 
-test('扩展：给真 UI 时 custom() 真的把浮层挂上去（overlay 宿主成立）', { skip: !hasPackage && '没装 @juicesharp/rpiv-ask-user-question' }, async () => {
+test('扩展：给真 UI 时 custom() 真的把浮层挂上去（overlay 宿主成立）', { skip: !hasAskUser && '没装 rpiv-ask-user-question' }, async () => {
   useRealHome();
   try {
     const { store } = freshStore();
@@ -401,7 +408,7 @@ test('扩展：before_agent_start 在 idle 时发，handler 抛错不炸环', as
   assert.deepEqual(errors, ['boom'], '抛错要被记成诊断，而不是炸掉整轮对话');
 });
 
-test('扩展：ask_user_question 的 before_agent_start 协调器在本项目是 no-op', { skip: !hasPackage && '没装' }, async () => {
+test('扩展：ask_user_question 的 before_agent_start 协调器在本项目是 no-op', { skip: !hasAskUser && '没装 rpiv-ask-user-question' }, async () => {
   // 钉住「工具集不中途变」这个决定：协调器在 hasUI=true 时该什么都不做。
   // 真去 assert「没改」需要观察 state —— 而 applyActiveTools 本来就是空实现。
   // 这里验的是它**跑得起来**且**不报错**（那条协调器读的是 ctx.hasUI）。
@@ -436,6 +443,130 @@ test('扩展：ask_user_question 的 before_agent_start 协调器在本项目是
     restoreHome();
   }
 });
+
+// ══════════════ pi-web-access（web 搜索 / 抓取）══════════════
+//
+// 这个扩展要**第一个没要过**的两样东西：
+//
+//   1. `pi.getAllTools()` —— `web_enable` 靠它判断「那些 web 工具在不在」。早先这里
+//      填 `[]`，于是它回「Cannot enable unavailable tools: web_search, ...」——
+//      而那些工具明明就在注册表里。症状：模型永远调不了 web_search，而模型**看不出**
+//      哪里不对（`web_enable` 只是一句「unavailable」）。
+//   2. 命令与快捷键（`registerCommand` × 4、`registerShortcut` × 2）—— 装上不报错，
+//      但本项目没有 `/websearch` 之类的命令与键位，界面里也没有反馈。
+//      详见下面「命令与快捷键不接」那条。
+//
+// 它的**真正的**硬依赖是 API key（exa / tavily / brave…）。所以这里**不打网络**：
+// 只验宿主面（工具装上、参数校验、getAllTools 真的返回注册表）。
+
+test('扩展：pi-web-access 装上，5 个 web 工具进注册表', { skip: !hasWebAccess && '没装 pi-web-access' }, async () => {
+  useRealHome();
+  try {
+    const { store } = freshStore();
+    const host = await loadExtensionHost({ store, cwd: process.cwd() });
+    registerExtraTools([]);
+
+    assert.ok(host.loaded >= 1, `应装上扩展：${JSON.stringify(host.errors)}`);
+    assert.deepEqual([...host.errors], [], '装载不该有诊断');
+
+    const names = host.tools.map((t) => t.name);
+    for (const want of ['web_search', 'fetch_content', 'source_check']) {
+      assert.ok(names.includes(want), `缺工具 ${want}：${names.join(',')}`);
+    }
+    // 全部都要 promptSnippet —— 官方语义是「没有 snippet 就不进 prompt」，而
+    // extension-host.ts 会为那种情况报一条诊断（上面断言 errors 为空已经盖住了）。
+    for (const want of ['web_search', 'fetch_content']) {
+      assert.ok(
+        host.promptTools.some((t) => t.name === want),
+        `${want} 该有 promptSnippet（否则模型不知道它存在）`,
+      );
+    }
+  } finally {
+    restoreHome();
+  }
+});
+
+test('扩展：pi-web-access 的参数校验走我们这条执行路径（不报宿主错）', { skip: !hasWebAccess && '没装 pi-web-access' }, async () => {
+  useRealHome();
+  try {
+    const { store } = freshStore();
+    await loadExtensionHost({ store, cwd: process.cwd() });
+    installPrompt(store);
+
+    // 少参数时扩展自己报错（**不是**宿主抛的）—— 这是「参数校验这条路通着」的意思。
+    const r = await getTool('web_search')!.execute('c1', {}, undefined, undefined);
+    const text = r.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
+    assert.match(text, /query/i, `该说清缺什么参数，而不是崩：${text}`);
+    assert.ok(
+      !/Cannot read properties of/.test(text),
+      '不该是宿主侧的 TypeError（那说明 ctx / tools 缺了什么）',
+    );
+    registerExtraTools([]);
+  } finally {
+    restoreHome();
+  }
+});
+
+test('扩展：getAllTools 真的返回注册表（web_enable 的前提）', { skip: !hasWebAccess && '没装 pi-web-access' }, async () => {
+  // 这条是**回归钉子**：`getAllTools` 曾被填成 `[]`，而 `web_enable` 用它判断工具在不在。
+  useRealHome();
+  try {
+    const { store } = freshStore();
+    await loadExtensionHost({ store, cwd: process.cwd() });
+    installPrompt(store);
+
+    // 走 `web_enable` 这条真实路径：它内部 `getAllTools()` → `setActiveTools()` →
+    // 再 `getActiveTools()` 核对。早先 `getAllTools()` 是 `[]`，于是第一步就报
+    // 「Cannot enable unavailable tools」。
+    const r = await getTool('web_enable')!.execute('c1', {}, undefined, undefined);
+    const text = r.content.map((c) => (c.type === 'text' ? c.text : '')).join('');
+    assert.ok(
+      !/unavailable/i.test(text),
+      `web_enable 说工具不可用 —— 而它们在注册表里：${text}`,
+    );
+    assert.ok(
+      !/still inactive/i.test(text),
+      `web_enable 说启用后仍不活跃（getActiveTools 读的是空表）：${text}`,
+    );
+    registerExtraTools([]);
+  } finally {
+    restoreHome();
+  }
+});
+
+test('扩展：pi-web-access 的命令与快捷键不接（明说，不假装能用）', { skip: !hasWebAccess && '没装 pi-web-access' }, async () => {
+  // 它注册了 4 个命令（`/websearch` `/curator` `/google-account` `/search`）与 2 个快捷键。
+  // 本项目**不接**它们：命令表是 `tui/app.ts` 里的 `SLASH_COMMANDS`（唯一真相），
+  // 快捷键是 `tui/app.ts` 里逐个 `matchesKey` 判的。
+  //
+  // **为什么明说而不是接**：命令 handler 在 pi 那边能拿到 `ExtensionCommandContext`
+  // （waitForIdle / newSession / fork / navigateTree…），本项目一个都没实现。接了就会
+  // 在 handler 里炸。而更糟的是**假装能用**——补全里出现 `/websearch`、敲下去什么
+  // 都不发生。
+  //
+  // 所以这条测试钉住的是「**没有**静默半吊子」：装它不会往 `SLASH_COMMANDS` 里塞东西。
+  useRealHome();
+  try {
+    const { store } = freshStore();
+    const before = getCommands();
+    await loadExtensionHost({ store, cwd: process.cwd() });
+    assert.deepEqual(getCommands(), before, '扩展命令不该悄悄进补全表');
+    registerExtraTools([]);
+  } finally {
+    restoreHome();
+  }
+});
+
+/** 本项目界面认的斜杠命令（`tui/app.ts` 的 `SLASH_COMMANDS`，唯一真相）。 */
+function getCommands(): string[] {
+  // 从界面模块读而不是重新抄一份：抄一份就会漂移，而那个漂移正是这条测试要防的。
+  const src = readFileSync(
+    path.join(import.meta.dirname, '..', 'src', 'tui', 'app.ts'),
+    'utf8',
+  );
+  const block = src.slice(src.indexOf('const SLASH_COMMANDS'), src.indexOf('const SLASH_COMMANDS') + 2000);
+  return [...block.matchAll(/name:\s*'([^']+)'/g)].map((m) => m[1]!);
+}
 
 /**
  * 「execute 的第五个参数是必交的」这个事实的可执行提醒。
