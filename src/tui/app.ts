@@ -71,6 +71,7 @@ import { getMarkdownTheme } from '@earendil-works/pi-coding-agent/dist/modes/int
 import { formatCwdForFooter, formatTokens } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js';
 import { addUsageToTotals, createUsageTotals } from '@earendil-works/pi-coding-agent/dist/core/usage-totals.js';
 import { setupTheme } from './theme';
+import type { HostUiOptions } from '../extension-ui';
 import { expandSkillCommand, parseSkillMessage, skillCommands, skillsInPrompt, type SkillInfo } from '../skills';
 
 const useColor = !process.env.NO_COLOR;
@@ -443,6 +444,37 @@ export interface TuiOptions {
   /** 一次性提问：给完就退出（脚本/管道友好）。 */
   prompt?: string | undefined;
   /**
+   * 装了哪些 pi 扩展（工具名 + 装载诊断）。
+   *
+   * ## 为什么也要开场报
+   *
+   * 与 skill 同一个道理：扩展的 prompt 片段（`promptSnippet`）在 system prompt 里，
+   * 用户**看不见**。不报出来的话，一个装坏的扩展（加载失败、或工具没有
+   * `promptSnippet` 因而**模型根本看不到**）就是彻底静默的 —— 而「模型静默少了
+   * 能力」是最难归因的一类问题。
+   *
+   * 诊断**刻意显眼**（黄字）：那不是「没装某个可选功能」，而是「你以为装上了」。
+   */
+  extensions?: {
+    tools: readonly string[];
+    errors: readonly string[];
+  } | undefined;
+  /**
+   * 扩展的 `ctx.ui` 由界面层造（它要活着的 tui 实例）。
+   *
+   * 内核装扩展时比这更早 —— 那时界面还没起来。所以它拿到的是**一个待填的引用**，
+   * 由本函数在 tui 建好之后填上；扩展工具真被调用时读它。
+   */
+  publishUi?: ((options: HostUiOptions) => void) | undefined;
+  /**
+   * 扩展的 `before_agent_start`（可选）。
+   *
+   * 每轮之前调一次，让扩展有机会调工具集（第一个扩展在会话中途改不了东西，所以
+   * 实际是 no-op，见 `extension-prompt.ts`）。不给就**不发**这个事件 ——
+   * 本项目没有扩展时装，就不该有扩展的回调。
+   */
+  beforeAgentStart?: ((text?: string | undefined) => Promise<void>) | undefined;
+  /**
    * 开新会话（换 id → 换文件）。由内核提供 —— TUI 拿不到内核，只能收回调。
    *
    * 不传就退化成「只清对话、沿用原 id」，那样之后的消者会追加进同一个文件。
@@ -523,6 +555,7 @@ export function gitBranch(cwd: string): string | undefined {
 
 export async function runTui(options: TuiOptions): Promise<number> {
   const { store, prompt, newSession, sessionId, restoreSession: restoreHook } = options;
+  const beforeAgentStartHook = options.beforeAgentStart;
   const cwd = options.cwd ?? process.cwd();
   // 主题**必须先于一切渲染**装上：pi 的 `theme` 是个 globalThis 上的 Proxy，
   // 没 initTheme() 时读它任何属性都抛 `Theme not initialized`。
@@ -530,7 +563,11 @@ export async function runTui(options: TuiOptions): Promise<number> {
   //
   // 为什么不能在模块顶层调：那时终端还没起来，`getTerminalTheme()` 拿不到深浅色，
   // 只能猜一个 —— 猜错就是浅色终端上出现黑底块。
-  setupTheme();
+  // setupTheme() 返回活着的 theme 对象（`globalThis` 上那个 Proxy）。
+  // **接住返回值**（而不是另去 import `theme`）：扩展的 `ctx.ui.custom()` 要把它传给
+  // 扩展自己的组件（那些组件直接调 `theme.fg(...)`），拿到 undefined 会在**渲染那一帧**
+  // 抛 “cannot read property of undefined” —— 症状出现在扩展内部，与真因隔了两层。
+  const theme = setupTheme();
   const terminal = new ProcessTerminal();
   // AltScreen 是 viewport 实现，setLayoutRoot 在 ViewportTUI 上（TUI 接口没有）。
   const tui: ViewportTUI = new TuiAltScreen(terminal, true, undefined, {
@@ -1012,6 +1049,14 @@ export async function runTui(options: TuiOptions): Promise<number> {
     loader.setIndicator({ frames: BUSY_FRAMES });
     loader.setMessage(yellow('思考中…'));
     loader.start();
+    // `before_agent_start` 在**发出去之前**调（与 pi 同序）：扩展看到的是「用户刚说了
+    // 什么、即将开跑」这个时刻。
+    //
+    // **不 await**：那个事件在本项目里是 no-op（工具集不中途变），而 await 会把
+    // 「敲回车」到「界面开始转圈」之间插入一段不可中断的等待。将来真要采信它的时候
+    // 改成 `void (async () => { await …; store.dispatch(...) })()` —— 注意那时
+    // `user.message` 必须**在** await 之后，否则时序反了。
+    void beforeAgentStartHook?.(text);
     store.dispatch({ type: 'user.message', text });
     refresh();
   };
@@ -1056,6 +1101,18 @@ export async function runTui(options: TuiOptions): Promise<number> {
   refresh();
   tui.start();
 
+  // 把活着的界面交给扩展宿主：内核装扩展时界面还没起来（那时只拿到一个待填的引用），
+  // 现在 tui / theme / raw input 都有了，扩展的 `ctx.ui.custom()` 才能真的画出东西。
+  //
+  // **必须在 `tui.start()` 之后**：`showOverlay` 要一个正在跑的 TUI（它会写终端转义
+  // 序列、重画栈）。之前填就等于扩展一开对话框就崩。
+  options.publishUi?.({
+    tui,
+    theme,
+    addInputListener: (listener) => tui.addInputListener(listener),
+    onNotice: (text: string) => notify(text),
+  });
+
   // 开场报一下装了哪些 skill —— 与 pi 同形（`[Skills]` 一节，逗号分隔的名字）。
   //
   // 为什么值得占这几行：skill 的全部意义在于「模型知道自己能做什么」，而清单在
@@ -1066,7 +1123,17 @@ export async function runTui(options: TuiOptions): Promise<number> {
   // 已经是「展开工具输出」，这里不复用它 —— 名字一行本来就不长。
   const startupSkills = stateSkills();
   const startupDiagnostics = store.getState().prompt.skillDiagnostics ?? [];
-  if (startupSkills.length > 0 || startupDiagnostics.length > 0) {
+  const extensionNames = (options.extensions?.tools ?? []).slice().sort((a, b) => a.localeCompare(b));
+  const extensionErrors = options.extensions?.errors ?? [];
+  // 护栏要把扩展也算进去：只装了扩展没装 skill（或反过来）时，这一节**照样**要出。
+  // 早先写成只看 skill，于是「一个 skill 都没装」的用户永远看不到扩展清单 ——
+  // 而那恰好是最需要看到的人（他们不靠 skill，只靠扩展）。
+  if (
+    startupSkills.length > 0 ||
+    startupDiagnostics.length > 0 ||
+    extensionNames.length > 0 ||
+    extensionErrors.length > 0
+  ) {
     const lines: string[] = [];
     if (startupSkills.length > 0) {
       // 形状照 pi 的 `formatCompactList()`：**排序**后逗号连排，剩下交给终端折行。
@@ -1086,6 +1153,15 @@ export async function runTui(options: TuiOptions): Promise<number> {
     }
     // **常驻**（不靠 notify）：pi 的开场那一节也是 `loadedResourcesContainer` 里的
     // 常驻组件，永不消失。skill 名单要反复对照着打 `/skill:x`，30 秒后就没了等于没有。
+    if (extensionNames.length > 0) {
+      // 与 `[Skills]` 同一个形状：逗号分隔的名字。
+      lines.push(`${dim('[扩展]')}\n${dim(extensionNames.join(', '))}`);
+    }
+    if (extensionErrors.length > 0) {
+      lines.push(
+        `${yellow('[扩展警告]')}\n` + extensionErrors.map((e) => yellow(`  ${e}`)).join('\n'),
+      );
+    }
     banner.text = lines.join('\n\n');
     refresh();
   }

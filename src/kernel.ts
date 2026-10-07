@@ -28,7 +28,10 @@ import { createSessionRecorder, type SessionRecorder } from './session-recorder'
 import { readSession, readSessionMessages } from './session-file';
 import path from 'node:path';
 import { getTools } from './tools';
-import { buildSystemPromptText, promptToolsFrom } from './system-prompt';
+import { buildSystemPromptText, promptToolsFrom, type PromptToolLike } from './system-prompt';
+import { loadExtensionHost } from './extension-host';
+import type { HostUiOptions } from './extension-ui';
+import type { ExtensionHost } from './extension-host';
 import { loadSkillRegistry } from './skills';
 /**
  * 从 Model 对象上读我们关心的三个能力。
@@ -98,6 +101,15 @@ export interface KernelOptions {
    * 与默认目录（`~/.pi/agent/skills` 与 `<cwd>/.pi/skills`）**叠加**，不是替换。
    */
   skillPaths?: readonly string[] | undefined;
+  /**
+   * 造扩展 `ctx.ui` 的工厂（界面层给，内核只负责传下去）。
+   *
+   * 不给 = 没有界面（一次性模式、测试）—— 扩展仍会装上（`settings.json` 的 `packages`
+   * 与界面无关），但真去开对话框时会得到一句说人话的错。
+   */
+  uiOptions?: (() => HostUiOptions) | undefined;
+  /** 跳过扩展装载（测试用；也省掉 jiti 那一跳的开销）。 */
+  noExtensions?: boolean | undefined;
 }
 
 export interface Kernel {
@@ -117,6 +129,13 @@ export interface Kernel {
   restoreSession(file: string): { id: string; restored: number };
   /** 把已经读出来的消息灌回 state。 */
   restore(messages: Message[]): void;
+  /**
+   * 扩展宿主（`settings.json` 的 `packages` 里装了什么）。
+   *
+   * 界面用它开场报一行「装了哪些扩展」，与 skill 清单同一个口径 —— 扩展也是
+   * 「模型知道自己能做什么」的一部分，而 prompt 里那份用户看不见。
+   */
+  readonly extensions: ExtensionHost;
   dispose(): void;
 }
 
@@ -217,6 +236,18 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   // 回放时读到 init 段就知道当时发给模型的是什么，不必重装配工具、不必再问 provider 能力。
   //
   // 放在 store 建好之后：它们本身就是 dispatch，得走真实的 store。
+  //
+  // **扩展先装、工具清单后取** —— 顺序不能反。`getTools()` 是「官方工具 + 扩展工具」
+  // 的合并结果，而 `prompt.init` 把那份清单装进 state（`effects.ts` 的 `toolSchemas()`
+  // 原样读它发给模型）。先装扩展再取清单，模型才知道它有 `ask_user_question`；
+  // 反过来它就只存在于注册表，症状是「工具调用永远回『未知工具』」，而界面上
+  // 那个工具块连参数都画不出来。
+  const extensionHost = await loadExtensionHost({
+    store,
+    cwd,
+    ...(options.uiOptions ? { uiOptions: options.uiOptions } : {}),
+    ...(options.noExtensions ? { disabled: true } : {}),
+  });
   const toolList = getTools(cwd);
   // Skill 清单：官方 `loadSkills()` + `loadSkillsFromDir()` 扫各个目录
   // （含跳工具约定的 `~/.agents/skills`），再由 reducer 拼进 system prompt
@@ -234,7 +265,14 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   //
   // 为什么在这里（而不是让调用方传一整串进来）：工具清单是内核按 cwd 建的，
   // AGENTS.md 与 skill 都随 cwd 变 —— 拼 prompt 需要的正是这三样，所以它属于内核这一步。
-  const promptTools = promptToolsFrom(cwd);
+  //
+  // **扩展工具与官方工具走同一条路**（同一个 `PromptToolLike` 形状、同一套筛选规则），
+  // 所以在 prompt 里它们没有区别 —— 「没有 promptSnippet 就不列」那条官方语义也照样
+  // 适用（那种工具模型看不到，而那是有意的：见 extension-host.ts 里的诊断）。
+  const promptTools: PromptToolLike[] = [
+    ...promptToolsFrom(cwd),
+    ...extensionHost.promptTools,
+  ];
   const systemPrompt = buildSystemPromptText({
     cwd,
     tools: promptTools,
@@ -423,12 +461,14 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         store.dispatch({ type: 'session.restored', message } as AgentAction);
       }
     },
+    extensions: extensionHost,
     dispose(): void {
       unsubscribeStart();
       autoCompact?.dispose();
       current.recorder?.dispose();
       persistence?.dispose();
       if (current.sink?.close) void current.sink.close();
+      extensionHost.dispose();
     },
   };
 }
