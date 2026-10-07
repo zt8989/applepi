@@ -1,8 +1,14 @@
 # 扩展
 
 本项目能装 **pi 扩展**（`settings.json` 的 `packages`），装上来的工具与 prompt 片段
-在**装载时**并进内核。第一个接的是 `@juicesharp/rpiv-ask-user-question`：模型可以
-开一个结构化的多选对话框问用户，而不是自己猜。
+在**装载时**并进内核。
+
+接了两个：
+
+| 包 | 给模型什么 |
+| --- | --- |
+| `@juicesharp/rpiv-ask-user-question` | 结构化多选对话框（多问题 tab、notes、`preview` 侧栏、折叠） |
+| `pi-web-access` | web 搜索 / 抓取 / PDF 提取 / GitHub / 视频理解（5 个工具） |
 
 ```bash
 pi install npm:@juicesharp/rpiv-ask-user-question   # 与 pi 共用同一份 settings.json
@@ -74,6 +80,78 @@ typebox                     => NOT RESOLVABLE
 没实现的是：`select` / `confirm` / `input`（RPC 宿主那套弹窗协议）、
 `setWidget` / `setFooter` / `setHeader`（要接 pi 的应用层布局，见
 [surfaces](surfaces.md)「为什么不用 pi 自己的 InteractiveMode」）。
+
+## 第二个扩展要到的另两样
+
+`pi-web-access` 比第一个重得多（110 个源文件、209 个依赖、编译成 1MB bundle），而且
+要了第一样**没要过**的东西。
+
+### `pi.getAllTools()`：得给真的
+
+它有个 `web_enable`（「动态启用 web 工具」的 loader）内部这么写：
+
+```js
+const registered = new Set(pi.getAllTools().map((t) => t.name));
+const unavailable = names.filter((n) => !registered.has(n));
+if (unavailable.length > 0) return { isError: true, content: [{ text: `Cannot enable unavailable tools: ${unavailable.join(", ")}.` }] };
+pi.setActiveTools([...new Set([...pi.getActiveTools(), ...names])]);
+```
+
+`getAllTools()` 早先被填成 `[]`（写的时候只想到「那二十几个成员里我实现了三个，
+其余不给」），于是它以为一个 web 工具都没有，回一句
+`Cannot enable unavailable tools: web_search, source_check, ...`。
+
+**而那些工具明明就在注册表里。** 症状是「模型永远调不了 web_search」而**看不出**
+哪里不对 —— `web_enable` 只是一句「unavailable」，模型会转而去用别的办法或者放弃。
+
+`allToolsInfo()` 现在报真实的 `getTools()`。官方那份 `ToolInfo` 还有
+`exposure` / `namespace` / `annotations` / `sourceInfo`：
+
+- `exposure` 给 `direct` —— 那是唯一有意义的（本项目不接 codemode 那套动态暴露）。
+- `namespace` / `annotations` 不接：它们是 MCP 与 codemode 的输入。
+- `sourceInfo` 给**一个合法形状**（`{ source: 'local' }`）而不是 `undefined` ——
+  扩展会在 `getAllTools().find(...)` 之后去读它，给 undefined 会炸在一个假字段上，
+  而那个堆栈与真因隔了三层。
+
+### `getActiveTools()` 得读**装上了 prompt 的那张表**
+
+`web_enable` 启用完会回头 `getActiveTools()` 核对一遍（「still inactive」就是这一步）。
+我们读的是 `state.prompt.tools` —— 也就是**真正发给模型的那份**（`effects.ts` 的
+`toolSchemas()` 原样读它）。早先在探针里读到空数组，于是误报「still inactive」。
+
+这不是巧合而是设计：扩展问「现在有哪些工具」，答案必须是「模型看得见哪些」。
+
+## 不接的：命令与快捷键
+
+`pi-web-access` 注册了 4 个命令（`/websearch` `/curator` `/google-account` `/search`）
+与 2 个快捷键（`ctrl+shift+s` / `ctrl+shift+w`）。本项目**不接**它们，**而且明说**：
+
+- 命令表是 `tui/app.ts` 里的 `SLASH_COMMANDS`（唯一真相，补全与 `/help` 都念它）。
+  接进去就要往那儿塞，而那边只有 `description` + 一个 `runCommand` 里的 switch。
+- 命令 handler 在 pi 那边拿的是 `ExtensionCommandContext`（`waitForIdle` /
+  `newSession` / `fork` / `navigateTree`…），本项目**一个都没实现**。接了就在 handler
+  里炸。
+- 更糟的是**假装能用**：补全里冒出 `/websearch`、敲下去什么都不发生 —— 那是
+  「静默退化」里最难查的一种。
+
+所以工具接、命令不接。测试里钉住「装它不会往 `SLASH_COMMANDS` 里塞东西」
+（`test/extension-host.test.ts` 的「命令与快捷键不接」）。
+
+## `pi-web-access` 的 key 依赖
+
+它的真正硬依赖是 API key（exa / tavily / brave / jina…，十几家）。所以**测试不打网络** ——
+只验宿主面（工具装上、参数校验走通、`getAllTools` 真的返回注册表）。
+
+真跑一次（手动，有 key 时）：
+
+```
+$ pnpm start
+> 搜一下 redux-loop 的最新版本
+
+**Provider:** exa
+# redux-loop  Sequence your effects naturally and purely by returning them from
+  your reducers. - Version: 6.2.0 - License: MIT - ...
+```
 
 **没实现的方法一律 reject，不静默 no-op。** 一个 `select()` 静默 resolve `undefined`
 的话，扩展会把「用户没选」当成真的答复发回模型 —— `undefined` 在 pi 的契约里明确表示
@@ -162,6 +240,11 @@ ask_user_question
 （官方语义：`buildSystemPrompt` 会过滤掉没有 snippet 的工具）。那与「工具在注册表里」
 矛盾 —— 用户会以为能用，模型那边根本没这个工具。所以那时报出来。
 
+| 扩展 | 工具 | UI | 命令/快捷键 |
+| --- | --- | --- | --- |
+| `rpiv-ask-user-question` | ✅ | ✅ `ui.custom()` overlay | — |
+| `pi-web-access` | ✅ | — | ❌ 明说不接 |
+
 ## 五个文件
 
 | 文件 | 干什么 |
@@ -182,6 +265,9 @@ ask_user_question
   假扩展很少用 `ctx.ui.custom()`，于是「overlay 到底能不能画出来」根本没被验到。
 - 扩展的 `details` 是 `unknown`，pi-ai 1.x 要它能 JSON 序列化 —— 假扩展多半返回 `{}`，
   碰不到那条路。
+- **扩展可能分发的形态不同**：`rpiv-ask-user-question` 是 TS 源码（入口 `index.ts`，
+  走 jiti 转译），`pi-web-access` 是编译 bundle（入口 `dist/index.js`）。`hasPackage()`
+  两种都认 —— 写死一种的话，第二个扩展的测试会一直 skip 而没人发现。
 
 所以用真的。装不上就 skip 并说清为什么（离线机器上这个测试没法跑，硬失败只会让人
 以为代码坏了）。
@@ -196,6 +282,10 @@ ask_user_question
   那是坑二，绑一个空 UI 就会得到 TypeError。
 - 「给真 UI 时 custom() 把浮层挂上去」**轮询** `tui.hasOverlay()`，不是固定等 3 秒 ——
   固定等待在单跑时过、全量并发跑时挂（实测过）。
+
+`pi-web-access` 那几条里最关键的是 `getAllTools` 那条：它走 `web_enable` 的**真实**
+路径（`getAllTools()` → `setActiveTools()` → 回头 `getActiveTools()` 核对），
+断言结果里**不出现** `unavailable` 与 `still inactive`。那正是两个真实回归。
 
 ## 相关
 

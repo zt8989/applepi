@@ -18,9 +18,9 @@ agent** —— 循环不是写出来的，是 reducer 与副作用互相 dispatc
   `bash`，直接用 Pi 官方那套）摸的是真实文件系统。
 - **长命令边跑边显示。** 接上官方工具的 `onUpdate`，`npm install` 这类命令的输出
   逐行出现，而不是「卡几十秒然后突然蹦出一块」——那几十秒的空白和卡死了没区别。
-- **能装 pi 扩展。** `settings.json` 的 `packages` 里的扩展（比如给模型一个结构化
-  多选对话框、让它别猜而是问你）装上就能用 —— 官方 loader 装载、官方扩展运行时驱动，
-  本项目只提供自己那一半：环、工具表、overlay 宿主。
+- **能装 pi 扩展。** `settings.json` 的 `packages` 里的扩展装上就能用 ——
+  比如让模型开一个结构化多选对话框问你（别猜），或者查 web 抓 PDF。官方 loader
+  装载、官方扩展运行时驱动，本项目只提供自己那一半：环、工具表、overlay 宿主。
 - **system prompt 也是官方的。** 用 pi 的 `buildSystemPrompt` 拼：每个工具怎么用、
   `edit` 的那些坑、`AGENTS.md` 项目上下文、cwd、skill 清单。自己**一个字都不写** ——
   项目自己的规则写在 `.pi/APPEND_SYSTEM.md`（或家目录那份）里，与 pi 同路径、同优先级。
@@ -100,11 +100,17 @@ patch 丢了或 pnpm 升级后没重新应用，这些 import 会全部变成
 扩展装在 **pi 那边**（同一个 `settings.json`），本项目启动时一并装载：
 
 ```bash
-pi install npm:@juicesharp/rpiv-ask-user-question
+pi install npm:@juicesharp/rpiv-ask-user-question   # 结构化多选对话框
+pi install npm:pi-web-access                        # web 搜索 / 抓取 / PDF / GitHub
 ```
 
-（第一个接的是它：模型可以开一个结构化的多选对话框问用户，而不是自己猜。）
+（前者让模型可以问你而不是猜；后者让它能查外面的东西 —— 依赖对应 provider 的
+API key，比如 exa / tavily / brave。）
+
 `--no-extensions` 跳过。装了什么、开场那节 `[扩展]` 会报出来，坏了是 `[扩展警告]`。
+
+**工具接了，命令与快捷键没接**（`/websearch` 那种）—— 本项目的命令表与键位是自己的
+一套，接半吊子会「补全里能看见、敲下去什么都不发生」。
 
 **工具集与 prompt 一样是装载时定下的** —— 不在一轮对话中间换工具（那会让已发出的
 消息与 prompt 对不上，而 prompt-cache 的前缀整个作废）。改工具集要 `/new` 换会话。
@@ -180,7 +186,7 @@ auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 prov
 ## 测试
 
 ```bash
-pnpm test           # 285 个离线测试，不打网络
+pnpm test           # 289 个离线测试，不打网络
 pnpm run typecheck  # tsc --noEmit（src + test + scripts）
 ```
 
