@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { homedir } from 'node:os';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
 import { formatCwdForFooter } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js';
@@ -14,6 +16,7 @@ import {
   statusLine,
   twoColumn,
 } from '../src/tui/app';
+import { gitBranch } from '../src/tui/app';
 import { resolveThemeName, setupTheme } from '../src/tui/theme';
 import type { AgentState } from '../src/state';
 import type { Message } from '@earendil-works/pi-ai';
@@ -83,6 +86,59 @@ test('cwdLine：不在家目录里时保持绝对路径（~ 只会骗人）', ()
   const out = cwdLine(String.raw`D:\some\proj`, 'main');
   assert.ok(!out.startsWith('~'), `家目录之外不该缩成 ~：${out}`);
   assert.ok(out.includes('some'), out);
+});
+
+// ─── git 分支：.git 是目录还是文件 ───
+
+test('gitBranch：普通 checkout（.git 是目录）读出分支名', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'gitbranch-dir-'));
+  try {
+    mkdirSync(path.join(root, '.git'));
+    writeFileSync(path.join(root, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+    assert.equal(gitBranch(root), 'main');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('gitBranch：linked worktree（.git 是文件）也要读出分支名', () => {
+  // 这是真 bug：`git worktree add` 之后 `<cwd>/.git` 变成一个**文件**，内容是
+  // `gitdir: <主仓库>/.git/worktrees/<名字>`。老实现直接把 `.git` 当目录拼 HEAD，
+  // 读到 ENOTDIR 就吞掉返回 undefined —— 底栏就只剩路径，分支名静默消失。
+  //
+  // 症状看起来像「界面坏了」，与真因隔了三层，所以在 worktree 里跑测试会先炸。
+  const root = mkdtempSync(path.join(tmpdir(), 'gitbranch-wt-'));
+  try {
+    const real = path.join(root, 'worktree-admin');
+    mkdirSync(real, { recursive: true });
+    writeFileSync(path.join(real, 'HEAD'), 'ref: refs/heads/feat/rpiv-ask-user-question\n');
+    // git 写的正是这个形状：单行 + 换行（这里刻意带上换行 —— 不 trim 就会拼出
+    // `...\rpiv-compat\rHEAD`）。
+    writeFileSync(path.join(root, '.git'), `gitdir: ${real}\n`);
+    assert.equal(gitBranch(root), 'feat/rpiv-ask-user-question');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('gitBranch：detached HEAD 认得出来', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'gitbranch-det-'));
+  try {
+    mkdirSync(path.join(root, '.git'));
+    writeFileSync(path.join(root, '.git', 'HEAD'), '9f2c1ab\n');
+    assert.equal(gitBranch(root), 'detached');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('gitBranch：不在仓库里返回 undefined（不编一个分支名）', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'gitbranch-none-'));
+  try {
+    assert.equal(gitBranch(root), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // ─── 对话区：现在直接用 pi 官方的渲染组件 ───

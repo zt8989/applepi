@@ -42,7 +42,7 @@ import type { AgentAction } from '../actions';
 import type { ToolCall } from '@earendil-works/pi-ai';
 import { cleanSessionsExcept, listSessions, type SessionSummary } from '../config-home';
 import { loadSessionMessages, openSessionPicker } from './session-picker';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 // ─── pi 官方的对话/工具渲染器 ───
@@ -478,10 +478,40 @@ export interface TuiOptions {
  * 为什么每次 refresh 都重读而不在启动时算一次：分支会变（用户切了分支、或我们自己在
  * 会话里执行了 git 命令）。每帧读一次 `.git/HEAD` 便宜到可以忽略，而缓存了就意味着
  * “底栏在说谎”。
+ *
+ * ## `.git` 有两种形状
+ *
+ * - **目录** —— 普通 checkout，HEAD 就在 `<cwd>/.git/HEAD`。
+ * - **文件** —— linked worktree 与 submodule。里面是一行 `gitdir: <真正的 git 目录>`：
+ *
+ *     gitdir: C:/repo/.git/worktrees/rpiv-compat
+ *
+ *   HEAD 在**那个**目录里。直接把 `.git` 当目录读会抛 ENOTDIR，于是 catch 掉、
+ *   返回 undefined —— 症状是底栏只剩路径、括号里的分支名**静默消失**。
+ *   （实测：在 worktree 里跑 `pnpm test` 会因此挂掉两条底栏断言，而它们看起来像
+ *   “界面坏了”，与真因隔了三层。）
+ *
+ * 读文件时必须剥掉换行再拼路径，否则拼出来的是 `...\rpiv-compat\rHEAD`。
+ * git 的 `gitdir:` 指针用正斜杠（Windows 上也是），`path.resolve` 能接。
  */
-function gitBranch(cwd: string): string | undefined {
+export function gitBranch(cwd: string): string | undefined {
+  const gitPath = path.join(cwd, '.git');
+  let gitDir: string;
   try {
-    const head = readFileSync(path.join(cwd, '.git', 'HEAD'), 'utf8').trim();
+    const st = statSync(gitPath);
+    if (st.isDirectory()) {
+      gitDir = gitPath;
+    } else if (st.isFile()) {
+      // `gitdir: <path>`（可能带尾随换行，也可能没有）。
+      const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(gitPath, 'utf8'));
+      const target = m?.[1]?.trim();
+      if (!target) return undefined;
+      // 相对指针（子模块常见）按 `.git` 文件所在目录解；绝对路径直接用。
+      gitDir = path.resolve(cwd, target);
+    } else {
+      return undefined;
+    }
+    const head = readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
     // 两种形状：`ref: refs/heads/main`（分支）或一串 sha（detached HEAD）。
     const match = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
     if (match) return match[1];
