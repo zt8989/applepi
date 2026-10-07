@@ -109,8 +109,8 @@ API key，比如 exa / tavily / brave。）
 
 `--no-extensions` 跳过。装了什么、开场那节 `[扩展]` 会报出来，坏了是 `[扩展警告]`。
 
-**工具接了，命令与快捷键没接**（`/websearch` 那种）—— 本项目的命令表与键位是自己的
-一套，接半吊子会「补全里能看见、敲下去什么都不发生」。
+**命令与快捷键也接了**：`/websearch` `/curator` `/google-account` `/search` 四个命令
+与两个键位都可用。内置的 `Ctrl+T`/`Ctrl+O`/`Ctrl+C` **优先**——扩展抢不走它们。
 
 **工具集与 prompt 一样是装载时定下的** —— 不在一轮对话中间换工具（那会让已发出的
 消息与 prompt 对不上，而 prompt-cache 的前缀整个作废）。改工具集要 `/new` 换会话。
@@ -186,7 +186,7 @@ auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 prov
 ## 测试
 
 ```bash
-pnpm test           # 294 个离线测试，不打网络
+pnpm test           # 307 个离线测试，不打网络
 pnpm run typecheck  # tsc --noEmit（src + test + scripts）
 ```
 

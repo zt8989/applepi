@@ -303,10 +303,109 @@ ask_user_question
 （官方语义：`buildSystemPrompt` 会过滤掉没有 snippet 的工具）。那与「工具在注册表里」
 矛盾 —— 用户会以为能用，模型那边根本没这个工具。所以那时报出来。
 
-| 扩展 | 工具 | UI | 模型/凭证 | 命令/快捷键 |
-| --- | --- | --- | --- | --- |
-| `rpiv-ask-user-question` | ✅ | ✅ `ui.custom()` overlay | — | — |
-| `pi-web-access` | ✅ | — | ✅ `modelRegistry` / `ctx.model` | ❌ 明说不接 |
+| 扩展 | 工具 | UI | 模型/凭证 | 命令/快捷键 | 会话 |
+| --- | --- | --- | --- | --- | --- |
+| `rpiv-ask-user-question` | ✅ | ✅ `ui.custom()` overlay | — | — | — |
+| `pi-web-access` | ✅ | ✅ `setWidget` / `theme` | ✅ `modelRegistry` / `ctx.model` | ✅ 4 命令 / 2 键位 | ✅ 三个只读成员 |
+
+## 斜杠命令与快捷键：接了
+
+早先「命令不接」的理由是：pi 的命令 handler 拿 `ExtensionCommandContext`，而那里面
+`waitForIdle` / `newSession` / `fork` / `navigateTree` / `switchSession` / `reload`
+本项目一个都没实现。
+
+那个理由**过了一半**：那六个**确实**不接，但 handler 真正要的东西少得多。
+`pi-web-access` 那四个命令（`/websearch` `/curator` `/google-account` `/search`）
+只用到两样，而且都有真的实现：
+
+| 成员 | 落在哪 |
+| --- | --- |
+| `ctx.ui.notify` | 界面那行 `notice`（`extension-ui.ts`） |
+| `pi.sendMessage` | 落成一条**用户消息**（于是环会跑起来） |
+
+那六个仍然 reject 掉（pi 的会话层，见 [surfaces](surfaces.md)），而不是给假 no-op ——
+后者会让扩展以为「fork 被用户取消了」而继续往下走。
+
+### 为什么不并进 `SLASH_COMMANDS`
+
+那份表是**常量**（补全与 `/help` 都念它，是唯一真相），而扩展的命令要等
+`loadExtensions()` 装载完才知道 —— 可能发生在编辑器建好**之后**。所以走
+`commandTable()` 里一个单独的展开（`extensionCommands.list()`），与 skill 命令
+同一种情况：现取。
+
+### 快捷键：内置键优先
+
+`onInput` 里**先**跑内置的 `Ctrl+T` / `Ctrl+O` / `Ctrl+C`，**没消费**才问扩展。
+
+顺序反了的后果很具体：扩展能把 `Ctrl+T` 吃掉，于是轨迹面板「按了没反应」，而那比
+「扩展的键偶尔不生效」难查得多。（这条顺序测试里钉了，**而且验过它能抓**。）
+
+扩展的 handler 是 async（`/search` 会弹 `select`），而输入监听器是**同步**回调 ——
+在监听器里 await 就是等一个要人来点的窗口。所以只把 handler 排出去，**不消费**那个键。
+
+### `setWidget` 与 `ctx.ui.theme`
+
+快捷键那条又逼出两样，都是「接了但会静默坏」：
+
+- **`ctx.ui.theme`** —— 官方 `ExtensionUIContext` 真的有这个成员，扩展会直接读
+  （`pi-web-access` 的活动面板开头就 `ctx.ui.theme.fg('accent', …)`）。少了它那个
+  面板一开就 `Cannot read properties of undefined (reading 'fg')`。
+  给 `setupTheme()` 返回的那个 globalThis Proxy，所以颜色与本项目界面**完全一致**。
+- **`setWidget`** —— 活动面板的落点。本项目的底部 VStack 里 editor 上面**本来就是**
+  一格，所以只差「布局要跟着重设」（VStack 的 children 是建时定下的）。
+
+  **`setWidget` 有两种形状，两个都接**：官方的 `string[]`（扩展自己上好色的行）与
+  组件工厂。早期只接工厂、把数组当错误抛了 —— 而 `pi-web-access` 恰恰用数组。
+
+### 一处真回归：`theme` 不能要求界面已起来
+
+`ctx.ui.theme` 是 getter，而扩展在**界面起来之前**就可能碰它（内核装扩展时
+`setUIContext` 已经把 UI 绑上了）。而 `tui.ts` 的 `requireUi()` 曾经对空 `uiRef`
+一律抛 —— 于是扩展一碰 theme 就抛，**整个界面起不来**。
+
+症状极难认：首帧空白、顶栏与底栏全没、底栏断言三条一起挂，而真因只在 stderr 一行
+「扩展要求界面」。看起来像布局坏了。
+
+现在 theme 真的给（`initTheme` 在内核装配之前就调了），只有要**活着**的 tui 的那几个
+方法才在没就绪时报错。测试里钉了这条，**而且验过它能抓**（把 `theme` 改回走 `live()`
+就立刻红）。
+
+## `ctx.sessionManager`：接了
+
+它只读三处：`getSessionId()`（算 opencode 的请求头）、`getBranch()`（恢复上次的搜索
+结果）、`buildSessionContext(branch)`（重建对话，判「这轮模型用过哪些 web 工具」）。
+
+### 数据源是**本项目**的会话
+
+pi 那边是 `SessionManager` **类**，条目来自它自己的 `sessions/*.jsonl`。本项目的会话是
+**另一份**（`state.messages` + 自己的落盘器）。拿 pi 的来读，读到的是**上一次进程**
+留下的文件 —— 而当前这一轮的消息一个都没有。
+
+症状是「`/search` 列不出刚才搜的东西」，而且**只在同一个会话里出错**（重启就「好了」，
+因为那时文件里的内容恰好等于内存里的）。极难归因。
+
+所以只实现那三个只读成员，数据源是 `state.messages`。
+
+### `getBranch()` 必须包一层 `{type:'message', message}`
+
+扩展是这么调的：`buildSessionContext(ctx.sessionManager.getBranch()).messages`。
+少包那层的话官方的 `buildSessionContext` 会把消息当成条目、读不到 `.message` ——
+症状是「模型这轮用过哪些 web 工具」判不出来，于是**每次都要求 `web_enable` 重新加载一遍**。
+
+## 仍然不接的
+
+- **那六个会话操作**（`waitForIdle` / `newSession` / `fork` / `navigateTree` /
+  `switchSession` / `reload`）—— pi 的会话层。
+- **`ctx.ui.select` / `confirm` / `input`** —— RPC 宿主那套弹窗协议。本项目的选择有
+  自己的（`openSessionPicker`）。`/search` 选历史结果那条要 `select`，所以它会报
+  「不支持」而不是假装列了。
+- **`setFooter` / `setHeader`** —— 要接 pi 的应用层布局。
+- **`pi.appendEntry`** —— 存「不发给模型」的会话条目（pi 会话层）。给 no-op 而不是报错，
+  于是扩展自己的 `if (results.length === 0)` 会走：`/search` 回一句
+  「No stored search results」。**代价：`/search` 看不到历史搜索结果。**
+- **`pi.sendMessage` 的 `customType` / `display` / `details`** —— 我们只取 `content` 里
+  那些 text 块拼成一条用户消息。后果：扩展 `/curator` 那种「在转录里留一个可点开的
+  卡片」会退化成**普通对话**。外观上的降级，结论照样回到对话里。
 
 ## 折叠（`Ctrl+]`）：验过了，包括一个上游的怪事
 
@@ -359,17 +458,18 @@ ask_user_question
    listener 永远不被调。按键要喂 `handleTerminalInput`（它自己会做焦点改派），
    不要自己遍历 listener。
 
-## 六个文件
+## 八个文件
 
 | 文件 | 干什么 |
 | --- | --- |
 | `src/extension-host.ts` | 装扩展：解包路径、`loadExtensions`、runner 绑定、工具适配 |
-| `src/extension-ui.ts` | `ctx.ui`：`custom()` 的 overlay 宿主、`notify`、raw input |
+| `src/extension-ui.ts` | `ctx.ui`：`custom()` overlay、`setWidget`、`theme`、`notify`、raw input |
 | `src/extension-tools.ts` | pi `ToolDefinition` → 本项目 `AgentTool`；工具集读/写 |
 | `src/extension-models.ts` | `ctx.modelRegistry`：官方的 `ModelRegistry` 门面 |
+| `src/extension-sessions.ts` | `ctx.sessionManager`：三个只读成员，数据源是 `state.messages` |
+| `src/extension-commands.ts` | 斜杠命令与快捷键（内置键优先） |
 | `src/extension-prompt.ts` | `before_agent_start` 的接线与两条守卫 |
-| `test/extension-host.test.ts` | 用**真扩展** + 一个探针工具测（见下） |
-| `test/extension-collapse.test.ts` | 折叠：模拟按键驱动真扩展的收/展/答 |
+| `test/extension-*.test.ts` | 真扩展 + 探针 + 模拟按键（三个文件） |
 
 ## 测试为什么用真扩展
 

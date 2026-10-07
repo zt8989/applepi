@@ -14,6 +14,11 @@ import path from 'node:path';
 import { defaultProviderSpec, providerNames } from './provider';
 import { createKernel, type Kernel } from './kernel';
 import { runTui } from './tui/app';
+import { setupTheme } from './tui/theme';
+import type { Theme } from '@earendil-works/pi-coding-agent';
+// pi 的 theme 是 globalThis 上的一个 Proxy —— initTheme() 之后一直可读。
+// 直接 import（不缓存）是为了「initTheme 可能被再调」时读到的是当时那个。
+import { theme as piTheme } from '@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';
 import type { HostUiOptions } from './extension-ui';
 
 /**
@@ -217,6 +222,9 @@ async function main(): Promise<void> {
   // 就要装好扩展，所以这里用一个**间接**：`uiRef.current` 由 runTui 填上，扩展的
   // 工具真被调用时读它。
   const uiRef: { current: HostUiOptions | undefined } = { current: undefined };
+  // 主题先装一次 —— `ctx.ui.theme` 在**装载期**就要给（见 requireUi 的注释）。
+  // `runTui()` 里面会再调一次，那时终端起来了、颜色更准，并把真的那份填进 uiRef。
+  setupTheme();
   try {
     kernel = await createKernel({
       // 没给 -P/-m 就用默认（settings.json → 兜底 workbuddy/cn:space-bunny）
@@ -269,6 +277,8 @@ async function main(): Promise<void> {
     sessionId: () => kernel.sessionId,
     // 扩展的 `before_agent_start`（内核持有的那个宿主）。
     beforeAgentStart: (text) => kernel.extensions.beforeAgentStart(text),
+    // 扩展的斜杠命令与快捷键（补全、`runCommand` 兜底、raw input）。
+    extensionCommands: kernel.extensions.commands,
     // 把活着的界面交给内核的扩展宿主（它在装扩展时只能拿到一个待填的引用）。
     publishUi: (options) => {
       uiRef.current = options;
@@ -294,10 +304,49 @@ async function main(): Promise<void> {
  *
  * 所以这里明说「界面还没起来」。那是一个真 bug，不该被伪装成「没界面」。
  */
+/**
+ * 扩展的 UI 宿主。**一直都有**（内核装扩展时它已经存在），只是里面的 `tui` 要等
+ * 界面起来才填上。
+ *
+ * ## 为什么不填一个空实现
+ *
+ * 空实现看着无害，实际有两个后果：
+ *
+ * 1. 扩展在**装载期**就碰 `ctx.ui.theme`（`bindCore` 在内核装配时调了 `setUIContext`），
+ *    那时 `uiRef.current` 还是空的 → `requireUi` 抛 → **整个界面起不来**
+ *    （症状：首帧空白、顶栏底栏全没了，而真因在一条日志里）。
+ * 2. 「tui 未就绪」这个抛错本身是**对的**（真有方法要一个还不存在的 TUI），
+ *    但它不该在「只读个 theme」时被触发。
+ *
+ * 所以拆开：`theme` 现在就给真的（`setupTheme()` 的返回值，界面起来之前就有），
+ * `tui` / `addInputListener` 那几个在界面起来之前调用会**明说「还没就绪」**。
+ */
 function requireUi(ref: { current: HostUiOptions | undefined }): HostUiOptions {
   const ui = ref.current;
-  if (!ui) throw new Error('扩展要求界面，但界面还没起来（tui 未就绪）');
-  return ui;
+  if (ui) return ui;
+  // 界面还没起来。`theme` 仍然给真的（`initTheme` 在内核装配之前就调了）——
+  // 扩展在装载期就会碰它。
+  return {
+    tui: undefined as never,
+    theme: preTheme(),
+    addInputListener: () => () => {},
+    onNotice: (text: string) => {
+      // 界面还没起来时扩展的提示无处可去 —— 落到 stderr（那时用户看得到终端）。
+      process.stderr.write(`${text}\n`);
+    },
+    setWidget: () => {},
+  };
+}
+
+/**
+ * 读当前的 theme（**不要求界面已起来**）。
+ *
+ * pi 的 `theme` 是 globalThis 上的一个 Proxy，`initTheme()` 之后一直可读。
+ * 每次现读而不是存一份常量：`initTheme()` 可以被再调（换主题名），而扩展拿到的
+ * 引用得是**当时**那个。
+ */
+function preTheme(): Theme {
+  return piTheme;
 }
 
 void main();

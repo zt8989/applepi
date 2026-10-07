@@ -251,6 +251,16 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     ...(options.noExtensions ? {} : { runtime }),
     ...(options.uiOptions ? { uiOptions: options.uiOptions } : {}),
     ...(options.noExtensions ? { disabled: true } : {}),
+    // 会话：扩展的 `getSessionId()` / `getBranch()`。传的是**取值函数**而不是常量 ——
+    // `/new` 换会话后 id 会变，而扩展问的时候得报新的那个。
+    sessionId: () => current.sessionId,
+    // 扩展的 `pi.sendMessage` 落到哪里：一条**用户消息**（于是环会跑起来），
+    // 与界面里敲一句话同一条路。
+    onSendMessage: (text) => {
+      if (text.trim() === '') return;
+      store.dispatch({ type: 'user.message', text } as AgentAction);
+    },
+    canSend: () => store.getState().phase === 'idle',
   });
   const toolList = getTools(cwd);
   // Skill 清单：官方 `loadSkills()` + `loadSkillsFromDir()` 扫各个目录

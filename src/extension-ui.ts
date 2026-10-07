@@ -9,7 +9,7 @@
  * （`showOverlay` 记了 `preFocus`）。
  *
  * 它**不要**的：`select` / `confirm` / `input` 那套 RPC 弹窗协议（给 VS Code pendant、
- * Zed 那种宿主用的）、`setWidget` / `setFooter` / `setHeader`（那要接 pi 的应用层布局，
+ * Zed 那种宿主用的）、`setFooter` / `setHeader`（那要接 pi 的应用层布局，
  * 本项目刻意不接，见 `surfaces.md`）。
  *
  * ## 没实现的方法怎么给
@@ -25,7 +25,7 @@
  * 让非交互运行卡在一个没人能回答的对话框上。
  */
 import type { Component, TUI, TuiInputListener, OverlayOptions } from '@earendil-works/pi-tui';
-import { getKeybindings } from '@earendil-works/pi-tui';
+import { getKeybindings, Text } from '@earendil-works/pi-tui';
 // Theme 是 pi 自己的（挂在 globalThis 上的 Proxy + 一堆 `fg`/`bg`/`bold` 方法），
 // 不在 pi-tui 里 —— 与 `tui/app.ts` 里 `setupTheme()` 返回的是同一个类型。
 import type { Theme } from '@earendil-works/pi-coding-agent';
@@ -48,6 +48,17 @@ export interface CustomOptions {
 export interface ExtensionHostUi {
   custom<T>(factory: CustomFactory<T>, options?: CustomOptions): Promise<T>;
   notify(message: string, type?: 'info' | 'warning' | 'error'): void;
+  /**
+   * 活的 pi theme 对象。
+   *
+   * **官方 `ExtensionUIContext` 真的有这个成员**，而扩展会直接读它：
+   * `pi-web-access` 的活动面板开头就 `ctx.ui.theme.fg('accent', …)`。
+   * 少了它那个面板一开就 `Cannot read properties of undefined (reading 'fg')`。
+   *
+   * 给的就是 `setupTheme()` 返回的那个 globalThis 上的 Proxy，所以扩展画的颜色与
+   * 本项目界面**完全一致**。
+   */
+  readonly theme: Theme;
   /** raw 终端输入（`ask_user_question` 靠它实现「浮层折叠后还能复原」）。 */
   onTerminalInput(handler: (data: string) => undefined | { consume?: boolean }): () => void;
 }
@@ -59,6 +70,19 @@ export interface HostUiOptions {
   addInputListener(listener: TuiInputListener): () => void;
   /** 扩展的提示写进哪里（界面对话区顶部那行 `notice`）。 */
   onNotice(text: string): void;
+  /**
+   * 放一块内容到输入区上方（`setWidget` 的落点）。
+   *
+   * 界面实现：它把组件塞进底部 VStack 里 editor 上面那格，并重设布局。
+   *
+   * **可缺省**：没有界面的宿主（测试、探针）不提供它，于是 `setWidget` 变成
+   * 「把内容丢掉」而不是抛 —— 扩展的 widget 只是不显示，其余照常。
+   */
+  setWidget?(
+    key: string,
+    component: (Component & { dispose?: () => void }) | undefined,
+    options?: { placement?: 'aboveEditor' | 'belowEditor' },
+  ): void;
 }
 
 function noticePrefix(type: string | undefined): string {
@@ -100,6 +124,19 @@ export function createHostUi(source: () => HostUiOptions): ExtensionHostUi {
   };
 
   return {
+    /**
+     * theme **不走 `live()`**：它只是读 globalThis 上的 Proxy，而 `setupTheme()` 一调
+     * 就一直在了 —— 比界面起来得**早得多**。
+     *
+     * 这一点是必须的（而不是讲究）：扩展在**界面起来之前**就可能碰 `ctx.ui.theme`
+     * （内核装扩展时 `setUIContext` 已经把 UI 绑上了）。`live()` 会因为 `tui` 是
+     * undefined 而抛「扩展要求界面」—— 于是扩展的活动面板一开就把**整轮对话**带崩，
+     * 而那个栈里**一帧本项目的代码都没有**。
+     */
+    get theme(): Theme {
+      return source().theme;
+    },
+
     custom: async <T>(factory: CustomFactory<T>, opts?: CustomOptions): Promise<T> => {
       if (opts?.overlay !== true) {
         // 非 overlay 的 custom 要**顶掉**底部输入区（pi 把 editor 换成那块组件）。
@@ -174,6 +211,49 @@ export function createHostUi(source: () => HostUiOptions): ExtensionHostUi {
     },
 
     onTerminalInput: (handler) => live().addInputListener(handler),
+
+    setWidget: (
+      key: string,
+      content: string[] | ((tui: TUI, theme: Theme) => Component & { dispose?: () => void }) | undefined,
+      opts?: { placement?: 'aboveEditor' | 'belowEditor' },
+    ) => {
+      const setWidget = source().setWidget;
+      const { tui: t, theme: th } = live();
+
+      // 卸下：两种形状都能卸。
+      if (content === undefined) {
+        setWidget?.(key, undefined, opts);
+        return;
+      }
+
+      // ① 字符串数组：扩展自己上好色了（`pi-web-access` 的活动面板就是这种：它自己
+      //    `theme.fg(...)` 拼好了整行）。用 `Text` 包一层直接画。`Text` 自己缓存
+      //    render，所以反复 setWidget（面板刷新）不会变贵。
+      if (Array.isArray(content)) {
+        if (!setWidget) return;
+        setWidget(key, new Text(content.join('\n'), 0, 0), opts);
+        return;
+      }
+
+      // ② 组件工厂。
+      if (typeof content === 'function') {
+        const component = content(t, th);
+        // 没有界面 → 没有那一格。把组件丢掉（并 dispose）而不是抛：扩展的 widget
+        // 只是不显示，其余（工具、命令）照常，那才是诚实的降级。
+        if (!setWidget) {
+          try {
+            component.dispose?.();
+          } catch {
+            /* 忽略 */
+          }
+          return;
+        }
+        setWidget(key, component, opts);
+        return;
+      }
+
+      throw new Error('setWidget 只接 string[] 或组件工厂（那是官方的两种形状）');
+    },
 
     // ── 明确不支持 ──
     // 这些方法故意**不在**返回类型里（`ExtensionHostUi` 只声明了真能做的三个）：

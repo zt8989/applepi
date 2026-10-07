@@ -55,6 +55,8 @@ import { getTool, getTools, registerExtraTools } from './tools';
 import { adaptExtensionTool, activeToolsFromState, applyActiveTools } from './extension-tools';
 import { createHostUi, type ExtensionHostUi, type HostUiOptions } from './extension-ui';
 import { extensionModelRegistry } from './extension-models';
+import { extensionSessionManager } from './extension-sessions';
+import { installExtensionCommands, type ExtensionCommands } from './extension-commands';
 import { notifyBeforeAgentStart, type BeforeAgentStartHandler } from './extension-prompt';
 import { configHome } from './config-home';
 import type { ToolInfo } from '@earendil-works/pi-coding-agent';
@@ -73,6 +75,13 @@ export interface ExtensionHost {
    * 就不列 —— 那是官方语义：「不告诉模型它存在」）。
    */
   readonly promptTools: readonly PromptToolLike[];
+  /**
+   * 扩展的斜杠命令与快捷键。
+   *
+   * 界面用它在**自己的命令表之后**兜底：`runCommand` 找不到自己的命令时问它。
+   * 不并进 `SLASH_COMMANDS`（那是常量的唯一真相），理由见 `extension-commands.ts`。
+   */
+  readonly commands: ExtensionCommands;
   /** 装载诊断（扩展加载失败、注册了但形状不对…）。 */
   readonly errors: readonly string[];
   /** 有没有任何扩展真的装上了。 */
@@ -117,8 +126,24 @@ export interface LoadExtensionHostOptions {
    * 也就是说：**假装有界面比承认没有界面坏得多**。让扩展自己的 `hasUI` 判断说话。
    */
   uiOptions?: (() => HostUiOptions) | undefined;
-  /** 测试注入：跳过整个装载流程。 */
+  /** ���试注入：跳过整个装载流程。 */
   disabled?: boolean | undefined;
+  /**
+   * 当前会话 id 的**取值函数**。
+   *
+   * 为什么是函数：它会变（`/new`、恢复历史）。扩展的 `getSessionId()` 问的时候得报
+   * 当时的值，而注册时那个值还不是最终的。
+   */
+  sessionId?: (() => string) | undefined;
+  /**
+   * `pi.sendMessage` 的落点：一条**用户消息**。
+   *
+   * 扩展用它把结论送回对话（`pi-web-access` 的命令全靠这个）。走用户消息而不是
+   * 「直接改 messages」是因为它要**触发一轮**——那正是本项目环的入口（见 loop.md）。
+   */
+  onSendMessage?: ((text: string) => void) | undefined;
+  /** 环是不是 idle。命令在环跑着时不能执行（否则中途插消息）。 */
+  canSend?: (() => boolean) | undefined;
 }
 
 /** 空宿主：一个扩展都没有时的形状。 */
@@ -126,10 +151,23 @@ function emptyHost(errors: readonly string[] = []): ExtensionHost {
   return {
     tools: [],
     promptTools: [],
+    commands: emptyCommands(),
     errors,
     loaded: 0,
     beforeAgentStart: async () => {},
     dispose: () => {},
+  };
+}
+
+/** 一个扩展都没有时的空命令表（界面照样调，只是永远 nothing）。 */
+function emptyCommands(): ExtensionCommands {
+  return {
+    list: () => [],
+    has: () => false,
+    run: async () => {
+      throw new Error('没有装任何扩展');
+    },
+    handleKey: async () => false,
   };
 }
 
@@ -185,7 +223,7 @@ function msg(error: unknown): string {
 export async function loadExtensionHost(
   options: LoadExtensionHostOptions,
 ): Promise<ExtensionHost> {
-  const { store, cwd, uiOptions, disabled, runtime } = options;
+  const { store, cwd, uiOptions, disabled, runtime, sessionId, onSendMessage, canSend } = options;
   // runtime 没给时造一个「什么都没有」的占位，只为让 bindCore 的签名固定。
   // 它只会被读 `ctx.model`（→ undefined）与 modelRegistry（→ undefined），而
   // 那正是降级路径上该有的形状（见 extension-models.ts 的文件头）。
@@ -217,11 +255,15 @@ export async function loadExtensionHost(
     loaded.extensions,
     loaded.runtime,
     cwd,
-    undefined as never,
+    // **真的**会话：扩展要读条目（`pi-web-access` 的 `/search` 列历史搜索结果、
+    // 判「模型这轮已经用过哪些 web 工具」）。数据源是**本项目的** `state.messages`，
+    // 不是 pi 的 SessionManager —— 那是另一份内存（读文件的话只能看到上一次进程的）。
+    // 详见 `extension-sessions.ts` 的文件头。
+    extensionSessionManager(store, sessionId ?? (() => store.getState().trace.sessionId)) as never,
     extensionModelRegistry(effectiveRuntime) as never,
   );
 
-  bindCore(runner, store, uiOptions, effectiveRuntime);
+  bindCore(runner, store, uiOptions, effectiveRuntime, onSendMessage);
 
   // 工具：同名的先注册者优先（与官方 `getAllRegisteredTools` 一个口径）。
   const seen = new Set<string>();
@@ -269,9 +311,27 @@ export async function loadExtensionHost(
     errors.push(`扩展 ${where}：${message}`);
   };
 
+  // 斜杠命令与快捷键。handler 抛错收成诊断（与官方 `runner.onError` 同一口径）——
+  // 扩展坏了不该把用户的对话带崩。
+  const commands = installExtensionCommands({
+    runner,
+    store,
+    onError: onExtensionError,
+    ...(onSendMessage ? { onMessage: onSendMessage } : { onMessage: () => {} }),
+    canSend: canSend ?? (() => store.getState().phase === 'idle'),
+    shortcuts: loaded.extensions.flatMap((ext) =>
+      [...ext.shortcuts.values()].map((s) => ({
+        shortcut: s.shortcut,
+        ...(s.description !== undefined ? { description: s.description } : {}),
+        handler: s.handler as (ctx: unknown) => unknown,
+      })),
+    ),
+  });
+
   return {
     tools,
     promptTools,
+    commands,
     errors,
     loaded: loaded.extensions.length,
     beforeAgentStart: async (text?: string) => {
@@ -322,16 +382,52 @@ function bindCore(
   store: AgentStore,
   uiOptions: (() => HostUiOptions) | undefined,
   runtime: AgentRuntime,
+  onSendMessage: ((text: string) => void) | undefined,
 ): void {
   const noUi = (what: string) => Promise.reject(new Error(`本项目不支持扩展的「${what}」`));
   runner.bindCore(
     {
-      sendMessage: () => {},
+      /**
+       * `pi.sendMessage` —— 扩展把结论送回对话。
+       *
+       * 官方那个签名收的是 `CustomMessage`（带 `customType` / `display` / `details`），
+       * 而本项目**不存** custom 条目（那是 pi 会话层的能力）。所以取它的 `content`
+       * 里那些 text 块拼成一条**用户消息**。
+       *
+       * 丢弃 `customType` 的后果要说清：扩展的 `/curator` 那些命令靠它在转录里留
+       * 一个可点开的卡片，而本项目只会把它当**普通对话**。那是外观上的降级，**不是**
+       * 丢功能（结论照样回到对话里）。
+       */
+      sendMessage: (message: unknown) => {
+        const content = (message as { content?: unknown })?.content;
+        const text = Array.isArray(content)
+          ? content
+              .map((c) =>
+                typeof c === 'string'
+                  ? c
+                  : typeof (c as { text?: unknown })?.text === 'string'
+                    ? (c as { text: string }).text
+                    : '',
+              )
+              .join('\n')
+          : '';
+        onSendMessage?.(text);
+      },
       sendUserMessage: (content: unknown) => {
         const text = typeof content === 'string' ? content : String((content as { text?: unknown })?.text ?? '');
         if (text.trim() === '') return;
         store.dispatch({ type: 'user.message', text } as never);
       },
+      /**
+       * `pi.appendEntry` —— 存一条**不发给模型**的会话条目。
+       *
+       * **不存**（这是刻意的）：那正是 pi 会话层的能力，而本项目的会话是另一套
+       * （见 sessions.md）。给 no-op 而不是报错，于是扩展自己的
+       * `if (results.length === 0)` 那条路会走 —— `/search` 于是回一句
+       * 「No stored search results」，那是**诚实的降级**而不是崩溃。
+       *
+       * 代价：`/search` 看不到历史搜索结果。记在 extensions.md 的「不接」清单里。
+       */
       appendEntry: () => {},
       setSessionName: () => {},
       getSessionName: () => undefined,

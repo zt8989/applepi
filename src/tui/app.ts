@@ -28,6 +28,7 @@ import {
   stripTerminalSequences,
   truncateToWidth,
   visibleWidth,
+  type Component,
   type SlashCommand,
   type ViewportTUI,
   type EditorTheme,
@@ -72,6 +73,7 @@ import { formatCwdForFooter, formatTokens } from '@earendil-works/pi-coding-agen
 import { addUsageToTotals, createUsageTotals } from '@earendil-works/pi-coding-agent/dist/core/usage-totals.js';
 import { setupTheme } from './theme';
 import type { HostUiOptions } from '../extension-ui';
+import type { ExtensionCommands } from '../extension-commands';
 import { expandSkillCommand, parseSkillMessage, skillCommands, skillsInPrompt, type SkillInfo } from '../skills';
 
 const useColor = !process.env.NO_COLOR;
@@ -444,6 +446,12 @@ export interface TuiOptions {
   /** 一次性提问：给完就退出（脚本/管道友好）。 */
   prompt?: string | undefined;
   /**
+   * 扩展的斜杠命令与快捷键（`extension-commands.ts` 造，界面读）。
+   *
+   * 不给 = 没装扩展：补全里没有它们，`runCommand` 不会问。
+   */
+  extensionCommands?: ExtensionCommands | undefined;
+  /**
    * 装了哪些 pi 扩展（工具名 + 装载诊断）。
    *
    * ## 为什么也要开场报
@@ -647,6 +655,11 @@ export async function runTui(options: TuiOptions): Promise<number> {
     ...skillCommands(stateSkills()).map(
       (c): SlashCommand => ({ name: c.name, description: c.description }),
     ),
+    // 扩展的命令**追在最后**：本项目的与 skill 的排前面，扩展的排后面。
+    //
+    // 为什么不用 `SLASH_COMMANDS` 那份常量：扩展的命令要等 `loadExtensions()` 装载完
+    // 才知道，而那可能发生在编辑器建好**之后**。所以这里现取（与 skill 同一种情况）。
+    ...(options.extensionCommands?.list() ?? []),
   ];
 
   const base = new CombinedAutocompleteProvider(SLASH_COMMANDS, process.cwd());
@@ -661,6 +674,15 @@ export async function runTui(options: TuiOptions): Promise<number> {
       base.shouldTriggerFileCompletion?.(...args) ?? false,
   };
   editor.setAutocompleteProvider(withFreshCommands);
+
+  /**
+   * 扩展 widget 的当前集合（key → 组件）。
+   *
+   * 刻意是一个**活着的 Map** 而不是一个组件：官方那套 widget 可以按 key 增删换，
+   * 而我们布局里要的是「当前有哪些」。用 Map 才不用在每次 setWidget 时重建整个布局对象
+   * —— 而 `applyLayout()` 每帧可能被 Ctrl+T 调，它读这个 Map 就够。
+   */
+  const widgetSlots = new Map<string, Component>();
 
   let showTrace = false;
   /**
@@ -801,26 +823,51 @@ export async function runTui(options: TuiOptions): Promise<number> {
 
   // 显式标出回调参数类型：1.x 的 TuiInputListener 是具名类型，不再从上下文推断。
   const onInput: TuiInputListener = (data: string) => {
-    if (matchesKey(data, 'ctrl+c')) {
-      if (store.getState().phase !== 'idle') {
-        abortRun();
-        return { consume: true };
+    /** 内置的三个开关键。返回 true = 已消费。 */
+    const builtins = (): boolean => {
+      if (matchesKey(data, 'ctrl+c')) {
+        if (store.getState().phase !== 'idle') {
+          abortRun();
+          return true;
+        }
+        tui.stop();
+        process.exit(0);
       }
-      tui.stop();
-      process.exit(0);
-    }
-    // Ctrl+T：切换轨迹面板。底部要放哪些组件变了，布局必须跟着重设。
-    if (matchesKey(data, 'ctrl+t')) {
-      showTrace = !showTrace;
-      applyLayout();
-      refresh();
-      return { consume: true };
-    }
-    // Ctrl+O：展开/收起工具输出的完整内容。与 pi 同键。
-    if (matchesKey(data, 'ctrl+o')) {
-      expanded = !expanded;
-      refresh();
-      return { consume: true };
+      // Ctrl+T：切换轨迹面板。底部要放哪些组件变了，布局必须跟着重设。
+      if (matchesKey(data, 'ctrl+t')) {
+        showTrace = !showTrace;
+        applyLayout();
+        refresh();
+        return true;
+      }
+      // Ctrl+O：展开/收起工具输出的完整内容。与 pi 同键。
+      if (matchesKey(data, 'ctrl+o')) {
+        expanded = !expanded;
+        refresh();
+        return true;
+      }
+      return false;
+    };
+
+    // **顺序即优先级**：内置的先跑，扩展的键只在它们**没**消费时才算。
+    //
+    // 为什么内置优先：它们是本项目的开关（轨迹面板 / 工具输出 / 中断），被扩展抢走
+    // 的话界面看着「按了没反应」，而那比「扩展的键偶尔不生效」难查得多。
+    //
+    // 为什么扩展的**先问**（而不是内置消费掉就完全不问）：`handleKey` 内部也会调
+    // `builtins()` —— 那样就会跑两遍，于是 `Ctrl+T` 切换**两次**（等于没切）。
+    // 所以这里先自己跑一遍，**已经消费就不再问扩展**。
+    if (builtins()) return { consume: true };
+
+    if (options.extensionCommands) {
+      // 扩展的 handler 可能是 async（它会弹对话框），而输入监听器是**同步**回调 ——
+      // 在这里 await 就是等一个要人来点的窗口，会把输入队列堵住。
+      // 所以不消费这个键（返回 undefined，让按键继续往编辑器走），只把 handler 排出去。
+      void options.extensionCommands
+        .handleKey(data, () => false)
+        .catch((error: unknown) => {
+          notify(yellow(`扩展快捷键出错：${error instanceof Error ? error.message : String(error)}`));
+        });
     }
     return undefined;
   };
@@ -969,6 +1016,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
         );
         return;
       default:
+        // 扩展的命令在**最后**试：内置的与 skill 的优先（skill 走上面的分支）。
+        if (options.extensionCommands?.has(name)) {
+          void options.extensionCommands.run(name, arg).catch((error: unknown) => {
+            notify(yellow(`/${name} 出错：${error instanceof Error ? error.message : String(error)}`));
+          });
+          return;
+        }
         notify(yellow(`未知命令 /${name}（试试 /help）`));
     }
     void arg;
@@ -1079,6 +1133,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // 打 `/` 看着像什么都没发生。不给则每帧渲染一遍量真实高度，补全展开时自然变高。
     const bottom = new VStack([
       ...(showTrace ? [{ component: tracePanel, minSize: 1 }] : []),
+      // 扩展的 widget（`pi-web-access` 的活动面板用它）。**不给 basis** ——
+      // 给了就把高度钉死，面板里的内容一变就错位（同上面那三个的理由）。
+      ...[...widgetSlots.values()].map((component) => ({ component, minSize: 1 })),
       { component: loader, minSize: 1 },
       { component: editor, minSize: 3 },
       { component: footer, basis: 2, grow: 0, minSize: 2 },
@@ -1111,6 +1168,32 @@ export async function runTui(options: TuiOptions): Promise<number> {
     theme,
     addInputListener: (listener) => tui.addInputListener(listener),
     onNotice: (text: string) => notify(text),
+    /**
+     * 扩展的 widget 槽（`setWidget` 的落点）。
+     *
+     * 位置：**输入区上方**（官方默认的 `aboveEditor`）。那里本来就是底部 VStack 的
+     * 一格，不需要新机制 —— 难的是**布局要跟着重设**：VStack 的 children 是建的时候
+     * 定下的，所以增删一个 widget 就得重新 `setLayoutRoot`（`applyLayout` 干这个）。
+     *
+     * 按 key 存：同一个 key 重复 set 就是替换（官方的语义），不同 key 叠成多块。
+     * 换掉旧的要 `dispose()` 旧的 —— 否则扩展的 widget 里的定时器/监听器会一直活着。
+     */
+    setWidget: (key, component, opts) => {
+      const previous = widgetSlots.get(key);
+      if (previous && previous !== component) {
+        try {
+          (previous as { dispose?: () => void }).dispose?.();
+        } catch {
+          // 旧 widget 的 dispose 失败不该挡住新 widget 上场。
+        }
+      }
+      if (component === undefined) widgetSlots.delete(key);
+      else widgetSlots.set(key, component);
+      void opts;
+      // 布局的 children 变了 —— 必须重设，否则新 widget 不出现/旧的赖着不走。
+      applyLayout();
+      refresh();
+    },
   });
 
   // 开场报一下装了哪些 skill —— 与 pi 同形（`[Skills]` 一节，逗号分隔的名字）。
