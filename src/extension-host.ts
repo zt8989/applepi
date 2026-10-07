@@ -54,9 +54,11 @@ import type { AgentTool, AgentToolResult } from './agent-tool';
 import { getTool, getTools, registerExtraTools } from './tools';
 import { adaptExtensionTool, activeToolsFromState, applyActiveTools } from './extension-tools';
 import { createHostUi, type ExtensionHostUi, type HostUiOptions } from './extension-ui';
+import { extensionModelRegistry } from './extension-models';
 import { notifyBeforeAgentStart, type BeforeAgentStartHandler } from './extension-prompt';
 import { configHome } from './config-home';
 import type { ToolInfo } from '@earendil-works/pi-coding-agent';
+import type { AgentRuntime } from './provider';
 import type { PromptToolLike } from './system-prompt';
 
 /** 装好的扩展宿主。 */
@@ -89,6 +91,15 @@ export interface ExtensionHost {
 export interface LoadExtensionHostOptions {
   store: AgentStore;
   cwd: string;
+  /**
+   * 当前这套 provider/runtime。
+   *
+   * 扩展要自己调模型时（`pi-web-access` 的答案与摘要）靠它拿 `ctx.model` 与
+   * `ctx.modelRegistry` 的凭证。不给 = 降级路径（`provider.ts` 退回了手写装配），
+   * 于是 `ctx.modelRegistry` 是 `undefined`，扩展会用时才炸 —— 那是对的：那告诉
+   * 用户「这条路上没接」，好过回一句「No API key available」而真因是**降级了**。
+   */
+  runtime?: AgentRuntime | undefined;
   /**
    * 造 `ctx.ui` 的**工厂**（不是实例）。
    *
@@ -174,7 +185,15 @@ function msg(error: unknown): string {
 export async function loadExtensionHost(
   options: LoadExtensionHostOptions,
 ): Promise<ExtensionHost> {
-  const { store, cwd, uiOptions, disabled } = options;
+  const { store, cwd, uiOptions, disabled, runtime } = options;
+  // runtime 没给时造一个「什么都没有」的占位，只为让 bindCore 的签名固定。
+  // 它只会被读 `ctx.model`（→ undefined）与 modelRegistry（→ undefined），而
+  // 那正是降级路径上该有的形状（见 extension-models.ts 的文件头）。
+  const effectiveRuntime: AgentRuntime = runtime ?? {
+    models: undefined as never,
+    spec: { provider: '', model: '' } as never,
+    model: undefined as never,
+  };
   if (disabled === true) return emptyHost();
 
   const errors: string[] = [];
@@ -186,23 +205,23 @@ export async function loadExtensionHost(
   for (const e of loaded.errors) errors.push(`扩展 ${shortPath(e.path)}：${e.error}`);
   if (loaded.extensions.length === 0) return emptyHost(errors);
 
-  // runner 要 sessionManager 与 modelRegistry。本项目**不接** pi 的会话与模型层 ——
-  // 那正是「只用 pi 的样式层与工具，不接它的应用层」那条决定的延续。
+  // runner 要 sessionManager 与 modelRegistry。本项目**不接** pi 的会话层（那是 pi 的
+  // 应用层，见 surfaces.md），但 **modelRegistry 接** —— 扩展要自己调模型时只认它
+  // （`pi-web-access` 的答案/摘要就靠它拿凭证）。
   //
-  // 传 `undefined as never` 而不是给假对象：扩展若去读它们的成员（列模型、读会话条目），
-  // 会在那里炸出「cannot read property of undefined」—— 那比给一个**会静默说谎**的
-  // 空实现好得多（后者会让扩展以为「没有可用模型」而改走另一条路，症状离真因很远）。
-  // 第一个要接的扩展只用到 `ctx.ui` / `ctx.hasUI` / `ctx.cwd` / `ctx.isProjectTrusted()`，
-  // 这四样我们都给真的。
+  // sessionManager 仍传 `undefined as never`：扩展若去读它的成员（读会话条目以重建
+  // 上下文），会在那里炸出「cannot read property of undefined」—— 那比给一个
+  // **会静默说谎**的空实现好得多（后者会让扩展以为「会话里什么都没有」而改走另一条
+  // 路，症状离真因很远）。
   const runner = new ExtensionRunner(
     loaded.extensions,
     loaded.runtime,
     cwd,
     undefined as never,
-    undefined as never,
+    extensionModelRegistry(effectiveRuntime) as never,
   );
 
-  bindCore(runner, store, uiOptions);
+  bindCore(runner, store, uiOptions, effectiveRuntime);
 
   // 工具：同名的先注册者优先（与官方 `getAllRegisteredTools` 一个口径）。
   const seen = new Set<string>();
@@ -302,6 +321,7 @@ function bindCore(
   runner: ExtensionRunner,
   store: AgentStore,
   uiOptions: (() => HostUiOptions) | undefined,
+  runtime: AgentRuntime,
 ): void {
   const noUi = (what: string) => Promise.reject(new Error(`本项目不支持扩展的「${what}」`));
   runner.bindCore(

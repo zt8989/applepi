@@ -32,7 +32,16 @@ import { mkdtempSync } from 'node:fs';
 import { createAgentStoreWith } from '../src/store';
 import { createFauxRuntime, demoResponses } from '../src/provider';
 import { loadExtensionHost } from '../src/extension-host';
+import { extensionModelRegistry } from '../src/extension-models';
 import { createHostUi } from '../src/extension-ui';
+import {
+  createExtensionRuntime,
+  loadExtensionFromFactory,
+} from '@earendil-works/pi-coding-agent/dist/core/extensions/loader.js';
+import { ExtensionRunner } from '@earendil-works/pi-coding-agent/dist/core/extensions/runner.js';
+import { createEventBus } from '@earendil-works/pi-coding-agent/dist/core/event-bus.js';
+import { createRuntime, defaultProviderSpec } from '../src/provider';
+import type { AgentStore } from '../src/store';
 import { getTool, getTools, registerExtraTools } from '../src/tools';
 import { initTheme, theme } from '@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';
 import { TuiAltScreen } from '@earendil-works/pi-tui';
@@ -556,6 +565,144 @@ test('扩展：pi-web-access 的命令与快捷键不接（明说，不假装能
     restoreHome();
   }
 });
+
+test('扩展：ctx.model / ctx.modelRegistry 是真的（pi-web-access 的摘要靠它们）', async () => {
+  // 这一条用**内联扩展工厂**而不是真扩展：它要验的是**我们绑给 ctx 的东西**，
+  // 而那个 ctx 与真扩展拿到的逐字同形（都由 `ExtensionRunner.createToolContext` 造）。
+  //
+  // 为什么不直接问真扩展：它把摘要模型解析包在一个 UI 面板里（点「生成摘要」才走），
+  // 而那条路要有真 key + 真页面。用一个探针工具问同一组问题，测的是同一段宿主代码。
+  useRealHome();
+  try {
+    const runtime = await createRuntime(defaultProviderSpec());
+    assert.ok(runtime.runtime, '主路径下应该有 ModelRuntime（provider.ts 的降级是另一条路）');
+
+    const seen: Record<string, unknown> = {};
+    const shared = createExtensionRuntime();
+    const loaded = await loadExtensionFromFactory(
+      (pi) => {
+        pi.registerTool({
+          name: 'probe',
+          label: 'probe',
+          description: 'probe',
+          parameters: { type: 'object', properties: {} },
+          async execute(_id: string, _p: unknown, _s: unknown, _u: unknown, ctx: never) {
+            const c = ctx as {
+              model?: { provider: string; id: string };
+              modelRegistry?: {
+                getAll(): unknown[];
+                getApiKeyAndHeaders(m: unknown): Promise<{ ok: boolean; apiKey?: string }>;
+              };
+              scopedModels: unknown[];
+            };
+            seen['hasModel'] = c.model != null;
+            seen['registry'] = typeof c.modelRegistry;
+            seen['scopedModels'] = JSON.stringify(c.scopedModels);
+            try {
+              const auth = c.modelRegistry
+                ? await c.modelRegistry.getApiKeyAndHeaders(c.model)
+                : undefined;
+              seen['authOk'] = auth?.ok === true;
+              seen['hasKey'] = typeof auth?.apiKey === 'string' && auth.apiKey.length > 0;
+            } catch (error) {
+              seen['authThrew'] = error instanceof Error ? error.message : String(error);
+            }
+            return { content: [{ type: 'text' as const, text: 'ok' }], details: null };
+          },
+        });
+      },
+      process.cwd(),
+      createEventBus(),
+      shared,
+      '<probe>',
+    );
+
+    const runner = new ExtensionRunner(
+      [loaded],
+      shared,
+      process.cwd(),
+      undefined as never,
+      extensionModelRegistry(runtime) as never,
+    );
+    const faux = createFauxRuntime();
+    faux.setResponses(demoResponses());
+    const { store } = createAgentStoreWith({ runtime: faux.runtime, cwd: process.cwd() });
+    bindProbeRunner(runner, store, runtime.model);
+
+    const def = runner.getToolDefinition('probe');
+    assert.ok(def, '探针工具该注册上了');
+    await def.execute('x', {}, undefined, undefined, runner.createToolContext('x', undefined));
+
+    assert.equal(seen['hasModel'], true, 'ctx.model 要是当前模型（扩展用它判 hosted search 资格）');
+    assert.equal(seen['registry'], 'object', 'ctx.modelRegistry 不能是 undefined');
+    // `[]` = 不限制（扩展的 isModelInScope 是 length===0 || 匹配）。不是「没有模型」。
+    assert.equal(seen['scopedModels'], '[]');
+    assert.equal(seen['authOk'], true, `凭证该拿得到：${String(seen['authThrew'] ?? '')}`);
+    assert.equal(seen['hasKey'], true, '该真的拿到一个 key —— 摘要与答案功能全靠它');
+  } finally {
+    restoreHome();
+  }
+});
+
+test('扩展：降级路径上没有 modelRegistry（不造一个说谎的）', async () => {
+  // provider.ts 降级时（ModelRuntime.create 失败）runtime.runtime 是 undefined。
+  // 那时 extensionModelRegistry 返回 undefined 而不是「一个说没有 key 的 registry」——
+  // 后者会让扩展回「No API key available」而真因是**降级了**。
+  const faux = createFauxRuntime();
+  faux.setResponses(demoResponses());
+  assert.equal(faux.runtime.runtime, undefined, '测试前提：faux 是降级路径');
+  assert.equal(extensionModelRegistry(faux.runtime), undefined);
+});
+
+/**
+ * 给探针用的 runner 绑一套最小但**真**的核心动作。
+ *
+ * 为什么不复用 `loadExtensionHost` 里那个：那是模块内私有的，而且它会真的去装
+ * `settings.json` 里的所有扩展（慢、且与这条测试无关）。这里只验 ctx 那几样。
+ */
+function bindProbeRunner(runner: ExtensionRunner, store: AgentStore, model: unknown): void {
+  runner.bindCore(
+    {
+      sendMessage: () => {},
+      sendUserMessage: () => {},
+      appendEntry: () => {},
+      setSessionName: () => {},
+      getSessionName: () => undefined,
+      setLabel: () => {},
+      getActiveTools: () => [],
+      getAllTools: () => [],
+      getSettings: () => ({}) as never,
+      setActiveTools: () => {},
+      refreshTools: () => {},
+      getCommands: () => [],
+      setModel: () => Promise.reject(new Error('x')),
+      getThinkingLevel: () => 'off',
+      setThinkingLevel: () => Promise.reject(new Error('x')),
+    } as never,
+    {
+      getModel: () => model,
+      getScopedModels: () => [],
+      isIdle: () => store.getState().phase === 'idle',
+      isProjectTrusted: () => true,
+      getSignal: () => undefined,
+      abort: () => {},
+      hasPendingMessages: () => false,
+      shutdown: () => {},
+      getContextUsage: () => undefined,
+      compact: () => {},
+      getSystemPrompt: () => store.getState().systemPrompt,
+    } as never,
+  );
+  runner.setUIContext(
+    createHostUi(() => ({
+      tui: undefined as never,
+      theme,
+      addInputListener: () => () => {},
+      onNotice: () => {},
+    })) as never,
+    'tui',
+  );
+}
 
 /** 本项目界面认的斜杠命令（`tui/app.ts` 的 `SLASH_COMMANDS`，唯一真相）。 */
 function getCommands(): string[] {

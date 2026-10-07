@@ -245,6 +245,10 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   const extensionHost = await loadExtensionHost({
     store,
     cwd,
+    // 扩展要自己调模型时靠这个拿凭证（`pi-web-access` 的答案/摘要）。主路径下
+    // `runtime.runtime` 就是 pi 的 ModelRuntime（44 个内置 provider + 1500 模型），
+    // extension-models.ts 把它包成扩展认的 ModelRegistry。
+    ...(options.noExtensions ? {} : { runtime }),
     ...(options.uiOptions ? { uiOptions: options.uiOptions } : {}),
     ...(options.noExtensions ? { disabled: true } : {}),
   });
