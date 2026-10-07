@@ -105,6 +105,14 @@ export interface PromptState {
    * `undefined`（没装）而不是空数组（装了但一个都没有）。
    */
   skills?: SkillInfo[];
+  /**
+   * skill 加载的诊断（重名、frontmatter 不合法…）。
+   *
+   * 为什么要留在状态里而不只是打到 stderr：TUI 模式下 stderr 用户看不见，而「某个
+   * skill 没加载上」正是**静默退化** —— 模型少了能力，用户与界面都不知道原因。
+   * pi 把这类信息印在开场（`[Skill conflicts]`），我们也照做。
+   */
+  skillDiagnostics?: string[];
   /** 是否已经装载过。回放时据此判断「init 段读到了没有」。 */
   seeded: boolean;
 }

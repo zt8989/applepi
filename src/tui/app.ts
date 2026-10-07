@@ -939,6 +939,36 @@ export async function runTui(options: TuiOptions): Promise<number> {
   refresh();
   tui.start();
 
+  // 开场报一下装了哪些 skill —— 与 pi 同形（`[Skills]` 一节，逗号分隔的名字）。
+  //
+  // 为什么值得占这几行：skill 的全部意义在于「模型知道自己能做什么」，而清单在
+  // prompt 里是**看不见的**。不报出来，用户既不知道有哪些 skill 可用，也不会想到打
+  // `/skill:<名字>` —— 于是这功能等于没装。
+  //
+  // 形状照 pi：折叠成一逗号分隔的名字（55 个 skill 铺开会把对话区冲走）；Ctrl+O
+  // 已经是「展开工具输出」，这里不复用它 —— 名字一行本来就不长。
+  const startupSkills = stateSkills();
+  const startupDiagnostics = store.getState().prompt.skillDiagnostics ?? [];
+  if (startupSkills.length > 0 || startupDiagnostics.length > 0) {
+    const lines: string[] = [];
+    if (startupSkills.length > 0) {
+      lines.push(
+        `${dim('[Skills]')}\n${dim(startupSkills.map((s) => s.name).join(', '))}\n` +
+          `${dim(`共 ${startupSkills.length} 个，用 /skill:<名字> 调用`)}`,
+      );
+    }
+    // 与 pi 同形（截图里的 `[Skill conflicts]`）：加载不上的 skill 要看得见 ——
+    // 否则就是「模型静默少了能力」，而用户与界面都不知道为什么。
+    if (startupDiagnostics.length > 0) {
+      lines.push(
+        `${yellow('[Skill 警告]')}\n` +
+          startupDiagnostics.map((d) => yellow(`  ${d}`)).join('\n'),
+      );
+    }
+    notify(lines.join('\n\n'));
+    // 开场提示不该 6 秒后就消失（那时用户可能还没看完）：延到 30 秒。
+    noticeUntil = Date.now() + 30_000;
+  }
   if (prompt !== undefined) {
     // 一次性模式：TUI 的差分渲染在非交互终端里只会留下一堆转义序列，
     // 所以不走界面 —— 直接跑环，然后把**纯文本**的对话与轨迹树打到 stdout。

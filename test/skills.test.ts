@@ -31,23 +31,43 @@ import {
 import { createAgentReducer } from '../src/reducer';
 import { createInitialState } from '../src/state';
 import { renderTranscript } from '../src/tui/app';
+import { PI_CONFIG_DIR } from '../src/config-home';
 import type { AgentState } from '../src/state';
 import type { AgentAction, PromptToolDefinition } from '../src/actions';
 import type { Message } from '@earendil-works/pi-ai';
 
 setupTheme(undefined, 'dark');
 
-/** 造一个家目录 + 工作目录，各自带 skill；返回清理函数。 */
+/**
+ * 家目录下的 skill 位置。
+ *
+ * **不是 `<home>/skills`** —— pi 的 `loadSkills()` 扫的是 `<agentDir>/skills`，而
+ * agentDir 是 `~/.pi/agent`，所以真实位置是 `~/.pi/agent/skills`。
+ * 写成 `<home>/skills` 时测试也能过（那时 agentDir 恰好等于 home），一旦 agentDir
+ * 改成真形状就静默失效。
+ */
+function userSkillsDir(home: string): string {
+  return path.join(home, PI_CONFIG_DIR, 'agent', 'skills');
+}
+
+/**
+ * 造一个临时「家目录」+ 工作目录。
+ *
+ * **家目录按真形状摆**：`<root>/home/.pi/agent`。因为 skill 除了 `<agentDir>/skills`
+ * 还会扫 `<家>/.agents/skills`（跳工具约定），而 `~` 不可重定向 —— 实现靠
+ * `PI_CODING_AGENT_DIR` 的**父目录名叫 `.pi`** 推出家目录。摆成别的形状就推不出来，
+ * 于是会退回真实 `~`，读到开发者自己的 55 个 skill（断言变成「这台机器上碰巧过」）。
+ */
 async function withSkills(
   build: (home: string, cwd: string) => Promise<void>,
 ): Promise<{ home: string; cwd: string }> {
   const root = await mkdtemp(path.join(tmpdir(), 'skills-home-'));
   const home = path.join(root, 'home');
   const cwd = path.join(root, 'project');
-  await mkdir(home, { recursive: true });
+  await mkdir(path.join(home, PI_CONFIG_DIR, 'agent'), { recursive: true });
   await mkdir(cwd, { recursive: true });
   const previous = process.env['PI_CODING_AGENT_DIR'];
-  process.env['PI_CODING_AGENT_DIR'] = home;
+  process.env['PI_CODING_AGENT_DIR'] = path.join(home, PI_CONFIG_DIR, 'agent');
   try {
     await build(home, cwd);
     return { home, cwd };
@@ -68,9 +88,71 @@ async function writeSkill(dir: string, name: string, body: string): Promise<void
   );
 }
 
+test('扫 ~/.agents/skills（跳工具约定 —— 用户装 skill 通常在这儿）', async () => {
+  // 这条是**真实 bug 的回归**：第一版只调 loadSkills()，而它只扫
+  // <agentDir>/skills 与 <cwd>/.pi/skills —— **不扫** `~/.agents/skills`。而 pi 自己
+  // 是扫的（package-manager.js 的 collectSkillEntries 那条路径）。实测一台机器上
+  // 55 个 skill 全在 ~/.agents/skills、而 ~/.pi/agent/skills 根本不存在，于是症状是
+  // 「一个 skill 都没有」：开场没列表、`/` 补全里也没有。
+  await withSkills(async (home, cwd) => {
+    await writeSkill(path.join(home, '.agents', 'skills'), 'agents-level', '家目录 .agents');
+    const registry = loadSkillRegistry({ cwd });
+    assert.deepEqual(
+      registry.skills.map((s) => s.name),
+      ['agents-level'],
+      `~/.agents/skills 要能被扫到，实际：${registry.skills.map((s) => s.name).join(',')}`,
+    );
+    assert.equal(registry.skills[0]?.scope, 'user');
+  });
+});
+
+test('扫 cwd 向上每一层的 .agents/skills（到 home 为止）', async () => {
+  await withSkills(async (home, cwd) => {
+    // cwd 自己这一层 + 上到 home 的中间层。
+    await writeSkill(path.join(cwd, '.agents', 'skills'), 'at-cwd', '就在 cwd');
+    const registry = loadSkillRegistry({ cwd });
+    assert.ok(
+      registry.skills.some((s) => s.name === 'at-cwd'),
+      `cwd 自己的 .agents 要能被扫到：${registry.skills.map((s) => s.name).join(',')}`,
+    );
+    assert.equal(registry.skills.find((s) => s.name === 'at-cwd')?.scope, 'project');
+  });
+});
+
+test('不会顺着祖先链一路扫到开发者真实家目录（cwd 不在 home 下时）', async () => {
+  // 回归：上界早先只认「正好等于 home」，而测试的 cwd 是 <root>/project、home 是
+  // <root>/home —— cwd 不是 home 的子目录，于是向上永远碰不到 home，循环走到盘符根，
+  // 扫到了 C:\Users\<名>\.agents\skills（实测 55 个）。断言变成「这台机器上碰巧过」。
+  await withSkills(async (home, cwd) => {
+    assert.ok(!cwd.startsWith(home + path.sep), '本测试的前提就是 cwd 不在 home 下');
+    await writeSkill(userSkillsDir(home), 'only-mine', '只该看到我自己的');
+    const registry = loadSkillRegistry({ cwd });
+    assert.deepEqual(
+      registry.skills.map((s) => s.name),
+      ['only-mine'],
+      `扫到了不该看到的：${registry.skills.map((s) => s.name).join(',')}`,
+    );
+  });
+});
+
+test('重名时先到先得（用户级胜过 .agents），并给诊断', async () => {
+  await withSkills(async (home, cwd) => {
+    await writeSkill(userSkillsDir(home), 'dup', '来自 .pi/agent');
+    await writeSkill(path.join(home, '.agents', 'skills'), 'dup', '来自 .agents');
+    const registry = loadSkillRegistry({ cwd });
+    const dup = registry.skills.filter((s) => s.name === 'dup');
+    assert.equal(dup.length, 1, '同名只应留一个');
+    assert.ok(dup[0]?.filePath.includes('.pi'), `应保留先到的（.pi/agent）：${dup[0]?.filePath}`);
+    assert.ok(
+      registry.diagnostics.some((d) => d.includes('dup')),
+      `重名要给诊断：${registry.diagnostics.join('; ')}`,
+    );
+  });
+});
+
 test('skill 从家目录与工作目录两处都能加载，且标出层级', async () => {
   await withSkills(async (home, cwd) => {
-    await writeSkill(path.join(home, 'skills'), 'user-skill', '用户级');
+    await writeSkill(userSkillsDir(home), 'user-skill', '用户级');
     await writeSkill(path.join(cwd, '.pi', 'skills'), 'project-skill', '项目级');
     const registry = loadSkillRegistry({ cwd });
     const byName = new Map(registry.skills.map((s) => [s.name, s]));
@@ -89,7 +171,7 @@ test('skill 与配置读同一个家目录（configHome 就是 pi 的 getAgentDi
   // 这条是回归：早先本项目另有 REDUX_AGENT_DIR 且优先级高于 pi 的那个，而 pi 的
   // getAgentDir() 不认它 —— 于是设了临时家目录也拦不住 skill 从真实家目录加载。
   await withSkills(async (home, cwd) => {
-    await writeSkill(path.join(home, 'skills'), 'isolated-skill', '只在临时家目录里');
+    await writeSkill(userSkillsDir(home), 'isolated-skill', '只在临时家目录里');
     const registry = loadSkillRegistry({ cwd });
     assert.deepEqual(
       registry.skills.map((s) => s.name),
@@ -113,7 +195,7 @@ test('没有 skill 时是空清单（不是报错）', async () => {
 
 test('prompt 末尾接上清单，且是 Agent Skills 标准的 XML 形状', async () => {
   await withSkills(async (home, cwd) => {
-    await writeSkill(path.join(home, 'skills'), 'demo', '正文');
+    await writeSkill(userSkillsDir(home), 'demo', '正文');
     const registry = loadSkillRegistry({ cwd });
     const block = skillsPrompt(registry.skills);
     assert.ok(block.includes('<available_skills>'), block);
@@ -127,7 +209,7 @@ test('prompt 末尾接上清单，且是 Agent Skills 标准的 XML 形状', asy
 
 test('disable-model-invocation 的 skill 不进 prompt（但仍可显式调用）', async () => {
   await withSkills(async (home, cwd) => {
-    const dir = path.join(home, 'skills', 'hidden');
+    const dir = path.join(userSkillsDir(home), 'hidden');
     await mkdir(dir, { recursive: true });
     await writeFile(
       path.join(dir, 'SKILL.md'),
@@ -147,7 +229,7 @@ test('disable-model-invocation 的 skill 不进 prompt（但仍可显式调用�
 
 test('/skill:x 展开成 pi 的 XML 形状（官方 parseSkillBlock 能还原）', async () => {
   await withSkills(async (home, cwd) => {
-    await writeSkill(path.join(home, 'skills'), 'demo', '第一步做什么');
+    await writeSkill(userSkillsDir(home), 'demo', '第一步做什么');
     const registry = loadSkillRegistry({ cwd });
     const expanded = expandSkillCommand('/skill:demo', registry.skills);
     const { parseSkillBlock } = await import('@earendil-works/pi-coding-agent');
@@ -164,7 +246,7 @@ test('/skill:x 展开成 pi 的 XML 形状（官方 parseSkillBlock 能还原）
 
 test('/skill:x 带参数时，参数跟在块后面', async () => {
   await withSkills(async (home, cwd) => {
-    await writeSkill(path.join(home, 'skills'), 'demo', '正文');
+    await writeSkill(userSkillsDir(home), 'demo', '正文');
     const registry = loadSkillRegistry({ cwd });
     const expanded = expandSkillCommand('/skill:demo 帮我评审这段', registry.skills);
     assert.ok(expanded.endsWith('帮我评审这段'), expanded);
@@ -273,7 +355,7 @@ test('skill 清单在轨迹树上可见（有 skill 才有节点）', () => {
 
 test('skill 块在界面上画成可折叠块（不是蓝底用户消息）', async () => {
   await withSkills(async (home, cwd) => {
-    await writeSkill(path.join(home, 'skills'), 'demo', '评审要点在这里');
+    await writeSkill(userSkillsDir(home), 'demo', '评审要点在这里');
     const registry = loadSkillRegistry({ cwd });
     const expandedText = expandSkillCommand('/skill:demo', registry.skills);
     const state = {

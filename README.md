@@ -122,7 +122,8 @@ prompt 里只列一张清单（名字/描述/位置），模型对上号时自�
 少花 token 是这一层的全部意义。
 
 ```text
-~/.pi/agent/skills/<名字>/SKILL.md    ← 用户级
+~/.pi/agent/skills/<名字>/SKILL.md    ← pi 自己的（用户级）
+~/.agents/skills/<名字>/SKILL.md      ← 跳工具约定（用户通常装这儿）
 <工作目录>/.pi/skills/<名字>/SKILL.md ← 项目级
 ```
 
@@ -147,7 +148,7 @@ auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 prov
 ## 测试
 
 ```bash
-pnpm test           # 206 个离线测试，不打网络
+pnpm test           # 210 个离线测试，不打网络
 pnpm run typecheck  # tsc --noEmit（src + test + scripts）
 ```
 

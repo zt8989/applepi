@@ -121,14 +121,50 @@ skill **不是工具**，是给模型看的「遇到这类任务怎么做」的�
 模型**不会自动加载**正文 —— prompt 里只列一张清单（名字 + 描述 + 文件位置），任务对上号时
 它自己调 `read` 去读那个文件。省 token 是这一层的全部意义。
 
-目录与 pi 完全一致：
+目录（与 pi 一致，但**比 pi 多一处**，见下）：
 
 ```
-~/.pi/agent/skills/<名字>/SKILL.md    ← 用户级
+~/.pi/agent/skills/<名字>/SKILL.md    ← 用户级（pi 自己的）
+~/.agents/skills/<名字>/SKILL.md      ← 跳工具约定（pi 也扫）
 <工作目录>/.pi/skills/<名字>/SKILL.md ← 项目级
+<工作目录>/.agents/skills/<名字>/SKILL.md
+<工作目录的每一层祖先>/.agents/skills/  ← 到家目录为止
 ```
 
 再加 `--skill <路径>`（可重复）。
+
+### 扫哪几个目录：这里踩过一个真坑
+
+**`loadSkills()` 那个便捷函数不扫 `~/.agents/skills`。** 它只扫
+`<agentDir>/skills` 与 `<cwd>/.pi/skills` —— 而 pi 自己**还扫** `~/.agents/skills`
+（跳工具的通用约定，见 https://agentskills.io）。
+
+照 `loadSkills()` 的默认行为写，后果是「一个 skill 都没有」：开场没列表、`/` 补全里
+也没有。实测一台机器上 **55 个 skill 全在 `~/.agents/skills`，而 `~/.pi/agent/skills`
+根本不存在** —— 这是静默退化，不报任何错。
+
+所以 `loadSkillRegistry()` 显式补扫，用**已导出的** `loadSkillsFromDir()`（它与 pi
+内部私有的 `collectSkillEntries()` 规则相同：找 `SKILL.md`、认 gitignore、目录里有
+SKILL.md 就不再往下递归）。
+
+**为什么不 pnpm patch 把那两个私有函数放出来**：patch 能改文件，但这里要改的是
+**运行时的资源发现语义**（多扫哪几个目录、什么条件下扫），不是 `exports` 字段。patch
+一旦被 pnpm 重新生成或上游升级就丢，而丢掉的症状是「skill 又全没了」。为一个已经有
+等价公开 API 的需求去改 vendor 语义，不划算。
+
+### 祖先目录的上界：家目录，不是 git 根
+
+pi 的 `collectAncestorAgentsSkillDirs()` 上界是 git 仓库根。但 `gitRoot` 为 null 时
+（cwd 不在任何仓库里 —— 临时目录、容器、CI），那个循环会**一直走到盘符根**：于是
+`C:\Users\<名>\AppData\Local\Temp\某临时目录\project` 会扫到 `C:\Users\<名>\.agents\skills`，
+也就是开发者自己家目录里的几十个 skill。
+
+测试会因此读到真实家目录，断言变成「这台机器上碰巧过」。所以这里取**家目录**作上界，
+并且额外判「home 在不在 cwd 的祖先链上」—— cwd 不在 home 下面时（临时目录就是这么）
+立刻停下，否则照样越界。
+
+真实项目里 git 根在 cwd 与家目录之间，所以这个上界**不改变** pi 在项目里的行为。
+要用仓库根**以上**的 `.agents`（monorepo 子目录想用上层共享 skill）请显式 `--skill`。
 
 ### 复用了 pi 的什么
 
@@ -162,3 +198,13 @@ pi 改了标准的细节，我们这边不会跟着动。
 `prompt.init` 时拼（`src/reducer.ts`）。走 action 而不是内核里拼，是因为这样会被落盘、
 被回放 —— 回放时读到 init 段就知道当时发给模型的完整 prompt 是什么，不必重新扫目录
 （那时的目录内容可能已经变了）。轨迹树上也有一个 `prompt.skills` 节点。
+
+### 开场要报清单
+
+prompt 里那份清单**用户看不见**。不报出来的话，用户既不知道有哪些 skill 可用，也不会
+想到打 `/skill:<名字>` —— 功能等于没装。所以启动时打印一节 `[Skills]`（与 pi 的
+`[Skills]` 同形：逗号分隔的名字），加载诊断打成 `[Skill 警告]`（pi 是 `[Skill conflicts]`）。
+
+诊断**原来打到 stderr**，TUI 模式下用户看不见，而「某个 skill 没加载上」正是静默退化
+（模型少了能力，界面与用户都不知道原因）。所以它们进 `state.prompt.skillDiagnostics`，
+由界面显示。

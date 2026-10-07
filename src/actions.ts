@@ -101,6 +101,8 @@ export type AgentAction =
        * 空数组也可能意味着「装了但一个都没有」。
        */
       skills?: SkillInfo[] | undefined;
+      /** 加载诊断（重名 / frontmatter 不合法…），TUI 开场要显示。 */
+      skillDiagnostics?: string[] | undefined;
     }
   /**
    * 中途追加一段 prompt（`system` 或 `developer` role）。

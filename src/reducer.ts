@@ -290,6 +290,9 @@ const transitions: TransitionHandlers = {
         systemPrompt,
         tools: action.tools,
         ...(action.skills ? { skills: action.skills } : {}),
+        ...(action.skillDiagnostics && action.skillDiagnostics.length > 0
+          ? { skillDiagnostics: action.skillDiagnostics }
+          : {}),
         seeded: true,
       },
       // 扁平别名跟着更新（真相在 prompt 块里）。

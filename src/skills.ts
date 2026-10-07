@@ -34,17 +34,29 @@
  * 注意项目级是 `<cwd>/.pi/skills`，不是 `.claude/skills` 之类 —— 用 `getAgentDir()`
  * 与 `CONFIG_DIR_NAME` 这些**官方常量**拼，而不是手抄字符串（理由同 config-home.ts）。
  */
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import os from 'node:os';
+import path, { dirname, resolve } from 'node:path';
 import {
   formatSkillsForPrompt,
   loadSkills,
+  loadSkillsFromDir,
   parseSkillBlock,
   type Skill as PiSkill,
 } from '@earendil-works/pi-coding-agent';
 import { stripFrontmatter } from '@earendil-works/pi-coding-agent/dist/utils/frontmatter.js';
-import { configHome } from './config-home';
+import { configHome, PI_CONFIG_DIR } from './config-home';
+import { ENV_AGENT_DIR as PI_CODING_AGENT_DIR_ENV } from '@earendil-works/pi-coding-agent/dist/config.js';
 import type { AgentState } from './state';
+
+/**
+ * 跳工具的 skill 目录名（Agent Skills 约定）。
+ *
+ * **手写字符串**：pi 自己没导出这个常量（它只在 `package-manager.js` 里拼路径），
+ * 而这个目录名是跨工具的公开约定（`https://agentskills.io`），不是 pi 的内部实现 ——
+ * 与 pi 的私有常量不同，跟着它变反而危险。
+ */
+const AGENTS_DIR = '.agents';
 
 /** 一个 skill 的形状（与 pi 的 `Skill` 对齐，但只留我们要用的字段）。 */
 export interface SkillInfo {
@@ -100,39 +112,212 @@ function toInfo(skill: PiSkill): SkillInfo {
 }
 
 /**
- * 加载全部 skill（用户级 + 项目级）。
+ * 加载全部 skill。
  *
- * 诊断**不是错误**：一个 skill 的 frontmatter 写坏了，不该让其他 skill 全部不可用
- * —— 所以只收集起来交给界面提示，加载继续。
+ * ## 扫哪几个目录（这一段是本文件最要紧的部分）
  *
- * `paths` 是额外的显式路径（文件或目录），对应 pi 的 `--skill`；我们从命令行收。
+ * `loadSkills()` 这个便捷函数**只扫两个目录**：`<家目录>/skills` 与
+ * `<cwd>/.pi/skills`。而 pi 自己**还扫第三个**：
+ *
+ * ```
+ * ~/.agents/skills/          ← 跳工具的通用约定（Agent Skills）
+ * <祖先目录>/.agents/skills/  ← 向上找到 git 仓库根为止
+ * ```
+ *
+ * pi 里走的是 `package-manager.js` 的私有函数 `collectSkillEntries` +
+ * `collectAncestorAgentsSkillDirs`（未导出）。**用户那一层最常见**：实际测过，
+ * 一个真机器上 55 个 skill 全在 `~/.agents/skills/`，而 `~/.pi/agent/skills`
+ * 根本不存在 —— 于是照 `loadSkills()` 的默认行为写，症状是「一个 skill 都没有」：
+ * 开场没有列表、`/` 补全里也没有 skill。
+ *
+ * 所以这里**显式补扫**那些目录，用的是**已导出的** `loadSkillsFromDir()`
+ * （它与私有的 `collectSkillEntries` 规则相同：找 `SKILL.md`、认 gitignore、
+ * 目录里有 SKILL.md 就不再往下递归）。
+ *
+ * ## 为什么不 pnpm patch 把那两个私有函数放出来
+ *
+ * patch 能改文件，但这里要改的是**运行时的资源发现语义**（多扫哪几个目录、
+ * 什么条件下扫），不是 `exports` 字段。patch 一旦被 pnpm 重新生成或上游升级就丢，
+ * 而丢掉的症状是「skill 又全没了」—— 静默退化。为一个已经有等价公开 API 的
+ * 需求去改 vendor 语义，不划算。
+ *
+ * ## 诊断不是错误
+ *
+ * 一个 skill 的 frontmatter 写坏了，不该让其他 skill 全部不可用 —— 诊断收集起来
+ * 交给界面提示，加载继续。
  */
 export function loadSkillRegistry(options: { cwd: string; paths?: readonly string[] }): SkillRegistry {
-  let result: { skills: PiSkill[]; diagnostics: { type: string; message: string; path?: string }[] };
+  const skills: PiSkill[] = [];
+  const diagnostics: { type: string; message: string; path?: string }[] = [];
+  /** 按 name 去重（先到先得，与 pi 的行为一致：用户级优先于 .agents）。 */
+  const seen = new Map<string, string>();
+  const add = (result: { skills: PiSkill[]; diagnostics: typeof diagnostics }, scope?: SkillInfo['scope']): void => {
+    diagnostics.push(...result.diagnostics);
+    for (const skill of result.skills) {
+      if (seen.has(skill.name)) {
+        diagnostics.push({
+          type: 'collision',
+          message: `name "${skill.name}" collision`,
+          path: skill.filePath,
+        });
+        continue;
+      }
+      seen.set(skill.name, skill.filePath);
+      skills.push(scope ? ({ ...skill, scope } as PiSkill) : skill);
+    }
+  };
+
+  // 1) pi 自己的两个默认目录（<家目录>/skills 与 <cwd>/.pi/skills）。
   try {
-    result = loadSkills({
-      cwd: options.cwd,
-      // **必须用 `configHome()` 而不是 pi 的 `getAgentDir()`**（两者现在逐字相同）。
-      // 用 configHome() 是为了「以后若真要换路径，只改一处」：现在 configHome() 就是
-      // getAgentDir() 的转发，所以两者不可能分家；一旦有人改了 configHome()，
-      // 这里跟着走，而不是静默指向别处。
-      agentDir: configHome(),
-      skillPaths: [...(options.paths ?? [])],
-      includeDefaults: true,
-    });
+    add(
+      loadSkills({
+        cwd: options.cwd,
+        // **必须用 `configHome()` 而不是 pi 的 `getAgentDir()`**（两者现在逐字相同）。
+        // 用 configHome() 是为了「以后若真要换路径，只改一处」：现在 configHome() 就是
+        // getAgentDir() 的转发，所以两者不可能分家；一旦有人改了 configHome()，
+        // 这里跟着走，而不是静默指向别处。
+        agentDir: configHome(),
+        skillPaths: [...(options.paths ?? [])],
+        includeDefaults: true,
+      }),
+    );
   } catch (error) {
     // 目录不存在之类的情况不该让界面起不来 —— 没有 skill 而已。
-    return {
-      skills: [],
-      diagnostics: [`skill 加载失败：${error instanceof Error ? error.message : String(error)}`],
-    };
+    diagnostics.push({
+      type: 'warning',
+      message: `skill 加载失败：${error instanceof Error ? error.message : String(error)}`,
+    });
   }
+
+  // 2) `~/.agents/skills` —— 跳工具的通用约定。**用户装 skill 通常装在这儿**。
+  //
+  // `home` 走 `agentsHome()` 而不是直接 `os.homedir()`：`~` 不可重定向，
+  // 测试就隔离不掉（会读到开发者真实家目录里的 55 个 skill，断言变成“测试机上
+  // 碰巧过了”）。`PI_CODING_AGENT_DIR` 指向临时目录时，`~/.agents` 取它的父目录 ——
+  // 也就是「家目录本身」搬家时，这个目录跟着走，与 pi 的行为一致。
+  const userAgentsHome = agentsHomeDir();
+  add(scanDir(path.join(userAgentsHome, AGENTS_DIR, 'skills'), 'user'));
+  // 3) 从 cwd 向上每一层的 `.agents/skills`，到 git 仓库根为止（与 pi 一致）。
+  for (const dir of ancestorAgentsSkillDirs(options.cwd)) {
+    if (resolve(dir) === resolve(path.join(userAgentsHome, AGENTS_DIR, 'skills'))) continue;
+    add(scanDir(dir, 'project'));
+  }
+
   return {
-    skills: result.skills.map(toInfo),
-    diagnostics: result.diagnostics.map(
+    skills: skills.map(toInfo),
+    diagnostics: diagnostics.map(
       (d) => `${d.type === 'collision' ? '重名' : '警告'}：${d.message}${d.path ? `（${d.path}）` : ''}`,
     ),
   };
+}
+
+/**
+ * `~/.agents` 所在的家目录。
+ *
+ * `PI_CODING_AGENT_DIR` 默认是 `<家>/.pi/agent`。设了它就以它为准，没设就是真的 `~`。
+ *
+ * ## 为什么要这条间接
+ *
+ * `~` 不可重定向，而 `.agents/skills` 恰恰是真实用户装 skill 的地方（实测一台机器上
+ * 55 个全在那儿）。不隔离的话，测试会读到开发者真实家目录，断言变成「这台机器上
+ * 碰巧过」—— 而且换个环境就红。
+ *
+ * ## 怎么推出家目录
+ *
+ * **认形状而不是猜**：真实形状是 `<家>/.pi/agent`（`PI_CONFIG_DIR` 与 `agent` 两段），
+ * 所以家目录是它的**上两级**。若 agentDir 的父目录不叫 `.pi`（例如测试把它指到
+ * `<临时>/home`），那它**自身**就是家目录 —— 此时只上一级。
+ *
+ * 早先写过两个错版本：「只上一次 dirname」（于是认成 `<家>/.pi`，`.agents` 落进 `.pi`
+ * 里，真实用户的 55 个 skill 一个都扫不到），以及「两级 + 认不出就退回 `~`」——
+ * 后者更糟：退回 `~` 意味着测试会读到开发者真实家目录，断言变成「这台机器上碰巧过」。
+ *
+ * 现在的规则没有「退回 `~`」这个分支：认得出 `.pi` 就两级，认不出就一级。两者都不会
+ * 跑到真实 `~` 去（只有变量没设时才用 `~`）。
+ */
+function agentsHomeDir(): string {
+  const agentDir = process.env[PI_CODING_AGENT_DIR_ENV];
+  // 没设 → 真 `~`（用户正常情况，也是 pi 的行为）。
+  if (!agentDir) return os.homedir();
+  const resolved = path.resolve(agentDir);
+  // 父目录叫 `.pi` → 上两级才是家目录；否则 agentDir 本身就是家目录 → 上一级。
+  return path.basename(path.dirname(resolved)) === PI_CONFIG_DIR
+    ? path.dirname(path.dirname(resolved))
+    : path.dirname(resolved);
+}
+
+/** 扫一个目录（不存在就当空）。异常一律降级成诊断，不往上抛。 */
+function scanDir(dir: string, scope: SkillInfo['scope']): {
+  skills: PiSkill[];
+  diagnostics: { type: string; message: string; path?: string }[];
+} {
+  if (!existsSync(dir)) return { skills: [], diagnostics: [] };
+  try {
+    const result = loadSkillsFromDir({ dir, source: scope });
+    // `source` 只影响 pi 内部记的 sourceInfo；scope 我们自己定（见上面的 add）。
+    return {
+      skills: result.skills,
+      diagnostics: result.diagnostics as { type: string; message: string; path?: string }[],
+    };
+  } catch (error) {
+    return {
+      skills: [],
+      diagnostics: [
+        { type: 'warning', message: `扫 ${dir} 失败：${error instanceof Error ? error.message : String(error)}` },
+      ],
+    };
+  }
+}
+
+/**
+ * 从 `startDir` 向上每一层目录的 `.agents/skills`。
+ *
+ * ## 上界为什么要加一层
+ *
+ * pi 的 `collectAncestorAgentsSkillDirs()` 上界是 **git 仓库根**。但 `gitRoot` 为 null
+ * 时（cwd 不在任何仓库里 —— 临时目录、用户直接开一个新目录），那个循环会**一直走到盘符
+ * 根**：于是 `C:\Users\<名>\AppData\Local\Temp\某临时目录\project` 会扫到
+ * `C:\Users\<名>\.agents\skills`，也就是开发者自己家目录里的 55 个 skill。
+ *
+ * 症状不报错，只是「测试机上碰巧过」+ 换个环境就红。
+ *
+ * 所以取**家目录**作上界，而不是 pi 的 git 根。
+ *
+ * 真实项目里 git 根在 cwd 与家目录之间，所以这个上界**不改变**pi 在项目里的行为 ——
+ * 它只是剪掉「越界到盘符根」那段危险的尾巴（不在仓库里时 pi 会一路走到 `C:\`，
+ * 于是 `Temp\某目录\project` 会扫到 `C:\Users\<名>\.agents\skills`，也就是开发者自己
+ * 家目录里的 skill）。
+ *
+ * 要用仓库根**以上**的 `.agents`（monorepo 里子目录想用上层共享 skill）请显式
+ * `--skill`，不做隐式 —— 隐式扫到用户家目录这件事的失败模式是「测试机上碰巧过」。
+ */
+function ancestorAgentsSkillDirs(startDir: string): string[] {
+  const dirs: string[] = [];
+  const home = resolve(agentsHomeDir());
+  let dir = resolve(startDir);
+  // cwd 常常**不在家目录下面**（容器 / CI / 临时目录跑测试），这时向上永远碰不到 home，
+  // 循环会一直走到盘符根 —— 而 `C:\Users\<名>\.agents\skills` 里可能有几十个 skill，
+  // 于是测试读到开发者自己的家目录。判据是「走到 home **或** home 不在祖先链上」。
+  const homeIsAncestor = dir === home || dir.startsWith(home + path.sep);
+  for (;;) {
+    dirs.push(path.join(dir, AGENTS_DIR, 'skills'));
+    if (dir === home || !homeIsAncestor) break;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return dirs;
+}
+
+/** 向上找 `.git` 所在的目录（没有就是 null）。 */
+function findGitRoot(startDir: string): string | null {
+  let dir = resolve(startDir);
+  for (;;) {
+    if (existsSync(path.join(dir, '.git'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
 }
 
 /**

@@ -177,15 +177,17 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   //
   // 放在 store 建好之后：它们本身就是 dispatch，得走真实的 store。
   const toolList = getTools(cwd);
-  // Skill 清单：官方 `loadSkills()` 扫 `~/.pi/agent/skills` 与 `<cwd>/.pi/skills`，
-  // 再由 reducer 拼进 system prompt（走 prompt.init，所以会被落盘、被回放）。
+  // Skill 清单：官方 `loadSkills()` + `loadSkillsFromDir()` 扫各个目录
+  // （含跳工具约定的 `~/.agents/skills`），再由 reducer 拼进 system prompt
+  // （走 prompt.init，所以会被落盘、被回放）。
   //
   // 加载**失败不能拖垮启动**：一个写坏 frontmatter 的 skill 不该让整个界面起不来
   // （loadSkillRegistry 已经把异常收成 diagnostics 了）。
+  //
+  // 诊断**不打到 stderr**：TUI 模式下 stderr 用户看不见，而「某个 skill 没加载上」
+  // 正是静默退化（模型少了能力，界面与用户都不知道）。它们进 state，由界面开场显示
+  // （与 pi 的 `[Skill conflicts]` 同形）。
   const skillRegistry = loadSkillRegistry({ cwd, ...(options.skillPaths ? { paths: options.skillPaths } : {}) });
-  for (const diagnostic of skillRegistry.diagnostics) {
-    options.onTraceError?.(new Error(`skill: ${diagnostic}`));
-  }
   store.dispatch({
     type: 'prompt.init',
     systemPrompt: options.systemPrompt,
@@ -195,6 +197,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       parameters: tool.parameters,
     })),
     skills: skillRegistry.skills,
+    skillDiagnostics: skillRegistry.diagnostics,
   });
   store.dispatch({
     type: 'model.init',
