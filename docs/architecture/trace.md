@@ -116,12 +116,26 @@ HEAD → n7
 
 | kind | 谁产生 | label | meta |
 | --- | --- | --- | --- |
-| `prompt.base` | `prompt.init` | system prompt 首行摘要 | — |
-| `prompt.tools` | `prompt.init` | 工具名逗号分隔 | `count` |
-| `model.init` | `model.init` | `provider/model` | `thinking` / `midConvoSystem` / `midConvoTools` / `developerRole` |
+| `prompt.base` | 第一条 `user.message` | system prompt 首行摘要 | — |
+| `prompt.tools` | 第一条 `user.message` | 工具名逗号分隔 | `count` |
+| `prompt.skills` | 第一条 `user.message` | skill 名逗号分隔 | `count` |
+| `model.init` | 第一条 `user.message` | `provider/model` | `thinking` / `midConvoSystem` / `midConvoTools` / `developerRole` |
 | `prompt.segment` | `prompt.segment.added` | 片段首行摘要 | `role` / `source` |
 
 完整内容在 `detail` 里（prompt 全文、每个工具的 description、片段原文），`label` 只是摘要。
+
+### 它们推迟到用户发出第一句话
+
+`prompt.init` / `model.init` **只改 state，不建节点**。上面那四个节点由 reducer 在**第一条
+`user.message`** 里补上（`reducer.ts` 的 `beginTrace()`），排在该 user 节点**前面**。
+
+为什么：内核一装配就 dispatch 那两条装载，于是「打开界面还没说话」也已经有了四个节点
+（Ctrl+T 一打开就是一屏提示词与工具名）。进来看一眼就退出是常态，那些节点是纯噪声。
+与 `SessionWriter` 那个「空会话不落盘」是同一个决定，两边现在口径一致 ——
+**发过第一句话才算一段会话**。
+
+补出来的节点从 `state.prompt` / `state.model` 读，所以反映的是发第一句话那一刻**生效**的
+那一版（期间热重载过也算），与模型真正看到的一致。理由与细节见 [init](init.md)。
 
 ### 这一族**不推进 tip**
 
@@ -140,8 +154,10 @@ HEAD → n7
 
 ### 重复装载是追加
 
-`prompt.init` 走 `appendNode` 而非 `patchNode`：热重载再装载一次是**追加**一对新节点，旧的不改写。
-生效的是最新那个（`state.prompt` 里是最新值）。
+树已经开过之后再来一条 `prompt.init`（热重载）走 `appendNode` 而非 `patchNode`：
+**追加**一对新节点，旧的不改写。生效的是最新那个（`state.prompt` 里是最新值）。
+
+开局前反复 `prompt.init` 则不建任何节点 —— 那时树还没开，等第一句话再从 state 补一次就够了。
 
 ### reset 会清掉它们
 
@@ -161,4 +177,5 @@ HEAD → n7
 ## 相关
 
 - 这些节点什么时候被创建 → [loop](loop.md)
+- 上下文压缩（它也开节点）→ [compact](compact.md)
 - 在哪儿看 → [surfaces](surfaces.md)

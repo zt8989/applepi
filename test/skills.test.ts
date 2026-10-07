@@ -25,9 +25,9 @@ import {
   expandSkillCommand,
   loadSkillRegistry,
   skillCommands,
-  skillsPrompt,
   type SkillInfo,
 } from '../src/skills';
+import { buildSystemPromptText, promptToolsFrom } from '../src/system-prompt';
 import { createAgentReducer } from '../src/reducer';
 import { createInitialState } from '../src/state';
 import { renderTranscript } from '../src/tui/app';
@@ -189,7 +189,15 @@ test('没有 skill 时是空清单（不是报错）', async () => {
   await withSkills(async (_home, cwd) => {
     const registry = loadSkillRegistry({ cwd });
     assert.deepEqual(registry.skills, []);
-    assert.equal(skillsPrompt(registry.skills), '', '空清单不该往 prompt 里塞任何东西');
+    const prompt = buildSystemPromptText({
+      cwd,
+      tools: promptToolsFrom(cwd),
+      skills: registry.skills,
+    });
+    assert.ok(
+      !prompt.includes('<skills>'),
+      `空清单不该往 prompt 里塞任何东西。实际开头：${prompt.slice(0, 200)}`,
+    );
   });
 });
 
@@ -197,13 +205,19 @@ test('prompt 末尾接上清单，且是 Agent Skills 标准的 XML 形状', asy
   await withSkills(async (home, cwd) => {
     await writeSkill(userSkillsDir(home), 'demo', '正文');
     const registry = loadSkillRegistry({ cwd });
-    const block = skillsPrompt(registry.skills);
-    assert.ok(block.includes('<available_skills>'), block);
-    assert.ok(block.includes('<name>demo</name>'), block);
-    // 位置与工具名：模型要靠 description 判断该不该 read 那个文件。
-    assert.ok(block.includes('demo 的说明'), `清单要带 description：${block}`);
-    // 正文件**不进 prompt**（省 token 的全部意义就在这里）。
-    assert.ok(!block.includes('正文'), '正文不该出现在清单里');
+    // 断言的是**真的发给模型的那一整段**（pi 的 buildSystemPrompt），
+    // 不是某个中间辅助函数 —— 辅助函数删了就没人看得住它拼没拼对。
+    const prompt = buildSystemPromptText({
+      cwd,
+      tools: promptToolsFrom(cwd),
+      skills: registry.skills,
+    });
+    assert.ok(prompt.includes('<available_skills>'), prompt.slice(0, 300));
+    assert.ok(prompt.includes('<name>demo</name>'), prompt.slice(0, 300));
+    // 模型要靠 description 判断该不该 read 那个文件。
+    assert.ok(prompt.includes('demo 的说明'), '清单要带 description');
+    // 正文**不进 prompt**（省 token 的全部意义就在这里）。
+    assert.ok(!prompt.includes('正文'), '正文不该出现在清单里');
   });
 });
 
@@ -218,7 +232,12 @@ test('disable-model-invocation 的 skill 不进 prompt（但仍可显式调用�
     );
     const registry = loadSkillRegistry({ cwd });
     assert.equal(registry.skills.length, 1, '还是加载了');
-    assert.equal(skillsPrompt(registry.skills), '', '但不该出现在 prompt 里');
+    const prompt = buildSystemPromptText({
+      cwd,
+      tools: promptToolsFrom(cwd),
+      skills: registry.skills,
+    });
+    assert.ok(!prompt.includes('<skills>'), '但不该出现在 prompt 里');
     // 显式调用要能列出来（pi 也是这么做的）。
     assert.deepEqual(
       skillCommands(registry.skills).map((c) => c.name),
@@ -293,7 +312,7 @@ function reduce(reducer: ReturnType<typeof createAgentReducer>, state: AgentStat
   return reducer(state, action) as AgentState;
 }
 
-test('prompt.init 把清单拼进 systemPrompt，并落进 state', () => {
+test('prompt.init **原样**收下拼好的 prompt（skill 清单已由 pi 的 buildSystemPrompt 拼进去了）', () => {
   const reducer = createAgentReducer({});
   const skills: SkillInfo[] = [
     {
@@ -306,11 +325,17 @@ test('prompt.init 把清单拼进 systemPrompt，并落进 state', () => {
     },
   ];
   const tools: PromptToolDefinition[] = [];
+  // 内核交给 reducer 的是**已经拼好的一整段**（内核那边已经带 <skills>）。
+  const assembled = '前言\n\n<rules>\n- 某条\n</rules>\n\n<skills>\n<available_skills>demo</available_skills>\n</skills>';
   const state = reduce(reducer, seedState('基础提示'), {
-    type: 'prompt.init', systemPrompt: '基础提示', tools, skills,
+    type: 'prompt.init', systemPrompt: assembled, tools, skills,
   } as AgentAction);
-  assert.ok(state.systemPrompt.startsWith('基础提示'), '基础提示要保留');
-  assert.ok(state.systemPrompt.includes('<available_skills>'), '清单要接在后面');
+  assert.equal(
+    state.systemPrompt,
+    assembled,
+    'reducer 不该再往 prompt 上拼东西（两处都拼 → 清单出现两次）',
+  );
+  assert.ok(state.systemPrompt.includes('<available_skills>'), '清单在里面');
   assert.deepEqual(state.prompt.skills, skills, '清单要落进 state（界面要念它）');
 });
 
@@ -325,7 +350,9 @@ test('prompt.init 不带 skills 时原样保留 prompt（旧轨迹回放路径�
 
 test('skill 清单在轨迹树上可见（有 skill 才有节点）', () => {
   const reducer = createAgentReducer({});
-  const withSkillsState = reduce(reducer, seedState('x'), {
+  // 装载节点推迟到「用户发出第一句话」才补上（见 docs/architecture/init.md），
+  // 所以这里先 dispatch prompt.init，再发一句话看树上。
+  const withSkillsState = reduce(reducer, reduce(reducer, seedState('x'), {
       type: 'prompt.init',
       systemPrompt: 'x',
       tools: [],
@@ -339,14 +366,14 @@ test('skill 清单在轨迹树上可见（有 skill 才有节点）', () => {
           scope: 'user',
         },
       ],
-  } as AgentAction);
+  } as AgentAction), { type: 'user.message', text: '第一句' } as AgentAction);
   assert.ok(
     withSkillsState.trace.order.some((id) => withSkillsState.trace.nodes[id]?.kind === 'prompt.skills'),
     '树上要有 prompt.skills 节点',
   );
-  const without = reduce(reducer, seedState('x'), {
+  const without = reduce(reducer, reduce(reducer, seedState('x'), {
     type: 'prompt.init', systemPrompt: 'x', tools: [],
-  } as AgentAction);
+  } as AgentAction), { type: 'user.message', text: '第一句' } as AgentAction);
   assert.ok(
     !without.trace.order.some((id) => without.trace.nodes[id]?.kind === 'prompt.skills'),
     '零 skill 不该建空节点',

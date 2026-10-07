@@ -160,3 +160,4 @@ OSC 133 区域标记也被一并剥掉。
 
 - 内核装配 → [kernel](kernel.md)
 - 恢复历史（零 token）→ [sessions](sessions.md)
+- 工具执行与流式输出 → [tools](tools.md)

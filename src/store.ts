@@ -17,6 +17,7 @@ import { createPiAiEffectTable, type EffectTable } from './effects';
 import { getTools } from './tools';
 import { defaultStreamFn, type AgentRuntime, type StreamFn } from './provider';
 import { createTracePersistence, type TracePersistence, type TraceSink } from './trace-store';
+import { decideCompaction } from './compact';
 
 export type AgentStore = Store<AgentState, AgentAction>;
 
@@ -24,11 +25,91 @@ export type AgentStore = Store<AgentState, AgentAction>;
 export interface AgentStoreHandle {
   store: AgentStore;
   persistence: TracePersistence | null;
+  /** 自动压缩的订阅器（dispose 时要一并退订，否则关掉内核后还在跑）。 */
+  autoCompact: AutoCompact | null;
+}
+
+/**
+ * 自动上下文压缩：盯住「一个回合结束」，判定超了没有，超了就发 `compact.request`。
+ *
+ * ## 为什么是 store 订阅器而不是接线里的一个 action
+ *
+ * 压缩**必须**在环彻底停下来的时候发起（`phase === 'idle'`）—— 压缩要整份换掉 messages，
+ * 而在 LLM 还在流 / 工具还在跑时换，那条流回来就找不到自己的 toolCall 了。
+ *
+ * 而「环停下来的那一刻」在 redux-loop 里没有一个对应的 action：`llm.done`（无工具时）
+ * 之后环**不是**由某条 action 闭合的，只是没有更多 Cmd 了。写一个「回合结束」action
+ * 会要求所有收尾路径都记得 dispatch 它 —— 而漏掉一次的后果是压缩永远不触发。
+ *
+ * 订阅器盯 `phase` 从非 idle 变成 idle，**不漏路径**：环怎么停的它都看得到。
+ *
+ * ## 为什么不在 reducer 里判
+ *
+ * reducer 是纯函数，不能读时间也不能发起副作用。「要不要压」这个判定要读
+ * `state.messages` 的最后一条 usage —— 那是 state，做得到。但「压」这件事要花钱打网络，
+ * 必须是 Cmd。所以：判定留在 reducer/Cmd 之外（这里），执行留在 effect 里。
+ */
+export interface AutoCompact {
+  dispose(): void;
+}
+
+export function createAutoCompact(options: {
+  store: AgentStore;
+  /** 能不能压（表里没有 runCompact 就是不支持）。 */
+  enabled: boolean;
+}): AutoCompact | null {
+  if (!options.enabled) return null;
+  const { store } = options;
+
+  /**
+   * 上一次看到的状态是不是「在跑」。
+   *
+   * 订阅器是在 reducer **之后**跑的，所以它只能看到「已经停下来」的状态 ——
+   * 看不到刚刚停下的那一刻。要判断「刚刚停下的那一刻」就得**记住上一次**：
+   * 上一次还在跑、这一次 idle ⇒ 环刚闭合，这就是唯一需要判定的时机。
+   *
+   * 为什么不能每次 idle 都判：那会在压缩刚完成（也会变 idle）时又判一次，
+   * 而压缩刚做完上下文已经小了 —— 虽然 `shouldCompact` 大概会返回 false，
+   * 但多一次没必要的判定就是多一个「为什么压了两次」的可能性。
+   */
+  let wasRunning = false;
+  /** 已经压过的那一轮（用 messages 长度当粗粒度标记）：压完不再对同一批历史重复压。 */
+  let compactedAtLength = -1;
+
+  const check = (): void => {
+    const state = store.getState();
+    const running = state.phase !== 'idle';
+    const justStopped = wasRunning && !running;
+    wasRunning = running;
+    // 只在「刚刚停下来」的那一下判：否则每一条 delta、每一次 store 变化都会重算一遍。
+    if (!justStopped) return;
+    if (state.compacting) return;
+
+    const decision = decideCompaction({ state, settings: state.compactionSettings });
+    // `manual` 是「用户主动要求」，自动路径永远不该出现它（出现就是判定逻辑写错了）。
+    if (!decision.should || decision.reason === null || decision.reason === 'manual') return;
+    // 压过同一批历史就不再压：压完还是超说明 reserve 给少了，再压一次是同样结果、白花钱。
+    if (compactedAtLength === state.messages.length) return;
+    compactedAtLength = state.messages.length;
+    store.dispatch({ type: 'compact.request', reason: decision.reason });
+  };
+
+  const unsubscribe = store.subscribe(check);
+  return { dispose: unsubscribe };
 }
 
 export interface CreateAgentStoreOptions {
   runtime: AgentRuntime;
-  systemPrompt: string;
+  /**
+   * 初始 system prompt（占位）。
+   *
+   * **通常不用给** —— 真的 prompt 由 `prompt.init` 装（那才是发给模型的那份，
+   * 由 pi 的 `buildSystemPrompt` 拼，见 [system-prompt.ts](system-prompt.ts)）。
+   * 这里给的只进 `createInitialState` 的初始值，活不过第一条 `prompt.init`。
+   *
+   * 只有「不 dispatch `prompt.init` 就直接跑」的测试/脚本需要它。
+   */
+  systemPrompt?: string | undefined;
   maxTurns?: number | undefined;
   /** 一次 LLM 调用的超时（毫秒）；超时按可重试错误处理。 */
   llmTimeoutMs?: number | undefined;
@@ -54,6 +135,22 @@ export interface CreateAgentStoreOptions {
 export const effectTableToReducerEffects = loopWiring;
 
 export function createAgentStore(options: CreateAgentStoreOptions): AgentStore {
+  return createAgentStoreWith(options).store;
+}
+
+/**
+ * 建 store 并把自动压缩的订阅器一起装好。
+ *
+ * ## 为什么自动压缩装在这里，而不是 `createPersistentStore`
+ *
+ * 因为它与「要不要落盘」**无关** —— 压缩是功能，落盘是持久化。
+ * 早先只在 `createPersistentStore` 里装，于是直接用 `createAgentStore` 的调用方
+ * （测试、以及任何只要内存 store 的人）**永远收不到自动压缩**，而症状是
+ * 「长会话一直撞窗口」且没有任何地方提到过压缩 —— 极难归因。
+ *
+ * 落盘那条路仍然走 `createPersistentStore`，它多做一件事（挂轨迹落盘器）。
+ */
+export function createAgentStoreWith(options: CreateAgentStoreOptions): AgentStoreHandle {
   const { runtime, systemPrompt, maxTurns, streamFn, effects, reducerEffects, sessionId } = options;
 
   const table: EffectTable =
@@ -64,7 +161,9 @@ export function createAgentStore(options: CreateAgentStoreOptions): AgentStore {
     });
 
   const initialState = createInitialState({
-    systemPrompt,
+    // `prompt.init` 会立刻覆盖它（那是唯一真正发给模型的那份）。给不给都不影响行为，
+    // 但走同一个字段名，免得两处各叫一个「systemPrompt」而其中一个是假的。
+    systemPrompt: systemPrompt ?? '',
     providerName: runtime.spec.provider,
     modelId: runtime.model.id,
     // 工具按 cwd 建（官方工具用它做路径边界检查）。
@@ -89,7 +188,10 @@ export function createAgentStore(options: CreateAgentStoreOptions): AgentStore {
     initialState as never,
     install<AgentState>({ DONT_LOG_ERRORS_ON_HANDLED_FAILURES: true }) as never,
   ) as unknown as AgentStore;
-  return store;
+  // 自动压缩：只在**能**压的时候装（表里没有 runCompact 就是不支持压缩，
+  // 那时装上去只会发一条没人接的 request）。
+  const autoCompact = createAutoCompact({ store, enabled: table.runCompact !== undefined });
+  return { store, persistence: null, autoCompact };
 }
 
 /**
@@ -101,15 +203,14 @@ export function createAgentStore(options: CreateAgentStoreOptions): AgentStore {
  * 错误节点同样会被写进去 —— 落盘器对成功与失败一视同仁。
  */
 export function createPersistentStore(options: CreateAgentStoreOptions): AgentStoreHandle {
-  const store = createAgentStore(options);
-  if (!options.traceSink) return { store, persistence: null };
+  const handle = createAgentStoreWith(options);
+  if (!options.traceSink) return handle;
   const persistence = createTracePersistence({
-    store,
+    store: handle.store,
     sink: options.traceSink,
     ...(options.onTraceError ? { onError: options.onTraceError } : {}),
   });
-  return { store, persistence };
-  return { store, persistence };
+  return { ...handle, persistence };
 }
 
 /**

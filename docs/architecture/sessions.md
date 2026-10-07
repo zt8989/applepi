@@ -73,6 +73,10 @@ v3（`migrateV1ToV2` 补 `id`/`parentId` 树、`migrateV2ToV3` 把 `hookMessage`
 `SessionWriter.start()` 只**记住** header，第一条消息到了才写文件。否则每次启动内核都会
 在 `sessions/` 留一个「一行 header、零条消息」的空壳，列表里全是噪声。
 
+轨迹那边是同一个决定：**发过第一句话才算一段会话**。内核一装配虽然已经把 prompt / model
+装满 state，但不开轨迹节点、不建 `traces/<id>.jsonl`；两者都推迟到第一条 `user.message`。
+详见 [init](init.md)「进入会话不建节点」。
+
 ### 崩溃截断
 
 读的时候 `JSON.parse` 失败的行直接跳过 —— 崩溃只会丢掉最后没写完的那半行，之前的历史完好。

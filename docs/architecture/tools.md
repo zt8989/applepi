@@ -33,10 +33,11 @@ createReadOnlyTools(cwd, options)   → [read, grep, find, ls]
 execute(toolCallId, params, signal?, onUpdate?) => Promise<AgentToolResult>
 ```
 
-本项目只需要前三个（`onUpdate` 是给 UI 流式刷进度用的，我们没有这个需求）。
+本项目用前四个（第五个 `ctx` 由对方运行时注入，不在公开契约里）。
 `src/tools.ts` 的 `adapt()` 做两件事：
 
-1. **签名收窄** —— 丢掉 `onUpdate`，成本项目的 `AgentTool` 形状
+1. **签名收窄** —— 丢掉 `ctx`，并把 `onUpdate` **转成本项目的 `AgentToolUpdate`**，
+   成本项目的 `AgentTool` 形状
 2. **补两个字段** —— `label`（官方给的是英文工具名；界面现在也显示英文工具名，
    详见 [surfaces](surfaces.md#为什么不自己画这四种样式)，所以这个 label 只留在本项目内部）；
    `details` 归一（官方有些工具返回 `undefined`，本项目要求有值）
@@ -89,6 +90,33 @@ llm.done（有 toolCall）
 
 工具抛错不会炸环：`runToolCall` catch 住，包成 `isError: true` 的 `ToolResultMessage`，
 在树上开一个 `error` 节点（**不推进 tip**），然后照常回到 LLM。
+
+## 长命令边跑边显示
+
+`npm install`、带 sleep 的脚本、编译 —— 这些动辄几十秒。**命令一开跑就什么都不显示，
+直到结束才突然蹦出一块**，那几十秒的空白与「卡死了」在屏幕上没有区别。
+
+所以 `onUpdate` 这一路是接上的（早先传的是 `undefined`，等于关掉了官方的流式通路）：
+
+```
+tool/start
+  → execute(…, onUpdate)            ← 官方 bash 内部节流后每收到一块输出就回调一次
+      → dispatch(tool.progress)     ← reducer 存进 state.toolProgress
+          → 界面每帧重画那个「正在跑的工具块」
+tool.result                        ← 终值进 messages，同时清掉 toolProgress
+```
+
+**中间输出不进 `messages`**（`state.toolProgress` 单独存）：`messages` 是发给模型的那份历史，
+只该有终值。中间态进去会有三个麻烦 —— 每个增量都要去重、流式途中被 Ctrl-C 掉会在
+messages 里留下一个**没有结果的 toolCall**（协议非法，provider 直接拒）、落盘器会把
+中间态写进会话文件。
+
+界面上那一块走的是官方的 `ToolExecutionComponent` + `updateResult(…, isPartial: true)`，
+于是「进行中」的样子是官方给的：pending 底色、接受不完整的输出、折叠保留尾部 5 行。
+**代价**：`Elapsed` 不再每秒自己跳（那需要组件跨帧活着，而我们每帧重建一次），而是跟着
+输出更新 —— 对「边跑边有输出」的命令没差别。
+
+细节见 [surfaces](surfaces.md)。
 
 ## 工具在哪执行
 
@@ -173,7 +201,7 @@ pi 的 `collectAncestorAgentsSkillDirs()` 上界是 git 仓库根。但 `gitRoot
 | 本项目 | 直接调 pi 的 |
 | --- | --- |
 | `loadSkillRegistry()` | `loadSkills()` |
-| `skillsPrompt()` | `formatSkillsForPrompt()`（Agent Skills 标准的 XML） |
+| （没了 —— 清单进 `<skills>` 段） | `formatSkillsForPrompt()`（Agent Skills 标准的 XML） |
 | `expandSkillCommand()` | 与 pi 的 `_expandSkillCommand()` 逐字同形 |
 
 **不自己扫目录、不自己解析 frontmatter、不自己拼 XML。** 那样只会得到一个会漂移的副本：
@@ -194,10 +222,17 @@ pi 改了标准的细节，我们这边不会跟着动。
 
 ### 与 prompt 的关系
 
-`formatSkillsForPrompt()` 的输出**接在基础 system prompt 后面**，由 reducer 在
-`prompt.init` 时拼（`src/reducer.ts`）。走 action 而不是内核里拼，是因为这样会被落盘、
-被回放 —— 回放时读到 init 段就知道当时发给模型的完整 prompt 是什么，不必重新扫目录
-（那时的目录内容可能已经变了）。轨迹树上也有一个 `prompt.skills` 节点。
+清单进 system prompt 的 **`<skills>` 段**，由 pi 的 `buildSystemPrompt` 拼
+（`src/system-prompt.ts`）—— 不再由 reducer 接在尾巴上。
+
+差别不只是“谁拼的”：接在尾巴上时那是一段**没有标签的裸文本**，模型不知道那是系统给的
+规则还是用户说的话；`<skills>` 是有边界的段。更要紧的是**只有一处**会拼 ——
+两处各拼一遍（内核拼一次、reducer 再接一次）迟早漂移，而症状是「清单出现两次」：
+token 白花且模型困惑。
+
+落盘的是**拼好的那一整段**，所以回放时读到 init 段就知道当时发给模型的完整 prompt
+是什么，不必重新扫目录（那时的目录内容可能已经变了）。轨迹树上也有一个
+`prompt.skills` 节点。
 
 ### 开场要报清单，而且常驻
 

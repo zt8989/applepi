@@ -28,6 +28,7 @@ import { createSessionRecorder, type SessionRecorder } from './session-recorder'
 import { readSession, readSessionMessages } from './session-file';
 import path from 'node:path';
 import { getTools } from './tools';
+import { buildSystemPromptText, promptToolsFrom } from './system-prompt';
 import { loadSkillRegistry } from './skills';
 /**
  * 从 Model 对象上读我们关心的三个能力。
@@ -56,7 +57,24 @@ function readCapabilities(model: Model<any>): ModelCapabilities {
 export interface KernelOptions {
   provider: string;
   model?: string | undefined;
-  systemPrompt: string;
+  /**
+   * 用户自定义的**前置**提示（`--system`）。
+   *
+   * **可选** —— 不给就用 pi 的 `buildSystemPrompt` 拼一整份（工具规则 / AGENTS.md /
+   * cwd / skill 清单，见 [system-prompt.ts](system-prompt.ts)）。早先这里是**必填**且
+   * 外面手写三行中文，那样模型完全不知道 `edit` 的 `oldText` 要精确匹配、
+   * 也不知道这个项目的 `AGENTS.md` 写了什么 —— 而那些正是踩坑换来的经验。
+   *
+   * 给了它就顶掉 pi 的 preamble（官方 `customPrompt` 的语义），其余各段照旧拼上。
+   */
+  systemPrompt?: string | undefined;
+  /**
+   * 追加到 prompt 末尾的规则（进 `<addendum>` 段）。
+   *
+   * **优先级低于文件**：`.pi/APPEND_SYSTEM.md`（或家目录那份）存在时用它，那个优先 ——
+   * 项目里的规则比命令行临时加的更“近”。
+   */
+  appendSystemPrompt?: string | undefined;
   /** 工作目录：官方工具用它做路径边界检查（防止模型跑出这个目录）。 */
   cwd: string;
   /** 不打网络，用 pi-ai 的 faux provider。 */
@@ -102,14 +120,17 @@ export interface Kernel {
   dispose(): void;
 }
 
-const DEFAULT_SYSTEM_PROMPT = [
-  '你是一个编码助手，跑在一个用 Redux Loop 组织的 agent 里。',
-  '需要读写文件、跑命令时用工具去查，不要凭空猜。',
-  '回答保持简短、直给；用用户的语言回答。',
-].join('\n');
-
-export function defaultSystemPrompt(): string {
-  return DEFAULT_SYSTEM_PROMPT;
+/**
+ * 默认 system prompt 是什么。
+ *
+ * **它不再是手写的字符串** —— 由 pi 的 `buildSystemPrompt` 拼（工具怎么用、`edit` 的坑、
+ * `AGENTS.md` 项目上下文、cwd、skill 清单），见 [system-prompt.ts](system-prompt.ts)。
+ *
+ * 这个函数保留是因为它在两个地方是**方便入口**：测试与脚本想看一眼「没传 `--system`
+ * 时到底会给模型发什么」。
+ */
+export function defaultSystemPrompt(cwd: string = process.cwd()): string {
+  return buildSystemPromptText({ cwd, tools: promptToolsFrom(cwd), skills: loadSkillRegistry({ cwd }).skills });
 }
 
 export async function createKernel(options: KernelOptions): Promise<Kernel> {
@@ -144,6 +165,25 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     },
   };
 
+  // 转发 sink 的另一个用法：**知道「当前会话已开始」**。
+  //
+  // 它不能只看 `current.sink` —— createFileSink 是懒的（不建目录、不建文件，只在第一次
+  // append 时才 mkdir + appendFile），所以「有没有 sink」与「盘上有没有文件」无关。
+  // 真正的事实是「用户发出第一句话了没有」，那就是 `state.traceBegun`
+  // （reducer 在补装载节点时置上，见 user.message）。
+  const activeSink: TraceSink = {
+    ...delegator,
+    append: (line) => {
+      // 空会话不落盘：只装了东西、一句话都没说的会话不该在 traces/ 里留文件。
+      // 与 SessionWriter 那边同一个决定（docs/architecture/sessions.md「空会话不落盘」）。
+      //
+      // 判据用 `traceBegun` 而不是「有没有写过」：落盘器自己**就是**订阅器，
+      // 它在建好时就会 flush 一次（那时树上没有节点，本来也不该写）。
+      if (!store.getState().traceBegun) return undefined;
+      return delegator.append(line);
+    },
+  };
+
   const openResources = (id: string, resumeFrom?: number): SessionResources => {
     const dir = options.traceDir;
     return {
@@ -157,15 +197,16 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   const sessionId = current.sessionId;
   const cwd = path.resolve(options.cwd ?? process.cwd());
 
-  const { store, persistence } = createPersistentStore({
+  const { store, persistence, autoCompact } = createPersistentStore({
     runtime,
-    systemPrompt: options.systemPrompt,
+    // **不给** systemPrompt：真的那份由下面的 prompt.init 装（那时才需要 cwd、
+    // 工具、skill）。这里给一个占位只会活到第一条 prompt.init。
     cwd,
     sessionId,
     ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
     ...(options.llmTimeoutMs !== undefined ? { llmTimeoutMs: options.llmTimeoutMs } : {}),
     ...(options.maxLlmAttempts !== undefined ? { maxLlmAttempts: options.maxLlmAttempts } : {}),
-    ...(options.traceDir === null ? {} : { traceSink: delegator }),
+    ...(options.traceDir === null ? {} : { traceSink: activeSink }),
     ...(options.onTraceError ? { onTraceError: options.onTraceError } : {}),
   });
 
@@ -188,9 +229,24 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   // 正是静默退化（模型少了能力，界面与用户都不知道）。它们进 state，由界面开场显示
   // （与 pi 的 `[Skill conflicts]` 同形）。
   const skillRegistry = loadSkillRegistry({ cwd, ...(options.skillPaths ? { paths: options.skillPaths } : {}) });
+  // System prompt 由 **pi 的 buildSystemPrompt** 拼（工具规则 / AGENTS.md / cwd / skill）。
+  // 我们只收集输入：工具的 snippet+guideline、AGENTS.md 上下文、skill 清单。
+  //
+  // 为什么在这里（而不是让调用方传一整串进来）：工具清单是内核按 cwd 建的，
+  // AGENTS.md 与 skill 都随 cwd 变 —— 拼 prompt 需要的正是这三样，所以它属于内核这一步。
+  const promptTools = promptToolsFrom(cwd);
+  const systemPrompt = buildSystemPromptText({
+    cwd,
+    tools: promptTools,
+    skills: skillRegistry.skills,
+    ...(options.systemPrompt !== undefined ? { customPrompt: options.systemPrompt } : {}),
+    ...(options.appendSystemPrompt !== undefined
+      ? { appendPrompt: options.appendSystemPrompt }
+      : {}),
+  });
   store.dispatch({
     type: 'prompt.init',
-    systemPrompt: options.systemPrompt,
+    systemPrompt,
     tools: toolList.map((tool) => ({
       name: tool.name,
       description: tool.description,
@@ -212,17 +268,25 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   // 装载段落盘：**写进同一个轨迹文件的前两行**（不再单独一个 `<id>.init.jsonl`）。
   // 有了它，回放时不必重装配工具、不必再问 provider「这个模型支持中途插 system 吗」。
   //
+  // ## 什么时候写：用户发出第一句话之后（不是内核一装配）
+  //
+  // 与会话文件那边同一个决定：「进来看一眼就退出」不该在盘上留一个只有装载段、
+  // 零条对话的文件。所以内核**不在这里调它**，而是在 store 里盯住
+  // `traceBegun` 翻转的那一刻（见下面那个订阅）。
+  //
   // 走 delegator（同一个 sink）而不是另开一个文件：少一半文件，目录里全是 jsonl 很难翻。
-  // 位置在几条 add 记录之后，这是**必然**的：`tools` 要从 store 读（那上面才有完整的工具定义），
-  // 而装载动作本身（prompt.init / model.init）也会各自开出一个轨迹节点并立刻被 flush。
-  // 所以 init 只能写在它们之后 —— 这没问题：回放是按 op 类型收集的，与行的先后无关。
+  // 位置在几条 add 记录之后（`tools` 要从 store 读，那上面才有完整的工具定义，
+  // 而装载节点由 user.message 开出并先被 flush）—— 这没问题：回放是按 op 类型收集的，
+  // 与行的先后无关。
 
   const writeInit = (): void => {
     const capabilities = readCapabilities(runtime.model);
     const records: InitRecord[] = [
       {
         op: 'prompt.init',
-        systemPrompt: options.systemPrompt,
+        // 落**拼好的那一整段**（不是 customPrompt 的原文）：回放时要能重建
+        // 「当时发给模型的到底是什么」，而 AGENTS.md 与 skill 清单都可能已经变了。
+        systemPrompt,
         tools: store.getState().prompt.tools,
         // skills 一并落：回放时要知道当时有哪些 skill（它们拼进了 prompt）。
         ...(skillRegistry.skills.length > 0 ? { skills: skillRegistry.skills } : {}),
@@ -238,7 +302,30 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     void delegator.append(records.map((r) => JSON.stringify(r)).join('\n'));
   };
 
-  writeInit();
+  //
+  // 「会话已开始」的信号 → 写装载段。
+  //
+  // 订阅而不是让界面/调用方来通知：判据是 `state.traceBegun`，而它是 reducer 在**第一条
+  // user.message** 里置上的（与装载节点同一刻）。于是「什么时候算这段会话开始」只有一个定义，
+  // 不依赖每个调用方记得调 writeInit —— 忘了就等于这次会话的 init 段永远缺失（回放时
+  // 只能重新装配工具）。
+  //
+  // **必须先于落盘器的 flush**（顺序理由见下面 activeSink 的注释）：落盘器是 store 订阅器，
+  // 而这个也是。订阅者按注册的顺序被通知，而本文件里 createPersistentStore 在前，
+  // 于是顺序反了 —— 所以这里不靠订阅顺序，而是**绕一圈**：
+  // 观察到的变化（traceBegun 翻转）恰好让 delegator 放行，落盘器那一轮 flush 就会先把
+  // 装载节点的 add 写出去；init 记录补在**后面**一行，而回放按 op 收集、与行序无关
+  // （这正是 init 记录从一开始就与 add 记录混在同一个文件的前提）。
+  //
+  // `restoreSession` 灌回的是**已经**有轨迹文件的历史：那棵树的 init 段在文件里，
+  // 所以那里把 `wroteInit` 直接置真，再补一份就是磁盘上的垃圾行。
+  let wroteInit = false;
+  const unsubscribeStart = store.subscribe(() => {
+    if (wroteInit) return;
+    if (!store.getState().traceBegun) return;
+    wroteInit = true;
+    writeInit();
+  });
 
   //
   // 会话记录器：把消息流写成 `sessions/<cwd>/<id>.jsonl`，供「恢复历史」用。
@@ -285,9 +372,13 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       current = next;
       // 旧记录器先摘掉：它绑在旧 id 上，不该再往旧文件写。
       previous.recorder?.dispose();
+      // 新会话从头来：又变成「还没说话」，于是装载节点与 init 记录都重新推迟到第一句话。
+      // （`conversation.reset` 建的 fresh state 里 traceBegun 本来就是 false，
+      //   但这里要在 dispatch **之前**清 wroteInit —— 那个订阅器在 dispatch 时就会看到
+      //   「已经开始了」，从而给一个空会话写 init。）
+      wroteInit = false;
       store.dispatch({ type: 'conversation.reset', sessionId: id } as AgentAction);
       openRecorder(id);
-      writeInit();
       // 旧 sink 收尾（把缓冲 flush 掉）。
       if (previous.sink?.close) void previous.sink.close();
 
@@ -314,6 +405,8 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       //
       // 必须在 dispatch **之前**调：flush 是 store 订阅器，dispatch 一发生就晚了。
       persistence?.skipMessages(messages.length);
+      // 恢复进来的会话**已经有** init 段了（那个会话当初也发过话），别再补一份。
+      wroteInit = true;
       store.dispatch({
         type: 'conversation.restored',
         sessionId: id,
@@ -331,6 +424,8 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       }
     },
     dispose(): void {
+      unsubscribeStart();
+      autoCompact?.dispose();
       current.recorder?.dispose();
       persistence?.dispose();
       if (current.sink?.close) void current.sink.close();

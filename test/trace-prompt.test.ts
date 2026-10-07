@@ -16,9 +16,25 @@ const TOOLS: PromptToolDefinition[] = [
   { name: 'bash', description: '跑命令', parameters: { type: 'object' } },
 ];
 
+/** 一块不带 effect 的 reducer（纯状态迁移）。 */
+const REDUCER = createAgentReducer({});
+
+/**
+ * 没有 effect 接线时用这个（这里要断言的是树，不是环跑起来什么样）。
+ */
 function reduce(state: AgentState, action: AgentAction): AgentState {
-  const r = createAgentReducer({});
-  return r(state, action) as AgentState;
+  return REDUCER(state, action) as AgentState;
+}
+
+/** 依次 dispatch 几条 action（共用一个 reducer），返回最后的状态。 */
+function play(
+  r: ReturnType<typeof createAgentReducer>,
+  state: AgentState,
+  ...actions: AgentAction[]
+): AgentState {
+  let current = state;
+  for (const action of actions) current = r(current, action) as AgentState;
+  return current;
 }
 
 function seed(): AgentState {
@@ -35,16 +51,50 @@ function kinds(state: AgentState): TraceNodeKind[] {
   return state.trace.order.map((id) => state.trace.nodes[id]?.kind as TraceNodeKind);
 }
 
-// ── prompt.base / prompt.tools ──
+// ── 装载节点推迟到「用户发出第一句话」 ──
 
-test('prompt.init 在树上留下 prompt.base 与 prompt.tools 两个节点', () => {
-  const state = reduce(seed(), {
-    type: 'prompt.init',
-    systemPrompt: '你是一个编码助手。',
-    tools: TOOLS,
+test('装载本身**不建节点**（进了界面还没说话时，树应当是空的）', () => {
+  let state = reduce(seed(), { type: 'prompt.init', systemPrompt: '你是一个编码助手。', tools: TOOLS });
+  state = reduce(state, {
+    type: 'model.init',
+    provider: 'workbuddy',
+    modelId: 'cn:space-bunny',
+    thinkingLevel: 'high',
+    capabilities: CAPS,
   });
 
-  assert.deepEqual(kinds(state), ['prompt.base', 'prompt.tools']);
+  // 「进来看一眼就退出」是常态，树上不该已经堆了四个装载节点。
+  assert.deepEqual(kinds(state), [], '装载只改 state，不建节点');
+  assert.equal(state.traceBegun, false, '轨迹还没开');
+  // 但 state 里该有的东西一个字不少（开场报 skill 清单、底栏显示模型都靠它们）。
+  assert.equal(state.prompt.seeded, true);
+  assert.equal(state.model.seeded, true);
+  assert.equal(state.prompt.systemPrompt, '你是一个编码助手。');
+  assert.equal(state.model.modelId, 'cn:space-bunny');
+});
+
+test('发出第一句话时，装载节点补在 user 节点**前面**', () => {
+  let state = reduce(seed(), { type: 'prompt.init', systemPrompt: '你是一个编码助手。', tools: TOOLS });
+  state = reduce(state, {
+    type: 'model.init',
+    provider: 'workbuddy',
+    modelId: 'cn:space-bunny',
+    thinkingLevel: 'high',
+    capabilities: CAPS,
+  });
+  state = reduce(state, { type: 'user.message', text: '你好' });
+
+  assert.deepEqual(kinds(state), ['prompt.base', 'prompt.tools', 'model.init', 'user']);
+  assert.equal(state.traceBegun, true);
+});
+
+test('prompt 节点：完整 prompt 留在 detail 里，工具名与描述都在树上', () => {
+  const state = play(
+    REDUCER,
+    seed(),
+    { type: 'prompt.init', systemPrompt: '你是一个编码助手。', tools: TOOLS },
+    { type: 'user.message', text: '你好' },
+  );
 
   const base = state.trace.nodes[state.trace.order[0] as string];
   assert.equal(base?.kind, 'prompt.base');
@@ -61,7 +111,12 @@ test('prompt.init 在树上留下 prompt.base 与 prompt.tools 两个节点', ()
 });
 
 test('prompt.tools 的父是 prompt.base（同一次装载的两半）', () => {
-  const state = reduce(seed(), { type: 'prompt.init', systemPrompt: 'p', tools: TOOLS });
+  const state = play(
+    REDUCER,
+    seed(),
+    { type: 'prompt.init', systemPrompt: 'p', tools: TOOLS },
+    { type: 'user.message', text: '你好' },
+  );
   const base = state.trace.order[0] as string;
   const toolsNode = state.trace.order[1] as string;
   assert.equal(state.trace.nodes[toolsNode]?.parentId, base);
@@ -73,33 +128,37 @@ test('prompt.* 节点**不推进 tip** —— 它们是上下文，不是对话�
   const before = seed();
   assert.equal(before.trace.tipId, null);
 
-  const state = reduce(before, { type: 'prompt.init', systemPrompt: 'p', tools: TOOLS });
-  assert.equal(state.trace.tipId, null, '装载不推进 tip');
+  // 第一句话之前 tip 仍然是 null（装载还没建节点）。
+  const loaded = reduce(before, { type: 'prompt.init', systemPrompt: 'p', tools: TOOLS });
+  assert.equal(loaded.trace.tipId, null, '装载不推进 tip');
 
-  // 于是第一条 user 消息的 parent 是 null（不是挂在 prompt.base 下面）——
-  // 上下文与对话是两条线，不该混在一棵「历史」树里。
-  const withUser = reduce(state, { type: 'user.message', text: '你好' });
-  const userNode = withUser.trace.nodes[withUser.trace.order[2] as string];
-  assert.equal(userNode?.parentId, null);
-  assert.equal(withUser.trace.tipId, withUser.trace.order[2]);
+  // 装载节点补出来之后仍然不推进 tip。
+  const state = reduce(loaded, { type: 'user.message', text: '你好' });
+  assert.equal(state.trace.tipId, state.trace.order[2], 'tip 是 user 节点（装载节点不吃 tip）');
+  const promptNodes = state.trace.order.slice(0, 2).map((id) => state.trace.nodes[id]?.parentId);
+  assert.deepEqual(promptNodes, [null, state.trace.order[0]], '装载节点都挂在根上');
 });
 
 test('model.init 也在树上，带能力标记，且不推进 tip', () => {
-  const state = reduce(seed(), {
-    type: 'model.init',
-    provider: 'workbuddy',
-    modelId: 'cn:space-bunny',
-    thinkingLevel: 'high',
-    capabilities: CAPS,
-  });
+  const state = play(
+    REDUCER,
+    seed(),
+    {
+      type: 'model.init',
+      provider: 'workbuddy',
+      modelId: 'cn:space-bunny',
+      thinkingLevel: 'high',
+      capabilities: CAPS,
+    },
+    { type: 'user.message', text: '你好' },
+  );
 
-  assert.deepEqual(kinds(state), ['model.init']);
+  assert.deepEqual(kinds(state), ['model.init', 'user']);
   const node = state.trace.nodes[state.trace.order[0] as string];
   assert.equal(node?.label, 'workbuddy/cn:space-bunny');
   assert.equal(node?.meta?.['thinking'], 'high');
   assert.equal(node?.meta?.['midConvoSystem'], 'true', '能不能中途插 system，树上要看得见');
   assert.equal(node?.meta?.['developerRole'], 'true');
-  assert.equal(state.trace.tipId, null);
 });
 
 // ── prompt.segment ──
@@ -148,17 +207,30 @@ test('追加 prompt 后，紧随其后的 LLM 尝试是它的子节点 —— �
 
 // ── 重复装载是追加，不是改写 ──
 
-test('重复 prompt.init 是**追加**新节点（热重载不改写历史）', () => {
+test('开局前反复 prompt.init：树上仍然空（补的时候只补最终生效的那一版）', () => {
   let state = reduce(seed(), { type: 'prompt.init', systemPrompt: '第一版', tools: TOOLS });
+  state = reduce(state, { type: 'prompt.init', systemPrompt: '第二版', tools: TOOLS });
+
+  // 装载节点要等第一句话才补，而补的时候是从 **state** 读的 —— 所以只有一版。
+  assert.deepEqual(kinds(state), [], '还没开口，树上什么都没有');
+  state = reduce(state, { type: 'user.message', text: '你好' });
+  assert.deepEqual(kinds(state), ['prompt.base', 'prompt.tools', 'user']);
+  assert.equal(state.trace.nodes[state.trace.order[0] as string]?.detail, '第二版');
+});
+
+test('树已经开过之后再 prompt.init（热重载）是**追加**新节点，不改写历史', () => {
+  let state = reduce(seed(), { type: 'prompt.init', systemPrompt: '第一版', tools: TOOLS });
+  state = reduce(state, { type: 'user.message', text: '你好' });
   state = reduce(state, { type: 'prompt.init', systemPrompt: '第二版', tools: TOOLS });
 
   assert.deepEqual(kinds(state), [
     'prompt.base',
     'prompt.tools',
+    'user',
     'prompt.base',
     'prompt.tools',
   ]);
-  assert.equal(state.trace.order.length, 4, '旧的节点还在');
+  assert.equal(state.trace.order.length, 5, '旧的节点还在');
   assert.equal(state.prompt.systemPrompt, '第二版', '生效的是新的');
 });
 
@@ -173,6 +245,7 @@ test('traceStats 不把 prompt.* / model.init 算进 turns 或 toolCalls', () =>
     thinkingLevel: 'off',
     capabilities: CAPS,
   });
+  state = reduce(state, { type: 'user.message', text: '你好' });
   const stats = traceStats(state.trace);
   assert.equal(stats.turns, 0, 'prompt 不是「一轮」');
   assert.equal(stats.toolCalls, 0, 'prompt.tools 是提示词里的工具定义，不是真调过工具');

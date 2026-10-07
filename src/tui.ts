@@ -15,17 +15,26 @@ import { defaultProviderSpec, providerNames } from './provider';
 import { createKernel, type Kernel } from './kernel';
 import { runTui } from './tui/app';
 
-const DEFAULT_SYSTEM_PROMPT = [
-  '你是一个跑在终端里的编码助手。',
-  '需要实时信息、算术或文件内容时，用提供的工具去查，不要凭空猜。',
-  '回答保持简短、直给；用用户的语言回答。',
-].join('\n');
+/**
+ * **没有手写的 default system prompt。**
+ *
+ * 早先这里硬编码了三行中文（"你是编码助手 / 用工具查 / 简短直给"）。现在整份 prompt 由
+ * pi 的 `buildSystemPrompt` 拼（工具规则、`edit` 的坑、`AGENTS.md` 项目上下文、cwd、
+ * skill 清单），见 [system-prompt.ts](system-prompt.ts)。
+ *
+ * `--system` 变成**可选**的覆盖：给了它顶掉 pi 的 preamble（"你是 pi 里的编码助手"），
+ * 其余各段（tools / rules / project_context / cwd / skills）照旧拼上 ——
+ * 「我是这个项目的专用助手」不该顺带丢掉工具怎么用。
+ */
 
 interface CliArgs {
   /** 命令行没给就留空 → 走 defaultProviderSpec()（settings.json → 兜底）。 */
   provider: string;
   model?: string | undefined;
-  system: string;
+  /** 不给 → 走 pi 的 buildSystemPrompt（见上）。 */
+  system?: string | undefined;
+  /** 追加规则（进 <addendum>）；文件 `.pi/APPEND_SYSTEM.md` 优先。 */
+  appendSystem?: string | undefined;
   maxTurns?: number | undefined;
   prompt?: string;
   apiKey?: string;
@@ -52,7 +61,8 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
   -p, --print <text>     一次性提问
   -P, --provider <id>    LLM provider（默认 deepseek；可用: ${providerNames().join(', ')}）
   -m, --model <id>       模型 id（默认取该 provider 的第一个模型）
-  -s, --system <text>    覆盖 system prompt
+  -s, --system <text>    覆盖 system prompt 的前言（工具规则 / AGENTS.md / cwd 仍照旧拼上）
+      --append-system <t> 追加一条规则（进 <addendum>；.pi/APPEND_SYSTEM.md 优先）
       --max-turns <n>    单回合最多几轮 LLM 调用（默认不限制）
       --llm-timeout <ms> 一次 LLM 调用的超时（默认 120000）；超时按可重试错误处理
       --attempts <n>     单轮内最多几次 LLM 尝试（含首次，默认 2；超时/网络错会自动重试）
@@ -79,7 +89,9 @@ function parseArgs(argv: string[]): CliArgs {
     // 再退到内置兜底 workbuddy / cn:space-bunny。命令行 -P/-m 仍然优先。
     provider: '',
     model: undefined,
-    system: DEFAULT_SYSTEM_PROMPT,
+    // **不给 system**：用 pi 拼的那份（工具规则 / AGENTS.md / cwd / skill）。
+    system: undefined,
+    appendSystem: undefined,
     // 不给默认上限：模型要查多少轮由它自己说了算，--max-turns 留给需要兜底的人。
     maxTurns: undefined,
     help: false,
@@ -112,7 +124,12 @@ function parseArgs(argv: string[]): CliArgs {
         break;
       case '-s':
       case '--system':
+        // 覆盖 pi 的 preamble，其余段不变。
         args.system = next();
+        break;
+      case '--append-system':
+        // 追加规则（<addendum> 段）；`.pi/APPEND_SYSTEM.md` 存在时那个优先。
+        args.appendSystem = next();
         break;
       case '--max-turns':
         args.maxTurns = Number.parseInt(next(), 10);
@@ -188,6 +205,7 @@ async function main(): Promise<void> {
       ...(args.provider ? { provider: args.provider } : {}),
       ...(args.model ? { model: args.model } : {}),
       systemPrompt: args.system,
+      appendSystemPrompt: args.appendSystem,
       cwd: args.cwd,
       ...(args.skillPaths.length > 0 ? { skillPaths: args.skillPaths } : {}),
       demo: args.demo,

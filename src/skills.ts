@@ -11,15 +11,19 @@
  * pi 已经把整套东西做完了，而且是**主入口直接导出**的（不需要 pnpm patch）：
  *
  * ```ts
- * import { loadSkills, formatSkillsForPrompt, parseSkillBlock } from '@earendil-works/pi-coding-agent';
+ * import { loadSkills, parseSkillBlock } from '@earendil-works/pi-coding-agent';
  * ```
  *
- * 所以这里只做三件薄薄的事：
+ * 所以这里只做两件薄薄的事：
  *
  * 1. `loadSkillRegistry()` —— 调 pi 的 `loadSkills()`，把 `Skill[]` 收进本项目的形状；
- * 2. `skillsPrompt()` —— 调 pi 的 `formatSkillsForPrompt()`，接到 system prompt 后面；
- * 3. `expandSkillCommand()` —— 调 pi 的 `parseSkillBlock()` 的**同一个** XML 形状，
+ * 2. `expandSkillCommand()` —— 调 pi 的 `parseSkillBlock()` 的**同一个** XML 形状，
  *    把 `/skill:name` 展开成 `<skill …>…</skill>`。
+ *
+ * **「把清单接进 prompt」这件事不再在这里做** —— 它是 pi 的 `buildSystemPrompt` 拼的
+ * `<skills>` 段（见 [system-prompt.ts](system-prompt.ts)）。早先这里是
+ * `skillsPrompt()`：接在基础 prompt 尾巴上一段**裸文本**（模型分不清那是系统规则还是
+ * 用户说话），而且与内核那处拼法各拼一遍 —— 迟早漂移，症状是「清单出现两次」。
  *
  * 自己实现这些（扫目录、解析 frontmatter、拼 XML）只会得到一个**会漂移的副本**：
  * pi 改了 Agent Skills 标准的细节，我们这边不会跟着动。
@@ -38,7 +42,6 @@ import { existsSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path, { dirname, resolve } from 'node:path';
 import {
-  formatSkillsForPrompt,
   loadSkills,
   loadSkillsFromDir,
   parseSkillBlock,
@@ -318,35 +321,6 @@ function findGitRoot(startDir: string): string | null {
     if (parent === dir) return null;
     dir = parent;
   }
-}
-
-/**
- * 把 skill 清单接在 system prompt 后面。
- *
- * 用 pi 的 `formatSkillsForPrompt()` —— 它按 Agent Skills 标准的 XML 形状输出
- * （`<available_skills><skill><name>…`），模型侧的 prompt 训练就是这个形状。
- * 自己拼一个近似形状会出现「模型认得清你写的、认不清标准写法」的怪现象。
- *
- * `disableModelInvocation` 的 skill 由 pi 那边过滤掉（不进 prompt）。
- *
- * `fileReadTool` 要与**实际注册的工具**对上：pi 用它决定提示模型用 `read` 还是
- * `bash` 去读文件。我们总是有 `read`，所以传 `'read'`。
- */
-export function skillsPrompt(skills: readonly SkillInfo[]): string {
-  if (skills.length === 0) return '';
-  // pi 要的是它自己的 Skill 形状 —— 这里把我们的字段映射回去（都是必需字段）。
-  const asPi = skills.map(
-    (s): PiSkill =>
-      ({
-        name: s.name,
-        description: s.description,
-        filePath: s.filePath,
-        baseDir: s.baseDir,
-        disableModelInvocation: s.disableModelInvocation,
-        // scope/baseDir 的其余字段本项目不用；`sourceInfo` 仅用于显示，不填。
-      }) as unknown as PiSkill,
-  );
-  return formatSkillsForPrompt(asPi, 'read');
 }
 
 /**

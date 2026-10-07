@@ -51,6 +51,15 @@ export type TraceNodeKind =
   | 'error'
   /** 轮数上限等「主动收工」。 */
   | 'stop'
+  /**
+   * 一次上下文压缩。
+   *
+   * 单独一种 kind（而不是复用 prompt.* 或 stop）：压缩是「把老对话换掉」这个事实，
+   * 它既不是上下文（prompt.*）、也不是失败或主动收工（stop）。
+   * 而且它**恰好是压缩之后 tip 的父节点** —— 压缩之后发生的每一件事都从它下面长出来，
+   * 这正是 git 里「squash 掉一段历史，然后接上新提交」的形状。
+   */
+  | 'compact'
   /** 装载进来的基础 system prompt（prompt.init）。 */
   | 'prompt.base'
   /** 随 prompt 一起装进来的工具定义（prompt.init 的 tools）。 */
@@ -130,6 +139,7 @@ const TIP_ADVANCING_KINDS: ReadonlySet<TraceNodeKind> = new Set<TraceNodeKind>([
   'llm.result',
   'tool.result',
   'stop',
+  'compact',
 ]);
 
 function advancesTip(node: TraceNode): boolean {

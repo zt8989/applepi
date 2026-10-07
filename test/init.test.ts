@@ -316,6 +316,189 @@ test('middleware：promptSegmentMiddleware 在 user.message 之后追加一段 p
   assert.equal(none.length, 0);
 });
 
+// ─── 进入会话不建节点：推迟到用户发出第一句话 ───
+
+test('进来看一眼就退出：树上 0 个节点，traces/ 里也不会有文件', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'idle-'));
+  try {
+    const kernel = await createKernel({
+      provider: 'deepseek',
+      systemPrompt: '你是测试助手',
+      cwd: dir,
+      demo: true,
+      sessionId: 'idle-1',
+      traceDir: dir,
+    });
+    try {
+      const state = kernel.store.getState();
+      assert.equal(state.trace.order.length, 0, '装载不建节点（Ctrl+T 一打开不该是一屏提示词）');
+      assert.equal(state.traceBegun, false);
+      // 但 state 里该有的东西一个字不少：开场报 skill 清单、底栏显示模型都靠它们。
+      assert.equal(state.prompt.seeded, true);
+      // prompt 现在是 **pi 拼的整段**，而传了 `systemPrompt` 就是走 `customPrompt` 那一路 ——
+      // 官方语义是「顶掉默认前缀」，所以**只剩 preamble + cwd**（tools/rules/docs 那几段
+      // 属于默认前缀的一部分）。不给 customPrompt 时才有那几段。
+      assert.ok(
+        state.prompt.systemPrompt.startsWith('你是测试助手'),
+        `前言应是传进来的那句。实际开头：${state.prompt.systemPrompt.slice(0, 120)}`,
+      );
+      assert.ok(
+        state.prompt.systemPrompt.includes('<cwd>'),
+        'cwd 段总是有（官方无条件加）',
+      );
+      assert.equal(state.prompt.tools.length > 0, true);
+      assert.equal(state.model.seeded, true);
+    } finally {
+      kernel.dispose();
+    }
+    // 等一下 flush（落盘器是异步写文件的）。
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual(
+      (await readdir(dir)).filter((f) => f.endsWith('.jsonl')),
+      [],
+      '没发过一句话的会话不该在盘上留文件（与会话文件那边同一个决定）',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('发出第一句话：装载节点补在前面，init 记录与轨迹一起落盘', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'begin-'));
+  try {
+    const kernel = await createKernel({
+      provider: 'deepseek',
+      systemPrompt: '你是测试助手',
+      cwd: dir,
+      demo: true,
+      sessionId: 'begin-1',
+      traceDir: dir,
+    });
+    kernel.store.dispatch({ type: 'user.message', text: '算一下 (3+4)*6' } as AgentAction);
+    for (let i = 0; i < 60; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      const s = kernel.store.getState();
+      if (s.phase === 'idle' && s.turns > 0) break;
+    }
+    try {
+      const kinds = kernel.store
+        .getState()
+        .trace.order.map((id) => kernel.store.getState().trace.nodes[id]?.kind);
+      assert.deepEqual(
+        kinds.slice(0, 4),
+        ['prompt.base', 'prompt.tools', 'model.init', 'user'],
+        '装载节点排在 user 节点前面（渲染出来就是「这次调用带着什么 prompt」）',
+      );
+      assert.equal(kernel.store.getState().traceBegun, true);
+    } finally {
+      kernel.dispose();
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    // 落盘：文件里 init 记录与 add 记录都有，回放照样零 token 复现。
+    const session = await loadSession('begin-1', dir);
+    assert.ok(session, '发了话就有文件了');
+    assert.ok(
+      session.init.prompt?.systemPrompt.startsWith('你是测试助手'),
+      '回放读到的是**当时拼好的那一整段**（不是 customPrompt 的原文）',
+    );
+    assert.ok(session.init.model, 'model.init 也在');
+    assert.ok(session.init.prompt && session.init.prompt.tools.length > 0, '工具完整定义也在');
+    assert.deepEqual(
+      (session.messages as { role: string }[]).map((m) => m.role),
+      ['user', 'assistant', 'toolResult', 'assistant'],
+      '消息链完整重建',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('init 记录只写一份（不会因为落盘器多冲几轮而重复）', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'once-'));
+  try {
+    const kernel = await createKernel({
+      provider: 'deepseek',
+      systemPrompt: 'p',
+      cwd: dir,
+      demo: true,
+      sessionId: 'once-1',
+      traceDir: dir,
+    });
+    // 连着问三句（每一句都会让落盘器冲好几轮：delta、tool.result…）。
+    for (const text of ['第一句', '第二句', '第三句']) {
+      kernel.store.dispatch({ type: 'user.message', text } as AgentAction);
+      for (let i = 0; i < 60; i += 1) {
+        await new Promise((r) => setTimeout(r, 100));
+        const s = kernel.store.getState();
+        if (s.phase === 'idle' && s.turns > 0) break;
+      }
+    }
+    kernel.dispose();
+    await new Promise((r) => setTimeout(r, 300));
+
+    const raw = await readFile(path.join(dir, 'once-1.jsonl'), 'utf8');
+    const lines = raw.trim().split('\n').map((l) => JSON.parse(l) as { op: string });
+    assert.equal(
+      lines.filter((l) => l.op === 'prompt.init').length,
+      1,
+      'prompt.init 记录只有一条（回放取最后一条，但重复就是垃圾行）',
+    );
+    assert.equal(lines.filter((l) => l.op === 'model.init').length, 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('恢复历史不补第二份 init 记录（那个会话的文件里已经有了）', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'restore-init-'));
+  try {
+    const first = await createKernel({
+      provider: 'deepseek',
+      systemPrompt: 'p',
+      cwd: dir,
+      demo: true,
+      sessionId: 'hist-1',
+      traceDir: dir,
+    });
+    first.store.dispatch({ type: 'user.message', text: '旧的第一句' } as AgentAction);
+    for (let i = 0; i < 60; i += 1) {
+      await new Promise((r) => setTimeout(r, 100));
+      const s = first.store.getState();
+      if (s.phase === 'idle' && s.turns > 0) break;
+    }
+    first.dispose();
+    await new Promise((r) => setTimeout(r, 300));
+
+    const traceFile = path.join(dir, 'hist-1.jsonl');
+    const before = await readFile(traceFile, 'utf8');
+
+    const second = await createKernel({
+      provider: 'deepseek',
+      systemPrompt: 'p',
+      cwd: dir,
+      demo: true,
+      sessionId: 'cur-1',
+      traceDir: dir,
+    });
+    try {
+      second.restoreSession(traceFile);
+      await new Promise((r) => setTimeout(r, 300));
+      const after = await readFile(traceFile, 'utf8');
+      assert.equal(
+        after.trim().split('\n').filter((l) => l.includes('"op":"prompt.init"')).length,
+        1,
+        '恢复不补 init（那个会话当初已经写过了）',
+      );
+      assert.equal(after, before, '恢复本身不往那个文件里追加任何东西');
+    } finally {
+      second.dispose();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 // ─── 端到端：装载落盘 + 零 token 回放 ───
 
 test('端到端：装载与对话都落盘，回放时零 token 复现', async () => {
@@ -350,7 +533,10 @@ test('端到端：装载与对话都落盘，回放时零 token 复现', async (
     // 装载段读回
     const init = session.init;
     assert.ok(init.prompt, 'prompt.init 在');
-    assert.equal(init.prompt.systemPrompt, '你是测试助手');
+    assert.ok(
+      init.prompt.systemPrompt.startsWith('你是测试助手'),
+      `落盘的 prompt 是拼好的那一整段。实际开头：${init.prompt.systemPrompt.slice(0, 120)}`,
+    );
     assert.deepEqual(
       init.prompt.tools.map((t) => t.name),
       ['read', 'write', 'edit', 'bash'],

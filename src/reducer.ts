@@ -9,8 +9,8 @@ import {
   type LlmErrorKind,
   type StopCause,
 } from './state';
-import { appendNode, patchNode, type TraceNode } from './trace';
-import { skillsPrompt } from './skills';
+import { appendNode, patchNode, type TraceNode, type TraceTree } from './trace';
+import { compactReasonText, type CompactReason } from './compact';
 /**
  * 一张纯表：action → (下一个状态, 该发哪些 effect)。
  *
@@ -224,79 +224,151 @@ const UNKNOWN_CAPABILITIES: ModelCapabilities = {
   developerRole: false,
 };
 
+/** 把 prompt 那半（base / tools / skills）追加到树上。parent 取此刻的 tip。 */
+function appendPromptNodes(tree: TraceTree, prompt: AgentState['prompt'], now: number): TraceTree {
+  const skills = prompt.skills ?? [];
+  // detail 用 **state 里的** systemPrompt（已经拼好 skill 清单），
+  // 而不是 init action 载荷里的那份：树上要显示的就是真正发给模型的那一整段。
+  const { tree: afterBase, node: baseNode } = appendNode(tree, tree.tipId, 'prompt.base', {
+    status: 'ok',
+    label: summarize(prompt.systemPrompt),
+    detail: prompt.systemPrompt,
+    createdAt: now,
+    endedAt: now,
+  });
+  const tools = prompt.tools;
+  // parent 用 base 节点的 **id**（不是它的 tipId —— prompt.base 不推进 tip，
+  // 那样取会拿到装载前的 tip，两兄弟就散了）。
+  const { tree: afterTools } = appendNode(afterBase, baseNode.id, 'prompt.tools', {
+    status: 'ok',
+    label: tools.map((t) => t.name).join(', ') || '（无）',
+    detail: tools.map((t) => `${t.name}: ${t.description}`).join('\n'),
+    meta: { count: String(tools.length) },
+    createdAt: now,
+    endedAt: now,
+  });
+  // skill 清单第三个节点：与 prompt / tools 平级，都是「装了什么」。
+  // **只在有 skill 时才建节点** —— 零 skill 的会话多一个空节点是噪声。
+  return skills.length > 0
+    ? appendNode(afterTools, baseNode.id, 'prompt.skills', {
+        status: 'ok',
+        label: skills.map((s) => s.name).join(', '),
+        detail: skills
+          .map((s) => `${s.name}（${s.scope}）: ${s.description}\n  ${s.filePath}`)
+          .join('\n'),
+        meta: { count: String(skills.length) },
+        createdAt: now,
+        endedAt: now,
+      }).tree
+    : afterTools;
+}
+
+/** 把 model 那半（provider / model / 思考级别 / 能力）追加到树上。 */
+function appendModelNode(tree: TraceTree, model: AgentState['model'], now: number): TraceTree {
+  const caps = model.capabilities;
+  // 能力逐条写进 meta：树上就能一眼看出「这个模型能不能中途插 system」。
+  return appendNode(tree, tree.tipId, 'model.init', {
+    status: 'ok',
+    label: `${model.provider}/${model.modelId}`,
+    meta: {
+      thinking: String(model.thinkingLevel),
+      midConvoSystem: String(caps.midConvoSystemMessages),
+      midConvoTools: String(caps.midConvoToolAdditions),
+      developerRole: String(caps.developerRole),
+    },
+    createdAt: now,
+    endedAt: now,
+  }).tree;
+}
+
+/**
+ * 补上装载段的轨迹节点 —— **用户发出第一句话的那一刻**。
+ *
+ * ## 为什么要有这一步
+ *
+ * 装载（prompt / tools / skills / model）必须**立刻**可用：开场就要报 skill 清单、
+ * `/skill:x` 要立刻能展开、底栏要显示模型。所以那些留在 `prompt.init` / `model.init` 里，
+ * 它们只改 state，**不进轨迹树**。
+ *
+ * 而「在树上留痕」应该等到**真的有对话** —— 一个只装了东西、一句话都没说的会话，
+ * 轨迹树上只有四个装载节点、文件里也只有装载记录：纯噪声。
+ * （会话文件那边早就是这么做的：`SessionWriter.start()` 记下 header 但不落盘，
+ * 见 docs/architecture/sessions.md「空会话不落盘」。这里是它的轨迹侧对应物。）
+ *
+ * ## 为什么节点内容从 state 读
+ *
+ * 补出来的必然是**这一刻生效**的那一版装载（期间热重载过 prompt 也算数）——
+ * 与模型真正看到的一致，而不是内核初始化时快照下来的那一版。
+ *
+ * ## 幂等
+ *
+ * `traceBegun` 守卫：已经补过就原样返回，不会把装载节点追加第二遍。
+ * （开局之后再来一条 `prompt.init` = 热重载，**那一条自己**会追加新节点，见 transitions。）
+ *
+ * @returns 带上装载节点的树（不推进 tip —— 上下文不是「发生过的事」）。
+ */
+function beginTrace(state: AgentState, now: number): TraceTree {
+  if (state.traceBegun) return state.trace;
+  let tree = state.trace;
+  if (state.prompt.seeded) tree = appendPromptNodes(tree, state.prompt, now);
+  if (state.model.seeded) tree = appendModelNode(tree, state.model, now);
+  return tree;
+}
+
 const transitions: TransitionHandlers = {
   // ── prompt 侧装载 ──
 
   /**
-   * 装载 prompt：基础 system prompt + 工具的**完整定义**。
-   *
-   * tools 落进 state 之后，`effects.ts` 就不用每次 `getTools()` 现算了 —— 既少一次 IO，
-   * 也让回放时不必重新装配工具就能知道当时发给模型的是什么。
-   */
+ * 装载 prompt：**已经拼好的那一整段 system prompt** + 工具的**完整定义**。
+ *
+ * tools 落进 state 之后，`effects.ts` 就不用每次 `getTools()` 现算了 —— 既少一次 IO，
+ * 也让回放时不必重新装配工具就能知道当时发给模型的是什么。
+ *
+ * ## 这里**不开**轨迹节点，也不拼 prompt
+ *
+ * 装载节点（prompt.base / prompt.tools / prompt.skills）改由 `beginTrace()` 补上 ——
+ * 也就是**用户真的发出第一句话时**才建。
+ *
+ * 为什么推迟：内核一装配就 dispatch 这两条装载，于是「打开界面还没说话」也已经有了
+ * 四个节点（Ctrl+T 一打开就是一屏提示词与工具名），并且 `traces/<id>.jsonl` 立刻被建出来。
+ * 而「进来看一眼就退出」是常态 —— 那些会话文件里只有装载段、零条对话，
+ * 是纯粹的噪声（会话文件那边早就有同样的处理：`SessionWriter.start()` 不落盘，
+ * 见 docs/architecture/sessions.md「空会话不落盘」；这里是它的轨迹侧对应物）。
+ *
+ * ## 为什么这里**不再**拼 skill 清单
+ *
+ * 早先是 `systemPrompt + formatSkillsForPrompt(skills)` —— 手工往尾巴上接。
+ * 现在 prompt 由 pi 的 `buildSystemPrompt` 拼，skill 清单进它自己的 `<skills>` 段
+ * （见 [system-prompt.ts](system-prompt.ts)）。
+ *
+ * 差别不只是「谁拼的」：接在尾巴上时，那段清单是**没有标签的裸文本**，模型不知道
+ * 那是系统给的规则还是用户说的话；而 `<skills>` 是有边界的段。
+ * 更要紧的是**只有一处**会拼 —— 两处各拼一遍（内核拼一次、reducer 再接一次）迟早漂移，
+ * 而症状是「prompt 里 skill 清单出现两次」，token 白花且模型困惑。
+ *
+ * **state 里该有的东西一个字不少** —— prompt、tools、skills、诊断全都立刻可用，
+ * 界面开场就能报 skill 清单、`/skill:x` 就能展开。推迟的只是「在树上留痕」与「落盘」。
+ */
   'prompt.init': (state, action) => {
-    const now = Date.now();
-    // skill 清单接在**基础** system prompt 后面（官方 `formatSkillsForPrompt()` 的输出）。
-    //
-    // 为什么要在这里拼而不在内核里：prompt 与 tools 一样是**装载**的一部分，
-    // 走 action 才能被落盘、被回放 —— 回放时读到 init 段就知道当时发给模型的完整
-    // prompt 是什么，不必重新扫 skill 目录（那时的目录内容可能已经变了）。
-    const skillsBlock = skillsPrompt(action.skills ?? []);
-    const systemPrompt =
-      skillsBlock === '' ? action.systemPrompt : `${action.systemPrompt}${skillsBlock}`;
-    // 装载也进轨迹树：树上要能看见「提示词是怎么来的」。
-    // 用 appendNode 而不是 patchNode —— 重复装载（比如热重载）是追加一条新的，不是改旧的。
-    const { tree: afterBase, node: baseNode } = appendNode(state.trace, state.trace.tipId, 'prompt.base', {
-      status: 'ok',
-      label: summarize(action.systemPrompt),
-      detail: systemPrompt,
-      createdAt: now,
-      endedAt: now,
-    });
-    // 工具定义单独一个节点：它和 system prompt 是两回事（一个是「说什么」，一个是「能做什么」）。
-    const { tree: afterTools } = appendNode(
-      afterBase,
-      // parent 用 base 节点的 **id**（不是它的 tipId —— prompt.base 不推进 tip，
-      // 那样取会拿到装载前的 tip，两兄弟就散了）。
-      baseNode.id,
-      'prompt.tools',
-      {
-        status: 'ok',
-        label: action.tools.map((t) => t.name).join(', ') || '（无）',
-        detail: action.tools.map((t) => `${t.name}: ${t.description}`).join('\n'),
-        meta: { count: String(action.tools.length) },
-        createdAt: now,
-        endedAt: now,
-      },
-    );
-    // skill 清单第三个节点：与 prompt / tools 平级，都是「装了什么」。
-    // **只在有 skill 时才建节点** —— 零 skill 的会话多一个空节点是噪声。
-    const tree =
-      action.skills && action.skills.length > 0
-        ? appendNode(afterTools, baseNode.id, 'prompt.skills', {
-            status: 'ok',
-            label: action.skills.map((s) => s.name).join(', '),
-            detail: action.skills
-              .map((s) => `${s.name}（${s.scope}）: ${s.description}\n  ${s.filePath}`)
-              .join('\n'),
-            meta: { count: String(action.skills.length) },
-            createdAt: now,
-            endedAt: now,
-          }).tree
-        : afterTools;
+    const prompt = {
+      // 原样接收：内核拼好的那一段就是最终形态（工具规则 / AGENTS.md / cwd / skills）。
+      systemPrompt: action.systemPrompt,
+      tools: action.tools,
+      ...(action.skills ? { skills: action.skills } : {}),
+      ...(action.skillDiagnostics && action.skillDiagnostics.length > 0
+        ? { skillDiagnostics: action.skillDiagnostics }
+        : {}),
+      seeded: true,
+    };
     return {
       ...state,
-      trace: tree,
-      prompt: {
-        systemPrompt,
-        tools: action.tools,
-        ...(action.skills ? { skills: action.skills } : {}),
-        ...(action.skillDiagnostics && action.skillDiagnostics.length > 0
-          ? { skillDiagnostics: action.skillDiagnostics }
-          : {}),
-        seeded: true,
-      },
+      // **已经开过树**的话（即热重载：会话已经聊起来了又重装一次），立刻追加新节点 ——
+      // 旧节点留在树上不改写（装载是不可变的历史）。开局那次不走这里：
+      // 树还没开，由第一条 user.message 统一补（见 beginTrace）。
+      trace: state.traceBegun ? appendPromptNodes(state.trace, prompt, Date.now()) : state.trace,
+      prompt,
       // 扁平别名跟着更新（真相在 prompt 块里）。
-      systemPrompt,
+      systemPrompt: prompt.systemPrompt,
       toolNames: action.tools.map((tool) => tool.name),
     };
   },
@@ -338,34 +410,24 @@ const transitions: TransitionHandlers = {
    * 装载模型：provider / model / 思考级别 + 这个模型支持什么。
    *
    * 能力随 init 一起落盘：回放时不必再问 provider「这个模型能不能中途插 system」。
+   *
+   * 与 `prompt.init` 同一个理由（见那条的注释）：开局那次**不开**轨迹节点，
+   * 那一个 `model.init` 节点由 `beginTrace()` 在第一条用户消息时补上；
+   * 已经开过树（换模型）则当场追加一个新节点，旧的不改写。
    */
   'model.init': (state, action) => {
-    const now = Date.now();
-    // 能力逐条写进 meta：树上就能一眼看出「这个模型能不能中途插 system」。
-    const caps = action.capabilities;
-    const { tree } = appendNode(state.trace, state.trace.tipId, 'model.init', {
-      status: 'ok',
-      label: `${action.provider}/${action.modelId}`,
-      meta: {
-        thinking: action.thinkingLevel,
-        midConvoSystem: String(caps.midConvoSystemMessages),
-        midConvoTools: String(caps.midConvoToolAdditions),
-        developerRole: String(caps.developerRole),
-      },
-      createdAt: now,
-      endedAt: now,
-    });
+    const model = {
+      provider: action.provider,
+      modelId: action.modelId,
+      thinkingLevel: action.thinkingLevel,
+      capabilities: action.capabilities,
+      contextWindow: action.contextWindow ?? 0,
+      seeded: true,
+    };
     return {
       ...state,
-      trace: tree,
-      model: {
-        provider: action.provider,
-        modelId: action.modelId,
-        thinkingLevel: action.thinkingLevel,
-        capabilities: action.capabilities,
-        contextWindow: action.contextWindow ?? 0,
-        seeded: true,
-      },
+      trace: state.traceBegun ? appendModelNode(state.trace, model, Date.now()) : state.trace,
+      model,
       // 扁平别名跟着更新。
       providerName: action.provider,
       modelId: action.modelId,
@@ -375,23 +437,31 @@ const transitions: TransitionHandlers = {
 
   'user.message': (state, action) => {
     if (state.phase !== 'idle') return state;
+    const now = Date.now();
     // 有附件时 content 是一组 text/image 块；否则就是纯文本。
     const message: Message = {
       role: 'user',
       content: action.content ?? action.text,
-      timestamp: Date.now(),
+      timestamp: now,
     };
+    // **先补装载节点、再开 user 节点** —— 顺序就是它们在树上的顺序，
+    // 于是渲染出来是「这次调用带着什么 prompt」在「用户说了什么」上面。
+    //
+    // 这一步就是「进入会话不建节点，发了第一句话才建」：内核一装配时树上还是空的
+    // （prompt.init / model.init 只改 state），到这里才第一次有节点。
+    const withInit = beginTrace(state, now);
     // 用户节点是一棵新树的根，并且推进 tip —— 后面所有的 LLM 尝试都挂在它下面。
-    const { tree, node } = appendNode(state.trace, state.trace.tipId, 'user', {
+    const { tree, node } = appendNode(withInit, withInit.tipId, 'user', {
       status: 'ok',
       label: summarize(action.text),
       detail: action.text,
-      createdAt: Date.now(),
-      endedAt: Date.now(),
+      createdAt: now,
+      endedAt: now,
     });
     return {
       ...state,
       trace: tree,
+      traceBegun: true,
       phase: 'thinking',
       error: null,
       errorNodeId: null,
@@ -618,6 +688,29 @@ const transitions: TransitionHandlers = {
     };
   },
 
+  /**
+   * 工具执行中的流式增量。
+   *
+   * **只改 `toolProgress`，不动 `messages` / 轨迹树**：
+   *   - `messages` 只该有终值（理由见 `ToolProgress` 的注释：中途被 Ctrl-C 掉会在
+   *     messages 里留下一个没有结果的 toolCall，那是协议非法的）；
+   *   - 轨迹树是「一次尝试一节点」，节点在 `tool/start` 开、在 `tool.result` 闭合。
+   *     每来一块输出就 append 一个节点会把树冲垮（一个 `npm install` 能刷出几百个）。
+   *
+   * 工具不在跑时的 progress 丢弃：那是过期消息（工具已经结束才回来的尾巴）。
+   */
+  'tool.progress': (state, action) => {
+    const openId = state.openToolNodeIds[action.toolCallId];
+    if (openId === undefined) return state;
+    return {
+      ...state,
+      toolProgress: {
+        ...state.toolProgress,
+        [action.toolCallId]: { toolCallId: action.toolCallId, content: action.content },
+      },
+    };
+  },
+
   'tool.result': (state, action) => {
     const result: ToolResultMessage = action.message;
     const exists = state.messages.some(
@@ -666,6 +759,10 @@ const transitions: TransitionHandlers = {
         });
     const openToolNodeIds = { ...state.openToolNodeIds };
     delete openToolNodeIds[result.toolCallId];
+    // 中间输出到此为止：终值已经在 messages 里，再留着会让界面把它又画一遍。
+    // （顺序要紧：在下面算 toolTimings 之前不能删 —— 它还要读 openToolNodeIds。）
+    const toolProgress = { ...state.toolProgress };
+    delete toolProgress[result.toolCallId];
     // 耗时记在这里（见 AgentState.toolTimings 的注释）：`tool/start` 打的点在这条
     // action 到达时已经过去一会儿了，而这是唯一同时拿到「开始 id」与「结束时刻」的地方。
     // 取 startedAt 走 openToolNodeIds：它还没被删（上两行才删），所以拿得到。
@@ -676,6 +773,7 @@ const transitions: TransitionHandlers = {
       ...state,
       trace: tree,
       openToolNodeIds,
+      toolProgress,
       // 负数/NaN 一律不记：界面会拿它算 `Took x.xs`，一个 NaN 会显示成 "Took NaNs"。
       toolTimings:
         startedAt !== undefined && Number.isFinite(startedAt) && now >= startedAt
@@ -744,6 +842,130 @@ const transitions: TransitionHandlers = {
     model: { ...state.model, thinkingLevel: action.level },
     thinkingLevel: action.level,
   }),
+
+  // ── 上下文压缩 ──
+
+  /**
+   * 开始压缩：只置相位标记 + 开一个 `compact` 节点（pending）。
+   *
+   * **只改状态，不动 messages** —— 真正干活的 effect 拿一条 `compact.done` /
+   * `compact.failed` 回来。这条 action 本身不花钱。
+   *
+   * ## 守卫：压缩期间不能再来一次
+   *
+   * 摘要要打网络（几秒）。这段时间里如果又来一条 `compact.request`，
+   * 两个摘要会**同时**基于同一份 messages 生成，回来时后写的覆盖先写的 ——
+   * 其中一份摘要的内容已经被丢掉了（不是错，是白花的钱 + 丢信息）。
+   * 所以这里直接忽略。
+   *
+   * ## 守卫：环在跑时不许压
+   *
+   * 压缩会把 `messages` 整份换掉。若在「LLM 正在流 / 工具正在跑」时换掉，
+   * 那条流回来时看到的已经不是它请求的那份历史了 ——
+   * 更糟的是 `tool.result` 会找不到它的 `toolCallId`，消息序列变成非法的。
+   * 用户要压就等这一轮结束（界面也会拦），这不是自动压。
+   */
+  'compact.request': (state, action) => {
+    if (state.compacting) return state;
+    if (state.phase !== 'idle') return state;
+    // tree 上开一个 pending 节点，parent 取此刻的 tip。
+    // **先开 pending 再等结果**，而不是等压缩完才开：那样中途挂掉就什么都没有，
+    // 而「开始压缩了」这个事实本身就该留在树上。
+    const { tree, node } = appendNode(state.trace, state.trace.tipId, 'compact', {
+      status: 'pending',
+      label: compactReasonText(action.reason),
+      createdAt: Date.now(),
+    });
+    return { ...state, trace: tree, compacting: true, openCompactNodeId: node.id };
+  },
+
+  /**
+   * 压完了：整份换掉 messages，闭合 `compact` 节点（它推进 tip）。
+   *
+   * ## 为什么 `compact` 节点推进 tip
+   *
+   * 压缩之后的那条线是从摘要开始的，不是从被压掉的那段历史延续的。
+   * 不推进 tip 的话，下一个 `user` 节点会挂在「压缩前最后一个节点」下面 ——
+   * 树上看起来像是从旧历史里长出来的，而实际上中间已经换过内容了。
+   * 这与 git 里 squash 一段历史之后接上新提交是同一个形状。
+   *
+   * ## 为什么 label 里带条数
+   *
+   * 「压掉了多少」是这个操作唯一值得看的信息：条数没降说明切点没找到
+   * （可压的还不够），那就是个可疑的静默退化。
+   */
+  'compact.done': (state, action) => {
+    const now = Date.now();
+    const { reason, summarizedCount, keptCount, tokensBefore } = action;
+    const why = compactReasonText(reason);
+    let { trace } = state;
+    // **就地改写**那个 pending 节点（不另开一个）：压这件事从头到尾就是一个节点，
+    // 「开始压缩」与「压完了多少条」是同一件事的两个时刻。
+    // 另开一个的话，树上会出现两个 compact 节点，而第二个才是结果 —— 读的人得猜哪个算数。
+    //
+    // 它从 pending 变成 ok，于是**推进 tip**（见上）。
+    if (state.openCompactNodeId) {
+      trace = patchNode(trace, state.openCompactNodeId, {
+        status: 'ok',
+        label: `${why}压缩：${summarizedCount} 条 → ${keptCount} 条`,
+        detail: action.summary,
+        meta: {
+          reason,
+          summarized: String(summarizedCount),
+          kept: String(keptCount),
+          tokensBefore: String(tokensBefore),
+        },
+        endedAt: now,
+      });
+    }
+    return {
+      ...state,
+      trace,
+      compacting: false,
+      openCompactNodeId: null,
+      messages: action.messages,
+      // 摘要这次也花了 token：记进去，否则底栏的累计用量会比真实支出少一块。
+      usage: action.usage ?? state.usage,
+      totalCost: state.totalCost + (action.usage?.cost?.total ?? 0),
+      lastCompaction: { reason, summarizedCount, keptCount, tokensBefore },
+      // 压缩成功**不碰** error / stopReason / stopCause：它不是「一轮对话的结果」。
+      // 上一轮为什么停的那句话与压缩无关，动它就是撒谎。
+    };
+  },
+
+  /**
+   * 压失败：把 pending 节点标成 error（对话一个字都没动）。
+   *
+   * 不推 `stopReason` / `stopCause`：压缩不是一轮对话，它不「结束」什么。
+   * 但 `stopCause` 要写 —— 否则界面上只能显示一句干巴巴的 `error` 字符串。
+   */
+  'compact.failed': (state, action) => {
+    const now = Date.now();
+    let { trace } = state;
+    if (state.openCompactNodeId) {
+      trace = patchNode(trace, state.openCompactNodeId, { status: 'error', endedAt: now });
+    }
+    const { tree, node } = appendNode(trace, state.openCompactNodeId, 'error', {
+      status: 'error',
+      label: action.error,
+      detail: action.error,
+      meta: { kind: 'compact-error', cause: 'compact-error' },
+      createdAt: now,
+      endedAt: now,
+    });
+    return {
+      ...state,
+      trace: tree,
+      compacting: false,
+      openCompactNodeId: null,
+      error: action.error,
+      errorKind: null,
+      errorNodeId: node.id,
+      stopReason: null,
+      stopCause: 'compact-error',
+      stopCauseDetail: stopCauseText('compact-error'),
+    };
+  },
 
   /**
    * 清空对话（可选：换一个新会话 id）。
@@ -899,6 +1121,9 @@ function redispatch(action: AgentAction): CmdType {
 export function loopWiring(table: {
   runAgent(text?: string): CmdType;
   runTools(calls: ToolCall[]): CmdType;
+  /** 没有它就是「不支持压缩」：那条 action 不发任何 Cmd。 */
+  runCompact?(): CmdType | undefined;
+  markCompactReason?(reason: CompactReason): void;
 }): Pick<
   ReducerEffects,
   | 'user.message'
@@ -908,6 +1133,7 @@ export function loopWiring(table: {
   | 'llm.failed'
   | 'tool.call'
   | 'tool.batch.done'
+  | 'compact.request'
 > {
   return {
     // user.message 之后要走一次 agent.run，让它的迁移开出一个 llm.attempt 节点。
@@ -952,6 +1178,39 @@ export function loopWiring(table: {
     // 直接调 runAgent 的话，这一轮 LLM 在树上就没有 attempt 节点，result 变成孤儿。
     'tool.batch.done': (_action, state) =>
       state.turns >= state.maxTurns ? [] : [redispatch({ type: 'agent.run' })],
+
+    /**
+     * 压缩上下文。
+     *
+     * **直接发 `runCompact()`，不绕一圈**：与 `llm.done` 里的工具同理由 ——
+     * `llm.done` 是从 `Cmd.run` 的 successActionCreator 进来的，那时
+     * `install()` enhancer 的 cmdsQueue 已经被外层 dispatch 取走，从这里再 dispatch
+     * 一个 action，它触发的 Cmd 没人冲刷。而压缩的 pending 节点本来就由
+     * `compact.request` 自己的迁移开好了（开在 effect 之前），不需要第二次 dispatch。
+     *
+     * **顺序：先 mark 再 run**：effect 里 `lastRequestedReason` 必须在读之前就位。
+     */
+    'compact.request': (action) => {
+      // 没接内核（测试、另一个前端）：发一条 failed，而不是静默无反应 ——
+      // 用户打了 /compact 却什么都没发生，比「不支持这个功能」糟糕得多。
+      if (table.runCompact === undefined) {
+        return [
+          redispatch({
+            type: 'compact.failed',
+            error: '本内核不支持上下文压缩',
+            reason: action.reason,
+          }),
+        ];
+      }
+      // **顺序：先 mark 再 run** —— effect 里的 lastRequestedReason 必须在读之前就位。
+      //
+      // 理由直接取 action 上的（必填）：它在 dispatch 那一刻就定下了，不在这里
+      // 根据 state 重推一遍 —— 两处各推一次必然漂移，而漂移的后果是界面显示的
+      // 理由与真正触发的原因不符（用户会据此排查错方向）。
+      table.markCompactReason?.(action.reason);
+      const run = table.runCompact();
+      return run === undefined ? [] : [run];
+    },
   };
 }
 

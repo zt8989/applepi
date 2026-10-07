@@ -26,7 +26,23 @@ import { classifyLlmError, type AgentState, type LlmErrorKind, type StopCause } 
 import { getTool, getTools } from './tools';
 import { beginRun, endRun, lastAbortCause, RunAbortedError } from './run-control';
 import { resolveApiKey, type StreamFn } from './provider';
+import {
+  effectiveCompactionSettings,
+  runCompaction,
+  type CompactReason,
+} from './compact';
 import { formatDuration } from './trace';
+
+/** `compact.done` 需要的载荷（effect 的返回值 = 成功 action 的字段）。 */
+type CompactOutcomeForAction = {
+  messages: AgentState['messages'];
+  summary: string;
+  tokensBefore: number;
+  usage?: NonNullable<AgentState['usage']> | undefined;
+  summarizedCount: number;
+  keptCount: number;
+  reason: CompactReason;
+};
 
 /** effect 表：每个名字返回一个 Cmd。 */
 export interface EffectTable {
@@ -34,6 +50,25 @@ export interface EffectTable {
   runAgent(text?: string | undefined): CmdType;
   /** 执行一批工具调用。 */
   runTools(calls: ToolCall[]): CmdType;
+  /**
+   * 跑一次上下文压缩（找切点 → 调 LLM 生成摘要 → 换掉老对话）。
+   *
+   * **可选**：不实现就是「不支持压缩」——`compact.request` 不发任何 Cmd。
+   * 那时界面的 `/compact` 会明说「未接内核」，而不是静默无反应
+   * （静默无反应是最坏的一种：用户以为压了，其实历史一个字没动）。
+   */
+  runCompact?(): CmdType;
+  /**
+   * 记下「这次压缩是为什么发起的」（手动 / 超阈值 / provider 报溢出）。
+   *
+   * 为什么要 effect 表来记，而不是 action 里带：`failActionCreator` 只拿到异常、
+   * 拿不到 action，所以「为什么压」必须在 dispatch 那一刻存到某个地方。
+   * 而它是**决定**的一部分（决定压了就写着「超阈值」），不是状态 ——
+   * 状态里放它等于让界面有机会改掉它，那就不可信了。
+   *
+   * `loopWiring` 在发 `runCompact()` **之前**调它，所以 effect 拿到的一定是这次的理由。
+   */
+  markCompactReason?(reason: CompactReason): void;
 }
 
 /**
@@ -66,6 +101,23 @@ export interface PiAiEffectsOptions {
 export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable {
   const { streamFn, model } = options;
   const keyOf = options.resolveKey ?? resolveApiKey;
+
+  /**
+   * 最近一次 `compact.request` 带的理由。
+   *
+   * 为什么存在 effect 表的闭包里而不是 state 里：
+   * `failActionCreator` 只拿到异常、拿不到 action，所以「为什么压」必须在
+   * dispatch 那一刻就存到某个**不可被界面改写**的地方。放 state 里等于留了一个
+   * 「界面能改掉判定依据」的口子，而理由要显示给用户、可不能被人随手改掉。
+   *
+   * 为什么用 `let` 而不是 state：它不是状态 —— 压缩一结束就没意义了，
+   * 而把它写进 state 会让 `conversation.reset` / `restored` 多一件要记得带上的事。
+   *
+   * **声明必须在 return 之前**：`markCompactReason` 是箭头函数（在 return 的对象里），
+   * 闭包引用的是下面这个 `let`；若声明在 return 之后，`markCompactReason` 被调用时
+   * 它还在 TDZ 里（ReferenceError）。
+   */
+  let lastRequestedReason: CompactReason = 'manual';
 
   async function callLlm(
     dispatch: Cmd.Dispatch,
@@ -278,7 +330,11 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
     return /Command exited with code [1-9]\d*/i.test(text);
   }
 
-  async function runToolCall(call: ToolCall, signal: AbortSignal): Promise<ToolResultMessage> {
+  async function runToolCall(
+    call: ToolCall,
+    signal: AbortSignal,
+    dispatch: Cmd.Dispatch,
+  ): Promise<ToolResultMessage> {
     const tool = getTool(call.name);
     if (!tool) {
       return toToolResult(
@@ -289,7 +345,16 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
       );
     }
     try {
-      const result = await tool.execute(call.id, call.arguments ?? {}, signal);
+      const result = await tool.execute(call.id, call.arguments ?? {}, signal, (partial) => {
+        // 流式增量 → `tool.progress` → reducer 存进 state.toolProgress。
+        //
+        // **为什么每一块都 dispatch**：界面就是靠这个动作重画的（diff 渲染只重画变化的行）。
+        // 官方的 bash 工具内部已经有节流（BASH_UPDATE_THROTTLE_MS），所以这里的频率是可控的；
+        // 而且即便节流失效，`TranscriptChunks` 那层还有缓存（只重画正在跑的那一块）。
+        //
+        // 这里只 dispatch，不改任何本地状态 —— 本项目的不变式：**状态只能由 action 改**。
+        dispatch({ type: 'tool.progress', toolCallId: call.id, content: partial.content });
+      });
       return toToolResult(call, result.content, result.details, isFailure(result.content));
     } catch (error) {
       return toToolResult(
@@ -316,7 +381,7 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
       const results = await Promise.all(
         calls.map(async (call) => {
           dispatch({ type: 'tool/start', call });
-          const message = await runToolCall(call, controller.signal);
+          const message = await runToolCall(call, controller.signal, dispatch);
           dispatch({ type: 'tool.result', message });
           return message;
         }),
@@ -358,6 +423,84 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
           // 这里 LLM 根本没在跑（openLlmNodeId 已是 null）：不是「大模型失败」，是工具批次挂了。
           failureAction(error, null, 'tool-error'),
       }),
+
+    /**
+     * 压缩上下文：一条 `compact.request` → 真的找切点、真的调 LLM 写摘要。
+     *
+     * **为什么摘要失败要走 failActionCreator 而不是吞掉**：
+     * 压缩失败时对话原样保留（reducer 的 `compact.failed` 保证），但用户必须知道 ——
+     * 否则「为什么上下文一直超」这个问题没有答案，而症状是「模型莫名其妙忘了前面说过什么」，
+     * 那是最难查的一类。
+     */
+    runCompact: () =>
+      Cmd.run(compactContext, {
+        args: [Cmd.dispatch, Cmd.getState],
+        successActionCreator: (outcome: CompactOutcomeForAction): AgentAction => ({
+          type: 'compact.done',
+          ...outcome,
+        }),
+        failActionCreator: (error: unknown): AgentAction => ({
+          type: 'compact.failed',
+          error: error instanceof Error ? error.message : String(error),
+          // 原因从 effect 的局部变量拿（是它定的，不在这里重新猜一遍 ——
+          // 两个地方各判一次必然漂移）。
+          reason: lastRequestedReason,
+        }),
+      }),
+
+    markCompactReason: (reason: CompactReason): void => {
+      lastRequestedReason = reason;
+    },
   };
+
+  /**
+   * 压缩的真正干活处：读状态 → 找切点 → 生成摘要 → 把结果交给 reducer。
+   *
+   * **不直接改 state**（本项目的不变式）：返回结果，由 successActionCreator
+   * 变成一条 `compact.done` 回去。
+   */
+  async function compactContext(
+    _dispatch: Cmd.Dispatch,
+    getState: Cmd.GetState,
+  ): Promise<CompactOutcomeForAction> {
+    const state = getState<AgentState>();
+    // 窗口小的模型要夹紧 reserve/keepRecent，否则「阈值」会变成永远成立。
+    const settings = effectiveCompactionSettings(
+      state.compactionSettings,
+      state.model.contextWindow,
+    );
+    const apiKey = await keyOf(model.provider);
+    const outcome = await runCompaction({
+      messages: state.messages,
+      model,
+      streamFn,
+      ...(apiKey !== undefined ? { apiKey } : {}),
+      ...(state.model.thinkingLevel !== 'off' ? { thinkingLevel: state.model.thinkingLevel } : {}),
+      settings,
+      contextWindow: state.model.contextWindow,
+    });
+    // 没有可压的内容（切点找不到 / 整段都还在保留窗口里）。
+    // 这**不是错误** —— 但也不能静默：回一条结果，让界面显示
+    // 「0 条 → N 条」，用户据此知道「现在压还太早」。静默才最坏：
+    // 用户以为压了，实际历史一个字没动。
+    return outcome === null
+      ? {
+          messages: state.messages,
+          summary: '',
+          tokensBefore: 0,
+          summarizedCount: 0,
+          keptCount: state.messages.length,
+          reason: lastRequestedReason,
+        }
+      : {
+          messages: outcome.messages,
+          summary: outcome.summary,
+          tokensBefore: outcome.tokensBefore,
+          ...(outcome.usage ? { usage: outcome.usage } : {}),
+          summarizedCount: outcome.summarizedCount,
+          keptCount: outcome.keptCount,
+          reason: lastRequestedReason,
+        };
+  }
 }
 

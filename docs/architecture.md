@@ -42,5 +42,6 @@ pi-coding-agent 的官方实现，pi-ai 升到 1.0.2）给了 [tools](architectu
 | [tools](architecture/tools.md) | 工具来自 pi-coding-agent，那层适配做了什么 |
 | [provider](architecture/provider.md) | 配置从哪来：复用 pi 的 ModelRuntime，内置 provider 目录 |
 | [surfaces](architecture/surfaces.md) | TUI 渲染层，以及它踩过的坑 |
-| [init](architecture/init.md) | 装载：prompt / model 两块、模型能力、中途插 prompt、洋葱式 middleware、零 token 回放 |
+| [init](architecture/init.md) | 装载：system prompt（拼装交给 pi）、prompt / model 两块、模型能力、中途插 prompt、洋葱式 middleware、零 token 回放 |
 | [sessions](architecture/sessions.md) | 配置家目录、会话文件格式、恢复历史（零 token） |
+| [compact](architecture/compact.md) | 上下文压缩：pi 的切点与摘要、三条触发路径、小窗口夹紧 |

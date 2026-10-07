@@ -13,7 +13,13 @@ export {
   type EffectTable,
   type PiAiEffectsOptions,
 } from './effects';
-export { createAgentStore, waitForIdle, type AgentStore, type CreateAgentStoreOptions } from './store';
+export {
+  createAgentStore,
+  createAgentStoreWith,
+  waitForIdle,
+  type AgentStore,
+  type CreateAgentStoreOptions,
+} from './store';
 export {
   createFauxRuntime,
   createRuntime,
@@ -72,9 +78,33 @@ export {
 } from './trace-file';
 export {
   createPersistentStore,
+  createAutoCompact,
   type AgentStoreHandle,
+  type AutoCompact,
 } from './store';
 export { classifyLlmError, isRetryable, DEFAULT_LLM_TIMEOUT_MS } from './state';
+
+// ─── 上下文压缩（compact） ───
+export {
+  compactionSettings,
+  compactReasonText,
+  buildSummaryMessage,
+  decideCompaction,
+  effectiveCompactionSettings,
+  isCompactionSummary,
+  isContextOverflow,
+  lastContextTokens,
+  planCut,
+  runCompaction,
+  shouldCompact,
+  DEFAULT_COMPACTION_SETTINGS,
+  type CompactDecision,
+  type CompactOutcome,
+  type CompactReason,
+  type CompactionSettings,
+  type CompactionSummaryMessage,
+  type CutPlan,
+} from './compact';
 
 // ─── 装载与 middleware ───
 export type { ModelCapabilities, PromptToolDefinition } from './actions';
@@ -88,3 +118,14 @@ export {
   type Next,
 } from './middleware';
 export type { InitRecord, ReplayedInit, ReplayedSession } from './trace-store';
+
+// ─── System prompt（拼装交给 pi 的 buildSystemPrompt） ───
+export {
+  buildPromptOptions,
+  buildSystemPromptText,
+  promptFileSources,
+  promptToolsFrom,
+  type PromptFileSources,
+  type PromptInputs,
+  type PromptToolLike,
+} from './system-prompt';

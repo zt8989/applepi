@@ -5,10 +5,12 @@ import type {
   TextContent,
   ToolCall,
   ToolResultMessage,
+  Usage,
 } from '@earendil-works/pi-ai';
 import type { Message } from '@earendil-works/pi-ai';
 import type { LlmErrorKind, StopCause } from './state';
 import type { SkillInfo } from './skills';
+import type { CompactReason } from './compact';
 
 /**
  * 工具的完整定义 —— 落进 state 后回放不必重跑。
@@ -195,6 +197,21 @@ export type AgentAction =
   | { type: 'tool.call'; calls: ToolCall[] }
   /** 一个工具开始执行。 */
   | { type: 'tool/start'; call: ToolCall }
+  /**
+   * 工具执行中的**流式增量**（长命令边跑边送）。
+   *
+   * `content` 是「到目前为止的**全部**输出」，不是 diff —— 界面直接整个替换。
+   * 工具跑完时 `tool.result` 会把终值写进 `messages`，这条只是给界面看的中间态。
+   *
+   * **为什么单独一条 action**：输出是工具执行里的事情，而工具执行由 effect 驱动
+   * （它拿到那个 `onUpdate` 回调）。所以「工具报了新输出」就得从 effect 回流到 reducer ——
+   * 跟 `llm.delta` 是同一个形状。
+   */
+  | {
+      type: 'tool.progress';
+      toolCallId: string;
+      content: (TextContent | ImageContent)[];
+    }
   /** 一个工具出结果。 */
   | { type: 'tool.result'; message: ToolResultMessage }
   /** 一批工具跑完了。 */
@@ -203,6 +220,53 @@ export type AgentAction =
   | { type: 'model.changed'; provider: string; modelId: string }
   /** 换了思考级别。 */
   | { type: 'thinking.changed'; level: ModelThinkingLevel }
+  // ── 上下文压缩 ──
+  /**
+   * 开始一次压缩。**不携带结果** —— 它只是「我要压」，真正干活的是 effect
+   * （要花钱、要打网络），结果从 `compact.done` / `compact.failed` 回来。
+   *
+   * 为什么要有这条：压缩不能写成 `user.message` 之后的自动副作用 ——
+   * 自动压的话，用户永远不知道对话刚刚被改写过（而「模型忘了什么」正是最难查的一类问题）。
+   * 显式一条 action，界面就能在对话区画出一条「已压缩」的节点。
+   */
+  | {
+      type: 'compact.request';
+      /**
+       * 为什么发起。
+       *
+       * **必填**：它必须在 dispatch 那一刻就定下来，因为 effect 的
+       * `failActionCreator` 拿不到 action。自动压由内核判定时填
+       * `threshold` / `overflow`，用户按 `/compact` 填 `manual`。
+       */
+      reason: CompactReason;
+    }
+  /**
+   * 压完了。老对话已被换成一条摘要消息。
+   *
+   * `messages` 是**整份新历史**（摘要 + 保留的尾巴）而不是「增量」——
+   * 因为压缩的本质就是「替换中间一大段」，增量表达不了。
+   */
+  | {
+      type: 'compact.done';
+      messages: Message[];
+      /** 摘要正文（界面上可展开看）。 */
+      summary: string;
+      /** 压缩前的上下文 token 数（界面显示「从多少压到多少」）。 */
+      tokensBefore: number;
+      /** 压缩前估的 token 数（= tokensBefore，单独一份是为了与 pi 的结果形状一致）。 */
+      estimatedTokensAfter?: number | undefined;
+      /** 摘要这一次花掉的 token。 */
+      usage?: Usage | undefined;
+      /** 被摘掉 / 保留的消息条数（界面提示用）。 */
+      summarizedCount: number;
+      keptCount: number;
+      /** 为什么压：用户手动 / 超阈值 / provider 报溢出。 */
+      reason: CompactReason;
+    }
+  /**
+   * 压失败。**对话原样保留**（压缩是优化，不是正确性要求）。
+   */
+  | { type: 'compact.failed'; error: string; reason: CompactReason }
   /**
    * 轨迹节点已落盘。持久化是 effect（写文件 / localStorage），它把游标推回来，
    * 于是 reducer 知道自己已经写过哪一段，重复的记录不会二次落盘。

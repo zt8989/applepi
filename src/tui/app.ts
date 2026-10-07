@@ -35,9 +35,11 @@ import {
 } from '@earendil-works/pi-tui';
 import { abortRun } from '../run-control';
 import { renderTree, traceStats, type TraceNode, type TraceTree } from '../trace';
+import { compactReasonText } from '../compact';
 import type { AgentState } from '../state';
 import type { AgentStore } from '../store';
 import type { AgentAction } from '../actions';
+import type { ToolCall } from '@earendil-works/pi-ai';
 import { cleanSessionsExcept, listSessions, type SessionSummary } from '../config-home';
 import { loadSessionMessages, openSessionPicker } from './session-picker';
 import { readFileSync } from 'node:fs';
@@ -135,6 +137,10 @@ function nodeColor(node: TraceNode): (t: string) => string {
       return red;
     case 'stop':
       return magenta;
+    // 压缩 = 历史被换掉的那个瞬间。给 magenta（与 stop 同色，视觉上归为「会话结构变了」这一类），
+    // 而 pending 时就是暗色 —— 「正在压」与「压完了」一眼能分开。
+    case 'compact':
+      return node.status === 'pending' ? dim : magenta;
     // 上下文族（prompt.*）统一用暗色：它们是「背景」不是「事件」，不该抢对话的注意力。
     case 'prompt.base':
       return magenta;
@@ -170,7 +176,7 @@ export function renderColoredTree(tree: TraceTree, maxWidth: number): string {
     .map((line) => {
       // 节点 kind 的全集。**漏一个就等于那个 kind 整族不上色**（静默退化，最难发现的一种 bug）。
       const match =
-        /^(.*?)(n\d+) (llm\.attempt|llm\.result|tool\.attempt|tool\.result|user|error|stop|prompt\.base|prompt\.tools|prompt\.segment|prompt\.skills|model\.init):/.exec(
+        /^(.*?)(n\d+) (llm\.attempt|llm\.result|tool\.attempt|tool\.result|user|error|stop|compact|prompt\.base|prompt\.tools|prompt\.segment|prompt\.skills|model\.init):/.exec(
           line,
         );
       if (!match) return line.startsWith('HEAD') ? bold(line) : line;
@@ -406,6 +412,10 @@ const SLASH_COMMANDS: SlashCommand[] = [
     description: '**删除**除当前会话外的全部历史会话（不可逆）',
   },
   { name: 'wipe', description: '同 /clean' },
+  {
+    name: 'compact',
+    description: '把老对话换成一段摘要（上下文快满了时用；与 pi 同名）',
+  },
   { name: 'help', description: '列出全部命令' },
 ];
 
@@ -617,6 +627,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 「我装了哪些 skill」正是需要反复对照的东西（打 `/skill:x` 时要对着名字打）。
    */
   const banner = { text: '' };
+  /**
+   * 已经报过一次的那次压缩（避免每帧都报一遍）。
+   *
+   * 为什么要单独记：`lastCompaction` 是**粘在 state 上的**（不会自动清），
+   * 而这个订阅器每次 store 变化都会跑 —— 不记就变成「每次刷新都插一行」。
+   */
+  let lastNoticedCompaction: AgentState['lastCompaction'] = null;
 
   const refresh = (): void => {
     const state = store.getState();
@@ -649,7 +666,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
     if (showTrace) {
       tracePanel.setText(
         state.trace.order.length === 0
-          ? dim('（还没有任何节点）')
+          ? // 开场树是空的（**故意**的：装载节点要等第一句话才建，见 reducer 的 beginTrace），
+            // 所以这句话得说清楚「不是坏了」，否则用户以为 Ctrl+T 没生效。
+            dim(state.prompt.seeded ? '（发送第一条消息后这里开始记轨迹）' : '（还没有任何节点）')
           : renderColoredTree(state.trace, terminal.columns ?? 100),
       );
     } else {
@@ -660,8 +679,25 @@ export async function runTui(options: TuiOptions): Promise<number> {
 
   store.subscribe(() => {
     const state = store.getState();
+    // 压缩中：把 loader 换成「压缩中…」—— 摘要要打一次网络，可能好几秒，
+    // 而环的相位这段时间是 idle（压缩不是一轮对话），所以上面那个「环跑完收 loader」
+    // 的分支根本不会触发。不给它一个指示，用户会以为按了 /compact 没反应。
+    if (state.compacting && !loading) {
+      loading = true;
+      lastLoaderMessage = 'compact';
+      loader.setIndicator({ frames: BUSY_FRAMES });
+      loader.setMessage(yellow('压缩中…'));
+      loader.start();
+    } else if (!state.compacting && loading && lastLoaderMessage === 'compact') {
+      // 压完了（或失败了）：把 loader 收掉，剩下的提示交给下面的 lastCompaction 分支。
+      loading = false;
+      loader.stop();
+      loader.setMessage('');
+      loader.setIndicator({ frames: IDLE_FRAMES });
+      lastLoaderMessage = '';
+    }
     // 环跑完时把 loader 收掉。
-    if (state.phase === 'idle' && loading) {
+    if (state.phase === 'idle' && loading && lastLoaderMessage !== 'compact') {
       loading = false;
       loader.stop();
       // stop() 只停动画，**不清那一行文字** —— 不置空的话「思考中…」会一直留在屏幕上转，
@@ -671,6 +707,27 @@ export async function runTui(options: TuiOptions): Promise<number> {
       // 那个圈又会自己转起来。
       loader.setIndicator({ frames: IDLE_FRAMES });
       lastLoaderMessage = '';
+    }
+    // 压缩跑完（或失败）：在对话区留一条**常驻**的说明。
+    //
+    // 为什么必须显眼：压缩是唯一会静默改写对话内容的操作——屏幕上那些用户消息
+    // 并没有消失，但它们已经不在模型的上下文里了。不说出来，用户看到的下一句回答
+    // 就会「凭空忘了」前面聊过的内容，而那正是最难归因的一类问题。
+    const compacted = state.lastCompaction;
+    if (compacted !== null && compacted !== lastNoticedCompaction) {
+      lastNoticedCompaction = compacted;
+      if (compacted.summarizedCount > 0) {
+        banner.text =
+          banner.text === ''
+            ? dim(
+                `[已压缩上下文] ${compactReasonText(compacted.reason)}：` +
+                  `${compacted.summarizedCount} 条老对话 → 一段摘要 + ${compacted.keptCount} 条最近消息` +
+                  `（之前的 ${formatTokens(compacted.tokensBefore)} 上下文已不在模型上下文里）`,
+              )
+            : banner.text;
+      } else {
+        notify(dim('没什么可压的（老对话还在保留窗口里）'));
+      }
     }
     refresh();
   });
@@ -794,6 +851,25 @@ export async function runTui(options: TuiOptions): Promise<number> {
               (current ? '（当前这段保留）' : ''),
           ),
         );
+        return;
+      }
+      case 'compact': {
+        // 压缩要**整份换掉** messages，所以环在跑时绝不能做：
+        // 那条还在等 token 的流回来时会认不出自己的上下文，而正在跑的
+        // toolResult 会找不到它的 toolCall（消息序列直接变成非法的）。
+        if (store.getState().phase !== 'idle') {
+          notify(yellow('上一回合还没结束，等它跑完再压缩'));
+          return;
+        }
+        if (store.getState().compacting) {
+          notify(yellow('正在压缩中（摘要要打一次网络）'));
+          return;
+        }
+        store.dispatch({ type: 'compact.request', reason: 'manual' } as AgentAction);
+        // 不在这里报「已开始」：结果由 `compact.done` / `compact.failed` 回到状态里，
+        // 那时才说「压掉了多少」。先报一句「开始了」再报一句「压了多少」是重复，
+        // 而且失败时用户会同时看到两条矛盾的话。
+        refresh();
         return;
       }
       case 'new':
@@ -1257,6 +1333,147 @@ function userSpacer(message: { role: string }, at: number): string[] {
 }
 
 /**
+ * 渲染**正在跑**的工具（`toolResult` 消息还没有，但工具已经开跑了）。
+ *
+ * ## 为什么这里有东西可画
+ *
+ * 一个长命令（`npm install`、带 sleep 的脚本、编译）在跑的时候：
+ *   - `state.messages` 里**还没有** `toolResult`（那要等它跑完）；
+ *   - `state.executing` 里有那条调用，`state.toolProgress` 里有官方工具边跑边送出来的输出。
+ *
+ * 早先只看 `messages`，于是工具一开跑就**什么都不显示** —— 用户看到光标在那儿闪，
+ * 而工具块要等命令结束才突然出现。几十秒的空白与「卡死了」在屏幕上没有区别。
+ *
+ * ## `isPartial: true` 让官方渲染器接管「进行中」的样子
+ *
+ * 不自己画半成品：pi 的 bash 渲染器拿到 `isPartial` 就会
+ *   - 把底色换成 `toolPendingBg`（而不是成功/失败色）；
+ *   - 把底部那行从 `Took` 换成 `Elapsed`，并起一个 1s 定时器让秒数跳；
+ *   - 接受**不完整**的输出（末尾不会被当成「截断」）。
+ *
+ * 这些细节手写要对齐一堆，所以直接用它的（见 `renderTool` 的同类注释）。
+ *
+ * @returns 行；工具没在跑（还没有任何输出）时返回空数组。
+ */
+function renderRunningTool(
+  state: AgentState,
+  call: ToolCall,
+  width: number,
+  expanded: boolean,
+): string[] {
+  const progress = state.toolProgress?.[call.id];
+  if (progress === undefined) return [];
+  const component = new ToolExecutionComponent(
+    call.name,
+    call.id,
+    (call.arguments ?? {}) as Record<string, unknown>,
+    { showImages: false, imageWidthCells: usableWidth(width) },
+    TOOL_RENDERERS[call.name] as never,
+    TOOL_UI as never,
+    process.cwd(),
+  );
+  // markExecutionStarted 必须在 updateResult **之前**：官方 bash 渲染器的
+  // `renderResult` 靠它记下的 startedAt 才能起那个计秒定时器（否则 `Elapsed` 永远是 0s）。
+  component.markExecutionStarted();
+  component.setArgsComplete();
+  component.setExpanded(expanded);
+  // isPartial = true → 官方切到「进行中」渲染：pending 底色、接受不完整的输出。
+  // `isError: false`（还不知道结果），content 是当前已有的那部分输出。
+  component.updateResult(
+    {
+      content: progress.content.map((c) =>
+        c.type === 'text'
+          ? { type: 'text', text: c.text }
+          : { type: 'image', data: c.data, mimeType: c.mimeType },
+      ),
+      details: undefined,
+      isError: false,
+    },
+    true,
+  );
+  const lines = component.render(usableWidth(width));
+  // **收尾：停掉官方渲染器的计秒定时器。**
+  //
+  // 官方 bash 渲染器看到 `isPartial` 会 `setInterval(..., 1000)` 让 `Elapsed` 自己跳，
+  // 而它只在**同一个组件**收到非 partial 的 `updateResult` 时才 clearInterval。
+  // 我们每帧新建一个用完就扔的组件，于是没有任何一次「收尾」到来 ——
+  // 每渲染过一个正在跑的工具块就留下一个永久 interval，事件循环永远不空。
+  // 实测：进程渲染过一次就不会退出（得 timeout 才杀得掉）。这正是加这行的原因。
+  //
+  // **代价**：`Elapsed` 不再每秒自己跳，而是**跟着输出更新**。对「边跑边有输出」的
+  // 命令（`npm install`、`ls -R`、带 sleep 的脚本）没差别；对「长时间完全没有输出」
+  // 的命令，那几十秒里秒数会停着不动 —— 而那种命令屏幕上本来什么也不变，
+  // 用户要判断的也正是「它还有没有在动」（屏幕上仍然挂着命令与已有的输出）。
+  //
+  // 想把跳秒也拿回来，就得让组件跨帧活着（pi 自己的做法），而那要求对话区不再按
+  // 「字符串块」缓存 —— 那是 O(N²) → O(N) 那个优化的倒退，不划算。
+  stopRendererTimers(component);
+  return lines;
+}
+
+/**
+ * 停掉官方渲染器在 `rendererState` 里留下的定时器。
+ *
+ * ## 判据为什么用 `unref`
+ *
+ * `setInterval` 在 Node 里返回 `Timeout` 对象，在浏览器里返回数字；两边都能安全
+ * `clearInterval`，但 `instanceof` 只认 Node 那个类。而「有 `unref` 方法」恰好是
+ * Node 定时器的标志 —— 一个普通对象恰好也有 `unref` 方法的概率低到可以忽略，
+ * 所以这个判据比认类可靠。
+ *
+ * ## 为什么还要置回 undefined
+ *
+ * 官方渲染器靠这个字段判断「定时器已经在了」（`!state.interval` 才起新的）。
+ * 清掉 interval 却留着真值的话，下一帧会以为不用再起 —— 而那个已经不存在了。
+ */
+function stopRendererTimers(component: ToolExecutionComponent): void {
+  const state = (component as unknown as { rendererState?: Record<string, unknown> })
+    .rendererState;
+  if (state === undefined) return;
+  for (const [key, value] of Object.entries(state)) {
+    if (value === null || typeof value !== 'object') continue;
+    const handle = value as { unref?: () => void };
+    if (typeof handle.unref !== 'function') continue;
+    clearInterval(value as Parameters<typeof clearInterval>[0]);
+    handle.unref();
+    state[key] = undefined;
+  }
+}
+
+/**
+ * 某条消息之后要额外画的**正在跑的工具块**。
+ *
+ * ## 为什么要跟着某条消息画，而不是单独一块
+ *
+ * 工具块在对话流里**位置固定**：紧跟在发起它的那条 assistant 消息后面（协议要求
+ * 每个 toolCall 后紧跟它的 toolResult）。所以把它算作那条消息的一部分 ——
+ * 于是增量渲染的缓存仍然有效（历史块命中缓存），而不是每帧重建整个工具区。
+ *
+ * 只画 `executing` 里的那些：工具结束后 `tool.result` 会把终值写进 `messages`，
+ * `executing` 里就不再有它，于是不会与最终的 toolResult 块重复。
+ */
+function runningToolsAfter(state: AgentState, message: { role: string }): ToolCall[] {
+  if (message.role !== 'assistant') return [];
+  // `executing` 理论上总是数组（createInitialState 会给），但测试里手造的 state 可能没填。
+  // 不写成 `state.executing.length === 0` 而是在这里兜 —— 这个函数会在**每一帧**对
+  // 每条消息调一次，一个 undefined 就是整个界面崩。
+  const executing = state.executing ?? [];
+  if (executing.length === 0) return [];
+  const ids = new Set(toolCallIdsOf(message as unknown as { content: unknown[] }));
+  return executing.filter((t) => ids.has(t.call.id)).map((t) => t.call);
+}
+
+/** 从一条 assistant 消息里取 toolCallId（给上面的位置判断用）。 */
+function toolCallIdsOf(message: { content: unknown[] }): string[] {
+  const ids: string[] = [];
+  for (const block of message.content) {
+    const c = block as { type?: string; id?: string };
+    if (c.type === 'toolCall' && typeof c.id === 'string') ids.push(c.id);
+  }
+  return ids;
+}
+
+/**
  * 把整段对话渲染成文本块（`from` 恒为 0：滚动交给 ScrollView）。
  *
  * ## 不加「你 ›」「助手 ›」这类前缀
@@ -1318,7 +1535,15 @@ export function renderMessage(
   if (message.role === 'assistant') {
     // 助手消息：**只有可见内容才占行**。一条纯 toolCall 的消息如果硬渲染会得到
     // 一段空白（Markdown 组件对空文本返回 []），而它紧跟着就有工具块要画。
-    return renderAssistant(message.content, width);
+    //
+    // 后面接上「正在跑的工具」：那些工具还没产出 toolResult，所以它们的块
+    // 只能在这里画（位置也正好：紧跟发起它的那条消息）。
+    const running = runningToolsAfter(state, message);
+    const lines = renderAssistant(message.content, width);
+    for (const call of running) {
+      lines.push(...renderRunningTool(state, call, width, expanded));
+    }
+    return lines;
   }
   return renderTool(
     state,
@@ -1501,10 +1726,24 @@ export class TranscriptChunks {
     expanded: boolean,
     widthChanged: boolean,
   ): string[] {
-    const cached = this.chunkLines(message, key, () => [
-      ...userSpacer(message, index),
-      ...renderMessage(state, message, width, expanded),
-    ]);
+    // 带「正在跑的工具」的那个块**不进缓存**。
+    //
+    // 缓存键是消息对象（+ 宽度与折叠），而正在跑的工具输出在变、发它的那条 assistant
+    // 消息却**不变**（它早就进 messages 了）—— 于是缓存会一直命中，流式输出永远不更新，
+    // 症状就是「命令在跑但屏幕不动，跑完突然全部出现」。
+    //
+    // 不缓存的成本可以忽略：这样的块**至多一个**（一轮里在跑的工具都跟着同一条消息），
+    // 而它本来就在每帧重算。
+    const isLive = runningToolsAfter(state, message).length > 0;
+    const cached = isLive
+      ? [
+          ...userSpacer(message, index),
+          ...renderMessage(state, message, width, expanded),
+        ]
+      : this.chunkLines(message, key, () => [
+          ...userSpacer(message, index),
+          ...renderMessage(state, message, width, expanded),
+        ]);
     let block = this.blocks[index];
     if (!block) {
       // **必须新建而不是复用**：pi-tui 的布局按「组件对象 + 宽度」缓存（layout.js 的

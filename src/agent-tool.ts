@@ -25,5 +25,25 @@ export interface AgentTool {
     toolCallId: string,
     params: Record<string, unknown>,
     signal?: AbortSignal,
+    /** 流式增量（官方工具用它把长命令的输出边跑边送）。不给就是「跑完才给」。 */
+    onUpdate?: AgentToolUpdate,
   ): Promise<AgentToolResult>;
 }
+
+/**
+ * 工具执行中的**部分结果**（官方叫 `AgentToolUpdateCallback` 的参数）。
+ *
+ * ## 为什么要自己定义一个
+ *
+ * 官方那个类型来自 pi-agent-core，而我们的 `AgentTool` 本来就是一层适配（见 tools.ts）——
+ * 让 `effects.ts` 依赖 pi-agent-core 的类型，等于让环的逻辑知道 pi-agent-core 的存在。
+ * 自己声明一份形状相同的，官方实现那边 `cast` 一下就行（那边本来就全靠 cast）。
+ *
+ * **语义**：每次调用都是**完整的当前结果**（不是增量 diff）——
+ * bash 侧给的是「到目前为止的全部输出」，所以界面直接整个替换即可。
+ */
+export type AgentToolUpdate = (partial: {
+  /** 到目前为止的输出（文本块数组）。 */
+  content: (TextContent | ImageContent)[];
+  details?: unknown;
+}) => void;

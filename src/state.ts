@@ -1,6 +1,14 @@
-import type { Message, ModelThinkingLevel, ToolCall, Usage } from '@earendil-works/pi-ai';
+import type {
+  ImageContent,
+  Message,
+  ModelThinkingLevel,
+  TextContent,
+  ToolCall,
+  Usage,
+} from '@earendil-works/pi-ai';
 import type { ModelCapabilities, PromptToolDefinition } from './actions';
 import type { SkillInfo } from './skills';
+import { compactionSettings, type CompactionSettings } from './compact';
 import { createTraceTree, newSessionId, type TraceTree } from './trace';
 
 /** 相位：只描述「现在在等谁」，不含任何驱动方式的信息。 */
@@ -9,6 +17,24 @@ export type Phase = 'idle' | 'thinking' | 'calling-tools';
 export interface ExecutingTool {
   call: ToolCall;
   startedAt: number;
+}
+
+/**
+ * 一个正在跑的工具当前的**中间输出**。
+ *
+ * ## 为什么要单独一份而不是提前写进 messages
+ *
+ * `messages` 是**发给模型的那份历史**，它只该有终值。中间态一旦进去就有三个麻烦：
+ *   - 每个增量都要 append 一条，最终得去重、还得让模型看到一堆中间状态；
+ *   - 流式过程中随时可能被 Ctrl-C 掉，于是 messages 里留下一个**没有结果**的工具调用
+ *     —— 协议非法（下一个请求直接被 provider 拒）；
+ *   - 落盘器会把中间态一起写进会话文件，恢复出来是一堆垃圾。
+ *
+ * 所以中间态只放这里（纯展示），终值才进 `messages`。
+ */
+export interface ToolProgress {
+  toolCallId: string;
+  content: (TextContent | ImageContent)[];
 }
 
 /** LLM 失败的类别 —— 决定它是不是「可重试」的（超时/网络可重试，鉴权/参数不行）。 */
@@ -56,7 +82,15 @@ export type StopCause =
   | 'model'
   | 'llm-error'
   | 'tool-error'
-  | 'shutdown';
+  | 'shutdown'
+  /**
+   * 上下文压缩失败。
+   *
+   * 为什么它进 `StopCause` 而不是 `StopReason`：压缩**不是**一轮对话，它不结束任何东西。
+   * 但它失败时用户确实需要知道（否则「为什么上下文一直超」没有答案），
+   * 而 `stopCause` 正是「一句人话 + 按类型上色」的那一层。
+   */
+  | 'compact-error';
 
 /** 停止原因 → 一句人话（界面与日志直接用，不必各写一份文案）。 */
 export function stopCauseText(cause: StopCause): string {
@@ -79,6 +113,8 @@ export function stopCauseText(cause: StopCause): string {
       return '已达单回合轮数上限';
     case 'shutdown':
       return '被内核关闭';
+    case 'compact-error':
+      return '上下文压缩失败（对话原样保留）';
     case 'completed':
       return '模型自己说完了';
   }
@@ -209,10 +245,31 @@ export interface AgentState {
   // ─── 轨迹树（trace tree） ───
   /** 像 git log 一样的一次尝试一节点的执行历史。 */
   trace: TraceTree;
+  /**
+   * 轨迹是否**开过**（用户发出过第一句话）。
+   *
+   * 为什么要有这个标记：装载（prompt / tools / skills / model）在内核一装配时就已经进 state，
+   * 但它们的**轨迹节点**推迟到用户发出第一句话才补上（见 `user.message` 里的 beginTrace）。
+   * 所以「装载了但树还是空的」是一个正常状态，而不是漏了东西 ——
+   * 界面上的「（还没有任何节点）」说的正是这句。
+   *
+   * 顺带当幂等守卫：补过装载段之后再来第二句话，不会把装载节点追加第二遍。
+   */
+  traceBegun: boolean;
   /** 当前在跑的 LLM 尝试节点 id；没有则 null。 */
   openLlmNodeId: string | null;
   /** 正在执行的工具 → 它的 attempt 节点 id。 */
   openToolNodeIds: Readonly<Record<string, string>>;
+  /**
+   * 正在跑的工具的**中间输出**，key 是 toolCallId。
+   *
+   * 用来让长命令（`npm install`、带 sleep 的脚本）边跑边显示，而不是
+   * 「卡住几十秒然后突然蹦出一坨」—— 用户看到它在输出，就不会以为卡死了。
+   *
+   * 工具结束（`tool.result`）就把那一条**删掉**：终值已经在 `messages` 里了，
+   * 留着会让界面把终值又画一遍。
+   */
+  toolProgress: Readonly<Record<string, ToolProgress>>;
   /**
    * 已完成工具的**耗时**（毫秒），key 是 toolCallId。
    *
@@ -232,6 +289,45 @@ export interface AgentState {
   toolTimings: Readonly<Record<string, number>>;
   /** 本轮（从 user.message 起）已发起的 LLM 尝试次数；用来判「还有没有重试机会」。 */
   llmAttempts: number;
+  // ─── 上下文压缩 ───
+  /**
+   * 压缩是否正在进行中（摘要要打一次网络，可能好几秒）。
+   *
+   * 界面用它：压缩期间不能发新消息（否则压缩完会把那句话一起换掉），
+   * 也不能开新会话（否则文件已经换了一半）。
+   */
+  compacting: boolean;
+  /**
+   * 正在跑的压缩对应的轨迹节点 id；没有则 null。
+   *
+   * 为什么要单独记：压缩是「先开一个 pending 节点，几秒后回来闭合它」的两段式，
+   * 而 `openLlmNodeId` 已经被 LLM 那一段占着（压缩期间不可能同时在跑 LLM，
+   * 但两者属于不同的活动，用不同的字段才能在排障时看出「当时在干什么」）。
+   */
+  openCompactNodeId: string | null;
+  /**
+   * 压缩参数（`enabled` / `reserveTokens` / `keepRecentTokens`）。
+   *
+   * 来源：`~/.pi/agent/settings.json` 的 `compaction` 段（pi 的官方键名，所以两边同一份配置），
+   * 没配就是 pi 的默认值（enabled=true, reserve=16384, keepRecent=20000）。
+   *
+   * **为什么要进 state**：effect 读它来算，而它得跟着 `model.init` 一起落盘 ——
+   * 将来换模型换窗口时，「当时是用什么阈值压的」是排障的一部分。
+   */
+  compactionSettings: CompactionSettings;
+  /**
+   * 最近一次压缩的结果摘要（给界面显示「N 条 → M 条，压掉了多少」）。
+   *
+   * 之所以进 state 而不是让界面自己 diff messages.length：
+   * 界面 diff 出来的「少了多少条」在**恢复历史之后**没有意义（那条历史本来就没被压缩过），
+   * 而这里记的是真的发生过一次压缩。
+   */
+  lastCompaction: {
+    reason: 'manual' | 'threshold' | 'overflow';
+    summarizedCount: number;
+    keptCount: number;
+    tokensBefore: number;
+  } | null;
   /** 允许的最大 LLM 尝试次数（含首次），2 = 失败后重试一次。 */
   maxLlmAttempts: number;
   /** 一次 LLM 调用的超时（毫秒）。effect 读它给流上闸。 */
@@ -311,10 +407,16 @@ export function createInitialState(options: InitialStateOptions): AgentState {
     retrying: false,
     aborted: false,
     trace: options.trace ?? createTraceTree(options.sessionId ?? newSessionId()),
+    traceBegun: false,
     openLlmNodeId: null,
     openToolNodeIds: {},
+    toolProgress: {},
     toolTimings: {},
     llmAttempts: 0,
+    compacting: false,
+    openCompactNodeId: null,
+    compactionSettings: compactionSettings(),
+    lastCompaction: null,
     maxLlmAttempts: options.maxLlmAttempts ?? 2,
     llmTimeoutMs: options.llmTimeoutMs ?? DEFAULT_LLM_TIMEOUT_MS,
     persistedSeq: 0,

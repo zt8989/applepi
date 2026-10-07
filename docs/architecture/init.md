@@ -8,7 +8,7 @@
 
 | 块 | 装它的 action | 装了什么 |
 | --- | --- | --- |
-| `state.prompt` | `prompt.init` | 基础 system prompt + 工具的**完整定义** + `seeded` |
+| `state.prompt` | `prompt.init` | **拼好的整段 system prompt**（pi 的 `buildSystemPrompt`，见 [prompt](#system-prompt-拼装全部交给-pi)）+ 工具的**完整定义** + `seeded` |
 | `state.model` | `model.init` | provider / model / thinkingLevel / **能力** + `seeded` |
 
 为什么分开：prompt 是「跟模型说什么」，model 是「用哪个模型说」。两者独立变
@@ -24,7 +24,8 @@
 - 被回放
 - 在测试里逐字断言
 
-所以 `createKernel()` 建好 store 之后，连着 dispatch 两条 init。
+所以 `createKernel()` 建好 store 之后，连着 dispatch 两条 init。装载节点与 init 落盘记录
+**推迟到用户发出第一句话**（见下面一节）。
 
 ### 扁平别名
 
@@ -34,6 +35,87 @@
 
 每条会改它们的 transition 都要同时更新两边（`prompt.init`、`model.init`、
 `model.changed`、`thinking.changed`），漏一处就会出现两份不一致的真相。
+
+## System prompt：拼装全部交给 pi
+
+`src/system-prompt.ts`。我们**不拼** prompt，只收集输入然后调 pi 的 `buildSystemPrompt`：
+
+```
+promptToolsFrom(cwd)                  → 每个工具的 promptSnippet / promptGuidelines
+loadProjectContextFiles({cwd, agentDir}) → AGENTS.md（用户级 + 项目级 + 祖先目录）
+loadSkillRegistry({cwd})              → skill 清单
+                    ↓
+        buildSystemPrompt(…)  ← 官方拼
+                    ↓
+   preamble + tools + rules + docs + project_context + skills + cwd
+```
+
+## 为什么不自己拼
+
+早先这里手写三行中文（"你是编码助手 / 用工具查 / 简短直给"）。那不是“风格不同”，
+是**信息缺失**：
+
+| | 手写 | pi 的 |
+| --- | --- | --- |
+| 工具怎么用 | 「用提供的工具去查」 | 每个工具的 `promptSnippet` |
+| `edit` 的坑 | **没有** | oldText 必须精确匹配、多处改动用一次调用、oldText 不要 padding… |
+| `bash` 的坑 | **没有** | 用 bash 做 ls/rg/find |
+| 项目上下文 | **没有** | 自动扫 `AGENTS.md` |
+| 模型站在哪 | **没有** | `<cwd>` 段 |
+
+那些 `edit` 的坑是官方**踩过才写下来的**：模型不知道就会把 `oldText` 写成一大段、
+或者对同一个文件连发多次 edit，结果是改了又改不对。手写一份等于把这些经验全扔掉。
+
+实测差别：手写版 3 行 → pi 版含工具规则 11 条、`AGENTS.md`（本机的 Windows/pwsh 约束
+也会被扫进去）、`docs` 索引、skill 清单。
+
+## 我们自己一条规则都不写
+
+**规则住在文件里。** pi 有一套完整的文件发现机制（`resource-loader.ts`），我们原样复用：
+
+| 文件 | 位置 | 进哪一段 |
+| --- | --- | --- |
+| `SYSTEM.md` | `<cwd>/.pi/SYSTEM.md` 或 `~/.pi/agent/SYSTEM.md` | 顶掉 preamble |
+| `APPEND_SYSTEM.md` | 同上两个位置 | `<addendum>` 段 |
+| `AGENTS.md` / `AGENTS.override.md` / `CLAUDE.md` | 家目录 + 项目 + 每一层祖先目录 | `<project_context>` 段 |
+
+优先级与官方一致：**项目级先于全局**；文件又**优先于命令行参数**（`--system` / `appendPrompt`）。
+
+所以「用用户的语言回答」是 `~/.pi/agent/APPEND_SYSTEM.md` 里的一行 —— 用户自己写、想改就改、
+不用改代码。而 `AGENTS.md` 早就是那套机制的一部分（之前就在扫，只是没人往里面写规则）。
+
+**为什么不留代码里的默认值**：`promptGuidelines` 参数确实存在，留一条「项目自己的默认值」
+是很自然的想法。但那会让「规则在代码里」和「规则在文件里」**并存** —— 用户改了文件却发现
+某条还在，排查时根本想不到去看代码。宁可一条都没有：没有就是「这个项目没配规则」，
+从 prompt 一眼看得出来。
+
+### 一处与 pi 的差异：项目信任
+
+pi 的项目级 `SYSTEM.md` 需要 `settingsManager.isProjectTrusted()`（防止在不受信任的目录里
+被文件劫持 prompt）。我们不读项目设置，所以**不实现这个判断** —— 项目级那两份一律生效。
+
+这个取舍是安全的：我们跑在用户自己的机器上，而读一份项目内的 `.pi/SYSTEM.md` 与读同目录的
+`AGENTS.md` 风险相同（后者无条件生效）。
+
+## `--system` 的语义是 `customPrompt`
+
+给了它就**顶掉 pi 的默认前缀**（官方定义：`replaces the default prefix`），
+而默认前缀**包含** `tools` / `rules` / `docs` 三段。所以给了 `--system` 之后：
+
+| 段 | 还在吗 |
+| --- | --- |
+| `preamble` | 换成你给的那句（**但 `SYSTEM.md` 存在时用它，那个优先**） |
+| `tools` / `rules` / `docs` | **没了**（属于被顶掉的前缀） |
+| `project_context` / `addendum` / `cwd` | 在（无条件加） |
+
+这不是我们丢的，是官方语义。副作用要知道：如果你给一个很简短的 `--system`，
+模型就**不再**知道 `edit` 的那些坑 —— 而 `.pi/APPEND_SYSTEM.md`（追加，不顶掉前缀）
+没有这个副作用，所以项目级规则更应该写在那里。
+
+## 拼好的整段会落盘
+
+`writeInit()` 落的是**拼好的那一整段**，不是 `customPrompt` 的原文——
+回放时要能重建「当时发给模型的到底是什么」，而 `AGENTS.md` 与 skill 清单都可能已经变了。
 
 ## 工具的完整定义进了 state
 
@@ -145,6 +227,43 @@ dispatch(action)
 `message` 记录是**零 token 回放**的关键：每条对话消息（user / assistant / toolResult /
 中途插的 system 段）都追加一行，回放时按顺序重放就重建出 `messages`。
 
+## 进入会话不建节点：推迟到用户发出第一句话
+
+`prompt.init` / `model.init` 一进来就把 state 装满，但**不开轨迹节点**。装载节点
+（`prompt.base` / `prompt.tools` / `prompt.skills` / `model.init`）由 reducer 在**第一条
+`user.message`** 里补上（`reducer.ts` 的 `beginTrace()`），`init` 落盘记录则由内核盯着
+`state.traceBegun` 翻转的那一刻补写（`kernel.ts`）。
+
+```
+内核装配         prompt.init / model.init  → state 满了，树上 0 个节点，traces/ 里没有文件
+用户发第一句话   user.message              → 装载节点补在前面，然后是 user 节点
+                                       → 落盘器写出整个文件，内核补 init 记录
+```
+
+**为什么不一起做**：装载必须**立刻**可用（开场报 skill 清单、`/skill:x` 能展开、底栏显示
+模型），但「留痕」不该早于「真的有对话」。进来看一眼就退出是常态，而那时：
+
+- Ctrl+T 一打开就是一屏提示词摘要、工具名、能力标记（四个节点）；
+- `traces/<id>.jsonl` 已经被建出来，里面只有两条 init 记录、零条对话。
+
+会话文件那边早就是同一个决定（`SessionWriter.start()` 记下 header 但不落盘，
+见 [sessions](sessions.md)「空会话不落盘」）—— 两边的「会话」起点现在一致了：
+**发过第一句话才算一段会话**。
+
+**补出来的节点从 state 读**，所以它反映的是发第一句话那一刻**生效**的那一版装载
+（期间热重载过 prompt 也算数），与模型真正看到的一致。开局之后再来的 `prompt.init`
+（热重载 / 换模型）则当场**追加**新节点，旧的不改写。
+
+### 谁负责写 init 记录
+
+内核，不是界面。每个调用方都记得调一次 `writeInit()` 是靠不住的 —— 忘了就等于这次会话
+的 init 段永远缺失，而症状很隐蔽：回放时仍然能跑（不校验），只是**每次回放都要重新装配
+工具**，而当时的目录内容可能已经变了。判据只有一个（`state.traceBegun`），与 `trace.begin`
+那一步是同一个事实。
+
+`restoreSession()` 是个例外：那个会话的轨迹文件里**已经有** init 段了，补一份只是磁盘上的
+垃圾行，所以那里把标记直接置真。
+
 ## 零 token 回放
 
 装载段和对话**在同一个文件里，所以也只有一次读取**：
@@ -170,3 +289,4 @@ const session = await loadSession(sessionId);
 - 环怎么转 → [loop](loop.md)
 - 轨迹树本身 → [trace](trace.md)
 - 内核装配 → [kernel](kernel.md)
+- 上下文满了怎么办 → [compact](compact.md)

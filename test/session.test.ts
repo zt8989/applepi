@@ -447,7 +447,10 @@ test('内核 newSession：换 id、清对话、保留装载的 prompt / model', 
       assert.equal(kernel.sessionId, created.id, '内核上的 id 也换');
       assert.equal(kernel.store.getState().messages.length, 0, '对话清空');
       assert.equal(kernel.store.getState().prompt.seeded, true, 'prompt 保留（会话级）');
-      assert.equal(kernel.store.getState().systemPrompt, '装载过的 prompt');
+      assert.ok(
+        kernel.store.getState().systemPrompt.startsWith('装载过的 prompt'),
+        'prompt 保留（它是拼好的那一整段，开头是传进来的前言）',
+      );
       assert.equal(kernel.store.getState().model.seeded, true, 'model 保留');
     } finally {
       kernel.dispose();

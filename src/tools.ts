@@ -17,8 +17,18 @@ import type { AgentTool, AgentToolResult } from './agent-tool';
  *
  *   execute(toolCallId, params, signal, onUpdate, ctx)
  *
- * 我们自己的 effect 只需要前三个。所以这里把后两个丢掉，签名收窄成本项目的形状 ——
- * 这样 `effects.ts` 完全不知道 pi-coding-agent 的存在，环的逻辑也不用动。
+ * 我们自己的 effect 只需要前四个（ctx 由对方运行时注入，不在公开契约里）。
+ * 所以这里把第五个丢掉、把第四个**转成本项目的 `AgentToolUpdate`**，
+ * 签名收窄成本项目的形状 —— `effects.ts` 完全不知道 pi-coding-agent 的存在。
+ *
+ * ## `onUpdate` 这一层是干什么的
+ *
+ * 官方的 bash 工具有一个 `onUpdate` 回调：每收到一块输出就调一次（内部有节流），
+ * 于是长命令（`npm install`、`sleep 30 && echo done`）能**边跑边显示**，
+ * 而不是「卡住几十秒然后突然蹦出一坨」。
+ *
+ * 早先这里传的是 `undefined`，那条路完全没用上：界面直到命令结束才动 ——
+ * 而「不知道它在跑什么」与「以为卡死了」只差一秒。
  *
  * `parameters` 那边也有个细节：官方用的是 typebox 的 `TObject`，本项目声明的是
  * pi-ai 的 `TSchema`。两者同源（都出自 typebox），直接给即可。
@@ -39,13 +49,17 @@ function adapt(official: OfficialTool<any>, label: string): AgentTool {
     label,
     description: official.description,
     parameters: official.parameters as AgentTool['parameters'],
-    async execute(toolCallId, params, signal) {
-      // 只传前四个：第五个 ctx 由对方运行时注入，不在公开契约里。
+    async execute(toolCallId, params, signal, onUpdate) {
+      // onUpdate 的参数形状与我们自己的 `AgentToolUpdate` 相同，只是来自不同包
+      // （pi-agent-core vs 本项目）—— cast 过去即可，运行时无差别。
+      //
+      // **不能传 undefined**：那就等于关掉了官方的流式输出，长命令会在界面上
+      // 「卡住几十秒然后突然蹦出一坨」，看起来像卡死了。
       const result = (await official.execute(
         toolCallId,
         params as never,
         signal,
-        undefined,
+        onUpdate as never,
       )) as AgentToolResult;
       // 官方有些工具的 details 是 undefined，本项目的 AgentToolResult 要求有 details。
       return {
