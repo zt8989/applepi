@@ -62,9 +62,9 @@ pi 现在要求 `models` 是**数组**，旧版（本项目早期写的）是**�
 
 ## 配置家目录
 
-默认 `~/.pi/agent`，与 pi 同址。环境变量 `REDUX_AGENT_DIR`（本项目，优先）>
-`PI_CODING_AGENT_DIR`（pi 官方名）。比 pi 多认前一个，是为了让测试能把自己从真实家目录里
-摘出去。详见 [sessions](sessions.md)。
+默认 `~/.pi/agent`，与 pi 同址。**只认 pi 官方的 `PI_CODING_AGENT_DIR`** —— 本项目早先
+额外认一个 `REDUX_AGENT_DIR` 且优先级更高，现在删了（理由见下）。详见
+[sessions](sessions.md)。
 
 ## 为什么要 pnpm patch
 
@@ -81,16 +81,16 @@ pi-coding-agent 的 `exports` 只开放 4 个入口（`.`、`./rpc-entry`、`./c
 解法是 `patches/@earendil-works__pi-coding-agent.patch`：给 `exports` 加
 `./dist/*` 与 `./dist/*.js` 两条通配符。**12 行 diff，只动 `package.json`**。
 
-## 为什么 `REDUX_AGENT_DIR` 仍然优先
+## 为什么不再额外认一个环境变量
 
-`getAgentDir()` 只认 `PI_CODING_AGENT_DIR`，而测试必须能把自己从真实家目录里摘出去
-（否则每跑一次测试就往用户历史里堆一批会话，见 `test/isolated-home.ts`）。所以顺序是：
+早先是 `process.env.REDUX_AGENT_DIR ?? getAgentDir()` —— 两个变量指向同一件事，却
+**只有 pi 那个会被 pi 自己认**。于是只要设了 `REDUX_AGENT_DIR`，就出现「我们以为在家目录 A，
+pi 在家目录 B」：配置分家、skill 从别处加载、症状是「改了一边另一边读不到」。
 
-```ts
-process.env.REDUX_AGENT_DIR ?? getAgentDir()
-```
+现在只有一个变量，`configHome()` 直接转发 `getAgentDir()`，**两边不可能分家**。
+测试改用 `PI_CODING_AGENT_DIR`（同一个机制、不同名字），隔离效果一样。
 
-目录名、文件名、环境变量名全部取自 pi 的官方常量，**只有优先级是本项目加的**。
+目录名、文件名、环境变量名全部取自 pi 的官方常量，现在连**优先级也没有自加的**。
 
 ## 相关
 

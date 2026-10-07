@@ -45,13 +45,13 @@ const CAPS: ModelCapabilities = {
 
 async function withHome(fn: (home: string) => Promise<void> | void): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), 'restore-home-'));
-  const previous = process.env['REDUX_AGENT_DIR'];
-  process.env['REDUX_AGENT_DIR'] = dir;
+  const previous = process.env['PI_CODING_AGENT_DIR'];
+  process.env['PI_CODING_AGENT_DIR'] = dir;
   try {
     await fn(dir);
   } finally {
-    if (previous === undefined) delete process.env['REDUX_AGENT_DIR'];
-    else process.env['REDUX_AGENT_DIR'] = previous;
+    if (previous === undefined) delete process.env['PI_CODING_AGENT_DIR'];
+    else process.env['PI_CODING_AGENT_DIR'] = previous;
     await rm(dir, { recursive: true, force: true });
   }
 }

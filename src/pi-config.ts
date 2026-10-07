@@ -54,7 +54,7 @@ import { streamSimple as anthropicStreamSimple } from '@earendil-works/pi-ai/api
 import { streamSimple as openaiResponsesStreamSimple } from '@earendil-works/pi-ai/api/openai-responses';
 
 /**
- * 配置家目录。默认与 pi 同址（`~/.pi/agent`），`REDUX_AGENT_DIR` 优先于
+ * 配置家目录。默认与 pi 同址（`~/.pi/agent`），环境变量只认 pi 官方的
  * `PI_CODING_AGENT_DIR`。见 `config-home.ts`。
  *
  * ## 现在直接用 pi 的 `getAgentDir()`
@@ -71,8 +71,7 @@ import { streamSimple as openaiResponsesStreamSimple } from '@earendil-works/pi-
  * 抄一份的风险是 pi 改了实现（tilde 展开、换目录名）而我们静默地指向别处 ——
  * 症状是「改了一边另一边读不到」，很难查。
  *
- * `REDUX_AGENT_DIR` 仍然优先：pi 的 `getAgentDir()` 不认它，而测试必须能把自己
- * 从真实家目录里摘出去（否则每跑一次测试就往用户历史里堆会话）。
+ * 本项目**不再**额外认自己的环境变量：只有一个变量时不可能分家。
  */
 export function piAgentDir(): string {
   return configHome();

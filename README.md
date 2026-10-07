@@ -35,7 +35,8 @@ pnpm install
 install 然后失败**。
 
 所有全局状态都在**配置家目录** `~/.pi/agent/` —— 与 pi 同址，两边共用同一份配置与历史。
-可搬家：`REDUX_AGENT_DIR`（本项目优先）或 `PI_CODING_AGENT_DIR`（pi 的官方名）。
+搬家只用 pi 官方的 `PI_CODING_AGENT_DIR`（本项目早先额外认一个自己的变量，现已删掉 ——
+两个变量指向同一件事却只有一个被 pi 认，症状是「改了一边另一边读不到」）。
 
 ```text
 ~/.pi/agent/

@@ -18,8 +18,8 @@
 
 ## 家目录
 
-全部全局状态在 `~/.pi/agent/` —— **与 pi 同址**（可搬家：`REDUX_AGENT_DIR` 优先于
-pi 的 `PI_CODING_AGENT_DIR`，都没设就用 `~/.pi/agent`）：
+全部全局状态在 `~/.pi/agent/` —— **与 pi 同址**（可搬家：只认 pi 官方的
+`PI_CODING_AGENT_DIR`，不设就是 `~/.pi/agent`）：
 
 ```text
 ~/.pi/agent/

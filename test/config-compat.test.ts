@@ -29,7 +29,7 @@ import { migrateModelsConfig } from '../scripts/migrate-models';
  * pi 现在要求 `models` 是数组，本项目（以及给别的工具写的配置）历史上用的是对象 map。
  * 这组测试守住「两种形状都能读」和「读的时候顺手把盘上那份改成 pi 要的形状」。
  *
- * 跑在 `test/isolated-home.ts` 指好的临时家目录（REDUX_AGENT_DIR）里，不碰真配置。
+ * 跑在 `test/isolated-home.ts` 指好的临时家目录（PI_CODING_AGENT_DIR）里，不碰真配置。
  */
 
 // ─── normalizeModels：两种形状都收 ───
@@ -86,7 +86,7 @@ test('buildProvider：对象 map 的 models 也能装出模型（旧配置不失
 /** 造一个隔离家目录，返回它的 models.json 路径。 */
 function withModelsFile(content: unknown): { dir: string; file: string } {
   const dir = mkdtempSync(path.join(tmpdir(), 'redux-agent-models-'));
-  process.env['REDUX_AGENT_DIR'] = dir;
+  process.env['PI_CODING_AGENT_DIR'] = dir;
   const file = path.join(dir, 'models.json');
   mkdirSync(dir, { recursive: true });
   writeFileSync(file, `${JSON.stringify(content, null, 2)}\n`, 'utf8');
@@ -117,7 +117,7 @@ test('loadPiModelsNormalized：已是数组就一个字都不改（幂等，别�
 
 test('loadPiModelsNormalized：没有 models.json 也不抛（配置目录可能还没建）', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'redux-agent-empty-'));
-  process.env['REDUX_AGENT_DIR'] = dir;
+  process.env['PI_CODING_AGENT_DIR'] = dir;
   assert.equal(loadPiModels(), null);
   assert.equal(loadPiModelsNormalized(), null);
 });
@@ -207,7 +207,7 @@ test('createPiModelRuntime：models.json 形状坏了时报错，而不是静默
   // 派上用场的原因：pi 校验不过时是**整个文件作废**，不报就会变成
   // 「怎么一个 provider 都没有」这种难查的现象。
   const dir = mkdtempSync(path.join(tmpdir(), 'redux-agent-bad-'));
-  process.env['REDUX_AGENT_DIR'] = dir;
+  process.env['PI_CODING_AGENT_DIR'] = dir;
   const file = path.join(dir, 'models.json');
   writeFileSync(file, JSON.stringify({ providers: { p: { models: 'not-an-array' } } }), 'utf8');
   await assert.rejects(

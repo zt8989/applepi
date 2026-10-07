@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import { configHome } from '../src/config-home';
 
 /**
  * pnpm patch 打开的子路径。
@@ -26,9 +28,16 @@ test('patch 生效：pi 的配置模块子路径可导入', async () => {
   const config = await import('@earendil-works/pi-coding-agent/dist/config.js');
   assert.equal(typeof config.getAgentDir, 'function', 'getAgentDir 应该在');
   // 它的返回值必须是个绝对路径 —— 这是我们与 pi 共用配置目录的前提。
+  //
+  // 注意**不能**断言它以 `/agent` 结尾：测试跑在 `PI_CODING_AGENT_DIR` 指向的临时目录里
+  // （见 test/isolated-home.ts），目录名是 `redux-agent-test-home-<pid>-XXXX`，
+  // 断言后缀等于在断言一个与本测试无关的东西。用户没设环境变量时才是 `~/.pi/agent`。
   const dir = config.getAgentDir();
-  assert.ok(dir.length > 0);
-  assert.ok(/agent$/.test(dir), `默认应指向 <home>/.pi/agent，实际 ${dir}`);
+  assert.ok(dir.length > 0, '不能为空');
+  assert.ok(path.isAbsolute(dir), `应是绝对路径，实际 ${dir}`);
+  // 而我们自己的 configHome() 必须与它**逐字相同** —— 这一条才是真正要守的不变量：
+  // 两者一旦分家，models.json / auth.json / sessions/ 就各写各的。
+  assert.equal(configHome(), dir, 'configHome() 必须与 pi 的 getAgentDir() 一致');
 });
 
 test('patch 生效：models.json 的官方校验器可导入', async () => {

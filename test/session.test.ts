@@ -20,19 +20,19 @@ import type { AssistantMessage, Message } from '@earendil-works/pi-ai';
 /**
  * 会话文件（`sessions/<cwd>/<id>.jsonl`）：格式与 pi 一致，用于「恢复历史」。
  *
- * 全部测试把 `REDUX_AGENT_DIR` 指到临时目录，绝不碰真实的 `~/.redux-agent`。
+ * 全部测试把 `PI_CODING_AGENT_DIR` 指到临时目录，绝不碰真实的 `~/.redux-agent`。
  */
 
 /** 在一个隔离的配置家目录里跑 fn。 */
 async function withHome(fn: (home: string) => Promise<void> | void): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), 'redux-home-'));
-  const previous = process.env['REDUX_AGENT_DIR'];
-  process.env['REDUX_AGENT_DIR'] = dir;
+  const previous = process.env['PI_CODING_AGENT_DIR'];
+  process.env['PI_CODING_AGENT_DIR'] = dir;
   try {
     await fn(dir);
   } finally {
-    if (previous === undefined) delete process.env['REDUX_AGENT_DIR'];
-    else process.env['REDUX_AGENT_DIR'] = previous;
+    if (previous === undefined) delete process.env['PI_CODING_AGENT_DIR'];
+    else process.env['PI_CODING_AGENT_DIR'] = previous;
     await rm(dir, { recursive: true, force: true });
   }
 }

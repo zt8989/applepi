@@ -10,9 +10,14 @@
  * provider 目录改一次两边都得知道，key 改一次两边都得用，pi 是官方工具、我们只是另一个
  * 前端。分两个目录的代价是每次改配置都得同步两次，收益仅仅是一个命名上的所有权标记。
  *
- * 环境变量兼容两个（前者优先，因为那是本项目自己的名字）：
- *   - `REDUX_AGENT_DIR`      本项目拼的，给测试隔离用
- *   - `PI_CODING_AGENT_DIR`  pi 的官方名（`getAgentDir()` 也认它）
+ * 环境变量只认 pi 的官方名 `PI_CODING_AGENT_DIR`（`getAgentDir()` 自己认它）。
+ *
+ * ## 为什么不自己再认一个
+ *
+ * 之前本项目额外认了 `REDUX_AGENT_DIR`（优先级更高，给测试隔离用）。现在删掉：
+ * 两个变量指向同一件事，却只有 pi 那个会被 pi 自己认 —— 于是会出现「我们以为在家目录 A，
+ * pi 在家目录 B」，配置分家。**只有一个环境变量**时不可能分家。测试改用
+ * `PI_CODING_AGENT_DIR`（同一个机制、不同名字），隔离效果一样。
  *
  * 两个都没设时跟 pi 一样：`~/.pi/agent`。
  *
@@ -56,46 +61,36 @@ import {
 import path from 'node:path';
 import {
   CONFIG_DIR_NAME as PI_DIR_NAME,
-  ENV_AGENT_DIR,
   getAgentDir,
 } from '@earendil-works/pi-coding-agent/dist/config.js';
 
 /** pi 自己的配置目录名（`.pi`）。从官方常量拿，不手写字符串。 */
 export const PI_CONFIG_DIR: string = PI_DIR_NAME;
-/** 本项目的搬家环境变量（测试隔离用）。 */
-export const ENV_HOME = 'REDUX_AGENT_DIR';
-/** pi 的官方搬家环境变量（与它自己同名同义）。 */
-export const ENV_PI_HOME: string = ENV_AGENT_DIR;
 
 /** 旧目录名（迁移脚本 `scripts/migrate-config-dir.ts` 的源）。 */
 export const CONFIG_DIR_NAME = '.redux-agent';
 
 /**
- * 配置家目录：**默认与 pi 同址**（`~/.pi/agent`）。
+ * 配置家目录 —— **就是 pi 的 `getAgentDir()`**（`~/.pi/agent`）。
  *
- * 优先级 `REDUX_AGENT_DIR` > `PI_CODING_AGENT_DIR` > `~/.pi/agent`。
- * 认 pi 的那个变量是为了「在 pi 那边搬了目录，这边也跟着走」—— 不然会出现
- * 我们与 pi 各读各的，改了 key 只有一边生效。
+ * 本项目只认 pi 那一个环境变量（`PI_CODING_AGENT_DIR`），与 pi 完全同步。
+ * 早先这里是 `~/.redux-agent`，再早还额外认了 `REDUX_AGENT_DIR` 且优先级更高 ——
+ * 都删了，理由见文件头：「两个变量指向同一件事，却只有一个被 pi 认」。
  *
- * 早先这里是 `~/.redux-agent`。换到同址是为了让配置只有一份，见文件头的理由。
+ * 为什么不手写 `join(homedir(), '.pi', 'agent')`：那是抄 pi 的实现，而 pi 改了
+ * （比如支持 tilde 展开、换目录名）我们就会静默地指向另一个地方 —— 症状是
+ * “改了一边另一边读不到”，很难查。直接用官方函数，两者不可能分家。
  */
 export function configHome(): string {
-  // 优先认本项目自己的变量（测试靠它隔离）；没设就**直接用 pi 的 getAgentDir()**。
-  //
-  // 为什么不手写 `join(homedir(), '.pi', 'agent')`：那是抄 pi 的实现，而 pi 改了
-  // （比如支持 tilde 展开、换目录名）我们就会静默地指向另一个地方 —— 症状是
-  // “改了一边另一边读不到”，很难查。现在两者是同一份代码。
-  const own = process.env[ENV_HOME];
-  if (own) return path.resolve(own);
   return getAgentDir();
 }
 
 /**
  * `<家目录>/models.json`。
  *
- * pi 那边有 `getModelsPath()`，但它**不认** `REDUX_AGENT_DIR`（只认自己的
- * `PI_CODING_AGENT_DIR`）。测试要能把自己从真实家目录里摘出去，所以路径仍从
- * `configHome()` 推 —— 只是目录名与文件名与 pi 一致。
+ * pi 那边有 `getModelsPath()`，我们仍然自己拼 —— 目录名与文件名要与它一致，
+ * 但路径从 `configHome()` 推，这样万一将来 pi 加了别的优先级，我们的读与写
+ * 仍然落在同一处（而不是一个用官方、一个用自己）。
  */
 export function modelsPath(): string {
   return path.join(configHome(), 'models.json');

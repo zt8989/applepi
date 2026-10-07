@@ -40,6 +40,18 @@ import { fileURLToPath } from 'node:url';
 /** 项目根目录（从本文件位置推）。 */
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+/**
+ * 子进程的环境：**去掉**测试的临时家目录，并用真配置启动。
+ *
+ * `delete` 而不是置空字符串：`PI_CODING_AGENT_DIR=''` 是「已设但为空」，pi 会照样
+ * 拿它当目录。
+ */
+function envWithoutTestHome(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, COLUMNS: '100', LINES: '30', NO_COLOR: '1' };
+  delete env['PI_CODING_AGENT_DIR'];
+  return env;
+}
+
 /** 剥掉所有 ANSI 序列与 OSC 控制串，只留可见文本。 */
 function visible(output: string): string {
   return output
@@ -89,7 +101,14 @@ async function firstFrame(ms = 9000): Promise<{ text: string; raw: string }> {
     const child = spawn('node', ['--import', 'tsx', 'src/tui.ts'], {
       cwd: ROOT,
       // COLUMNS/LINES：pi-tui 量尺寸用。给一个确定的宽高，断言才稳定。
-      env: { ...process.env, COLUMNS: '100', LINES: '30', NO_COLOR: '1' },
+      //
+      // `PI_CODING_AGENT_DIR` **必须删掉**（而不是置空）：`PI_CODING_AGENT_DIR=`
+      // 是一个「已设但为空」的值，pi 会照样用它当目录。
+      // test/isolated-home.ts 把这个变量指到了临时目录，而那里没有
+      // `models.json` / `auth.json` / `settings.json`，于是报「未知 provider」——
+      // 根本进不了界面。这个测试**故意**用真配置：它要验的正是「真实启动路径」，
+      // 隔离掉配置就验不到 provider 解析这一段了。
+      env: envWithoutTestHome(),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let out = '';

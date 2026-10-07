@@ -12,14 +12,14 @@ import { cleanSessions, cleanSessionsExcept, listSessions, tracePathFor } from '
  * 现在测试自己隔离了，但**已经堆下的那些还在**，而且以后手工作业一样会堆。
  * 所以要有一个能真删的入口 —— 这组测试守住它。
  *
- * 这些测试跑在 `test/isolated-home.ts` 指好的临时家目录里（REDUX_AGENT_DIR），
+ * 这些测试跑在 `test/isolated-home.ts` 指好的临时家目录里（PI_CODING_AGENT_DIR），
  * 碰不到真实的 `~/.redux-agent`。
  */
 
 /** 在家目录里造一个假的会话文件（会话 + 对应轨迹），返回它的 id。 */
 function fakeSession(id: string, cwd: string): string {
-  const home = process.env['REDUX_AGENT_DIR'];
-  assert.ok(home, '测试必须跑在隔离的 REDUX_AGENT_DIR 下');
+  const home = process.env['PI_CODING_AGENT_DIR'];
+  assert.ok(home, '测试必须跑在隔离的 PI_CODING_AGENT_DIR 下');
   const dir = path.join(home, 'sessions', `--${cwd.replace(/[/\\:]/g, '-')}--`);
   mkdirSync(dir, { recursive: true });
   const header = JSON.stringify({ type: 'session', version: 1, id, timestamp: new Date().toISOString(), cwd });
