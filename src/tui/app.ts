@@ -230,11 +230,14 @@ export function modelLine(state: AgentState): string {
  * `pi-coding-agent/dist/...` 直接 import 的。两边显示的数字对不上会让人以为算错了，
  * 宁可完全一致也不要各写一套。
  *
- * ## 累计 vs 最近一轮
+ * ## 两种口径，不要混
  *
- * `state.usage` 只是**最近一次** LLM 调用的用量，而底箱要的是**本次会话累计**。
- * 所以从 `state.messages` 里把所有 assistant 消息的 usage 累加。这是每帧 O(消息数) ——
- * 消息多了会略慢，但换来与 pi 一致的口径。
+ * - **累计**（`↑`/`↓`/`R`/`W`/`$`）：本次会话一共花了多少。从 `state.messages` 里把
+ *   所有 assistant 消息的 usage 累加（每帧 O(消息数)，换来与 pi 一致的口径）。
+ * - **最近一次**（上下文占用 `29.2%/1.0M`）：这一次请求占了窗口多少。**只看最后一条
+ *   有效消息的 usage**，不累加 —— 累加出来的数字是天文数字（见函数体的注释）。
+ *
+ * 两者混用就是「把整段历史重复数了 N 次」。
  */
 /** 底箱第二行算出来的结果。 */
 export interface StatsLine {
@@ -268,23 +271,72 @@ export function statsLine(state: AgentState): StatsLine {
   }
   if (totals.cost > 0) parts.push(`$${totals.cost.toFixed(3)}`);
 
-  // 上下文占用：已用 / 窗口。超过 70% 转黄、90% 转红 —— 快满时模型会开始丢东西，
-  // 要提前看见而不是等它开始表现变差。
+  // 上下文占用 = **最后一次** LLM 调用占掉多少窗口。**不能拿累加值**。
+  //
+  // ## 为什么不能累加（这里原先就错着）
+  //
+  // `totals` 是**整个会话累计**的 —— `↑`/`↓`/`R`/`$` 那一排要的就是这个口径
+  // （“本次会话一共花了多少”）。但上下文窗口**不是**：它是**这一次请求**能装多少。
+  // 每一轮的 `input + cacheRead` 都把当轮完整的 prompt 重新数了一遍，而 prompt 里
+  // 包含**前面所有轮次的内容** —— 累加起来等于「整段历史被重复数了 N 次」。
+  //
+  // 实测（583 次助手消息的真实会话，窗口 1.0M）：累加口径 **9536%**，
+  // 正确口径 **29.2%**。所以底栏会出现「9536%/1.0M」这种一眼就知道坏了的数字。
+  //
+  // ## 口径与 pi 官方一致
+  //
+  // `agent-session.js` 的 `getContextUsage()`：取**最后一条有效**助手消息的
+  // `usage.totalTokens`（`compaction.js` 的 `calculateContextTokens`：
+  // `totalTokens || input+output+cacheRead+cacheWrite`），即“上一次请求的总 token”。
   //
   // 这里**不自己上色**，而是把告警信息一起返回（`warning`）：整行底箱会被包进 dim，
   // 而 dim 里再嵌一个 `\x1b[0m` 结尾的颜色段会把 dim 提前关掉（见 dimLine 的注释）。
   const contextWindow = state.model.contextWindow;
   if (contextWindow > 0) {
-    const used = totals.input + totals.cacheRead + totals.cacheWrite;
-    const percentValue = (used / contextWindow) * 100;
-    const percent = percentValue < 1 ? percentValue.toFixed(1) : Math.round(percentValue);
-    const display = `${percent}%/${formatTokens(contextWindow)}`;
-    parts.push(display);
-    if (percentValue > 70) {
-      warnings.push({ find: display, paint: percentValue > 90 ? red : yellow });
+    const last = lastContextUsage(state.messages);
+    if (last !== undefined) {
+      const percentValue = (last / contextWindow) * 100;
+      // 超过 100% **如实显示**，不夹到 100 —— 夹了就变成“刚好满”，而事实是
+      // “目录里配的窗口小于实际能发的量，该换窗口或压缩历史”。pi 也是直接显示原值。
+      const percent = percentValue < 1 ? percentValue.toFixed(1) : Math.round(percentValue);
+      const display = `${percent}%/${formatTokens(contextWindow)}`;
+      parts.push(display);
+      if (percentValue > 70) {
+        warnings.push({ find: display, paint: percentValue > 90 ? red : yellow });
+      }
+    } else {
+      // 还没有任何一次**有效**调用（会话刚开、或全部失败/被中断）：占用**未知**。
+      // pi 这里是 `?/1.0M`，不是 `0%/1.0M` —— 后者会说谎（说“没占”）。
+      parts.push(`?/${formatTokens(contextWindow)}`);
     }
   }
   return { text: parts.join(' '), warnings };
+}
+
+/**
+ * 最后一次**有效** LLM 调用占掉的上下文 token 数；没有就 undefined。
+ *
+ * ## 三个过滤条件（照抄 pi 的 `getAssistantUsage`）
+ *
+ * 1. token 数 > 0 —— 没 usage 的消息（比如恢复出来的历史消息）不算。
+ * 2. 不是 aborted —— 用户中断的那一轮 usage 残缺。
+ * 3. 不是 error —— 失败的那轮没真正装进去。
+ *
+ * 从**后往前**找：最后一条有效的就是「当前上下文里有多少」。
+ */
+function lastContextUsage(messages: AgentState['messages']): number | undefined {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    // pi-ai 的 Message 联合里 system 消息没有 usage / stopReason 字段。
+    if (!message || message.role !== 'assistant') continue;
+    const usage = message.usage;
+    if (!usage) continue;
+    if (message.stopReason === 'aborted' || message.stopReason === 'error') continue;
+    const tokens =
+      usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+    if (tokens > 0) return tokens;
+  }
+  return undefined;
 }
 
 /** 去掉 ANSI 序列，拿到可见宽度。 */

@@ -347,6 +347,11 @@ function assistantWithUsage(usage: Record<string, unknown>): Message {
   } as unknown as Message;
 }
 
+/** 一条**指定 stopReason 的助手消息（aborted / error 的 usage 不可信）。 */
+function assistantStopping(usage: Record<string, unknown>, stopReason: string): Message {
+  return { ...assistantWithUsage(usage), stopReason } as unknown as Message;
+}
+
 test('statsLine：没有任何用量时是空串（不画 0↑0↓0R 噪声）', () => {
   const state = { messages: [], model: { contextWindow: 0 } } as unknown as AgentState;
   assert.equal(statsLine(state).text, '');
@@ -402,6 +407,90 @@ test('statsLine：窗口未知（0）时不画百分比，而不是画个猜的�
 test('statsLine：窗口为 0 时不崩（contextWindow 还没装载的启动瞬间）', () => {
   const state = { messages: [], model: { contextWindow: 0 } } as unknown as AgentState;
   assert.doesNotThrow(() => statsLine(state));
+});
+
+// ─── 上下文占用：只看最后一次，不累加 ───
+//
+// 这批盯的是一个算错的数字：底栏一度显示「9536%/1.0M」。上下文窗口是**这一次请求**
+// 能装多少，而每轮的 input+cacheRead 都把当轮完整 prompt 重数一遍（prompt 里含前面
+// 所有轮次），累加等于把整段历史重复数了 N 次。累计口径只适用于 ↑↓R W$ 那一排。
+
+test('statsLine：上下文占用只看**最后一次**，不累加所有轮次', () => {
+  const one = (n: number): Message => assistantWithUsage({
+    input: 200_000, output: 1_000, cacheRead: 0, cacheWrite: 0, totalTokens: 201_000,
+  });
+  // 20 轮，每轮 prompt 都是 201k。累加 = 4020k → 402%，但真实占用是最后那一次的 20.1%。
+  const state = {
+    messages: Array.from({ length: 20 }, () => one(20)),
+    model: { contextWindow: 1_000_000 },
+  } as unknown as AgentState;
+  const out = statsLine(state).text;
+  assert.ok(out.includes('20%/1.0M'), `应显示 20%，实际：${out}`);
+  assert.ok(!/\d{3,}%/.test(out), `不该出现三位数百分比：${out}`);
+  // ↑↓ 那一排**仍然是累计**（两种口径各管各的）。
+  assert.ok(out.includes('↑4.0M'), `用量仍是累计：${out}`);
+});
+
+test('statsLine：最后一轮被中断时，占用看前一轮有效的（aborted 的 usage 不可信）', () => {
+  const state = {
+    messages: [
+      assistantWithUsage({ input: 300_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 300_000 }),
+      // 用户中断：usage 残缺（可能只有一半），不能拿它当「当前占用」。
+      assistantStopping({ input: 5_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 5_000 }, 'aborted'),
+    ],
+    model: { contextWindow: 1_000_000 },
+  } as unknown as AgentState;
+  const out = statsLine(state).text;
+  assert.ok(out.includes('30%/1.0M'), `应回退到上一轮有效的 30%，实际：${out}`);
+  assert.ok(!out.includes('5%/1.0M'), `不该采信被中断那轮：${out}`);
+});
+
+test('statsLine：最后一轮报错时同理跳过（error 的 usage 描述的不是最终请求）', () => {
+  const state = {
+    messages: [
+      assistantWithUsage({ input: 400_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 400_000 }),
+      assistantStopping({ input: 9_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 9_000 }, 'error'),
+    ],
+    model: { contextWindow: 1_000_000 },
+  } as unknown as AgentState;
+  assert.ok(statsLine(state).text.includes('40%/1.0M'), statsLine(state).text);
+});
+
+test('statsLine：totalTokens 缺失时用四个字段之和（与 pi 的 calculateContextTokens 同口径）', () => {
+  const state = {
+    messages: [assistantWithUsage({
+      input: 100_000, output: 2_000, cacheRead: 50_000, cacheWrite: 8_000, totalTokens: 0,
+    })],
+    model: { contextWindow: 1_000_000 },
+  } as unknown as AgentState;
+  // 100k + 2k + 50k + 8k = 160k → 16%
+  assert.ok(statsLine(state).text.includes('16%/1.0M'), statsLine(state).text);
+});
+
+test('statsLine：超 100% 如实显示，不夹到 100（夹了就是谎报「刚好满」）', () => {
+  // 目录里配的窗口小于实际能发的量（网关换过模型 / 目录过期）时会出现。
+  const state = {
+    messages: [assistantWithUsage({ input: 0, output: 0, cacheRead: 291_000, cacheWrite: 0, totalTokens: 291_969 })],
+    model: { contextWindow: 128_000 },
+  } as unknown as AgentState;
+  const out = statsLine(state);
+  assert.ok(out.text.includes('228%/128k'), out.text);
+  // 超 90% 应该是红色告警（这是真问题，不该静默）。
+  assert.equal(out.warnings.length, 1, '超 100% 也要告警');
+});
+
+test('statsLine：一次有效调用都没有时显示 ? 而不是 0%（0% 是在说谎）', () => {
+  const state = {
+    messages: [
+      { role: 'user', content: 'hi' } as Message,
+      // 恢复出来的历史消息没有 usage。
+      { role: 'assistant', content: [{ type: 'text', text: '旧内容' }] } as Message,
+    ],
+    model: { contextWindow: 1_000_000 },
+  } as unknown as AgentState;
+  const out = statsLine(state).text;
+  assert.ok(out.includes('?/1.0M'), `应显示未知，实际：${out}`);
+  assert.ok(!out.includes('0%'), `不该显示 0%：${out}`);
 });
 
 // ─── dimLine：整行变淡，但告警段保持颜色 ───
