@@ -308,6 +308,57 @@ ask_user_question
 | `rpiv-ask-user-question` | ✅ | ✅ `ui.custom()` overlay | — | — |
 | `pi-web-access` | ✅ | — | ✅ `modelRegistry` / `ctx.model` | ❌ 明说不接 |
 
+## 折叠（`Ctrl+]`）：验过了，包括一个上游的怪事
+
+折叠是**唯一**一条要**原始终端输入**才能走通的路，所以它单独一个测试文件
+（`test/extension-collapse.test.ts`），形状与其他扩展测试不同：那边只发 promise，
+这边要能**模拟按键**。
+
+### 两条路，缺一不可
+
+扩展的 `registerCollapseKeyListener()` 同时做两件事：
+
+1. **raw listener**（`ctx.ui.onTerminalInput`）—— **唯一**能让折叠后**复原**的路：
+   pi-tui 不把输入发给一个 `setHidden(true)` 的 overlay 的 `handleInput`。
+2. **`handle.setHidden(true)`** —— 收成一行（`buildCollapsedRender`）而不是满屏浮层，
+   于是背后的对话看得见。
+
+只做 1 不做 2：对话框还在挡。只做 2 不做 1：一旦收起**再也回不来**。
+测的是「收得起 → 提示里点名那个键 → 展得回」这个**来回**。
+
+### 按键用 `\x1d`（GS）
+
+`Ctrl+]` 就是 0x1d。验过 pi-tui 的 `matchesKey`：0x1d、CSI 27;5;93~、CSI 93;5u 都匹配；
+**裸 `]` 与 CSI 93（无修饰位）不匹配** —— 用错一个键就会静默地什么都不发生。
+
+### 一个上游的怪事：收起后按 Esc 什么也不发生
+
+扩展文档写「While collapsed, every keystroke other than cancel is ignored」——
+读起来是「Esc 能用」。**实测不是**（pi-tui 1.0.3）：
+
+1. `handle.setHidden(true)` 会**把焦点移走**（`setFocus(topVisible ?? preFocus)`）；
+2. 下一帧 `handleTerminalInput` 发现「焦点在一个**不可见**的 overlay 上」，**再改派一次**；
+3. 于是按键永远到不了 `QuestionnaireSession.handleInput`，而 `routeCollapsed()`
+   （collapsed 时只认 cancel）写在**那条收不到按键的链上**。
+
+出路是**再按一次 `Ctrl+]` 展开**，然后 Esc 就能放弃。
+
+**这不是我们宿主的问题** —— pi 自己跑同一个扩展也是这个行为（同一个 pi-tui）。
+记在这里是因为「收起后按 Esc 没反应」是真实的用户困惑，而真因在 pi-tui 与扩展的交界处：
+只看现象会以为是自己的接线错了。`routeCollapsed` 只在「折叠但**仍可见**」的降级形态下
+可达（宿主没给 raw input → `canReopenWhileHidden === false` → 扩展退回可见的一行提示）。
+
+### 写这个测试时踩的三个坑（都在注释里）
+
+1. **必须 `tui.start()`**，否则 `doRender()` 第一行就 return —— 于是 `hasOverlay()` 是
+   true、promise 也不 reject，而画面全空。**看起来一切正常。**
+2. **重绘是异步的**（`requestRender` 走 nextTick + 16ms 节流），所以按键之后要显式
+   `renderNow(true)` 强推一帧，否则断言在第一帧之前就跑。
+3. **不能覆盖 `addInputListener`** —— pi-tui 的 `handleTerminalInput` 直接读它**内部的
+   Set**，不是调那个公开方法。覆盖它等于把 listener 存到别处，于是扩展的 raw
+   listener 永远不被调。按键要喂 `handleTerminalInput`（它自己会做焦点改派），
+   不要自己遍历 listener。
+
 ## 六个文件
 
 | 文件 | 干什么 |
@@ -318,6 +369,7 @@ ask_user_question
 | `src/extension-models.ts` | `ctx.modelRegistry`：官方的 `ModelRegistry` 门面 |
 | `src/extension-prompt.ts` | `before_agent_start` 的接线与两条守卫 |
 | `test/extension-host.test.ts` | 用**真扩展** + 一个探针工具测（见下） |
+| `test/extension-collapse.test.ts` | 折叠：模拟按键驱动真扩展的收/展/答 |
 
 ## 测试为什么用真扩展
 
