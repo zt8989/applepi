@@ -88,6 +88,41 @@ function build(cwd: string): readonly AgentTool[] {
   ];
 }
 
+/**
+ * 扩展提供的工具（`extension-host.ts` 装出来的）。
+ *
+ * ## 为什么要**单独**一份而不是直接并进 `registries`
+ *
+ * 官方工具在**构造时**把 cwd 烤进闭包（路径边界检查靠它），所以它们必须按 cwd 缓存。
+ * 扩展工具相反 —— 它们已经自己拿到了 `ctx.cwd`（`extension-tools.ts` 里拼的），
+ * 不依赖注册表的 cwd，**也不能**按 cwd 重建：重建等于把 jiti 已经装载好的模块
+ * 重新适配一遍，白花开销。
+ *
+ * 所以分成两层：按 cwd 的官方工具（缓存）+ 一份全局的扩展工具。`getTools()` 把它们
+ * 合起来，`getTool(name)` 从合并后的表里找 —— 环那边**看不出**这个区别。
+ *
+ * 装载顺序：内核在 `prompt.init` **之前**调 `registerExtraTools()`（见 kernel.ts）。
+ * 反过来的话 `prompt.init` 已经把工具清单装进 state 了，扩展工具就只存在于注册表、
+ * 模型看不见 —— 而症状是「工具调用永远回「未知工具」」。
+ */
+const extensionTools: AgentTool[] = [];
+
+export function registerExtraTools(tools: readonly AgentTool[]): void {
+  extensionTools.length = 0;
+  for (const tool of tools) {
+    // 官方工具名优先：同名时扩展工具让位，否则一个扩展能把 `bash` 顶掉。
+    if (getOfficialToolNames().has(tool.name)) {
+      continue;
+    }
+    extensionTools.push(tool);
+  }
+}
+
+/** 扩展提供的工具（只读）。 */
+export function getExtensionTools(): readonly AgentTool[] {
+  return extensionTools;
+}
+
 export function getTools(cwd: string = process.cwd()): readonly AgentTool[] {
   const key = path.resolve(cwd);
   let tools = registries.get(key);
@@ -95,17 +130,31 @@ export function getTools(cwd: string = process.cwd()): readonly AgentTool[] {
     tools = build(cwd);
     registries.set(key, tools);
   }
-  return tools;
+  return extensionTools.length === 0 ? tools : [...tools, ...extensionTools];
+}
+
+function getOfficialToolNames(): Set<string> {
+  // **只取官方那一层** —— 不能用 `getTools()`，那个已经把扩展工具合进来了，
+  // 那样就成了「扩展工具在不在表里取决于它自己有没有被装上」的循环。
+  return new Set(build(process.cwd()).map((tool) => tool.name));
 }
 
 export function getTool(name: string, cwd: string = process.cwd()): AgentTool | undefined {
-  return getTools(cwd).find((tool) => tool.name === name);
+  // 先找扩展工具：它们是**后**装的，而名字与官方工具不冲突（`registerExtraTools` 拦了），
+  // 所以顺序其实无所谓 —— 但这里写明「先扩展」是因为它是本轮新加的一层，顺序不该
+  // 靠「名字碰巧不撞」维持。
+  return extensionTools.find((tool) => tool.name === name) ??
+    getTools(cwd).find((tool) => tool.name === name);
 }
 
-/** 丢掉某个 cwd 的缓存（测试用：换目录后要能看到新目录的工具实例）。 */
+/**
+ * 丢掉某个 cwd 的缓存（测试用：换目录后要能看到新目录的工具实例）。
+ *
+ * **不动扩展工具**：它们不属于任何 cwd（见上面那个注释）。
+ */
 export function resetTools(cwd: string = process.cwd()): readonly AgentTool[] {
   const key = path.resolve(cwd);
   const tools = build(cwd);
   registries.set(key, tools);
-  return tools;
+  return extensionTools.length === 0 ? tools : [...tools, ...extensionTools];
 }

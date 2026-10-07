@@ -55,22 +55,35 @@ execute(toolCallId, params, signal?, onUpdate?) => Promise<AgentToolResult>
 `bash` 的 `cwd` 是**工厂函数**的参数（`createBashTool(cwd)`），不是 execute 的第五个参数 ——
 第一次接的时候传错了，报 `Working directory does not exist: undefined`。
 
-## 注册表按 cwd 缓存
+## 注册表分两层
 
 ```ts
-const registries = new Map<string, readonly AgentTool[]>();
+const registries = new Map<string, readonly AgentTool[]>();   // 官方工具，按 cwd
+const extensionTools: AgentTool[] = [];                        // 扩展工具，不按 cwd
 
 export function getTools(cwd = process.cwd()) {
   const key = path.resolve(cwd);
   let tools = registries.get(key);
   if (!tools) { tools = build(cwd); registries.set(key, tools); }
-  return tools;
+  return extensionTools.length === 0 ? tools : [...tools, ...extensionTools];
 }
 ```
 
-必须按 cwd 缓存，不能用单个全局值：官方工具在构造时就把 cwd 烤进闭包了，
+官方工具必须按 cwd 缓存，不能用单个全局值：它们在构造时就把 cwd 烤进闭包了，
 换个 cwd 还复用旧实例的话，路径边界还是老的。用 `path.resolve` 做 key，免得 `'x'` 和 `'./x'`
 各建一份。
+
+扩展工具**不按 cwd**，因为它们已经自己拿到了 `ctx.cwd`（见
+[extensions](extensions.md)），而且**不能**按 cwd 重建：重建等于把 jiti 已经装载好的
+模块重新适配一遍，白花开销。
+
+`registerExtraTools()` 有两个细节：
+
+- **同名时官方工具优先** —— 否则一个扩展能把 `bash` 顶掉。判据是**官方那一层**的名字
+  （不能用 `getTools()`，那个已经合并了扩展工具，会变成循环依赖）。
+- **必须在 `prompt.init` 之前调**（内核保证）。反过来的话 `prompt.init` 已经把工具
+  清单装进 state 了，扩展工具就只存在于注册表、模型看不见 —— 而症状是「工具调用永远
+  回『未知工具』」，界面上那个工具块连参数都画不出来。
 
 ## 执行路径
 
@@ -140,6 +153,9 @@ const myTool: AgentTool = {
 
 `details` 必须是 `JsonValue`（pi-ai 1.x 收紧了）—— 它要进消息流、存盘、发给 provider，
 所以本来就得能真的 JSON 序列化。
+
+**扩展提供的工具走另一条路**（`registerExtraTools()`，不是 `build()`）：它们由 pi 的
+扩展运行时装载、拿第五个 `ctx` 参数，详见 [extensions](extensions.md)。
 
 ## Skill —— 也在 pi 那一侧（`src/skills.ts`）
 

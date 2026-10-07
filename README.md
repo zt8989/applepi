@@ -18,6 +18,9 @@ agent** —— 循环不是写出来的，是 reducer 与副作用互相 dispatc
   `bash`，直接用 Pi 官方那套）摸的是真实文件系统。
 - **长命令边跑边显示。** 接上官方工具的 `onUpdate`，`npm install` 这类命令的输出
   逐行出现，而不是「卡几十秒然后突然蹦出一块」——那几十秒的空白和卡死了没区别。
+- **能装 pi 扩展。** `settings.json` 的 `packages` 里的扩展装上就能用 ——
+  比如让模型开一个结构化多选对话框问你（别猜），或者查 web 抓 PDF。官方 loader
+  装载、官方扩展运行时驱动，本项目只提供自己那一半：环、工具表、overlay 宿主。
 - **system prompt 也是官方的。** 用 pi 的 `buildSystemPrompt` 拼：每个工具怎么用、
   `edit` 的那些坑、`AGENTS.md` 项目上下文、cwd、skill 清单。自己**一个字都不写** ——
   项目自己的规则写在 `.pi/APPEND_SYSTEM.md`（或家目录那份）里，与 pi 同路径、同优先级。
@@ -92,6 +95,27 @@ patch 丢了或 pnpm 升级后没重新应用，这些 import 会全部变成
 - `models.json` 的形状：pi 要求 `models` 是**数组**。本项目两种都读，读到旧的对象 map
   会顺手把盘上那份改成数组 —— 否则 pi 自己读同一个文件时整个文件作废。
 
+## 扩展
+
+扩展装在 **pi 那边**（同一个 `settings.json`），本项目启动时一并装载：
+
+```bash
+pi install npm:@juicesharp/rpiv-ask-user-question   # 结构化多选对话框
+pi install npm:pi-web-access                        # web 搜索 / 抓取 / PDF / GitHub
+```
+
+（前者让模型可以问你而不是猜；后者让它能查外面的东西 —— 依赖对应 provider 的
+API key，比如 exa / tavily / brave。）
+
+`--no-extensions` 跳过。装了什么、开场那节 `[扩展]` 会报出来，坏了是 `[扩展警告]`。
+
+**工具接了，命令与快捷键没接**（`/websearch` 那种）—— 本项目的命令表与键位是自己的
+一套，接半吊子会「补全里能看见、敲下去什么都不发生」。
+
+**工具集与 prompt 一样是装载时定下的** —— 不在一轮对话中间换工具（那会让已发出的
+消息与 prompt 对不上，而 prompt-cache 的前缀整个作废）。改工具集要 `/new` 换会话。
+详见 [`docs/architecture/extensions.md`](docs/architecture/extensions.md)。
+
 ## 运行
 
 ```bash
@@ -153,7 +177,7 @@ pnpm start --skill ./docs/my-skill.md    # 额外指定，可重复
 
 选项：`-p/--print`、`-P/--provider`、`-m/--model`、`-s/--system`、`--max-turns`、
 `--llm-timeout`、`--attempts`、`--api-key`、`--demo`、`--no-trace`、`--session`、
-`--skill`、`--cwd`、`--trace-dir`、`-h/--help`。
+`--skill`、`--cwd`、`--trace-dir`、`--no-extensions`、`-h/--help`。
 
 配置/provider 这一层**直接用 pi-coding-agent 的 `ModelRuntime`**（它自己读 models.json /
 auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 provider、1500+ 模型目录）。
@@ -162,7 +186,7 @@ auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 prov
 ## 测试
 
 ```bash
-pnpm test           # 210 个离线测试，不打网络
+pnpm test           # 294 个离线测试，不打网络
 pnpm run typecheck  # tsc --noEmit（src + test + scripts）
 ```
 

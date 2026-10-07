@@ -14,6 +14,7 @@ import path from 'node:path';
 import { defaultProviderSpec, providerNames } from './provider';
 import { createKernel, type Kernel } from './kernel';
 import { runTui } from './tui/app';
+import type { HostUiOptions } from './extension-ui';
 
 /**
  * **没有手写的 default system prompt。**
@@ -49,6 +50,8 @@ interface CliArgs {
   /** 额外的 skill 路径（文件或目录），可重复。 */
   skillPaths: string[];
   traceDir?: string;
+  /** 完全不装 pi 扩展（调试用：jiti 装载那一跳有开销）。 */
+  noExtensions: boolean;
 }
 
 const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界面）
@@ -69,6 +72,7 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
       --api-key <key>    直接给 key（否则读 DEEPSEEK_API_KEY）
       --demo             不打网络：用 pi-ai 自带的 faux provider 跑一遍完整环
       --no-trace         不把轨迹落盘到 .trace/
+      --no-extensions    不装 pi 扩展（settings.json 的 packages）
       --session <id>     指定会话 id（决定 .trace/<id>.jsonl 的文件名）
       --skill <path>     额外的 skill 文件或目录（可重复；默认扫 ~/.pi/agent/skills 与 <cwd>/.pi/skills）
       --cwd <dir>       工具的工作目录（文件操作边界，默认当前目录）
@@ -97,6 +101,7 @@ function parseArgs(argv: string[]): CliArgs {
     help: false,
     demo: false,
     noTrace: false,
+    noExtensions: false,
     cwd: process.cwd(),
     skillPaths: [],
   };
@@ -163,6 +168,9 @@ function parseArgs(argv: string[]): CliArgs {
       case '--no-trace':
         args.noTrace = true;
         break;
+      case '--no-extensions':
+        args.noExtensions = true;
+        break;
       case '-h':
       case '--help':
         args.help = true;
@@ -197,7 +205,18 @@ async function main(): Promise<void> {
 
   // 内核：整个应用里唯一的一次 createKernel() 装配，界面只拿到它的 store。
   // 没有第二份 store，也没有第二份环。
+  //
+  // **扩展的 UI 宿主必须在内核之前造好** —— 内核 `prompt.init` 那一刻就要知道有哪些
+  // 工具进 prompt，而扩展工具的装载要一个 `ui` 形状（虽然那只在工具**被调用**时才
+  // 真的用到）。见 `runTui()` 里怎么拿到 tui 实例。
+  //
+  // 为什么不让内核自己造：它没有界面（一次性模式根本没有界面），而 `ui.custom()`
+  // 要的是**活着的** pi-tui 实例（浮层栈、raw input、焦点）。
   let kernel: Kernel;
+  // pi-tui 的实例在 runTui() 里才有（主题要先 setup、终端要起来）。内核在它之前
+  // 就要装好扩展，所以这里用一个**间接**：`uiRef.current` 由 runTui 填上，扩展的
+  // 工具真被调用时读它。
+  const uiRef: { current: HostUiOptions | undefined } = { current: undefined };
   try {
     kernel = await createKernel({
       // 没给 -P/-m 就用默认（settings.json → 兜底 workbuddy/cn:space-bunny）
@@ -214,6 +233,14 @@ async function main(): Promise<void> {
       maxLlmAttempts: args.maxLlmAttempts,
       ...(args.sessionId !== undefined ? { sessionId: args.sessionId } : {}),
       traceDir: args.noTrace ? null : args.traceDir,
+      // 一次性模式**不给** uiOptions → 不绑 UI → 官方 `hasUI` 为 false → 扩展把自己的
+      // 交互式工具从清单里摘掉。这比「给个空 UI」对：空 UI 的 tui 是 undefined，
+      // 扩展一调 `custom()` 就崩在自己的渲染里（实测过）。
+      //
+      // 交互模式给的是**工厂**：内核装扩展时界面还没起来（`runTui` 里才有 tui），
+      // 而扩展工具真被调用时（可能在第一轮之后）读那个引用。
+      ...(args.prompt === undefined ? { uiOptions: () => requireUi(uiRef) } : {}),
+      ...(args.noExtensions ? { noExtensions: true } : {}),
       onTraceError: (error) => {
         process.stderr.write(
           `轨迹落盘失败（不影响对话）：${String(error instanceof Error ? error.message : error)}\n`,
@@ -240,8 +267,37 @@ async function main(): Promise<void> {
     // 当前会话 id 也要给：`/clean` 删历史时得放行它（记录器正开着那个文件）。
     // 注意它是**取值**不是常量：开新会话后 id 会变。
     sessionId: () => kernel.sessionId,
+    // 扩展的 `before_agent_start`（内核持有的那个宿主）。
+    beforeAgentStart: (text) => kernel.extensions.beforeAgentStart(text),
+    // 把活着的界面交给内核的扩展宿主（它在装扩展时只能拿到一个待填的引用）。
+    publishUi: (options) => {
+      uiRef.current = options;
+    },
+    // 开场报一行装了哪些扩展 + 装载诊断（与 skill 清单同一个口径）。
+    extensions: {
+      tools: kernel.extensions.tools.map((tool) => tool.name),
+      errors: kernel.extensions.errors,
+    },
     ...(prompt !== undefined ? { prompt } : {}),
   });
+}
+
+/**
+ * 取出界面层的 UI 宿主（扩展的 `ctx.ui` 由它造）。
+ *
+ * ## 拿不到就**抛**，不是给空实现
+ *
+ * 交互模式下内核已经绑了 UI（`uiOptions` 给了），所以 `hasUI` 是 true —— 扩展会真的
+ * 去开对话框。那时如果界面还没起来（理论上不该发生：`publishUi` 在 `tui.start()` 之后
+ * 就调了，而用户在首帧之前敲不出字），给一个 `tui: undefined` 会让扩展崩在自己的
+ * `requestRender()` 上 —— 那个堆栈与真因隔了三层。
+ *
+ * 所以这里明说「界面还没起来」。那是一个真 bug，不该被伪装成「没界面」。
+ */
+function requireUi(ref: { current: HostUiOptions | undefined }): HostUiOptions {
+  const ui = ref.current;
+  if (!ui) throw new Error('扩展要求界面，但界面还没起来（tui 未就绪）');
+  return ui;
 }
 
 void main();

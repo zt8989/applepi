@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -59,6 +59,31 @@ function visible(output: string): string {
     .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '') // CSI（颜色/光标）
     .replace(/\x1b[()][B0]/g, ''); // 字符集切换
 }
+
+/**
+ * 当前 git 分支名 —— 用来在首帧里认底栏那行。
+ *
+ * ## 为什么不写死 `main`
+ *
+ * 早先这两个断言找的是含 `(main)` 的行。那在主仓库上碰巧成立，但**换个分支就假失败**：
+ * 断言找不到那行，报「底栏应该有 cwd + git 分支」—— 而底栏其实好好地在那儿，只是分支
+ * 叫 `feat/rpiv-ask-user-question`。它测的是底栏排版，却在断言分支名。
+ *
+ * 现在读真实分支。测试若在仓库里跑（它本来就要读 `settings.json` 那些真文件），
+ * 就一定读得到；万一读不到（比如被拷到没有 .git 的目录），退回 `main` 只是让断言
+ * 继续找那一段形状，而不是让整个测试跳过。
+ */
+const BRANCH = (() => {
+  try {
+    const out = execFileSync('git', ['branch', '--show-current'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+    }).trim();
+    return out === '' ? 'main' : out;
+  } catch {
+    return 'main';
+  }
+})();
 
 /**
  * 判断两个片段是否在**同一屏幕行**上。
@@ -157,8 +182,8 @@ test('TUI 首帧：空闲时 loader 不转圈', async () => {
 
 test('TUI 首帧：底栏把 cwd 与模型分列两端', async () => {
   const { text: frame, raw } = await firstFrame();
-  // 找带 (main) 的那行（cwd 行）。
-  const cwdRow = frame.split('\n').find((l) => l.includes('(main)'));
+  // 找带 (分支名) 的那行（cwd 行）。
+  const cwdRow = frame.split('\n').find((l) => l.includes(`(${BRANCH})`));
   assert.ok(cwdRow, `底栏应该有 cwd + git 分支。首屏：\n${frame.slice(0, 400)}`);
   // pi 的口径是「家目录缩成 ~」，不是盘符开头。
   assert.ok(
@@ -168,7 +193,7 @@ test('TUI 首帧：底栏把 cwd 与模型分列两端', async () => {
   // 模型在**第二行**右侧（pi 的排法：用量与模型并排，cwd 独占第一行）。
   // 用原始输出判断同行与否 —— 差分重绘里两者之间是光标定位序列，不是换行。
   assert.ok(
-    !onSameScreenLine(raw, '(main)', '(workbuddy)'),
+    !onSameScreenLine(raw, `(${BRANCH})`, '(workbuddy)'),
     '模型不该与 cwd 同一行（那是上一版的错误排法）',
   );
 });
@@ -183,7 +208,7 @@ test('TUI 首帧：底栏占两行（第二行是空的用量行）', async () =
   // 屏幕的边界。
   const { text: frame, raw } = await firstFrame();
   const rows = frame.split('\n').map((l) => l.trimEnd());
-  const cwdIndex = rows.findIndex((l) => l.includes('(main)'));
+  const cwdIndex = rows.findIndex((l) => l.includes(`(${BRANCH})`));
   assert.ok(cwdIndex >= 0, '找不到底栏第一行');
   // 底栏是屏幕最下面的块，所以它离末尾很近；多给几行余量给终端自身的空行。
   assert.ok(
