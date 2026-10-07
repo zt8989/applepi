@@ -607,6 +607,16 @@ export async function runTui(options: TuiOptions): Promise<number> {
   /** 命令反馈：插在对话区顶部，6 秒后自动消失（不占输入区）。 */
   const notice = { text: '' };
   let noticeUntil = 0;
+  /**
+   * 开场那一节（已装载的 skill 名单 / 警告）—— **常驻，永不消失**。
+   *
+   * 与 `notice` 分开是因为两者寿命不同：`notice` 是命令反馈（6 秒），而这一节是
+   * 「本次会话装了什么」，应该像 pi 的 `loadedResourcesContainer` 那样一直在对话区顶部。
+   *
+   * 早先它走 `notify()` + 30 秒 —— 结果用户滚上去找刚才那条提示时它已经没了，而
+   * 「我装了哪些 skill」正是需要反复对照的东西（打 `/skill:x` 时要对着名字打）。
+   */
+  const banner = { text: '' };
 
   const refresh = (): void => {
     const state = store.getState();
@@ -633,8 +643,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
         dimLine(padToWidth(statsRow, width), ...stats.warnings),
     );
     // 提示过期就清掉（6 秒后自动消失，不留一行孤儿文本）。
+    // banner 不过期（常驻）。
     if (notice.text !== '' && Date.now() > noticeUntil) notice.text = '';
-    transcript.update(state, terminal.columns ?? 100, expanded, notice);
+    transcript.update(state, terminal.columns ?? 100, expanded, notice, banner);
     if (showTrace) {
       tracePanel.setText(
         state.trace.order.length === 0
@@ -952,10 +963,12 @@ export async function runTui(options: TuiOptions): Promise<number> {
   if (startupSkills.length > 0 || startupDiagnostics.length > 0) {
     const lines: string[] = [];
     if (startupSkills.length > 0) {
-      lines.push(
-        `${dim('[Skills]')}\n${dim(startupSkills.map((s) => s.name).join(', '))}\n` +
-          `${dim(`共 ${startupSkills.length} 个，用 /skill:<名字> 调用`)}`,
-      );
+      // 形状照 pi 的 `formatCompactList()`：**排序**后逗号连排，剩下交给终端折行。
+      // 不排序的话清单顺序取决于目录遍历，每次启动都不一样。
+      // 55 个名字折成十几行是正常的（pi 的截图里也是 6 行）—— 不截断：
+      // 名字列表的价值就在于能扫到某一个。
+      const names = startupSkills.map((s) => s.name).sort((a, b) => a.localeCompare(b));
+      lines.push(`${dim('[Skills]')}\n${dim(names.join(', '))}`);
     }
     // 与 pi 同形（截图里的 `[Skill conflicts]`）：加载不上的 skill 要看得见 ——
     // 否则就是「模型静默少了能力」，而用户与界面都不知道为什么。
@@ -965,9 +978,10 @@ export async function runTui(options: TuiOptions): Promise<number> {
           startupDiagnostics.map((d) => yellow(`  ${d}`)).join('\n'),
       );
     }
-    notify(lines.join('\n\n'));
-    // 开场提示不该 6 秒后就消失（那时用户可能还没看完）：延到 30 秒。
-    noticeUntil = Date.now() + 30_000;
+    // **常驻**（不靠 notify）：pi 的开场那一节也是 `loadedResourcesContainer` 里的
+    // 常驻组件，永不消失。skill 名单要反复对照着打 `/skill:x`，30 秒后就没了等于没有。
+    banner.text = lines.join('\n\n');
+    refresh();
   }
   if (prompt !== undefined) {
     // 一次性模式：TUI 的差分渲染在非交互终端里只会留下一堆转义序列，
@@ -1363,6 +1377,8 @@ export class TranscriptChunks {
   private readonly lastTexts: string[] = [];
   /** 命令反馈（`/clean` 的结果、恢复会话的提示）—— 形状是**贴在对话区顶部**。 */
   private readonly noticeBlock: Text;
+  /** 开场那节（常驻，永不消失）—— 与 6 秒的 notice 分开。 */
+  private readonly bannerBlock: Text;
   /** 正在流式生成的文字：每帧都在变，**只渲染这一条**。 */
   private readonly streamBlock: Text;
   /** 重试提示 + 收工原因 + 错误提示。 */
@@ -1376,11 +1392,13 @@ export class TranscriptChunks {
   private lastWidth = 0;
   /** 三个尾块上一次的内容，避免每帧都 `setText`（那会让它们的缓存失效）。 */
   private lastNotice = '';
+  private lastBanner = '';
   private lastStream = '';
   private lastTail = '';
 
   constructor() {
     this.noticeBlock = new Text('', 0, 0);
+    this.bannerBlock = new Text('', 0, 0);
     this.streamBlock = new Text('', 0, 0);
     this.tail = new Text('', 0, 0);
   }
@@ -1409,7 +1427,13 @@ export class TranscriptChunks {
    *
    * @param width 终端宽度。变了会让**每个**块重新折行（一次性代价，不在流式路径上）。
    */
-  update(state: AgentState, width: number, expanded: boolean, notice: { text: string }): void {
+  update(
+    state: AgentState,
+    width: number,
+    expanded: boolean,
+    notice: { text: string },
+    banner?: { text: string },
+  ): void {
     const key = `${width}:${expanded}`;
     const widthChanged = width !== this.lastWidth;
     const messages = state.messages;
@@ -1432,6 +1456,12 @@ export class TranscriptChunks {
     // 那正是本次要消掉的开销（而且会把整段对话重复画一遍，见下面的注释）。
     this.setIfChanged(this.noticeBlock, 'notice', notice.text === '' ? '' : `${notice.text}\n`, notice.text);
     this.setIfChanged(
+      this.bannerBlock,
+      'banner',
+      banner?.text === '' || banner === undefined ? '' : `${banner.text}\n`,
+      banner?.text ?? '',
+    );
+    this.setIfChanged(
       this.streamBlock,
       'stream',
       state.phase === 'thinking' && state.streamingText
@@ -1444,18 +1474,19 @@ export class TranscriptChunks {
   }
 
   /** 内容真变了才 `setText`（它会清掉块自己的折行缓存）。 */
-  private setIfChanged(block: Text, slot: 'notice' | 'stream' | 'tail', text: string, identity: string): void {
+  private setIfChanged(block: Text, slot: 'notice' | 'banner' | 'stream' | 'tail', text: string, identity: string): void {
     if (this.lastOf(slot) === identity) return;
     this.remember(slot, identity);
     block.setText(text);
   }
 
-  private lastOf(slot: 'notice' | 'stream' | 'tail'): string {
-    return slot === 'notice' ? this.lastNotice : slot === 'stream' ? this.lastStream : this.lastTail;
+  private lastOf(slot: 'notice' | 'banner' | 'stream' | 'tail'): string {
+    return slot === 'notice' ? this.lastNotice : slot === 'banner' ? this.lastBanner : slot === 'stream' ? this.lastStream : this.lastTail;
   }
 
-  private remember(slot: 'notice' | 'stream' | 'tail', value: string): void {
+  private remember(slot: 'notice' | 'banner' | 'stream' | 'tail', value: string): void {
     if (slot === 'notice') this.lastNotice = value;
+    else if (slot === 'banner') this.lastBanner = value;
     else if (slot === 'stream') this.lastStream = value;
     else this.lastTail = value;
   }
@@ -1511,6 +1542,7 @@ export class TranscriptChunks {
     const at = this.lastWidth > 0 ? this.lastWidth : width;
     const lines: string[] = [];
     lines.push(...this.noticeBlock.render(at));
+    lines.push(...this.bannerBlock.render(at));
     for (const block of this.blocks) lines.push(...block.render(at));
     lines.push(...this.streamBlock.render(at));
     lines.push(...this.tail.render(at));
@@ -1520,6 +1552,7 @@ export class TranscriptChunks {
   invalidate(): void {
     for (const block of this.blocks) block.invalidate();
     this.noticeBlock.invalidate();
+    this.bannerBlock.invalidate();
     this.streamBlock.invalidate();
     this.tail.invalidate();
   }

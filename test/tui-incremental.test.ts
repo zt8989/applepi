@@ -166,6 +166,30 @@ test('notice 贴在对话区顶部（命令反馈滚上去就看不见了）', (
   assert.ok(!stripTerminalSequences(chunks.render(80).join('\n')).includes('已清理 3 条历史会话'));
 });
 
+test('banner 是常驻的（开场那节永不消失），与 6 秒的 notice 分开', () => {
+  // 回归：开场那节原先走 notify() + 30 秒，于是用户往上翻找刚才那条提示时它已经没了。
+  // 而「我装了哪些 skill」正是要反复对照着打 `/skill:x` 的东西。
+  const chunks = new TranscriptChunks();
+  chunks.update(stateOf(history(3)), 80, false, { text: '' }, { text: '[Skills]\ndemo, other' });
+  const withBanner = stripTerminalSequences(chunks.render(80).join('\n'));
+  assert.ok(withBanner.includes('[Skills]'), `banner 要画出来：${withBanner}`);
+  assert.ok(withBanner.includes('demo, other'), withBanner);
+  // notice 清空**不该**带走 banner —— 两者是独立的槽位。
+  chunks.update(stateOf(history(3)), 80, false, { text: '一条命令反馈' }, { text: '[Skills]\ndemo, other' });
+  const both = stripTerminalSequences(chunks.render(80).join('\n'));
+  assert.ok(both.includes('[Skills]'), `notice 出现后 banner 仍在：${both}`);
+  assert.ok(both.includes('一条命令反馈'), `notice 也要在：${both}`);
+  // banner 排在 notice 下面（同在顶部，命令反馈更即时）。
+  assert.ok(
+    both.indexOf('一条命令反馈') < both.indexOf('[Skills]'),
+    `顺序：notice 在 banner 之前\n${both}`,
+  );
+  // 不给 banner 也不该崩（没装 skill 的会话）。
+  const bare = new TranscriptChunks();
+  bare.update(stateOf(history(2)), 80, false, { text: '' });
+  assert.ok(bare.render(80).length > 0);
+});
+
 test('收工原因画在最后（流式/重试提示之后）', () => {
   const state = stateOf(history(2), {
     phase: 'idle',
