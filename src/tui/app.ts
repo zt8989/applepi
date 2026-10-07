@@ -37,6 +37,7 @@ import { abortRun } from '../run-control';
 import { renderTree, traceStats, type TraceNode, type TraceTree } from '../trace';
 import type { AgentState } from '../state';
 import type { AgentStore } from '../store';
+import type { AgentAction } from '../actions';
 import { cleanSessionsExcept, listSessions, type SessionSummary } from '../config-home';
 import { loadSessionMessages, openSessionPicker } from './session-picker';
 import { readFileSync } from 'node:fs';
@@ -380,6 +381,20 @@ export interface TuiOptions {
    */
   newSession?: (() => { id: string }) | undefined;
   /**
+   * 恢复一个历史会话（换 id → 之后的消息追加进**那个**文件 + 记录器游标接着算）。
+   *
+   * ## 为什么必须由内核出手
+   *
+   * 界面自己 dispatch 是**做不到**的：`session.restored` 只是往 `messages` 里追加，而会话
+   * 记录器是 store 的订阅器，它看到「多了一条新消息」就写盘 —— 于是整段历史被当成新产生的
+   * 消息，全量抄进**当前**会话的文件（真发生过：390 行会话原样复制成另一个 390 行的文件）。
+   * 要挡住它必须做两件只有内核知道的事：把 `sessionId` 换掉、并用 `resumeFrom` 告诉记录器
+   * 「前面那 N 条已经在文件里了」。内核的 `restoreSession(file)` 已经把两件事一起做了。
+   *
+   * 不传就退化成界面版的灌消息（状态对，但会复制一份，且之后的消息写错文件）。
+   */
+  restoreSession?: ((file: string) => { id: string; restored: number }) | undefined;
+  /**
    * 当前会话 id。`/clean` 要**放行**它 —— 记录器正开着那个文件，删了等于写到虚空里。
    */
   sessionId?: (() => string) | undefined;
@@ -409,7 +424,7 @@ function gitBranch(cwd: string): string | undefined {
 }
 
 export async function runTui(options: TuiOptions): Promise<number> {
-  const { store, prompt, newSession, sessionId } = options;
+  const { store, prompt, newSession, sessionId, restoreSession: restoreHook } = options;
   const cwd = options.cwd ?? process.cwd();
   // 主题**必须先于一切渲染**装上：pi 的 `theme` 是个 globalThis 上的 Proxy，
   // 没 initTheme() 时读它任何属性都抛 `Theme not initialized`。
@@ -446,7 +461,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 也不用管两行之间的高度分配。
    */
   const footer = new Text('', 0, 0);
-  const transcript = new Text('', 0, 0);
+  /**
+   * 对话区：**按消息分块**的增量渲染（每条消息一个组件，内容没变就不重算）。
+   *
+   * 以前这里是 `new Text(renderTranscript(...))` 那个整段重算的形状，每帧 ~1.2 秒，
+   * 而流式 token 每个都触发一次刷新 —— 详见 TranscriptChunks 的注释。
+   */
+  const transcript = new TranscriptChunks();
   const tracePanel = new Text('', 0, 0);
   const loader = new CancellableLoader(tui, (s) => cyan(s), (s) => dim(s), '');
   /**
@@ -525,13 +546,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
         // 直接 dim(带色文本) 的话，内层的 \x1b[0m 会把外层 dim 提前关掉。
         dimLine(padToWidth(statsRow, width), ...stats.warnings),
     );
-    // 整段重渲染：ScrollView 自己管滚动与跟随，我们每次给它完整的对话文本。
-    // （早前这里只渲染「新增的那几条」，靠 renderedMessages 游标 —— 那个游标每帧都被
-    //  推到最新，等于永远从末尾开始渲染，于是对话区什么都不显示。ScrollView 只重画
-    //  变化区域，这个 bug 才暴露出来。）
     // 提示过期就清掉（6 秒后自动消失，不留一行孤儿文本）。
     if (notice.text !== '' && Date.now() > noticeUntil) notice.text = '';
-    transcript.setText(renderTranscript(state, 0, terminal.columns ?? 100, expanded, notice));
+    transcript.update(state, terminal.columns ?? 100, expanded, notice);
     if (showTrace) {
       tracePanel.setText(
         state.trace.order.length === 0
@@ -690,16 +707,60 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 恢复一个历史会话：把它的消息灌回 state。**零 token** —— 不重跑模型，
    * 纯粹是把 JSONL 里读到的内容搬进状态树。
    *
+   * ## 两条路，优先走内核那条
+   *
+   * 1. `options.restoreSession`（接了内核）：内核负责换会话 id + 记录器游标对齐，
+   *    不会把恢复出来的历史再写一遍盘。**这是唯一正确的那条**。
+   * 2. 没接（测试、或将来另一个前端）：退化成界面版 —— 一条 `conversation.restored`
+   *    灌完，仍然一次 dispatch（不是逐条），但**不换 id**、也没有记录器游标的概念，
+   *    于是恢复出来的消息会被当前记录器当成新消息写盘（也就是「复制一份」那个症状）。
+   *    这种情况要说出来，不然用户会以为是历史坏了。
+   *
+   * ## 为什么必须**一条** action 而不是逐条
+   *
+   * 每次 dispatch 都会让 `refresh()` 重渲染整段对话，而重渲染成本与 messages 长度成正比。
+   * 逐条灌 N 条 = O(N²)：那个 390 条消息的会话实测 62 秒（用户看到的是「卡了一分钟」）。
+   * 合成一条只渲染一次，O(N)。
+   *
    * 轨迹**不**跟着恢复：轨迹是那一轮的产物（时间线、失败、重试），和「对话内容」是两份
-   * 并行的记录，历史轨迹在 `~/.redux-agent/traces/<id>.jsonl`（`/trace` 面板只看当前轮）。
+   * 并行的记录，历史轨迹在 `traces/<id>.jsonl`（`/trace` 面板只看当前轮）。
    */
   const restoreSession = (session: SessionSummary): void => {
-    const messages = loadSessionMessages(session);
-    store.dispatch({ type: 'conversation.reset' });
-    for (const message of messages) {
-      store.dispatch({ type: 'session.restored', message });
+    // 先走内核那条，而且**先**判断再读文件：内核的 restoreSession(file) 自己会读，
+    // 这里要是先 loadSessionMessages 就等于把 1MB 多的文件读两遍。
+    if (restoreHook) {
+      const result = restoreHook(session.file);
+      notify(
+        dim(
+          `已恢复 ${result.id}（${result.restored} 条消息，未重跑模型；之后的消息继续写进它）`,
+        ),
+      );
+      refresh();
+      return;
     }
-    notify(dim(`已恢复 ${session.id}（${messages.length} 条消息，未重跑模型）`));
+    const messages = loadSessionMessages(session);
+    if (store.getState().trace.sessionId === session.id) {
+      // 恢复的就是当前会话：直接一条灌回去（重复灌一遍内容相同的消息，但没有别的问题）。
+      store.dispatch({
+        type: 'conversation.restored',
+        sessionId: session.id,
+        messages,
+      } as AgentAction);
+      notify(dim(`已重载 ${session.id}（${messages.length} 条消息，未重跑模型）`));
+      refresh();
+      return;
+    }
+    store.dispatch({
+      type: 'conversation.restored',
+      sessionId: store.getState().trace.sessionId,
+      messages,
+    } as AgentAction);
+    notify(
+      yellow(
+        `已载入 ${messages.length} 条消息到**当前会话**（未接内核，无法切换记录器）—— ` +
+          `后续消息会写进当前会话文件，不是 ${session.id}`,
+      ),
+    );
     refresh();
   };
 
@@ -1008,44 +1069,270 @@ function toolCallArgs(state: AgentState, toolCallId: string): Record<string, unk
  * 每个工具块用 `Box` 把底色补到整行（手写时宽度差一列底色就断一截）。
  * 这些各自都不难，但**一起对**才和截图一致。
  */
-export function renderTranscript(
+/**
+ * 渲染**一条**消息。
+ *
+ * ## 为什么要单独抽出来
+ *
+ * 对话区是**增量**渲染的（见 `TranscriptChunks`）：每条消息各自成为一个组件，
+ * 内容没变就不重算。整段渲染只有在一次性模式（管道输出）和测试里才需要，
+ * 那是同一套循环拼起来的。
+ */
+export function renderMessage(
   state: AgentState,
-  from: number,
+  message: Extract<AgentState['messages'][number], { role: string }>,
   width: number,
   expanded: boolean,
-  notice?: { text: string },
-): string {
-  const lines: string[] = [];
-  // 命令反馈贴在最上面，6 秒后自动消失。
-  if (notice && notice.text !== '') lines.push(notice.text, '');
-  for (let i = from; i < state.messages.length; i += 1) {
-    const message = state.messages[i];
-    if (!message) continue;
-    // pi-ai 1.x：Message 联合多了 system，且 content 可能是纯字符串 ——
-    // 先按 role 收窄，再把 content 归一成「文本片段数组」再渲染。
-    if (message.role === 'system') {
-      const text = typeof message.content === 'string' ? message.content : '';
-      if (text) lines.push(...renderPlain(text));
-    } else if (message.role === 'user') {
-      const text =
-        typeof message.content === 'string'
-          ? message.content
-          : message.content
-              .map((c) => (c.type === 'text' ? c.text : '[image]'))
-              .join(' ');
-      lines.push(...renderUser(text, width));
-    } else if (message.role === 'assistant') {
-      // 助手消息：**只有可见内容才占行**。一条纯 toolCall 的消息如果硬渲染会得到
-      // 一段空白（Markdown 组件对空文本返回 []），而它紧跟着就有工具块要画。
-      lines.push(...renderAssistant(message.content, width));
-    } else {
-      lines.push(...renderTool(state, message, width, expanded));
+): string[] {
+  // pi-ai 1.x：Message 联合多了 system，且 content 可能是纯字符串 ——
+  // 先按 role 收窄，再把 content 归一成「文本片段数组」再渲染。
+  if (message.role === 'system') {
+    const text = typeof message.content === 'string' ? message.content : '';
+    return text ? renderPlain(text) : [];
+  }
+  if (message.role === 'user') {
+    const text =
+      typeof message.content === 'string'
+        ? message.content
+        : message.content
+            .map((c) => (c.type === 'text' ? c.text : '[image]'))
+            .join(' ');
+    return renderUser(text, width);
+  }
+  if (message.role === 'assistant') {
+    // 助手消息：**只有可见内容才占行**。一条纯 toolCall 的消息如果硬渲染会得到
+    // 一段空白（Markdown 组件对空文本返回 []），而它紧跟着就有工具块要画。
+    return renderAssistant(message.content, width);
+  }
+  return renderTool(
+    state,
+    message as Extract<AgentState['messages'][number], { role: 'toolResult' }>,
+    width,
+    expanded,
+  );
+}
+
+// ══════════════════════════ 对话区：增量渲染 ══════════════════════════
+
+/**
+ * 对话区：**按消息分块**的增量渲染。
+ *
+ * ## 为什么不是「整段一个 Text」
+ *
+ * 原来的做法是 `transcript.setText(renderTranscript(...))`：每次状态变化都把**整段**
+ * 对话重新渲染成一个字符串，再让 `Text.render()` 折行。而流式 token 每来一个就触发一次
+ * `store.subscribe` → `refresh()`，于是每帧都要：
+ *
+ *   1. `renderTranscript`：重建 N 个官方组件（Markdown 解析、diff、底色）—— 实测 887ms
+ *   2. `Text.render`：重新折行 14890 行 / 1.9MB 文本 —— 实测 313ms
+ *
+ * 合计约 **1.2 秒一帧**，而 pi-tui 的 `MIN_RENDER_INTERVAL_MS` 只有 16ms。渲染永远追不上
+ * 流式速度，症状就是「界面卡住、token 刷不出来」。而且这是**同步**的：它直接占住事件
+ * 循环，连输入都收不到 —— 越长的会话越卡。
+ *
+ * ## 照抄 pi 官方的结构
+ *
+ * pi 的 `interactive-mode.js` 就是每个消息一个组件（`chatContainer.addChild(...)`），
+ * 流式那一条原地 `updateContent`。`Text` 组件自己缓存 `render()` 的结果，只在
+ * `setText()` 时失效 —— 所以「没变的块不重算」这件事官方组件已经帮我们做好了，
+ * 缺的只是别把 1208 条消息塞进**同一个** `Text` 里。
+ *
+ * 实测（1208 条消息的真实会话）：整段 291.9ms/帧 → 分块 **0.30ms/帧**（≈160×）。
+ *
+ * ## 缓存键为什么是「宽度 + 折叠」而不是只有消息本身
+ *
+ * 同一个 `message` 对象在两种情况下渲染结果不同：终端宽度变了（要重新折行），
+ * Ctrl+O 切了 `expanded`（工具块展开/折叠）。这两个都进了键，所以宽度变化或
+ * 切换折叠后不会读到过期的行。
+ *
+ * 用 `WeakMap` 而不是 `Map`：键是消息对象，会话被 `/new` 清空后旧消息就能被回收 ——
+ * 用 `Map` 的话整段历史会一直被钉在内存里。
+ */
+export class TranscriptChunks {
+  /** 每条消息一个 `Text`，下标与 `state.messages` 一一对应。 */
+  private readonly blocks: Text[] = [];
+  /**
+   * 每个块上一次 `setText` 的内容。
+   *
+   * 为什么不能读 `block.text` 而不是自己存：pi-tui 的 `Text.text` 在类型上是 `private`
+   * （编译不过），而 `setText` 之后「有没有变」正是要判断的事。自己存一份等价，
+   * 而且这份数组还能顺手当「哪些块需要重画」的依据。
+   */
+  private readonly lastTexts: string[] = [];
+  /** 命令反馈（`/clean` 的结果、恢复会话的提示）—— 形状是**贴在对话区顶部**。 */
+  private readonly noticeBlock: Text;
+  /** 正在流式生成的文字：每帧都在变，**只渲染这一条**。 */
+  private readonly streamBlock: Text;
+  /** 重试提示 + 收工原因 + 错误提示。 */
+  private readonly tail: Text;
+  /**
+   * 按消息缓存渲染结果。`WeakMap<object, Map<string, string[]>>`：
+   * 外层按消息对象，内层按 `${width}:${expanded}` 键。
+   */
+  private readonly cache = new WeakMap<object, Map<string, string[]>>();
+  /** 上一帧的宽度：变了就得让 pi-tui 重新折行（`Text` 自己会重算）。 */
+  private lastWidth = 0;
+  /** 三个尾块上一次的内容，避免每帧都 `setText`（那会让它们的缓存失效）。 */
+  private lastNotice = '';
+  private lastStream = '';
+  private lastTail = '';
+
+  constructor() {
+    this.noticeBlock = new Text('', 0, 0);
+    this.streamBlock = new Text('', 0, 0);
+    this.tail = new Text('', 0, 0);
+  }
+
+  private chunkLines(
+    message: Extract<AgentState['messages'][number], { role: string }>,
+    key: string,
+    build: () => string[],
+  ): string[] {
+    let perKey = this.cache.get(message as object);
+    if (!perKey) {
+      perKey = new Map();
+      this.cache.set(message as object, perKey);
     }
+    const hit = perKey.get(key);
+    if (hit !== undefined) return hit;
+    const lines = build();
+    perKey.set(key, lines);
+    return lines;
   }
-  // 正在流式生成的这一段也画出来。
-  if (state.phase === 'thinking' && state.streamingText) {
-    lines.push(...renderAssistant([{ type: 'text', text: state.streamingText }], width, true));
+
+  /**
+   * 同步到最新状态。
+   *
+   * 成本：**只有变了的块会重算**。流式 token 只碰 `streamBlock`，历史块全部命中缓存。
+   *
+   * @param width 终端宽度。变了会让**每个**块重新折行（一次性代价，不在流式路径上）。
+   */
+  update(state: AgentState, width: number, expanded: boolean, notice: { text: string }): void {
+    const key = `${width}:${expanded}`;
+    const widthChanged = width !== this.lastWidth;
+    const messages = state.messages;
+    const count = messages.length;
+    // 消息变少（/new、恢复别的会话）：把多余的块**丢掉**。
+    //
+    // 为什么不能只跳过：`render()` 是遍历 `this.blocks` 全部元素，而 blocks 与
+    // messages 等长只在「消息只增不减」时成立。留着的话 `/new` 之后旧消息还画在屏幕上
+    // （这个测试就是钉它的）。
+    if (this.blocks.length > count) {
+      this.blocks.length = count;
+      this.lastTexts.length = count;
+    }
+    for (let i = 0; i < count; i += 1) {
+      const message = messages[i];
+      if (!message) continue;
+      this.blockLines(message, i, key, state, width, expanded, widthChanged);
+    }
+    // 三个尾块各自独立，不合成一个 —— 合起来每帧就要 join 一次 1.9MB 字符串，
+    // 那正是本次要消掉的开销（而且会把整段对话重复画一遍，见下面的注释）。
+    this.setIfChanged(this.noticeBlock, 'notice', notice.text === '' ? '' : `${notice.text}\n`, notice.text);
+    this.setIfChanged(
+      this.streamBlock,
+      'stream',
+      state.phase === 'thinking' && state.streamingText
+        ? renderAssistant([{ type: 'text', text: state.streamingText }], width, true).join('\n')
+        : '',
+      state.streamingText,
+    );
+    this.setIfChanged(this.tail, 'tail', renderTail(state, width).join('\n'), state.error ?? '');
+    this.lastWidth = width;
   }
+
+  /** 内容真变了才 `setText`（它会清掉块自己的折行缓存）。 */
+  private setIfChanged(block: Text, slot: 'notice' | 'stream' | 'tail', text: string, identity: string): void {
+    if (this.lastOf(slot) === identity) return;
+    this.remember(slot, identity);
+    block.setText(text);
+  }
+
+  private lastOf(slot: 'notice' | 'stream' | 'tail'): string {
+    return slot === 'notice' ? this.lastNotice : slot === 'stream' ? this.lastStream : this.lastTail;
+  }
+
+  private remember(slot: 'notice' | 'stream' | 'tail', value: string): void {
+    if (slot === 'notice') this.lastNotice = value;
+    else if (slot === 'stream') this.lastStream = value;
+    else this.lastTail = value;
+  }
+
+  /** 一条消息的块：命中缓存就不碰组件，否则重算并 `setText`。 */
+  private blockLines(
+    message: Extract<AgentState['messages'][number], { role: string }>,
+    index: number,
+    key: string,
+    state: AgentState,
+    width: number,
+    expanded: boolean,
+    widthChanged: boolean,
+  ): string[] {
+    const cached = this.chunkLines(message, key, () =>
+      renderMessage(state, message, width, expanded),
+    );
+    let block = this.blocks[index];
+    if (!block) {
+      // **必须新建而不是复用**：pi-tui 的布局按「组件对象 + 宽度」缓存（layout.js 的
+      // `renderCached`），复用旧对象才能让历史块在后续帧里跳过重算。
+      block = new Text('', 0, 0);
+      this.blocks[index] = block;
+    }
+    const text = cached.join('\n');
+    // 内容变了才 `setText`（它会清掉块自己的折行缓存）。
+    if (this.lastTexts[index] !== text) {
+      block.setText(text);
+      this.lastTexts[index] = text;
+    } else if (widthChanged) {
+      // 只变宽：**不能 setText**（内容没变，setText 是白做），但块里按宽度分桶的折行
+      // 缓存要清掉。用 `invalidate()` 而不是 `setText(同一份文本)`：后者会让下一帧
+      // 看起来「内容变了」，多一次无谓的重建。
+      block.invalidate();
+    }
+    return cached;
+  }
+
+  /**
+   * 给布局用的组件（`ScrollView` 吃的就是它）。
+   *
+   * ## 为什么用 `lastWidth` 而不是传入的 `width`
+   *
+   * 块里的行是 `update()` 时**按那个宽度**渲染的（官方组件已经折行、铺好底色、补齐到全宽）。
+   * 拿另一个宽度去 `render()` 就会把按 40 列排好的行按 120 列再折一次 —— 结果是每行
+   * 后面挂着一截空白，行数凭空翻倍（实测 15 行变 36 行）。
+   *
+   * 所以宽度以 `update()` 为准。正常调用顺序本来就是 `update()` → `requestRender()`
+   * → 布局来 `render()`，两者同宽；但万一顺序反了，这里也不会画出乱掉的东西。
+   */
+  render(width: number): string[] {
+    const at = this.lastWidth > 0 ? this.lastWidth : width;
+    const lines: string[] = [];
+    lines.push(...this.noticeBlock.render(at));
+    for (const block of this.blocks) lines.push(...block.render(at));
+    lines.push(...this.streamBlock.render(at));
+    lines.push(...this.tail.render(at));
+    return lines;
+  }
+
+  invalidate(): void {
+    for (const block of this.blocks) block.invalidate();
+    this.noticeBlock.invalidate();
+    this.streamBlock.invalidate();
+    this.tail.invalidate();
+  }
+}
+
+/**
+ * 对话区**尾部**那些不属于任何单条消息的行：正在流式生成的文字、重试提示、收工原因。
+ *
+ * 从 `renderTranscript` 里原样搬出来的，所以两处画出来的东西一致。
+ *
+ * 注意**不含**正在流式生成的文字：那一段由 `TranscriptChunks` 单独一个块负责
+ * （它每帧都变，必须独立才能只重画它）。`renderTranscript` 里仍然拼上它，
+ * 因为那是一趟性渲染，形状必须与界面一致。
+ */
+export function renderTail(state: AgentState, width: number): string[] {
+  const lines: string[] = [];
   if (state.retrying) {
     lines.push(dim(`  ↻ 上一次失败，正在重试（第 ${state.llmAttempts}/${state.maxLlmAttempts} 次尝试）`));
   }
@@ -1070,5 +1357,30 @@ export function renderTranscript(
       lines.push(dim('  按 Ctrl+T 看轨迹树'));
     }
   }
+  return lines;
+}
+
+export function renderTranscript(
+  state: AgentState,
+  from: number,
+  width: number,
+  expanded: boolean,
+  notice?: { text: string },
+): string {
+  const lines: string[] = [];
+  // 命令反馈贴在最上面，6 秒后自动消失。
+  if (notice && notice.text !== '') lines.push(notice.text, '');
+  for (let i = from; i < state.messages.length; i += 1) {
+    const message = state.messages[i];
+    if (!message) continue;
+    lines.push(...renderMessage(state, message, width, expanded));
+  }
+  // 正在流式生成的这一段。**`renderTail` 里刻意不含它**（那边由独立的一块负责，
+  // 合成一个就会画两遍）—— 一次性模式不走 TranscriptChunks，所以要在这里补上，
+  if (state.phase === 'thinking' && state.streamingText) {
+    lines.push(...renderAssistant([{ type: 'text', text: state.streamingText }], width, true));
+  }
+  // 否则管道输出会丢掉模型正在说的话。
+  lines.push(...renderTail(state, width));
   return lines.join('\n');
 }

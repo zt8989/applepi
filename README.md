@@ -122,13 +122,13 @@ auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 prov
 ## 测试
 
 ```bash
-pnpm test           # 134 个离线测试，不打网络
+pnpm test           # 183 个离线测试，不打网络
 pnpm run typecheck  # tsc --noEmit（src + test + scripts）
 ```
 
 全程离线（pi-ai 的 faux provider），不消耗 token。覆盖：环闭合、轮数上限、错误路径、
 reducer 纯性、轨迹树的不变量（**超时后重试的父 id 指向超时前的节点**）、错误落盘与 JSONL
-回放、会话清理、真实文件 IO。
+回放、会话清理、对话区的增量渲染（**没变的块不许重算**）、真实文件 IO。
 
 ## 目录
 
