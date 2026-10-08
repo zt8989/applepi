@@ -755,7 +755,7 @@ export interface TuiOptions {
    *
    * 不传就退化成界面版的灌消息（状态对，但会复制一份，且之后的消息写错文件）。
    */
-  restoreSession?: ((file: string) => { id: string; restored: number }) | undefined;
+  restoreSession?: ((file: string) => Promise<{ id: string; restored: number }>) | undefined;
   /**
    * 当前会话 id。`/clean` 要**放行**它 —— 记录器正开着那个文件，删了等于写到虚空里。
    */
@@ -1462,13 +1462,17 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // 先走内核那条，而且**先**判断再读文件：内核的 restoreSession(file) 自己会读，
     // 这里要是先 loadSessionMessages 就等于把 1MB 多的文件读两遍。
     if (restoreHook) {
-      const result = restoreHook(session.file);
-      notify(
-        dim(
-          `已恢复 ${result.id}（${result.restored} 条消息，未重跑模型；之后的消息继续写进它）`,
-        ),
-      );
-      refresh();
+      // **要等**：内核要读 `traces/<id>.jsonl` 才能把轨迹树带回来。
+      // 不等的话 notify 会先弹「已恢复」，而那棵树还没灌进 state ——
+      // 症状是「提示说恢复了，轨迹面板却还是空的」。
+      void restoreHook(session.file).then((result) => {
+        notify(
+          dim(
+            `已恢复 ${result.id}（${result.restored} 条消息，未重跑模型；之后的消息继续写进它）`,
+          ),
+        );
+        refresh();
+      });
       return;
     }
     const messages = loadSessionMessages(session);

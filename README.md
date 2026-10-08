@@ -225,7 +225,7 @@ HEAD → n10
 
 | 命令 | 作用 |
 | --- | --- |
-| `/sessions` | 弹窗选一个历史会话恢复。**零 token** —— 不重跑模型，只把消息读回来 |
+| `/sessions` | 弹窗选一个历史会话恢复。**零 token** —— 不重跑模型，只把消息**和轨迹树**读回来 |
 | `/new` | 开**新会话**：换 id → 换文件。上一段完整留在 `sessions/` 里 |
 | `/clean`（或 `/wipe`） | **删除**除当前会话外的全部历史会话（连同轨迹文件）。不可逆 |
 | `/compact` | 把老对话换成一段结构化摘要（上下文快满了时用；与 pi 同名） |
@@ -269,7 +269,7 @@ auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 prov
 ## 测试
 
 ```bash
-pnpm test           # 328 个离线测试，不打网络
+pnpm test           # 330 个离线测试，不打网络
 pnpm run typecheck  # tsc --noEmit（src + test + scripts）
 ```
 

@@ -34,6 +34,7 @@ import { createAgentReducer } from '../src/reducer';
 import { createSessionRecorder } from '../src/session-recorder';
 import { SessionWriter, readSessionMessages, readJsonlHead, type MessageEntry } from '../src/session-file';
 import { listSessions, sessionPath } from '../src/config-home';
+import { waitForIdle } from '../src/store';
 import type { AgentAction, ModelCapabilities } from '../src/actions';
 import type { Message } from '@earendil-works/pi-ai';
 
@@ -334,7 +335,8 @@ test('内核 restoreSession：换 id + 灌回消息', async () => {
       traceDir: null,
     });
     try {
-      const result = second.restoreSession(historyFile);
+      // **要 await**：内核要读 traces/<id>.jsonl 才能把轨迹树带回来。
+      const result = await second.restoreSession(historyFile);
       assert.equal(result.id, 'history', '换成了历史那个 id（之后的消息追加进它）');
       assert.equal(result.restored, before.length, '全部灌回');
       assert.equal(second.sessionId, 'history', '内核上的 id 也换');
@@ -463,5 +465,131 @@ test('listSessions：坏 header 的会话仍然列得出来（只是拿不到 cw
     const ids = listSessions().map((s) => s.id);
     assert.ok(ids.includes('good'), '好的列出来了');
     assert.ok(ids.includes('bad'), 'header 坏的也列出来了（用户还能看到它、删掉它）');
+  });
+});
+/**
+ * 恢复历史时**轨迹树也要回来**。
+ *
+ * ## 这个 bug 的形状
+ *
+ * 早先 `restoreSession` 只读 `sessions/<id>.jsonl`（消息），轨迹那份
+ * `traces/<id>.jsonl` **压根没读** —— 而 `conversation.restored` 的迁移里
+ * `createInitialState` 造的是一棵**空树**。
+ *
+ * 症状特别有欺骗性：恢复后**对话区里的图片照常显示、消息一条不少**，
+ * 只有轨迹面板是空的。很容易归因为「恢复不完整 / 图片没存」，
+ * 而真因是那棵树没被读回来（文件明明在盘上）。
+ *
+ * 所以这条测试盯的是**树**，而且用一个带图片的会话 —— 因为那正是用户报 symptom 的场景。
+ */
+test('恢复历史：轨迹树跟着回来（对话区有图、轨迹却是空的那个 bug）', async () => {
+  await withHome(async () => {
+    const { createKernel } = await import('../src/kernel');
+    const cwd = process.cwd();
+    // 1x1 PNG —— 只关心「消息里有 image 块」，不真的解码。
+    const png =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+    const first = await createKernel({
+      provider: 'deepseek',
+      systemPrompt: 'p',
+      cwd,
+      demo: true,
+      sessionId: 'with-image',
+      // **不关 traceDir**：这个 bug 只在真的落盘轨迹时才谈得上「读回来」。
+    });
+    first.store.dispatch({
+      type: 'user.message',
+      text: '这张图是什么',
+      content: [
+        { type: 'text', text: '这张图是什么' },
+        { type: 'image', data: png, mimeType: 'image/png' },
+      ],
+    } as AgentAction);
+    // **等环真的跑完**，而不是 `setTimeout` 一个魔数 —— 后者在整个套件并行跑时
+    // 会不够（磁盘慢一点就只跑了一半），症状是「轨迹节点数对不上」，
+    // 而真因跟被测的恢复路径毫无关系。本文件其它用例都是这么等的。
+    await waitForIdle(first.store, 20_000);
+    // 再等一拍：`turn.end` 的 Cmd 是在 phase 转 idle 之后才冲刷的（见 reducer 的
+    // closeTurn 注释），不等它就会漏掉最后一个节点。
+    await new Promise((r) => setTimeout(r, 50));
+    const beforeTree = first.store.getState().trace;
+    assert.ok(beforeTree.order.length > 0, '跑之前轨迹上有节点');
+    assert.equal(
+      JSON.stringify(first.store.getState().messages[0]?.content).includes('image'),
+      true,
+      '消息里有图片',
+    );
+    first.dispose();
+
+    // 起一个新内核（当前会话是另一个 id），恢复它。
+    const second = await createKernel({
+      provider: 'deepseek',
+      systemPrompt: 'p',
+      cwd,
+      demo: true,
+      sessionId: 'other',
+    });
+    try {
+      await second.restoreSession(sessionPath('with-image', cwd));
+      const after = second.store.getState();
+
+      // 对话区：图片还在（这部分本来就是好的）。
+      assert.equal(
+        JSON.stringify(after.messages[0]?.content).includes('image'),
+        true,
+        '恢复后图片仍在对话里',
+      );
+      // 轨迹：**这才是修的那一条**。
+      assert.equal(
+        after.trace.order.length,
+        beforeTree.order.length,
+        `恢复后轨迹节点数应与跑之前一致（实际 ${after.trace.order.length}，期望 ${beforeTree.order.length}）`,
+      );
+      assert.equal(after.trace.tipId, beforeTree.tipId, 'tip 也一致');
+      assert.equal(
+        after.trace.order.map((id) => after.trace.nodes[id]?.kind).join(','),
+        beforeTree.order.map((id) => beforeTree.nodes[id]?.kind).join(','),
+        '节点顺序与 kind 逐个相同',
+      );
+      assert.equal(after.traceBegun, true, 'traceBegun 为真（否则这段树永远不落盘）');
+    } finally {
+      second.dispose();
+    }
+  });
+});
+
+test('恢复没有轨迹文件的历史：行为与修复前一致（空树，不报错）', async () => {
+  await withHome(async () => {
+    const { createKernel } = await import('../src/kernel');
+    const cwd = process.cwd();
+    const first = await createKernel({
+      provider: 'deepseek',
+      systemPrompt: 'p',
+      cwd,
+      demo: true,
+      sessionId: 'no-trace',
+      traceDir: null, // ← 关掉落盘，于是没有 traces/<id>.jsonl
+    });
+    first.store.dispatch({ type: 'user.message', text: '一句话' } as AgentAction);
+    await waitForIdle(first.store, 20_000);
+    first.dispose();
+
+    const second = await createKernel({
+      provider: 'deepseek',
+      systemPrompt: 'p',
+      cwd,
+      demo: true,
+      sessionId: 'cur2',
+    });
+    try {
+      // **不能抛** —— 老会话（早于轨迹功能）就属于这一类。
+      const result = await second.restoreSession(sessionPath('no-trace', cwd));
+      assert.equal(result.id, 'no-trace');
+      assert.ok(result.restored > 0, '消息还是灌回来了');
+      assert.equal(second.store.getState().trace.order.length, 0, '没有轨迹就是空树');
+    } finally {
+      second.dispose();
+    }
   });
 });

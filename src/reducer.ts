@@ -1448,32 +1448,28 @@ const transitions: TransitionHandlers = {
    * 但那条守卫属于界面与内核的入口策略，不是这条迁移的职责 —— reducer 不该假设
    * 「没人会趁环在跑的时候恢复」。所以这里原样带着走。
    */
-  'conversation.restored': (state, action) => {
-    const fresh = createInitialState({
-      systemPrompt: state.prompt.systemPrompt,
-      providerName: state.model.provider,
-      modelId: state.model.modelId,
-      ...(state.model.thinkingLevel !== undefined
-        ? { thinkingLevel: state.model.thinkingLevel }
-        : {}),
-      toolNames: state.prompt.tools.map((tool) => tool.name),
-      maxTurns: state.maxTurns,
-      llmTimeoutMs: state.llmTimeoutMs,
-      maxLlmAttempts: state.maxLlmAttempts,
-      sessionId: action.sessionId,
-    });
+  'conversation.restored': (state, action) =>
+    restoredConversationState(state, action.sessionId, action.messages),
+
+  /**
+   * 恢复历史 + **轨迹树**。
+   *
+   * 与 `conversation.restored` 只差一样东西：那棵树。共用同一个迁移体（见
+   * `restoredConversationState`），避免两处各写一遍「哪些状态带着走」——
+   * 那种重复的代价是：将来加了一项（比如 thinkingLevel），只改了一处，
+   * 于是「有轨迹的恢复」与「没轨迹的恢复」行为不同，而症状极难归因。
+   *
+   * `traceBegun` 置真：树非空就说明这段会话**确实发过话**，而它是落盘器
+   * 「要不要写」的判据（见 kernel.ts 的 `activeSink`）。若这里置假，
+   * 恢复出来的树会被当成「还没开始」而**永远不落盘** —— 也就是恢复一次、
+   * 进程一退，那段历史就只剩消息而没了轨迹。
+   */
+  'trace.restored': (state, action) => {
+    const base = restoredConversationState(state, action.sessionId, action.messages);
     return {
-      ...fresh,
-      // 会话级的三块带着走：换会话不等于换模型/系统提示。
-      prompt: state.prompt,
-      model: state.model,
-      persistedSeq: state.persistedSeq,
-      // 「正在跑」的现场也带着走（见上面的注释）。
-      phase: state.phase,
-      streamingText: state.streamingText,
-      thinkingText: state.thinkingText,
-      openLlmNodeId: state.openLlmNodeId,
-      messages: action.messages,
+      ...base,
+      trace: action.trace,
+      traceBegun: action.trace.order.length > 0,
     };
   },
 };
@@ -1855,6 +1851,52 @@ export function loopWiring(table: {
       const run = table.runCompact();
       return run === undefined ? [] : [run];
     },
+  };
+}
+
+/**
+ * 「换一个已存在的会话」之后的基线状态。
+ *
+ * `conversation.restored` 与 `trace.restored` **共用**这一份，差别只在轨迹树
+ * （前者空、后者带回读的那棵）。
+ *
+ * ## 为什么要抽出来而不是写两遍
+ *
+ * 这里列的是「换会话时**哪些东西要带着走**」——prompt、model、persistedSeq、
+ * 以及正在跑的现场。这类清单**天然会变**（将来加一项），而两处各写一遍的代价是：
+ * 只改了一处，于是「有轨迹的恢复」与「没轨迹的恢复」行为不同。
+ * 那个症状（有时恢复有轨迹、有时没有）比「全都没有」难查得多。
+ */
+function restoredConversationState(
+  state: AgentState,
+  sessionId: string,
+  messages: Message[],
+): AgentState {
+  const fresh = createInitialState({
+    systemPrompt: state.prompt.systemPrompt,
+    providerName: state.model.provider,
+    modelId: state.model.modelId,
+    ...(state.model.thinkingLevel !== undefined
+      ? { thinkingLevel: state.model.thinkingLevel }
+      : {}),
+    toolNames: state.prompt.tools.map((tool) => tool.name),
+    maxTurns: state.maxTurns,
+    llmTimeoutMs: state.llmTimeoutMs,
+    maxLlmAttempts: state.maxLlmAttempts,
+    sessionId,
+  });
+  return {
+    ...fresh,
+    // 会话级的三块带着走：换会话不等于换模型/系统提示。
+    prompt: state.prompt,
+    model: state.model,
+    persistedSeq: state.persistedSeq,
+    // 「正在跑」的现场也带着走（见 conversation.restored 的注释）。
+    phase: state.phase,
+    streamingText: state.streamingText,
+    thinkingText: state.thinkingText,
+    openLlmNodeId: state.openLlmNodeId,
+    messages,
   };
 }
 

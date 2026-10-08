@@ -10,7 +10,7 @@ import type {
 import type { Message } from '@earendil-works/pi-ai';
 import type { LlmErrorKind, StopCause } from './state';
 import type { QueueKind } from './state';
-import type { TraceNodeStatus } from './trace';
+import type { TraceNodeStatus, TraceTree } from './trace';
 import type { SkillInfo } from './skills';
 import type { CompactReason } from './compact';
 
@@ -390,6 +390,32 @@ export type AgentAction =
    * 但每次都白白重渲染一整屏）。
    */
   | { type: 'conversation.restored'; sessionId: string; messages: Message[] }
+  /**
+   * 恢复历史：**连轨迹树一起**灌回去。
+   *
+   * ## 为什么 `conversation.restored` 不够
+   *
+   * 早先恢复只带 `messages`，而 `conversation.restored` 的迁移里用 `createInitialState`
+   * 造了一份**全新的空树** —— 于是恢复后对话区有内容（含粘贴的图片），但轨迹面板**空的**。
+   *
+   * 症状特别有欺骗性：图像能看见、消息都在，只有轨迹没了，于是很容易归因为「恢复不完整」，
+   * 而真因是那条树压根没被读回来（`traces/<id>.jsonl` 明明在盘上）。
+   *
+   * ## 为什么要单独一条而不是给 `conversation.restored` 加个可选字段
+   *
+   * 因为「有没有轨迹文件」是**运行期事实**（那个文件存在吗），不是「想要什么」。
+   * 可选字段会让两处各判一次：内核判「要不要带」、迁移判「带了用不用」——
+   * 一旦不一致，症状又是「有时恢复有轨迹有时没有」，而那更难复现。
+   *
+   * 带了就用；没带（或文件不存在）就是空树，与之前行为完全一致。
+   */
+  | {
+      type: 'trace.restored';
+      sessionId: string;
+      messages: Message[];
+      /** 从 `traces/<sessionId>.jsonl` 回放出来的那棵树。 */
+      trace: TraceTree;
+    }
   /**
    * 清空对话。
    *

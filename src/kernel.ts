@@ -18,7 +18,7 @@ import {
   type AgentRuntime,
 } from './provider';
 import { createPersistentStore } from './store';
-import { createFileSink, tracePath, type TraceDir } from './trace-file';
+import { createFileSink, loadTrace, tracePath, type TraceDir } from './trace-file';
 import { newSessionId } from './trace';
 import type { AgentStore } from './store';
 import type { InitRecord, TracePersistence, TraceSink } from './trace-store';
@@ -126,7 +126,7 @@ export interface Kernel {
    * 恢复一个历史会话（读文件 + 灌回 state）。**零 token**，不重跑模型。
    * @returns 恢复的会话 id 与灌进去的消息条数。
    */
-  restoreSession(file: string): { id: string; restored: number };
+  restoreSession(file: string): Promise<{ id: string; restored: number }>;
   /** 把已经读出来的消息灌回 state。 */
   restore(messages: Message[]): void;
   /**
@@ -437,13 +437,14 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       return { id };
     },
     /**
-     * 恢复一个历史会话：读文件、清空当前对话、把消息**一次**灌回去。
+     * 恢复一个历史会话：读文件、清空当前对话、把消息**一次**灌回去，
+     * **并把那一段的轨迹树也读回来**。
      *
      * **零 token** —— 不重跑模型。状态只能由 action 改（本项目的不变式），所以走一条
-     * `conversation.restored`：它把 `conversation.reset`（清对话 + 换 id）与灌消息合成了
-     * 一次 dispatch。分开发的话恢复 390 条消息要重渲染 390 次整屏（实测 62 秒）。
+     * `trace.restored`：它把「换会话 + 灌消息 + 带上轨迹树」合成了一次 dispatch。
+     * 分开发的话恢复 390 条消息要重渲染 390 次整屏（实测 62 秒）。
      */
-    restoreSession(file: string): { id: string; restored: number } {
+    async restoreSession(file: string): Promise<{ id: string; restored: number }> {
       const session = readSession(file);
       const messages = readSessionMessages(file);
       const id = session?.header.id ?? '';
@@ -451,6 +452,15 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       const previous = current;
       previous.recorder?.dispose();
       current = openResources(id);
+      // 轨迹树也要读回来。早先只读消息，于是恢复后对话区有内容（含粘贴的图片），
+      // 而轨迹面板**空的** —— 而 `traces/<id>.jsonl` 明明在盘上。
+      // 那个症状特别有欺骗性：图像看得见、消息都在，只有轨迹没了。
+      //
+      // 读不到（旧会话、或当时开了 --no-trace）不是错误：那就发不带树的那条 action，
+      // 行为与修复前完全一致。
+      const traceDir = options.traceDir;
+      const tree =
+        id !== '' && traceDir !== null ? await loadTrace(id, traceDir ?? undefined) : null;
       // 轨迹落盘器的游标也要跟着推 —— 它只看 messages 有没有变长，看不出这些是「读回来的」
       // 而不是「新产生的」。不推的话，它会把整批历史当新消息重写一遍，
       // 于是轨迹文件里同一批消息出现两次。
@@ -459,11 +469,17 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       persistence?.skipMessages(messages.length);
       // 恢复进来的会话**已经有** init 段了（那个会话当初也发过话），别再补一份。
       wroteInit = true;
-      store.dispatch({
-        type: 'conversation.restored',
-        sessionId: id,
-        messages,
-      } as AgentAction);
+      store.dispatch(
+        (
+          tree === null
+            ? {
+                type: 'conversation.restored',
+                sessionId: id,
+                messages,
+              }
+            : { type: 'trace.restored', sessionId: id, messages, trace: tree }
+        ) as AgentAction,
+      );
       // 恢复出来的消息已经在文件里，记录器游标要从这里接着算，别再写一遍。
       openRecorder(id, messages.length);
       if (previous.sink?.close) void previous.sink.close();
