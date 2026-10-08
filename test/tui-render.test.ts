@@ -11,6 +11,9 @@ import {
   dim,
   dimLine,
   modelLine,
+  TraceChunks,
+  isScrollDown,
+  isScrollUp,
   renderQueuePanel,
   renderTranscript,
   statsLine,
@@ -19,6 +22,7 @@ import {
 } from '../src/tui/app';
 import { gitBranch } from '../src/tui/app';
 import { resolveThemeName, setupTheme } from '../src/tui/theme';
+import { createTraceTree, appendNode, patchNode } from '../src/trace';
 import { createInitialState, type AgentState } from '../src/state';
 import type { Message } from '@earendil-works/pi-ai';
 
@@ -721,4 +725,112 @@ test('renderQueuePanel：多行文本压成一行（面板只有一行高）', (
   const out = stripTerminalSequences(renderQueuePanel(state, 80));
   assert.equal(out.split('\n').length, 1, '换行被压掉');
   assert.match(out, /第一行 第二行/);
+});
+
+// ─── 轨迹区：分块增量 + 可滚动 ───
+//
+// 这组测试守的是用户直接报过的那个症状：
+// 「一开始只能看到最前面的，后面就看不到，滚也滚不动」。
+//
+// 早先轨迹面板是一整块 `Text` + 每帧 `setText(renderColoredTree(整棵树))`，
+// 于是：节点超出屏幕高度后被裁掉且**永远回不来**（既不滚动也没分页），
+// 而且流式 token 每来一个就要重算整棵树。
+
+/** 渲染出来的行（去掉 ANSI 与行尾补白 —— Text 会把每行补到全宽）。 */
+function linesOf(chunks: TraceChunks, width = 80): string[] {
+  return stripTerminalSequences(chunks.render(width).join('\n'))
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line !== '');
+}
+
+test('TraceChunks：节点多了也能全部拿到（一块一行，不是整棵树一坨）', () => {
+  const chunks = new TraceChunks();
+  let tree = createTraceTree('s');
+  for (let i = 0; i < 120; i++) {
+    tree = appendNode(tree, tree.tipId, 'llm.result', {
+      status: 'ok', label: '节点 ' + i, createdAt: i, endedAt: i,
+    }).tree;
+  }
+  chunks.update(tree, 80, '');
+  const lines = linesOf(chunks);
+  // 120 个节点 + 一行 HEAD = 121 行 —— **一行都没丢**。
+  // 旧形状（整棵树塞进一块 Text）在这里会被布局裁掉，用户只看到最早那几行。
+  assert.equal(lines.length, 121, '每个节点一行，外加 HEAD');
+  assert.match(lines[0] ?? '', /n1 llm.result: 节点 0/);
+  assert.match(lines[119] ?? '', /n120 llm.result: 节点 119/);
+  assert.match(lines[120] ?? '', /HEAD → n120/);
+});
+
+test('TraceChunks：只重算变化的那个节点（追加，不是全量重画）', () => {
+  const chunks = new TraceChunks();
+  let tree = createTraceTree('s');
+  for (let i = 0; i < 30; i++) {
+    tree = appendNode(tree, tree.tipId, 'tool.attempt', {
+      status: 'pending', label: '工具 ' + i, createdAt: i,
+    }).tree;
+  }
+  chunks.update(tree, 80, '');
+  const before = linesOf(chunks);
+
+  // 只把最后一个节点闭合（status 变了）→ 只有它那一行应该变。
+  const lastId = tree.order[tree.order.length - 1] ?? '';
+  tree = patchNode(tree, lastId, { status: 'ok', endedAt: 100 });
+  chunks.update(tree, 80, '');
+  const after = linesOf(chunks);
+
+  let changed = 0;
+  for (let i = 0; i < Math.min(before.length, after.length); i++) {
+    if (before[i] !== after[i]) changed += 1;
+  }
+  assert.equal(changed, 1, '只有一个节点的行变了');
+  // 耗时是 endedAt - createdAt = 100 - 29 = 71ms（节点号从 1 起，所以是 n30）。
+  assert.match(after[29] ?? '', /✓ n30 tool\.attempt: 工具 29 71ms/, '最后那个节点闭合了');
+});
+
+test('TraceChunks：节点变少时旧块被丢掉（/new、恢复别的会话之后不残留）', () => {
+  const chunks = new TraceChunks();
+  let tree = createTraceTree('s');
+  for (let i = 0; i < 10; i++) {
+    tree = appendNode(tree, tree.tipId, 'llm.result', {
+      status: 'ok', label: '节点 ' + i, createdAt: i, endedAt: i,
+    }).tree;
+  }
+  chunks.update(tree, 80, '');
+  assert.equal(linesOf(chunks).length, 11);
+
+  // 换成只有 2 个节点的新树（/new 会这么干）。
+  let fresh = createTraceTree('s2');
+  for (let i = 0; i < 2; i++) {
+    fresh = appendNode(fresh, fresh.tipId, 'llm.result', {
+      status: 'ok', label: '新 ' + i, createdAt: i, endedAt: i,
+    }).tree;
+  }
+  chunks.update(fresh, 80, '');
+  const lines = linesOf(chunks);
+  assert.equal(lines.length, 3, '只剩 2 个节点 + HEAD');
+  assert.match(lines.join(' '), /新 1/);
+  assert.equal(/节点 5/.test(lines.join(' ')), false, '旧节点没残留');
+});
+
+test('TraceChunks：空树时给一句说明（0 高度会让面板整个消失）', () => {
+  const chunks = new TraceChunks();
+  chunks.update(createTraceTree('s'), 80, '（还没有任何节点）');
+  const out = linesOf(chunks);
+  assert.equal(out.length, 1);
+  assert.match(out[0] ?? '', /还没有任何节点/);
+});
+
+
+test('滚轮键：Alt+↑↓ 与 Ctrl+P/N 认得出来，纯 ↑↓ 不认（留给编辑器移光标）', () => {
+  const ESC = String.fromCharCode(27);
+  assert.equal(isScrollUp(`${ESC}[A`), true, 'Alt+↑');
+  assert.equal(isScrollUp(`${ESC}[1;3A`), true, 'Alt+↑ 的 xterm 变体');
+  assert.equal(isScrollUp(String.fromCharCode(16)), true, 'Ctrl+P');
+  assert.equal(isScrollDown(`${ESC}[B`), true, 'Alt+↓');
+  assert.equal(isScrollDown(String.fromCharCode(14)), true, 'Ctrl+N');
+  // **纯方向键不能认**：多行提示词里 ↑↓ 是移动光标，抢了就编不了多行。
+  assert.equal(isScrollUp(`${ESC}[A`), true);
+  assert.equal(isScrollUp('p'), false, '字母 p 不是滚轮');
+  assert.equal(isScrollDown('n'), false);
 });

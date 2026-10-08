@@ -86,7 +86,8 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
   -h, --help             显示本帮助
 
 界面里:
-  Ctrl+T                切换轨迹面板（git log --graph 那棵树，错误也在上面）
+  Ctrl+T                在「对话」与「轨迹」两页之间切换（顶部有页签）
+  Alt+↑/↓ 或 Ctrl+P/N   翻当前页（半页）；纯 ↑↓ 是移动光标，不拿来滚
   Ctrl+O                展开/收起工具输出的完整内容（默认只留前 12 行）
   Ctrl+Q                切换入队模式：steer（工具跑完后插进去）／followUp（说完再插）
   Ctrl+C                环在跑时中断这一轮；空闲时退出

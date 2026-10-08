@@ -35,7 +35,7 @@ import {
   type TuiInputListener,
 } from '@earendil-works/pi-tui';
 import { abortRun } from '../run-control';
-import { renderTree, traceStats, type TraceNode, type TraceTree } from '../trace';
+import { renderTree, traceStats, formatDuration, type TraceNode, type TraceTree } from '../trace';
 import { compactReasonText } from '../compact';
 import type { AgentState, QueuedInput, QueueKind } from '../state';
 import type { AgentStore } from '../store';
@@ -170,6 +170,162 @@ function nodeColor(node: TraceNode): (t: string) => string {
 }
 
 /**
+ * 轨迹面板：**一个节点一个块**的增量渲染。
+ *
+ * ## 为什么不用一块 `Text` 画整棵树
+ *
+ * 早先 `tracePanel` 是 `new Text('', 0, 0)`，每帧 `setText(renderColoredTree(整个树))`。
+ * 两个后果，第二个是用户直接抱怨的那个：
+ *
+ * 1. **每帧重算整棵树**。流式 token 每来一个就触发一次 `refresh()`，于是 200 个节点
+ *    的树每秒重算几十次（实测单次 4~6ms，而一个长工具输出能刷几百帧）。
+ * 2. **节点多了看不见后面的**。`Text` 高度就是内容高度，被布局裁掉的部分**永远回不来** ——
+ *    面板既不滚动也没有分页，于是「一开始只能看到最前面的，后面就看不到，滚也滚不动」。
+ *
+ * 这里改成与对话区**同构**的形状（`TranscriptChunks` 就是这个套路）：
+ *
+ * - 每个节点一个 `Text`，下标与 `tree.order` 一一对应；
+ * - 只在**那个节点的**内容真变了才 `setText`（追加式：新节点只算自己那几个）；
+ * - 外层包 `ScrollView`，`follow: 'end'` —— 新节点往下追加，视口自动贴底；
+ * - 节点变少（`/new`、恢复别的会话）就把多余的块丢掉，否则旧节点还画在屏幕上。
+ *
+ * ## 为什么不能用 pi 官方的 `CollapsibleRender`
+ *
+ * 轨迹是**时间线**，不是可折叠的树：关掉一个节点不该让它的子节点消失（那是 pi 渲染
+ * `entry_appended` 那类内容的形状）。这里要的只是「按块增量 + 可滚动」。
+ */
+export class TraceChunks implements Component {
+  /** 每个节点一个 `Text`，下标与 `tree.order` 一一对应。 */
+  private readonly blocks: Text[] = [];
+  /** 每个块上次 `setText` 的内容 —— 「变没变」的判据。 */
+  private readonly lastTexts: (string | undefined)[] = [];
+  /** 宽度变了要清折行缓存（`Text` 按宽度分桶缓存）。 */
+  private lastWidth = 0;
+  /** HEAD 那一行（树的落点）单独一块：它不是节点，但每次 tip 变都要更新。 */
+  private readonly headBlock = new Text('', 0, 0);
+  private lastHead = '';
+  /** 空树时显示的那句（开场就空着，得说清楚「不是坏了」）。 */
+  private emptyText = '';
+
+  /**
+   * 同步到最新状态。**只算变化的那几个节点。**
+   *
+   * @param emptyText 树还是空的时候显示什么（开场那句「发送第一条消息后…」）
+   */
+  update(tree: TraceTree, width: number, emptyText: string): void {
+    const widthChanged = width !== this.lastWidth;
+    this.emptyText = emptyText;
+    const order = tree.order;
+    // 节点变少（/new、恢复别的会话、树被重建）：把多余的块**丢掉**。
+    //
+    // 为什么不能只跳过：`render()` 遍历的是 `this.blocks` 全部元素，而它与 order 等长
+    // 只在「节点只增不减」时成立。留着的话 /new 之后旧节点还画在屏幕上。
+    if (this.blocks.length > order.length) {
+      this.blocks.length = order.length;
+      this.lastTexts.length = order.length;
+    }
+    for (let i = 0; i < order.length; i += 1) {
+      const id = order[i];
+      const node = id === undefined ? undefined : tree.nodes[id];
+      if (node === undefined) continue;
+      const line = this.lineOf(node, tree, width);
+      let block = this.blocks[i];
+      if (block === undefined) {
+        // **必须新建而不是复用**：pi-tui 的布局按「组件对象 + 宽度」缓存
+        // （layout.js 的 renderCached），复用旧对象才能让历史块在后续帧里跳过重算。
+        block = new Text('', 0, 0);
+        this.blocks[i] = block;
+        this.lastTexts[i] = undefined;
+      }
+      if (this.lastTexts[i] !== line) {
+        block.setText(line);
+        this.lastTexts[i] = line;
+      } else if (widthChanged) {
+        // 只变宽：**不能 setText**（内容没变，setText 是白做），但块里按宽度分桶的
+        // 折行缓存要清掉。用 invalidate() 而不是 setText(同一份)：后者会让下一帧
+        // 看起来「内容变了」，多一次无谓的重建。
+        block.invalidate();
+      }
+    }
+    // 空树时给一句说明，而不是留一个 0 高的块（0 高度会让整块在布局里消失，
+    // 于是「按了 Ctrl+T 没反应」与「面板塌了」看起来一模一样）。
+    if (order.length === 0) {
+      if (this.lastHead !== emptyText) {
+        this.headBlock.setText(dim(emptyText));
+        this.lastHead = emptyText;
+      }
+    } else {
+      const tip = tree.tipId === null ? '' : `${bold('HEAD')} → ${tree.tipId}`;
+      if (this.lastHead !== tip) {
+        this.headBlock.setText(tip);
+        this.lastHead = tip;
+      }
+    }
+    this.lastWidth = width;
+  }
+
+  /**
+   * 给布局用的 `Component` 实现（`ScrollView` 吃的就是它）。
+   *
+   * ## 为什么用 `lastWidth` 而不是传入的 `width`
+   *
+   * 每一行的 `Text` 是在 `update()` 时**按那个宽度** `setText` 的。拿另一个宽度去
+   * `render()` 就会把按 40 列排好的行按 120 列再折一次 —— 结果是每行后面挂着一截
+   * 空白，行数凭空翻倍（与 `TranscriptChunks` 同一个坑）。
+   */
+  render(width: number): string[] {
+    const at = this.lastWidth > 0 ? this.lastWidth : width;
+    const lines: string[] = [];
+    for (const block of this.blocks) lines.push(...block.render(at));
+    lines.push(...this.headBlock.render(at));
+    return lines;
+  }
+
+  invalidate(): void {
+    for (const block of this.blocks) block.invalidate();
+    this.headBlock.invalidate();
+  }
+
+  /**
+   * 一个节点那一行的**带色**文本。
+   *
+   * 刻意**不**调 `renderTree`：那个函数是「整棵树一坨字符串」的形状（它要算全树的缩进），
+   * 而这里要的是「这一行自己什么样」。两者共用 `nodeColor` 与节点标签，
+   * 所以命令行里看到的树与界面里看到的仍然是同一份逻辑。
+   */
+  private lineOf(node: TraceNode, tree: TraceTree, width: number): string {
+    const mark = statusMarkOf(node);
+    const color = nodeColor(node);
+    const elapsed = node.endedAt === null ? '' : ` ${formatDuration(node.endedAt - node.createdAt)}`;
+    const meta = metaSuffixOf(node);
+    const text = `${mark} ${node.id} ${node.kind}: ${node.label}${elapsed}${meta}`;
+    const line = truncateToWidth(text, width);
+    // 失败的节点加粗，视觉上更跳一点（与 renderColoredTree 同一口径）。
+    return node.status === 'error' ? bold(color(line)) : color(line);
+  }
+}
+
+function statusMarkOf(node: TraceNode): string {
+  switch (node.status) {
+    case 'ok':
+      return '✓';
+    case 'error':
+      return '✗';
+    case 'aborted':
+      return '⊘';
+    case 'pending':
+      return '·';
+  }
+}
+
+function metaSuffixOf(node: TraceNode): string {
+  if (!node.meta) return '';
+  const entries = Object.entries(node.meta);
+  if (entries.length === 0) return '';
+  return ` (${entries.map(([k, v]) => `${k}=${v}`).join(', ')})`;
+}
+
+/**
  * 把轨迹树画成带颜色的 ASCII 树。
  *
  * 直接复用 trace.ts 的 renderTree（纯函数，测试里也在用），再按节点 id 上色 ——
@@ -292,6 +448,49 @@ export interface StatsLine {
  * followUp 是「等它说完」。若都显示成同一行「已排队」，用户就无法判断自己的话
  * 到底什么时候会被看见——而这正是使用这两个键的全部意义。
  */
+/**
+ * 滚轮键的字节序列 → 滚轮动作。
+ *
+ * ## 为什么不用 `matchesKey(data, 'up')`
+ *
+ * 方向键要先给编辑器：多行提示词里 `↑`/`↓` 是**移动光标**（editor.js 的默认行为），
+ * 而在 ScrollView 上只滚一格（且官方没给它默认键）。两者抢同一个键的结果是
+ * 「有时滚有时不滚」—— 取决于光标在哪一行，而那是最难复现的一类 bug。
+ *
+ * 所以用 **Alt+方向键 / Ctrl+P / Ctrl+N**：编辑器不碰它们，而用户按 `Alt+↑`
+ * 的直觉仍然是「往上翻」。
+ *
+ * ## 为什么列字节序列而不是一个 helper
+ *
+ * pi-tui 的输入回调拿的是**原始序列**，而 Alt+↑ 在不同终端发的变体不少
+ * （`\x1b[1;3A` / `\x1b[1;5A` / `\x1bOa` …）。列全它们比调一个只会匹配其中
+ * 一种的 helper 可靠 —— 少列一种的症状是「在某个终端上 Alt+↑ 没反应」，
+ * 而那只有换终端才复现得到。
+ */
+const ESC = String.fromCharCode(27);
+const SCROLL_UP_SEQUENCES: readonly string[] = [
+  `${ESC}[A`, // Alt+↑（xterm 常见）
+  `${ESC}[1;3A`,
+  `${ESC}Oa`, // Alt+↑（application cursor 模式）
+  String.fromCharCode(16), // Ctrl+P
+];
+const SCROLL_DOWN_SEQUENCES: readonly string[] = [
+  `${ESC}[B`,
+  `${ESC}[1;3B`,
+  `${ESC}Ob`,
+  String.fromCharCode(14), // Ctrl+N
+];
+
+/** 这一串输入是不是「往上翻」（Alt+↑ 或 Ctrl+P）。 */
+export function isScrollUp(data: string): boolean {
+  return SCROLL_UP_SEQUENCES.includes(data);
+}
+
+/** 这一串输入是不是「往下翻」（Alt+↓ 或 Ctrl+N）。 */
+export function isScrollDown(data: string): boolean {
+  return SCROLL_DOWN_SEQUENCES.includes(data);
+}
+
 export function renderQueuePanel(state: AgentState, width: number): string {
   const rows: string[] = [];
   for (const item of state.steerQueue) {
@@ -666,7 +865,47 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 而流式 token 每个都触发一次刷新 —— 详见 TranscriptChunks 的注释。
    */
   const transcript = new TranscriptChunks();
-  const tracePanel = new Text('', 0, 0);
+  /**
+   * 轨迹区：**按节点分块**的增量渲染 + 可滚动。
+   *
+   * 与对话区同构（`TraceChunks` 就是 `TranscriptChunks` 的翻版），而外面包一个
+   * `ScrollView` 且 `follow: 'end'` —— 新节点往下追加、视口自动贴底，
+   * 用户往上翻时 `follow` 自动让位（ScrollView 自带这个行为）。
+   *
+   * `primary: true` 只在「当前页是轨迹」时才给（见 `applyLayout`），于是滚轮与
+   * PgUp/PgDn 在两个页里各自滚自己的内容。
+   */
+  const traceChunks = new TraceChunks();
+  /**
+   * 轨迹区的容器：把 `TraceChunks` 装进 VStack，外面再包 ScrollView。
+   *
+   * `follow: 'end'` = 新节点往下追加时视口自动贴底（用户往上翻时它会让位，
+   * 这是 ScrollView 自带的行为）。`scrollbar: 'auto'` 只在内容超出时才出现。
+   *
+   * ## 为什么是 `let` 而不是 `const`
+   *
+   * `ScrollView.primary` 是 **readonly**（构造时定）—— 而「哪个是 primary」正是
+   * 整页切换的核心：pi-tui 的 key 处理（滚轮 / PgUp / PgDn）只发给 primary 那个。
+   * 不跟着当前页走的话，在轨迹页里滚会滚到对话区（症状：轨迹页怎么滚都不动）。
+   *
+   * 所以切页时**重建**这两个 ScrollView。重建代价很小：块（`traceChunks` /
+   * `transcript`）是长生命的对象，被新 ScrollView 重新包一层而已，已渲染的内容
+   * 与滚动位置都在那些块里，不丢。
+   */
+  let traceScroll = new ScrollView(new VStack([{ component: traceChunks, minSize: 1 }]), {
+    follow: 'end',
+    primary: false,
+    scrollbar: 'auto',
+  });
+  let scroll = new ScrollView(transcript, { follow: 'end', primary: true });
+  /**
+   * 页签行：`对话` / `轨迹`，当前页高亮。
+   *
+   * **为什么要它而不是 Ctrl+T 直接换掉整页**：用户需要知道自己现在在哪个页 ——
+   * 否则「轨迹突然不见了」看起来像树坏了，而「树不见了」恰好是最容易出的症状
+   * （开场树就是空的，见 beginTrace 的注释）。
+   */
+  const tabs = new Text('', 0, 0);
   /**
    * 排队中的用户输入（steer / followUp）—— 与 pi 的 `pendingMessagesContainer` 同一形状：
    * 一行一条，前面标出它去哪一列。
@@ -756,7 +995,14 @@ export async function runTui(options: TuiOptions): Promise<number> {
    */
   const widgetSlots = new Map<string, Component>();
 
-  let showTrace = false;
+  /**
+   * 当前在哪个**整页**。
+   *
+   * 「不分屏」是刻意的：早先轨迹面板与对话区上下排，结果是轨迹一多就把对话区挤没，
+   * 而它自己又不可滚 —— 于是两败俱伤。改成整页切换后，每页都能占满中间那块，
+   * 并且 ScrollView 的 `primary` 跟着它走（见 applyLayout）。
+   */
+  let page: 'chat' | 'trace' = 'chat';
   /**
    * 这一轮真的进了 system prompt 的 skill 清单。
    *
@@ -837,17 +1083,22 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // banner 不过期（常驻）。
     if (notice.text !== '' && Date.now() > noticeUntil) notice.text = '';
     transcript.update(state, terminal.columns ?? 100, expanded, notice, banner);
-    if (showTrace) {
-      tracePanel.setText(
-        state.trace.order.length === 0
-          ? // 开场树是空的（**故意**的：装载节点要等第一句话才建，见 reducer 的 beginTrace），
-            // 所以这句话得说清楚「不是坏了」，否则用户以为 Ctrl+T 没生效。
-            dim(state.prompt.seeded ? '（发送第一条消息后这里开始记轨迹）' : '（还没有任何节点）')
-          : renderColoredTree(state.trace, terminal.columns ?? 100),
-      );
-    } else {
-      tracePanel.setText('');
-    }
+    // 轨迹：**每帧都同步**（即使不在轨迹页）—— 否则切过去的第一帧看到的是
+    // 上一次 refresh 的快照，而那时可能已经落后好几步（症状：切过去先看到一棵
+    // 少了几步的树，然后才突然补齐）。同步是增量的，成本与节点数无关。
+    traceChunks.update(
+      state.trace,
+      terminal.columns ?? 100,
+      // 开场树是空的（**故意**的：装载节点要等第一句话才建，见 reducer 的 beginTrace），
+      // 所以这句话得说清楚「不是坏了」，否则用户以为没记上。
+      state.prompt.seeded ? '（发送第一条消息后这里开始记轨迹）' : '（还没有任何节点）',
+    );
+    // 页签：当前页高亮，并把切换键写在旁边（否则得另找地方说「Ctrl+T 能切」）。
+    tabs.setText(
+      page === 'chat'
+        ? `${bold(cyan('对话'))} ${dim('│ 轨迹')} ${dim('(Ctrl+T)')}`
+        : `${dim('对话')} ${bold(cyan('│ 轨迹'))} ${dim('(Ctrl+T)')}`,
+    );
     tui.requestRender();
   };
 
@@ -907,7 +1158,30 @@ export async function runTui(options: TuiOptions): Promise<number> {
   });
 
   // 显式标出回调参数类型：1.x 的 TuiInputListener 是具名类型，不再从上下文推断。
+  /** 当前页的 ScrollView —— 滚轮只滚它（另一个不滚，免得「在轨迹页却滚动了对话区」）。 */
+  const activeScroll = (): ScrollView => (page === 'trace' ? traceScroll : scroll);
   const onInput: TuiInputListener = (data: string) => {
+    /**
+     * 滚轮：**必须在编辑器之前**。
+     *
+     * Alt+↑ / Ctrl+P 这些键编辑器不碰，但它们的兄弟（纯 ↑↓）要碰 ——
+     * 所以只要不冲突，就没必要让它晚一步。
+     *
+     * 半页而不是一行：轨迹一行就是**一个节点**，一行一行翻太慢；而对话区
+     * 半页刚好是「一屏的一半」，两边都不别扭。
+     */
+    if (isScrollUp(data)) {
+      const view = activeScroll();
+      view.scrollBy(-Math.max(1, Math.floor(view.viewportHeight / 2)));
+      refresh();
+      return { consume: true };
+    }
+    if (isScrollDown(data)) {
+      const view = activeScroll();
+      view.scrollBy(Math.max(1, Math.floor(view.viewportHeight / 2)));
+      refresh();
+      return { consume: true };
+    }
     /** 内置的三个开关键。返回 true = 已消费。 */
     const builtins = (): boolean => {
       if (matchesKey(data, 'ctrl+c')) {
@@ -918,9 +1192,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
         tui.stop();
         process.exit(0);
       }
-      // Ctrl+T：切换轨迹面板。底部要放哪些组件变了，布局必须跟着重设。
+      // Ctrl+T：**切到轨迹页 / 切回对话页**。
+      //
+      // 早先是「显示/隐藏一块贴在对话区上面的面板」，两个毛病：轨迹一多把对话区挤没，
+      // 而它自己不可滚（只看得到最早那几行）。现在是整页切换，布局要重设
+      // （中间那块换了组件，primary ScrollView 也跟着换）。
       if (matchesKey(data, 'ctrl+t')) {
-        showTrace = !showTrace;
+        page = page === 'trace' ? 'chat' : 'trace';
         applyLayout();
         refresh();
         return true;
@@ -1239,25 +1517,42 @@ export async function runTui(options: TuiOptions): Promise<number> {
   };
 
   // 布局：AltScreen = 真正的全屏（占满视口、终端不留回滚缓冲）。
-  // 纵向三段：顶栏一行 / 对话区（唯一可伸缩，自己滚）/ 底部输入区。
+  // 纵向四段：顶栏一行 / 页签一行 / 中间那块（当前页，唯一可伸缩）/ 底部输入区。
   //
   // 为什么不能用 addChild 平铺：那样每个组件各占若干行，内容一多就把输入框顶出屏幕，
   // 而且整屏重画时旧内容会留在回滚缓冲里（看起来像「重复刷屏」）。
   //
-  // 为什么写成函数：Ctrl+T 切换轨迹面板会改变底部要放哪些组件，布局得跟着重设。
-  const scroll = new ScrollView(transcript, { follow: 'end', primary: true });
+  // 为什么写成函数：Ctrl+T 换页会改变中间那块是哪个组件（primary 也跟着变），
+  // 布局得跟着重设。
+  //
   // 用函数声明（不是 const 箭头）：onInput 里会调它，const 有 TDZ，声明会提升。
   function applyLayout(): void {
-    // 对话区是**唯一**可伸缩的（basis 0 + grow 1），其余按内容自适应。
+    // 重建两个 ScrollView，让 **primary** 跟着当前页走（见 traceScroll 的注释）。
     //
-    // 下面这三个**不给 `basis`**：给了就把固有高度钉死成那个数（`layout.js` 里是
-    // `typeof entry.basis === 'number' ? entry.basis : measureHeight(...)`），
-    // 于是编辑器永远只有 3 行 —— 它的补全列表（自己渲染成额外行）就画不出来，
-    // 打 `/` 看着像什么都没发生。不给则每帧渲染一遍量真实高度，补全展开时自然变高。
+    // 顺序要点：先定 `scroll` / `traceScroll`，再读它们排布局。
+    const wantTracePrimary = page === 'trace';
+    if (wantTracePrimary !== traceScroll.primary) {
+      traceScroll = new ScrollView(new VStack([{ component: traceChunks, minSize: 1 }]), {
+        follow: 'end',
+        primary: wantTracePrimary,
+        scrollbar: 'auto',
+      });
+      scroll = new ScrollView(transcript, { follow: 'end', primary: !wantTracePrimary });
+    }
+    // **两个整页切换，不分屏。**
+    //
+    // 早先的形状是「轨迹面板贴在对话区上面」（同一个 VStack 里两个可伸缩区），
+    // 后果有两个：轨迹一多就把对话区挤没；而它自己又不可滚，于是只剩最早那几行。
+    //
+    // 现在：顶部放一行**页面标签**，中间那块的**内容**按 `page` 换掉，
+    // 谁在中间谁就是 `primary`（pi-tui 的 key 处理只发给 primary ScrollView ——
+    // 见 layout.js 的 `node.state.primary || !context.primaryScrollView`）。
+    // 所以「滚轮 / PgUp / PgDn 在轨迹页滚轨迹、在对话页滚对话」是白得的，不用自己判。
+    //
+    // 不做分屏也就不用调两块的高度：中间那块永远 basis 0 + grow 1（唯一可伸缩的）。
     const bottom = new VStack([
-      ...(showTrace ? [{ component: tracePanel, minSize: 1 }] : []),
       // 扩展的 widget（`pi-web-access` 的活动面板用它）。**不给 basis** ——
-      // 给了就把高度钉死，面板里的内容一变就错位（同上面那三个的理由）。
+      // 给了就把高度钉死，面板里的内容一变就错位（同下面那三个的理由）。
       ...[...widgetSlots.values()].map((component) => ({ component, minSize: 1 })),
       // 队列面板在输入框**之上** —— 用户敲完字、回车之前就该看到刚才排了什么。
       { component: queuePanel, minSize: 1 },
@@ -1268,7 +1563,10 @@ export async function runTui(options: TuiOptions): Promise<number> {
     tui.setLayoutRoot(
       new VStack([
         { component: header, basis: 1, grow: 0, minSize: 1 },
-        { component: scroll, basis: 0, grow: 1, minSize: 3 },
+        // 页签行：写清当前在哪个页、以及怎么切（**不写在别处**，否则得记两处）。
+        { component: tabs, basis: 1, grow: 0, minSize: 1 },
+        // 中间那块 = 当前页。primary 跟着 page 走。
+        { component: page === 'trace' ? traceScroll : scroll, basis: 0, grow: 1, minSize: 3 },
         bottom,
       ]),
     );
