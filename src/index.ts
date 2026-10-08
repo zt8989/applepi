@@ -2,7 +2,15 @@
  * 库入口：把 Agent Loop 的几个部件暴露出去，方便复用/测试。
  */
 export type { AgentAction, AgentActionType } from './actions';
-export { createInitialState, type AgentState, type ExecutingTool, type Phase } from './state';
+export {
+  createInitialState,
+  type AgentState,
+  type ExecutingTool,
+  type Phase,
+  type QueuedInput,
+  type QueueKind,
+  type TurnEndReason,
+} from './state';
 export {
   createAgentReducer,
   loopWiring,

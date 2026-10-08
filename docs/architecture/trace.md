@@ -17,7 +17,9 @@ Agent 的执行历史不是一条流水。`src/trace.ts` 把它做成**一棵树
 interface TraceNode {
   id: string;                    // "n7"，reducer 内单调自增
   parentId: string | null;       // 根为 null
-  kind: 'user' | 'llm.attempt' | 'llm.result'
+  kind: 'user' | 'turn.start' | 'turn.end'      // 回合容器
+      | 'step.start' | 'step.end'               // 步容器（= 一次 LLM 调用 + 它的工具批次）
+      | 'llm.result'
       | 'tool.attempt' | 'tool.result' | 'error' | 'stop'
       // 上下文族（不推进 tip，见下）
       | 'prompt.base' | 'prompt.tools' | 'prompt.segment' | 'model.init';
@@ -30,38 +32,69 @@ interface TraceNode {
 }
 ```
 
-`attempt` 是**容器**（一次尝试），`result` / `error` 是它的**结局**。
+`turn.*` / `step.*` 是**容器**（区间），`llm.result` / `tool.result` / `error` 是里面的**事件**。
 
-## 关键规则：只有四类节点推进 tip
+## 两层容器：turn 与 step
+
+- **turn** = 一次用户输入引发的整个回合（user → 若干 step → 收工）。
+- **step** = 一次 LLM 调用**加上它触发的工具批次**。它取代了原先的 `llm.attempt`
+  —— 语义相同（都是「一次尝试」的容器，parent 取发起那一刻的 tip），只是名字不预设
+  「里面一定只有 LLM」。
+
+## 关键规则：只有五类节点推进 tip
 
 ```ts
-const TIP_ADVANCING_KINDS = new Set(['user', 'llm.result', 'tool.result', 'stop']);
+const TIP_ADVANCING_KINDS = new Set([
+  'user', 'turn.end', 'llm.result', 'tool.result', 'stop',
+]);
 
 function advancesTip(node) {
   return (node.status === 'ok' || node.status === 'aborted') && TIP_ADVANCING_KINDS.has(node.kind);
 }
 ```
 
-`llm.attempt` / `tool.attempt` 是分叉点，`error` 是失败记录 —— **它们都不推进 tip**。
+**容器（`turn.start` / `step.start` / `step.end` / `tool.attempt`）一律不推进 tip**，
+`error` 也不推进。只有 `turn.end` 这个**回合的闭合点**推进。
 
-这条不变量就是「重试的父 id 指向超时前的节点」的全部实现：第一次失败时 attempt 自己闭合了
+这条不变量就是「重试的父 id 指向超时前的节点」的全部实现：第一次失败时 step 自己闭合了
 （status 变 error）但不推进 tip，它的 error 子节点也不推进，于是 tip 原地不动，下一次尝试开
 新节点时 parent 拿到的仍是那个从没动过的节点。
 
-## 于是重试长这样
+## 一次正常对话长这样
+
+```
+✓ n1  user: 今天几号？
+· n2  turn.start: 回合 1
+✓ n3  step.start: 第 1 步
+✓ n4  llm.result: 我来查
+✓ n5  tool.result: 10 月 5 日
+✓ n6  step.end: 第 1 步结束（1 个工具调用）
+✓ n7  step.start: 第 2 步
+✓ n8  llm.result: 今天是 10 月 5 日
+✓ n9  step.end: 第 2 步结束（0 个工具调用）
+✓ n10 turn.end: 回合 1 结束：模型说完了 (reason=completed, steps=2)
+HEAD → n10
+```
+
+一个回合里模型可以跑很多步（模型→工具→模型→…），**那是同一个回合的正常推进，不是重试**
+—— `traceStats` 的 `retries` 因此要求那组兄弟里**有失败的**才算。
+
+## 于是重试长这样（分叉在 step 这一层）
 
 ```
 ✓ n1 user: 今天几号？
-├── ✗ n2 llm.attempt: 第 1 次尝试 407ms
-│  └── ✗ n3 error: LLM 调用超时（400ms） (kind=timeout)
-├── ✗ n4 llm.attempt: 第 2 次尝试（重试） 414ms
-│  └── ✗ n5 error: LLM 调用超时（400ms） (kind=timeout)
-└── ✓ n6 llm.attempt: 第 3 次尝试（重试） 1.2s
-   └── ✓ n7 llm.result: 10 月 5 日
-HEAD → n7
+· n2 turn.start: 回合 1
+├── ✗ n3 step.start: 第 1 步
+│  └── ✗ n4 error: LLM 调用超时（400ms） (kind=timeout)
+├── ✗ n5 step.start: 第 2 步（重试）
+│  └── ✗ n6 error: LLM 调用超时（410ms) (kind=timeout)
+└── ✓ n7 step.start: 第 3 步（重试）
+   └── ✓ n8 llm.result: 10 月 5 日
+HEAD → n8
 ```
 
-`n4` 的父 id 是 `n1`（**超时前**的节点），不是 `n3`（失败节点）。失败与重试是**兄弟**。
+`n5` 与 `n7` 的父 id 是 `n2`（**那个 turn 容器**，它从没动过），不是 `n4`（失败节点）。
+失败与重试是**兄弟**。
 如果错误节点推进了 tip，重试就会被挂到「错误的子节点才是正史」下面，那就不是 git 了。
 
 ## 纯函数

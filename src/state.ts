@@ -14,6 +14,41 @@ import { createTraceTree, newSessionId, type TraceTree } from './trace';
 /** 相位：只描述「现在在等谁」，不含任何驱动方式的信息。 */
 export type Phase = 'idle' | 'thinking' | 'calling-tools';
 
+/**
+ * 排队的用户输入 —— 环在跑的时候人还能说话（与 pi 的 steer / followUp 同一个口径）。
+ *
+ * ## 两种队列的差别是**投递时机**，不是优先级
+ *
+ * - `steer`：当前 step 的工具跑完后、**下一次 LLM 调用之前**插入。
+ *   也就是说它会打断「模型→工具→模型」这个循环的延续，让模型看到新的话。
+ * - `followUp`：等到模型**没有工具调用了**（回合本该收工）才插入，然后开一个新回合。
+ *   它不打断任何东西，只是「接着聊」。
+ *
+ * 两者都是 FIFO，各自独立成列（pi 也是两列：两个队列的元素互不排队）。
+ *
+ * ## 为什么入队的是 text 而不是 Message
+ *
+ * 与 `user.message` 一样，附件在装载时折成 content 块 —— 入队的就是「一句话」，
+ * 真要发出去时才组装成消息（见 reducer 的 `queue.delivered`）。
+ */
+export interface QueuedInput {
+  text: string;
+  content?: (TextContent | ImageContent)[] | undefined;
+  /** 入队时刻（毫秒）。界面显示「排了多久」用；也是 FIFO 的稳定排序依据。 */
+  at: number;
+}
+
+/** 队列里那条输入怎么来的 —— 界面用它选颜色（与 pi 的 pendingMessages 同一个口径）。 */
+export type QueueKind = 'steer' | 'followUp';
+
+/**
+ * 一次「回合」（turn）的结局。
+ *
+ * 界面/轨迹靠它区分「这一回合是自己说完的」与「是被外部打断的」——
+ * 而这两种在 `stopReason` 里都是 `completed`/`aborted`，分不开。
+ */
+export type TurnEndReason = 'completed' | 'maxTurns' | 'error' | 'aborted' | 'interrupted';
+
 export interface ExecutingTool {
   call: ToolCall;
   startedAt: number;
@@ -206,6 +241,50 @@ export interface AgentState {
   /** 已完成的 LLM 轮数。 */
   turns: number;
   maxTurns: number;
+  // ─── turn / step 两层容器（轨迹树与统计的唯一真相） ───
+  /**
+   * 当前回合（turn）的序号，从 1 开始；不在回合里时为 0。
+   *
+   * ## turn 与 step 的边界
+   *
+   * - **turn** = 一次用户输入引发的**整个回合**：从那条消息进来，到模型没有工具调用、
+   *   这一轮真正收工为止。中间可以有好几个 step。
+   * - **step** = 一次 LLM 调用 **加上它触发的工具批次**。它在轨迹树上就是原先
+   *   `llm.attempt` 的位置（那个容器已被 `step.start` 取代）。
+   *
+   * 于是树形是 `user → turn → step → llm.result / tool.*`，
+   * 而重试的开叉发生在 **step 这一层**（同父下多个 step.start），不是 turn 层。
+   *
+   * 与 pi 的 `turn_start` / `turn_end` 对齐（`step` 是本项目细分出来的，
+   * pi 把「LLM 调用 + 工具」整段当一个 turn）。
+   */
+  turnIndex: number;
+  /** 当前回合在跑的 step 序号，从 1 开始；不在 step 里时为 0。 */
+  stepIndex: number;
+  /**
+   * 已完成的 step 总数（整个会话，不随回合归零）。
+   *
+   * 顶箱的「轮数」显示念它 —— 而 `turns` 是「当前回合内的 LLM 调用数」，
+   * 每次新回合归零。两者名字相近但含义不同，所以这里写清楚。
+   */
+  totalSteps: number;
+  // ─── 排队中的用户输入（steer / followUp） ───
+  /** steer 队列：在下一次 LLM 调用前插入。FIFO。 */
+  steerQueue: readonly QueuedInput[];
+  /** followUp 队列：回合收工时才插入，然后开新回合。FIFO。 */
+  followUpQueue: readonly QueuedInput[];
+  /**
+   * 已经「决定要发」但还没真正组装成消息的队列头（FIFO 弹出后的在途状态）。
+   *
+   * 为什么需要它：投递 steer 的那一刻要把一条 user 消息插进 `messages`。
+   * 如果直接 `shift()` 然后拼消息，中间要是有别的东西读了队列就会不一致。
+   * 而**先记账、再插入**这两步之间必然有一个 dispatch 边界（插入要发一条
+   * `queue.delivered`），所以「已经取出来但还没插」的中间态必须显式存下来 ——
+   * 否则连按两次「取队列」会把同一条消息发两遍。
+   */
+  deliveringInput: QueuedInput | null;
+  /** 这条在途消息要送到哪一列（决定它算 steer 还是 followUp 的落点）。 */
+  deliveringAs: QueueKind | null;
   usage: Usage | null;
   totalCost: number;
   error: string | null;
@@ -258,6 +337,24 @@ export interface AgentState {
   traceBegun: boolean;
   /** 当前在跑的 LLM 尝试节点 id；没有则 null。 */
   openLlmNodeId: string | null;
+  /** 当前在跑的 step 容器节点 id（`step.start`）；没有则 null。 */
+  openStepNodeId: string | null;
+  /** 当前回合容器节点 id（`turn.start`）；没有则 null。 */
+  openTurnNodeId: string | null;
+  /**
+   * `openTurnNodeId` 那个容器的**序号**（= 开它时的 turnIndex）。
+   *
+   * 为什么不能只靠 `openTurnNodeId !== null` 判断「容器开着」：followUp 到达时
+   * reducer 会**直接开新容器**而不给旧回合发 `turn.end`（那条路在 Cmd.run 回来时
+   * 没人冲刷），于是一段时间里「新容器开着、旧容器还没关」。
+   *
+   * 这个字段就是用来区分那两种情况的：`openTurnSeq < turnIndex` = 有个旧容器待收尾。
+   */
+  openTurnSeq: number | null;
+  /** 当前回合里**已经结束**的 step 数（写 turn.end 的标签用）。 */
+  turnSteps: number;
+  /** 当前 step 里**已经完成**的工具数（写 step.end 的标签用）。 */
+  stepToolCalls: number;
   /** 正在执行的工具 → 它的 attempt 节点 id。 */
   openToolNodeIds: Readonly<Record<string, string>>;
   /**
@@ -396,6 +493,18 @@ export function createInitialState(options: InitialStateOptions): AgentState {
     // 曾经默认 25，表现为「模型正干着活突然停了」—— 但用户只发了一条消息，
     // 是 25 次 LLM 调用把这个大需求砍断了。命令行的 --max-turns 仍可显式设一个兜底值。
     maxTurns: options.maxTurns ?? Number.POSITIVE_INFINITY,
+    turnIndex: 0,
+    stepIndex: 0,
+    totalSteps: 0,
+    openStepNodeId: null,
+    openTurnNodeId: null,
+    openTurnSeq: null,
+    turnSteps: 0,
+    stepToolCalls: 0,
+    steerQueue: [],
+    followUpQueue: [],
+    deliveringInput: null,
+    deliveringAs: null,
     usage: null,
     totalCost: 0,
     error: null,

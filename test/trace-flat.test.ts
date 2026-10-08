@@ -89,7 +89,8 @@ function assertAllFlat(rendered: string, what: string): void {
 test('正常对话：一条链 = 一张平铺的列表，一行缩进都没有', () => {
   const state = play(
     { type: 'user.message', text: '算一下' },
-    { type: 'agent.run' },
+    { type: 'turn.start' },
+    { type: 'step.start' },
     { type: 'llm.done', message: assistantMessage([{ type: 'text', text: '42' }], 'stop') },
   );
   assertAllFlat(renderTree(state.trace, { maxWidth: 0 }), '单链');
@@ -110,20 +111,23 @@ test('装载节点（prompt.* / model.init）平铺 —— 它们本来就并列
   assertAllFlat(renderTree(state.trace, { maxWidth: 0 }), '根层的节点');
 });
 
-test('重试：同一父下的第 2 个 attempt 才开始缩进', () => {
+test('重试：同一父下的第 2 个 step 才开始缩进', () => {
   const state = play(
     { type: 'user.message', text: '你好' },
-    { type: 'agent.run' },
+    { type: 'turn.start' },
+    { type: 'step.start' },
     { type: 'llm.failed', error: 'LLM 调用超时', kind: 'timeout' },
-    { type: 'agent.run' },
+    { type: 'step.start' },
     { type: 'llm.done', message: assistantMessage([{ type: 'text', text: '好了' }], 'stop') },
   );
   const rendered = renderTree(state.trace, { maxWidth: 0 });
   console.log(`\n${rendered}\n`);
 
-  // 两个 attempt 是兄弟 → 真的有分叉，树枝要画出来。
-  assert.match(rendered, /├── ✗ n2 llm\.attempt/);
-  assert.match(rendered, /└── ✓ n4 llm\.attempt/);
+  // 两个 step 容器是兄弟 → 真的有分叉，树枝要画出来。
+  // （第 2 个 step 是**兄弟而不是续用** —— 失败的 step 自己关掉，重试另开一个。
+  // 节点号：n1 user / n2 turn / n3 step1 / n4 error / n5 step1.end / n6 step2 …）
+  assert.match(rendered, /├── ✗ n3 step\.start/);
+  assert.match(rendered, /└── ✓ n6 step\.start/);
   // user 只有一个孩子（那棵分叉树），所以它自己**不**缩进 —— 分叉从它下面才开始。
   assert.match(rendered, /^✓ n1 user/m);
 });
@@ -132,20 +136,30 @@ test('树结构本身没变：拉平只影响画法，不影响父子关系', ()
   // 防「为了让界面好看把树改平了」—— 那会让 tip、分叉、回放全失去意义。
   const state = play(
     { type: 'user.message', text: '你好' },
-    { type: 'agent.run' },
+    { type: 'turn.start' },
+    { type: 'step.start' },
     { type: 'llm.failed', error: '超时', kind: 'timeout' },
-    { type: 'agent.run' },
+    { type: 'step.start' },
     { type: 'llm.done', message: assistantMessage([{ type: 'text', text: '好了' }], 'stop') },
   );
-  const attempts = state.trace.order.filter((id) => state.trace.nodes[id]?.kind === 'llm.attempt');
-  const userNode = state.trace.order[0];
-  assert.equal(attempts.length, 2);
-  // 两个 attempt 仍是**同一个父**（git 语义的核心，见 trace.ts 的文件注释）。
-  for (const id of attempts) {
-    assert.equal(state.trace.nodes[id]?.parentId, userNode, '拉平不能动父子关系');
+  const steps = state.trace.order.filter((id) => state.trace.nodes[id]?.kind === 'step.start');
+  const userNode = state.trace.order[0] ?? '';
+  const turnNode = state.trace.order[1] ?? '';
+  assert.equal(steps.length, 2);
+  // 两个 step 仍是**同一个父**（git 语义的核心，见 trace.ts 的文件注释）。
+  // 而那个父现在是 turn 容器 —— 新层级多了一节，但分叉语义没变。
+  assert.equal(state.trace.nodes[turnNode]?.kind, 'turn.start');
+  assert.equal(state.trace.nodes[turnNode]?.parentId, userNode, 'turn 挂在 user 下面');
+  for (const id of steps) {
+    assert.equal(state.trace.nodes[id]?.parentId, turnNode, '拉平不能动父子关系');
   }
-  // 成功后才推进 tip。
-  assert.equal(state.trace.tipId, state.trace.order[state.trace.order.length - 1]);
+  // 成功后才推进 tip —— 而且推进的是 `llm.result`（n7），**不是**随后的 `step.end`。
+  //
+  // 这条断言的意义：step/turn 是容器，容器闭合不等于「这里发生了一件事」。
+  // 若 step.end 也推进 tip，工具结果与容器就会抢着当 tip，HEAD 指向一个没有内容的节点。
+  assert.equal(state.trace.tipId, 'n7', 'tip 是 llm.result，不是 step.end');
+  assert.equal(state.trace.nodes['n7']?.kind, 'llm.result');
+  assert.equal(state.trace.nodes['n8']?.kind, 'step.end');
 });
 
 // ── 并行工具要走真环（工具节点是 effect 开的，reducer 造不出来） ──

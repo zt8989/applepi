@@ -1,8 +1,9 @@
 node_modules/
 dist/
 .worktrees/
-.env
 *.log
+
+# 凭证只放 ~/.pi/agent/auth.json（本仓库不再有 .env）
 
 # pnpm patch 的临时工作区（`pnpm patch` 创建，`pnpm patch-commit` 后可以删）。
 node_modules/.pnpm_patches/

@@ -37,7 +37,7 @@ import {
 import { abortRun } from '../run-control';
 import { renderTree, traceStats, type TraceNode, type TraceTree } from '../trace';
 import { compactReasonText } from '../compact';
-import type { AgentState } from '../state';
+import type { AgentState, QueuedInput, QueueKind } from '../state';
 import type { AgentStore } from '../store';
 import type { AgentAction } from '../actions';
 import type { ToolCall } from '@earendil-works/pi-ai';
@@ -128,8 +128,17 @@ function nodeColor(node: TraceNode): (t: string) => string {
   switch (node.kind) {
     case 'user':
       return cyan;
-    case 'llm.attempt':
-      return node.status === 'error' ? red : blue;
+    // turn 与 step 都是**容器**（它们不推进 tip，里面才是发生的事）。
+    // 都给暗色：容器是结构，不是事件 —— 给亮色会在树上凭空多出几条抢注意力的大块。
+    // pending 时也还是暗色：容器开着不代表出错，闭合状态由它里面的 result/error 表达。
+    case 'turn.start':
+      return dim;
+    case 'turn.end':
+      return dim;
+    case 'step.start':
+      return node.status === 'error' ? red : dim;
+    case 'step.end':
+      return node.status === 'error' ? red : dim;
     case 'llm.result':
       return green;
     case 'tool.attempt':
@@ -206,7 +215,11 @@ export function renderColoredTree(tree: TraceTree, maxWidth: number): string {
 export function statusLine(state: AgentState): string {
   const stats = traceStats(state.trace);
   const traceBits = [`节点 ${state.trace.order.length}`];
-  if (stats.turns > 0) traceBits.push(`${stats.turns} 轮`);
+  // **回合与步数分开报**：它们是两个不同的口径，混成一句「N 轮」就分不清
+  // 「模型说了 5 句话」还是「模型调用了 5 次工具」。
+  if (stats.turns > 0) traceBits.push(`回合 ${stats.turns}`);
+  if (stats.steps > 0) traceBits.push(`步 ${stats.steps}`);
+  if (stats.toolCalls > 0) traceBits.push(`工具 ${stats.toolCalls}`);
   if (stats.retries > 0) traceBits.push(`重试 ${stats.retries}`);
   if (stats.errors > 0) traceBits.push(red(`错误 ${stats.errors}`));
   const cost = state.totalCost > 0 ? ` · $${state.totalCost.toFixed(4)}` : '';
@@ -260,6 +273,48 @@ export interface StatsLine {
   text: string;
   /** 要在 dim 底箱里保持告警色的子段。 */
   warnings: { find: string; paint: (s: string) => string }[];
+}
+
+/**
+ * 排队中的用户输入面板。空队列时返回空串（面板自己不占高度）。
+ *
+ * 与 pi 的 `updatePendingMessagesDisplay()` 同一形状与同一口径：
+ *
+ * ```
+ * Steering: 顺便看下版本
+ * Follow-up: 待会儿再说
+ * ⏎ <key> to edit all queued messages
+ * ```
+ *
+ * ## 为什么 steer 与 followUp 要用**不同的标记
+ *
+ * 两者投递给模型的时机不同，用户对它们的预期也不同：steer 是「打断现在这条线」，
+ * followUp 是「等它说完」。若都显示成同一行「已排队」，用户就无法判断自己的话
+ * 到底什么时候会被看见——而这正是使用这两个键的全部意义。
+ */
+export function renderQueuePanel(state: AgentState, width: number): string {
+  const rows: string[] = [];
+  for (const item of state.steerQueue) {
+    rows.push(dim(`Steering: ${truncateToWidth(singleLine(item.text), Math.max(8, width - 12))}`));
+  }
+  for (const item of state.followUpQueue) {
+    rows.push(dim(`Follow-up: ${truncateToWidth(singleLine(item.text), Math.max(8, width - 12))}`));
+  }
+  if (rows.length === 0) return '';
+  return rows.join('\n');
+}
+
+/** 队列里那句话压成一行（队列面板只有一行高，多行会把输入框顶下去）。 */
+function singleLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * 造一条排队输入。附件（图片）一并带过去 —— 与 `user.message` 同一个形状，
+ * 所以「在生成中附了张图」也能排队。
+ */
+function queuedInput(text: string): QueuedInput {
+  return { text, content: [{ type: 'text', text }], at: Date.now() };
 }
 
 export function statsLine(state: AgentState): StatsLine {
@@ -612,6 +667,23 @@ export async function runTui(options: TuiOptions): Promise<number> {
    */
   const transcript = new TranscriptChunks();
   const tracePanel = new Text('', 0, 0);
+  /**
+   * 排队中的用户输入（steer / followUp）—— 与 pi 的 `pendingMessagesContainer` 同一形状：
+   * 一行一条，前面标出它去哪一列。
+   *
+   * ## 为什么**常驻**在底区而不是 notify 一下就没
+   *
+   * 排队的消息在真正插进去之前，模型**完全不知道它存在**。用户如果看不到队列，
+   * 打完字就不知道「它到底收没收到」—— 而这个反馈缺失会让人重复打一遍
+   * （于是模型收到两条几乎相同的话）。
+   *
+   * ## 为什么用 `setText` 而不是函数形式
+   *
+   * pi-tui 的 `Text` 构造器只吃字符串（官方内部那个 `ThemedText` 才吃函数，
+   * 两者不是同一个东西）。队列长度会变，所以每次 `refresh()` 里重算一遍再 setText ——
+   * 一共三五行的字符串，重算成本可以忽略，而增删子节点要处理很多状态。
+   */
+  const queuePanel = new Text('', 0, 0);
   const loader = new CancellableLoader(tui, (s) => cyan(s), (s) => dim(s), '');
   /**
    * 空闲时**不显示**转圈。
@@ -703,6 +775,17 @@ export async function runTui(options: TuiOptions): Promise<number> {
   let expanded = false;
   let loading = false;
   let lastLoaderMessage = '';
+  /**
+   * 入队模式：生成中提交的话，默认走哪一列。
+   *
+   * 默认 **steer**（对齐 pi）：它是最常见的意图（「等等，改用这个」），而且
+   * followUp 的语义在「说完再插」这个场景下更接近默认值。
+   *
+   * 用 `cycleQueueMode()` 切。为什么不做成「回车两次 = 先 steer 再升级成 followUp」：
+   * 那需要在队列里记住「它本来想干什么」，而实际结果往往是用户改主意了 ——
+   * 显式一个键位切换更清楚，也与 pi 的两个独立键位一致。
+   */
+  let queueMode: QueueKind = 'steer';
   /** 命令反馈：插在对话区顶部，6 秒后自动消失（不占输入区）。 */
   const notice = { text: '' };
   let noticeUntil = 0;
@@ -739,6 +822,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // dim 要包住**整行**而不是每段单独包：`twoColumn` 靠 visibleWidth 算空白，
     // 已经上了色的那段会算错宽度。做法是先用无色文本算好对齐，再整体包 dim。
     const width = terminal.columns ?? 100;
+    // 队列面板同样要补到全宽（否则少一行时残影会留在屏幕上）。
+    queuePanel.setText(padToWidth(renderQueuePanel(state, width), width));
     const stats = statsLine(state);
     const statsRow = twoColumn(stats.text, modelLine(state), width);
     footer.setText(
@@ -846,6 +931,15 @@ export async function runTui(options: TuiOptions): Promise<number> {
         refresh();
         return true;
       }
+      // Ctrl+Q：切换入队模式（steer ↔ followUp）。
+      //
+      // **不用 Ctrl+S / Ctrl+U**（pi 用的那两个）：它们在某些终端里会被流控吃掉
+      // （Ctrl+S 是 XOFF），按下去「什么反应都没有」—— 而那正好是最需要反馈的时刻。
+      // Ctrl+Q 与本项目已用的三个（Ctrl+T/O/C）不冲突，扩展也抢不走（内置优先）。
+      if (matchesKey(data, 'ctrl+q')) {
+        cycleQueueMode();
+        return true;
+      }
       return false;
     };
 
@@ -893,11 +987,40 @@ export async function runTui(options: TuiOptions): Promise<number> {
       return;
     }
     if (store.getState().phase !== 'idle') {
-      lastLoaderMessage = `${yellow('上一回合还没结束（Ctrl-C 可中断）')}`;
-      refresh();
+      // **环在跑：入队，而不是拒绝。**
+      //
+      // 早期版本直接回一句「上一回合还没结束（Ctrl-C 可中断）」，于是用户想问
+      // 「顺便查下版本」时唯一的选择是等——或者中断（丢掉模型已经跑出来的东西）。
+      // 真正的做法与 pi 一样：**排进队列**，看它什么时候插进去。
+      //
+      // 用哪一列由**模式键**决定（默认 steer）：
+      // - steer：当前 step 的工具跑完后、下一次 LLM 调用前插进去（会打断延续）。
+      // - followUp：等模型说完、开一个新回合才插（不打断）。
+      // 见 `queueMode` 的注释。
+      queue(queuedInput(input));
       return;
     }
     send(input);
+  };
+
+  /**
+   * 把一句排队的输入送进内核。
+   *
+   * **入队不等于立刻插进去** —— 投递时机由 reducer 决定（见 queue.input 的注释）：
+   * steer 在「工具跑完、下一次 LLM 调用前」，followUp 在「回合收工时」。
+   */
+  const queue = (item: QueuedInput): void => {
+    store.dispatch({ type: 'queue.input', text: item.text, content: item.content, as: queueMode });
+    // 提示一句去了哪一列：用户得知道「我现在说的话会不会打断它」。
+    notify(dim(`${queueMode === 'steer' ? 'Steering' : 'Follow-up'}: ${item.text}`));
+    refresh();
+  };
+
+  /** 在 steer 与 followUp 之间切模式（对应 pi 的 `app.message.steer` / `followUp` 两个键位）。 */
+  const cycleQueueMode = (): void => {
+    queueMode = queueMode === 'steer' ? 'followUp' : 'steer';
+    notify(dim(`入队模式：${queueMode === 'steer' ? 'steer（工具跑完后插进去）' : 'followUp（说完再插）'}`));
+    refresh();
   };
 
   /**
@@ -1136,6 +1259,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
       // 扩展的 widget（`pi-web-access` 的活动面板用它）。**不给 basis** ——
       // 给了就把高度钉死，面板里的内容一变就错位（同上面那三个的理由）。
       ...[...widgetSlots.values()].map((component) => ({ component, minSize: 1 })),
+      // 队列面板在输入框**之上** —— 用户敲完字、回车之前就该看到刚才排了什么。
+      { component: queuePanel, minSize: 1 },
       { component: loader, minSize: 1 },
       { component: editor, minSize: 3 },
       { component: footer, basis: 2, grow: 0, minSize: 2 },

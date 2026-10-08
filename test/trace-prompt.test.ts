@@ -190,14 +190,15 @@ test('prompt.segment.added 进树，parent 是此刻的 tip（即「下一轮会
 test('追加 prompt 后，紧随其后的 LLM 尝试是它的子节点 —— 树上能看出「这次调用读到了这段」', () => {
   let state = reduce(seed(), { type: 'prompt.init', systemPrompt: 'p', tools: TOOLS });
   state = reduce(state, { type: 'prompt.segment.added', role: 'system', text: '额外约束' });
-  // 追加的 prompt 不推进 tip（tip 仍是 null），所以下一轮 attempt 从同一个 tip 出发 ——
-  // 也就是说 attempt 会成为 prompt.segment 的兄弟，而不是它的子节点。
+  // 追加的 prompt 不推进 tip（tip 仍是 null），所以下一个容器从同一个 tip 出发 ——
+  // 也就是说 step 会成为 prompt.segment 的兄弟，而不是它的子节点。
   const segment = state.trace.order[state.trace.order.length - 1] as string;
   assert.equal(state.trace.tipId, null, 'segment 不推进 tip');
 
-  state = reduce(state, { type: 'agent.run' });
+  state = reduce(state, { type: 'step.start' });
   const attempt = state.trace.order[state.trace.order.length - 1] as string;
-  assert.equal(state.trace.nodes[attempt]?.parentId, null, 'attempt 与 segment 同级（共享同一个 tip）');
+  assert.equal(state.trace.nodes[attempt]?.kind, 'step.start');
+  assert.equal(state.trace.nodes[attempt]?.parentId, null, 'step 与 segment 同级（共享同一个 tip）');
   // 顺序上 segment 在 attempt 之前 —— 渲染出来就是「这段 prompt 在这次调用上面」。
   assert.ok(
     state.trace.order.indexOf(segment) < state.trace.order.indexOf(attempt),

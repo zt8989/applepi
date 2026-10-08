@@ -4,12 +4,15 @@
   "private": true,
   "description": "Redux Loop 驱动的 Agent Loop：reducer 纯函数返回 loop(state, Cmd)，LLM 流式调用与工具执行都是 Cmd；Provider 走 Pi（@earendil-works/pi-ai，DeepSeek）。",
   "type": "module",
+  "bin": {
+    "ela": "./bin/ela.mjs"
+  },
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "start": "node --env-file-if-exists=.env --import tsx src/tui.ts",
-    "agent": "node --env-file-if-exists=.env --import tsx src/tui.ts",
+    "start": "node --import tsx src/tui.ts",
+    "agent": "node --import tsx src/tui.ts",
     "typecheck": "tsc --noEmit",
 
     "config:migrate": "node --import tsx scripts/migrate-config-dir.ts",

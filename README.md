@@ -40,7 +40,31 @@ agent** —— 循环不是写出来的，是 reducer 与副作用互相 dispatc
 
 ```bash
 pnpm install
+npm link          # 把 `ela` 装成全局命令（软链本仓库）
 ```
+
+全局入口是 `bin/ela.mjs`：**一个只做装载的启动器**，一行逻辑也不放它里面 ——
+`src/tui.ts` 是 TypeScript 且用 `moduleResolution: "Bundler"` + 无扩展名相对导入，
+tsc 不 emit（`noEmit`），产物也没法被 node 原生 ESM 解析，所以必须经 tsx 装载
+（`tsx/esm/api` 的 `tsImport()`，不用改 tsx 的 exports，不用 patch）。
+npm 只拷 `bin/`（`files` 之外的仓库文件不会跟着走），入口全部靠 `import.meta.url`
+推仓库根 —— 与调用时的 cwd 无关，因此**任何目录里都能跑**：
+
+```bash
+ela                              # 交互式
+ela -p "今天几号？"              # 跑一条就退出
+ela --demo                       # 不打网络
+ela --cwd ~/some/project         # 工具的文件边界换到别处
+```
+
+改 `src/*.ts` 后**直接生效**，不用重新 link。代价是仓库的 `node_modules` 得在
+（`rm -rf node_modules` 之后全局命令会报模块找不到 —— 这是软链方案的固有性质）。
+
+> **不读 `.env`**。key 来自 `~/.pi/agent/auth.json`、shell 环境变量、或 models.json
+> 条目内的 `apiKey` —— `ela` 与 `pnpm start` 现在**完全等价**。
+> 刻意没有 `.env` 这一档：从调用目录读 `.env` 会把「A 项目的 key」发给「B 项目」，
+> 比读不到更难查。要带 key 用 `ela --api-key <key>` 或设真环境变量
+> （凭证优先级与 pi 一致，见 `docs/architecture/provider.md`）。
 
 `pnpm-workspace.yaml` 里的 `allowBuilds` 放行了三个包的构建脚本（esbuild / protobufjs /
 @google/genai）—— 不放行的话 pnpm 10+ 会拦截它们，并让**每条 pnpm 命令都先跑一次
@@ -86,8 +110,8 @@ patch 丢了或 pnpm 升级后没重新应用，这些 import 会全部变成
 `ERR_PACKAGE_PATH_NOT_EXPORTED` —— `test/pi-subpath-patch.test.ts` 盯着这件事。
 
 三个 json 手写或从别处拷进来。`models.json` 放 provider 的 baseUrl / api / 模型目录，
-`auth.json` 只放凭证；`.env` 里的 `<ID>_API_KEY` 也能用（`pnpm start` 走
-`--env-file-if-exists=.env`）。命令行的 `-P` / `-m` 仍然优先。
+`auth.json` 只放凭证；也可以用 `<ID>_API_KEY` 环境变量（**不读 `.env`**）。
+命令行的 `-P` / `-m` 仍然优先。
 
 - `-P/--provider`：models.json 里自定义的 provider，或 pi 自带的 44 个内置 provider
   （`anthropic` / `openai` / `deepseek` / …）。凭证优先级：models.json > auth.json >
@@ -119,12 +143,14 @@ API key，比如 exa / tavily / brave。）
 ## 运行
 
 ```bash
-npm install
+pnpm install
 ```
+
 **终端界面**（pi-tui）：
 
 ```bash
-pnpm start                                  # 交互式
+pnpm start                                  # 交互式（开发用）
+ela                                        # 交互式（全局命令，任何目录；与上面等价）
 pnpm start -p "今天几号？"                  # 跑一条就退出，顺带打印轨迹树
 pnpm start --demo                          # 不打网络：pi-ai 自带的 faux provider
 pnpm start --llm-timeout 30000 --attempts 3   # 短超时 + 三次尝试，好看到重试分叉
@@ -132,8 +158,45 @@ pnpm start --cwd ../other                  # 工具的文件操作边界换到�
 ```
 
 界面里：`Ctrl+T` 切换轨迹面板，`Ctrl+O` 展开/收起工具输出，`Ctrl+C` 中断当前回合
-（空闲时退出）。布局照抄 pi 的终端界面：顶栏只放轨迹统计，模型与工作目录在底栏，
+（空闲时退出），`Ctrl+Q` 切换入队模式。布局照抄 pi 的终端界面：顶栏只放轨迹统计，模型与工作目录在底栏，
 工具调用是带底色的整块。
+
+### 生成中也能说话：steer 与 followUp
+
+环在跑的时候直接敲字回车，**不用等也不用中断**。话会排进队列，按时机插进对话：
+
+| 模式 | 插进去的时机 | 什么时候用 |
+| --- | --- | --- |
+| **steer**（默认） | 当前 step 的工具跑完后、**下一次 LLM 调用前** | 「等等，改用这个」「顺便查下版本」 |
+| **followUp** | 模型没有工具调用了（回合收工），然后**开一个新回合** | 「先按你说的做，弄完再说下一件事」 |
+
+两列队列各自 FIFO、互不排队。语义与 pi 的 `steer()` / `followUp()` 一致。
+`Ctrl+Q` 在两者之间切；底区会一直列着排队的消息（`Steering:` / `Follow-up:`），
+投递后自动消失——排队的消息在插进去之前模型**完全不知道它存在**，所以必须让人看得见。
+
+### 回合（turn）与步（step）
+
+一次用户输入引发的整个过程是一个**回合**（turn），里面可以有好几个**步**（step），
+一步 = 一次 LLM 调用 **加上它触发的工具批次**。轨迹树于是是：
+
+```text
+✓ n1 user: 今天几号？
+· n2 turn.start: 回合 1
+✓ n3 step.start: 第 1 步
+✓ n4 llm.result: 我来查
+✓ n5 tool.result: 42
+✓ n6 step.end: 第 1 步结束（1 个工具调用）
+✓ n7 step.start: 第 2 步
+✓ n8 llm.result: 今天是…
+✓ n9 step.end: 第 2 步结束（0 个工具调用）
+✓ n10 turn.end: 回合 1 结束：模型说完了 (reason=completed, steps=2)
+HEAD → n10
+```
+
+顶栏分别报**回合数 / 步数 / 工具数**——它们是三个不同的口径，混成一句「N 轮」就分不清
+「模型说了 5 句话」还是「模型调了 5 次工具」。重试的分叉长在 **step 这一层**：
+失败的 step 自己关掉，重试另开一个兄弟 step（`turn.start` / `step.start` 都不推进 tip，
+所以兄弟都挂在同一个 turn 下面，与原先 `llm.attempt` 的 git 语义一致）。
 
 > **pnpm 与参数**：`pnpm start -p "问题"`，**中间没有 `--`**。写了的话 pnpm 会把它
 > 一起透传给脚本，于是 `src/tui.ts` 收到一个孤零零的 `--` 并报「未知选项」。
@@ -186,7 +249,7 @@ auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 prov
 ## 测试
 
 ```bash
-pnpm test           # 307 个离线测试，不打网络
+pnpm test           # 323 个离线测试，不打网络
 pnpm run typecheck  # tsc --noEmit（src + test + scripts）
 ```
 
@@ -198,6 +261,7 @@ reducer 纯性、轨迹树的不变量（**超时后重试的父 id 指向超时
 
 ```
 src/                    内核 + pi-tui 界面（见 docs/architecture.md）
+bin/ela.mjs              全局 CLI 启动器（只做 tsx 装载，逻辑都在 src/）
 test/                   离线测试
 docs/architecture/      架构现状
 patches/                pnpm patch（打开 pi-coding-agent 的内部子路径）

@@ -79,6 +79,10 @@ test('轨迹落盘：错误节点也会被写进 JSONL（这就是「错误也�
         }
       });
     });
+    // **等回合容器真的闭合**：`turn.end` 是在 phase 转 idle 之后才 flush 的
+    // （见 reducer 里 `closeTurn()` 的注释）。不等它，落盘的树就少一个节点，
+    // 而回放出来的 turns 也会是 0 —— 那不是持久化的 bug，是读取得太早。
+    await new Promise((r) => setTimeout(r, 50));
     persistence?.dispose();
     await sink.close?.();
 
@@ -95,13 +99,18 @@ test('轨迹落盘：错误节点也会被写进 JSONL（这就是「错误也�
     assert.match(errorNode?.detail ?? '', /超时/);
     assert.equal(errorNode?.status, 'error');
 
-    // 重试产生了一个新的 attempt 节点，且父 id 指向超时前的节点。
-    const attempts = added.filter((n) => n?.kind === 'llm.attempt');
+    // 重试产生了一个新的 step 节点，且父 id 指向超时前的容器。
+    const attempts = added.filter((n) => n?.kind === 'step.start');
     assert.ok(attempts.length >= 2, '至少两次尝试');
+    // 多了一层 turn：重试的兄弟关系长在 **turn 容器**下面，而不是 user 下面。
+    // 「父 id 指向超时前的节点」这条需求没变，只是那棵树深了一节。
+    const turnNode = added.find((n) => n?.kind === 'turn.start');
+    assert.ok(turnNode, '有 turn 容器');
     const userNode = added.find((n) => n?.kind === 'user');
     assert.ok(userNode);
+    assert.equal(turnNode?.parentId, userNode.id, 'turn 挂在 user 下面');
     for (const attempt of attempts) {
-      assert.equal(attempt?.parentId, userNode.id, '每次尝试的父 id 都指向超时前的 user 节点');
+      assert.equal(attempt?.parentId, turnNode.id, '每次尝试的父 id 都指向同一个 turn 容器');
     }
 
     // 从文件回放，树与内存里的一致。
@@ -135,13 +144,17 @@ test('从 .trace/<id>.jsonl 能把整棵树读回来（loadTrace）', async () =
         }
       });
     });
+    // **等 turn.end 落盘**：phase 转 idle 早于回合容器闭合（见上面那个测试的注释），
+    // 直接 dispose 会丢掉 `turn.end`，回放出来的 turns 就成了 0。
+    await new Promise((r) => setTimeout(r, 50));
     persistence?.dispose();
     await sink.close?.();
 
     const tree = await loadTrace(sessionId, dir);
     assert.ok(tree, '能从文件读回');
     const stats = traceStats(tree);
-    assert.equal(stats.turns, 2, '两轮 LLM');
+    assert.equal(stats.turns, 1, '一个回合');
+    assert.equal(stats.steps, 2, '两步 = 两次 LLM 调用');
     assert.equal(stats.toolCalls, 1, '一次工具');
     assert.equal(stats.errors, 0);
     assert.ok(tree.tipId, 'HEAD 存在');

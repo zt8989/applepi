@@ -9,6 +9,8 @@ import type {
 } from '@earendil-works/pi-ai';
 import type { Message } from '@earendil-works/pi-ai';
 import type { LlmErrorKind, StopCause } from './state';
+import type { QueueKind } from './state';
+import type { TraceNodeStatus } from './trace';
 import type { SkillInfo } from './skills';
 import type { CompactReason } from './compact';
 
@@ -154,6 +156,95 @@ export type AgentAction =
       type: 'user.message';
       text: string;
       content?: (TextContent | ImageContent)[] | undefined;
+    }
+  /**
+   * ═══ steer / followUp ═══
+   *
+   * 环在跑的时候人还能说话。两种队列只差**投递时机**（语义与 pi 的
+   * `AgentSession.steer()` / `followUp()` 一致）：
+   *
+   * - `queue.input` + `as: 'steer'`：当前 step 的工具跑完后、下一次 LLM 调用前插进去。
+   *   它会打断「模型→工具→模型」的延续，让模型看见新的话。
+   * - `queue.input` + `as: 'followUp'`：等模型没有工具调用了（回合本该收工）才插，
+   *   然后开一个新回合。不打断任何东西，只是「接着聊」。
+   *
+   * 两条队列各自 FIFO、互不排队（与 pi 同）。
+   *
+   * ## 为什么不用 `user.message` 表达
+   *
+   * `user.message` 的语义是「开始一个新回合」—— 它会开 user 节点、清 `turns`、
+   * 把相位从 idle 拉到 thinking。而 steer 发生时相位正在 thinking/calling-tools，
+   * 走那条路会把正在跑的回合重置掉（用户看到「对话重来了一遍」）。
+   * 两者必须是不同的 action。
+   */
+  | {
+      type: 'queue.input';
+      text: string;
+      content?: (TextContent | ImageContent)[] | undefined;
+      as: QueueKind;
+    }
+  /**
+   * 一条排队的输入**已被取出并组装成 user 消息**。
+   *
+   * 由接线在「此刻该投递了」的那一刻发出；reducer 据此把消息插进 `messages`，
+   * 并顺带开一个 user 轨迹节点。
+   *
+   * ## 为什么投递本身也是一条 action
+   *
+   * 因为「什么时候该投递」是**状态决定的**（steer 在 step 收尾、followUp 在回合收工），
+   * 而 reducer 是唯一知道状态的地方。接线只能在收到某个 action 后读**迁移后**的
+   * state，判断出「队列头该走了」，再发这一条 —— 于是投递成了环上的一环，
+   * 而不是某个 effect 里的隐藏副作用。
+   */
+  | {
+      type: 'queue.delivered';
+      text: string;
+      content?: (TextContent | ImageContent)[] | undefined;
+      as: QueueKind;
+    }
+  /**
+   * ═══ turn / step 两层容器 ═══
+   *
+   * 这四条把原先的 `llm.attempt` 容器换掉了。新的层级：
+   *
+   *   user.message → turn.start → step.start → llm.result → tool.*
+   *                                        → step.end
+   *                  → turn.end
+   *
+   * - `turn.start` / `turn.end`：一次用户输入引发的整个回合。
+   * - `step.start` / `step.end`：一次 LLM 调用加上它触发的工具批次。
+   *
+   * ## 重试的开叉位置不变（但多了一层）
+   *
+   * 原先重试是在「同一个 tip 下开多个 `llm.attempt`」。现在容器（turn/step）都不推进 tip，
+   * 一次失败也不推进 tip，所以**重试开的新 step 仍然挂回同一个 turn 节点** ——
+   * 于是在 turn 下面长出分叉，与之前语义一致。
+   */
+  | { type: 'turn.start' }
+  /**
+   * 关回合容器。
+   *
+   * **不带 reason / reasonText / steps** —— 它们都能从 state 推出来（见迁移里那段）。
+   * 写在 action 上就是多一份真相：接线得先算出同样的值，而两处一旦漂移，
+   * 症状是「节点上写着「模型说完了」，而状态里是超时」—— 不报错，只误导人排障。
+   */
+  | { type: 'turn.end' }
+  /**
+   * 开一步的容器。
+   *
+   * **不带 stepIndex / attempt** —— 那两个数 reducer 自己能从 state 算出来
+   * （`stepIndex + 1` / `llmAttempts + 1`）。写在这里等于多一份真相：
+   * 接线得先算出同样的数再传进来，两处一旦漂移，节点标签与状态就对不上，
+   * 而症状是「界面上第 3 步，树里写第 2 步」—— 不报错，只误导。
+   */
+  | { type: 'step.start' }
+  | {
+      type: 'step.end';
+      stepIndex: number;
+      /** 这一次 step 的结局：`ok` / `error` / `aborted`。 */
+      status: TraceNodeStatus;
+      /** 这一 step 里完成了几个工具调用（0 = 纯 LLM 回答）。 */
+      toolCalls: number;
     }
   /** 跑一轮对话（= 调一次 LLM）。谁执行由 effect 表决定。 */
   | { type: 'agent.run'; text?: string | undefined }

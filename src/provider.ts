@@ -161,8 +161,14 @@ export function defaultStreamFn(runtime: AgentRuntime): StreamFn {
 const KEYLESS_PROVIDERS = new Set(['faux']);
 
 /**
- * 取该 provider 的 API key：有就返回；没有而它免鉴权（faux）就返回 undefined；
- * 否则抛出可读的错误。
+ * 取该 provider 的 API key。**三处来源，不读任何 `.env`**：
+ *
+ * 1. shell 环境变量 `<ID>_API_KEY`（`--api-key` 也是走这条路，见 tui.ts）
+ * 2. `~/.pi/agent/auth.json`（与 pi 同址，两边共用一份凭证）
+ * 3. models.json 条目内的 `apiKey`（在 `buildProvider` 那条路上，已 self-contained）
+ *
+ * 顺序与 pi 的凭证优先级一致。刻意**没有** `.env` 这一档：从调用目录读 `.env`
+ * 会把「A 项目的 key」发给「B 项目」，比读不到更难查。
  */
 export function resolveApiKey(provider: string): string | undefined {
   // 非字母数字的 provider id 要归一下（`my-gateway` → `MY_GATEWAY_API_KEY`），
@@ -170,14 +176,14 @@ export function resolveApiKey(provider: string): string | undefined {
   const envName = `${provider.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`;
   const fromEnv = process.env[envName];
   if (fromEnv) return fromEnv;
-  // 再看 `~/.redux-agent/auth.json` ——
-  // 这样即使项目 .env 里没有那个 key，配置家目录里的凭证也能用。
+  // 再看 `~/.pi/agent/auth.json`（pi 官方 `getAgentDir()`，见 config-home.ts）。
   const fromAuth = loadPiAuth()[provider]?.key;
   if (fromAuth) return fromAuth;
   if (KEYLESS_PROVIDERS.has(provider)) return undefined;
   throw new Error(
-    `缺少 ${envName}。三处任选其一：` +
-      `项目 .env、shell 环境变量、或 ~/.redux-agent/auth.json。`,
+    `缺少 ${envName}。两处任选其一：` +
+      `~/.pi/agent/auth.json 写 {"${provider}": {"type": "api_key", "key": "…"}}，` +
+      `或 shell 里设 ${envName}（或跑 ela --api-key）。`,
   );
 }
 

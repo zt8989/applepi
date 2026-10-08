@@ -46,18 +46,27 @@ reducer 只做两件事：算下一个状态、查「这个 action 类型的 eff
   │  dispatch({type:'user.message'})
   ├───────────────────────────►│
   │                            │  reducer 迁移：追加 user 消息、开一个 user 节点
-  │                            │  接线：Cmd.action(agent.run)
+  │                            │  接线：Cmd.action(turn.start)
   │                            │        ↓ 再走一次 dispatch
-  │                            │  reducer 迁移：开一个 llm.attempt 节点（parent = tip）
+  │                            │  reducer 迁移：开一个 turn.start 容器（回合层）
+  │                            │  接线：Cmd.action(step.start) + Cmd.action(agent.run)
+  │                            │        ↓ 再走一次 dispatch
+  │                            │  reducer 迁移：开一个 step.start 容器（parent = 回合容器）
   │                            │  接线：Cmd.run(callLlm)
   │                            │        ↓ effect 真去调模型
   │  ◄── 订阅回调 ──────────────┤  状态一变就重绘
   │                            │        ↓ token 增量 → llm.delta ×N
   │  ◄── 订阅回调 ──────────────┤
   │                            │  llm.done → 开 llm.result（有工具则 tool.call → runTools）
-  │                            │  tool.batch.done → agent.run → 下一轮
+  │                            │  tool.batch.done → 关掉 step → step.start → 下一轮
   │  ◄── 订阅回调（phase:idle）─┤  环闭合
+  │                            │        ↓ （turn.end 是 idle 之后才冲刷的）
+  │  ◄── 订阅回调 ──────────────┤  关掉回合容器（推进 tip）
 ```
+
+生成中还能说话：发 `queue.input`（`as: 'steer' | 'followUp'`）。steer 在「工具跑完、下一次
+LLM 调用前」投递并**留在当前回合**；followUp 在「回合收工」时投递并**开新回合**。
+详见 [loop](loop.md) 与 [trace](trace.md)。
 
 界面**不参与**中间任何一步，它只在状态变化时被告知。
 

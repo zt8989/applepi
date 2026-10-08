@@ -299,9 +299,9 @@ function envVarFor(providerId: string): string {
 /**
  * 把 models.json 里的一个条目装配成 pi-ai 的 `Provider`。
  *
- * auth 用 `envApiKeyAuth`：它按 `<ID>_API_KEY` 读环境变量，而 `npm start` 用了
- * `--env-file-if-exists=.env`，所以 key 从项目 `.env` 来。若 models.json 的条目里
- * 直接写了 `apiKey`，优先用它（自包含，不依赖环境）。
+ * auth 用 `envApiKeyAuth`：它按 `<ID>_API_KEY` 读环境变量。要带 key 就用真环境变量
+ * （或 `ela --api-key`，它也是写进环境变量的），**不读 `.env`**。
+ * 若 models.json 的条目里直接写了 `apiKey`，优先用它（自包含，连环境变量都不需要）。
  */
 export function buildProvider(
   providerId: string,
@@ -329,7 +329,7 @@ export function buildProvider(
   // 同一个 resolve —— 手写一个「只认某个 key」的版本反而会漏掉 env 的那条路。
   //
   // 优先级：条目内 apiKey > auth.json 的 key > `<ID>_API_KEY` 环境变量。
-  // `npm start` 用了 --env-file-if-exists=.env，所以 key 从项目 .env 来。
+  // 不读 `.env`（见 resolveApiKey 的注释：那个口子会把别的项目的 key 发出去）。
   const explicit = config.apiKey ?? auth[providerId]?.key;
   const envVar = envVarFor(providerId);
   const apiKeyAuth = explicit

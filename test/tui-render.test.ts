@@ -11,6 +11,7 @@ import {
   dim,
   dimLine,
   modelLine,
+  renderQueuePanel,
   renderTranscript,
   statsLine,
   statusLine,
@@ -18,7 +19,7 @@ import {
 } from '../src/tui/app';
 import { gitBranch } from '../src/tui/app';
 import { resolveThemeName, setupTheme } from '../src/tui/theme';
-import type { AgentState } from '../src/state';
+import { createInitialState, type AgentState } from '../src/state';
 import type { Message } from '@earendil-works/pi-ai';
 
 /**
@@ -681,4 +682,43 @@ test('statsLine：上下文超 70% 时给出告警段（而不是自己上色）
   assert.ok(out.warnings[0]?.find.includes('%'), out.warnings[0]?.find);
   // text 本身必须是无色的（否则 twoColumn 的宽度会算错）。
   assert.ok(!/\x1b/.test(out.text), `text 不该含 ANSI：${JSON.stringify(out.text)}`);
+});
+
+
+// ─── 队列面板 ───
+
+test('renderQueuePanel：空队列不占高度', () => {
+  const state = createInitialState({
+    systemPrompt: 's', providerName: 'faux', modelId: 'f', toolNames: [], sessionId: 't',
+  });
+  assert.equal(renderQueuePanel(state, 80), '', '空队列返回空串');
+});
+
+test('renderQueuePanel：steer 与 followUp 分行标出，各自带前缀', () => {
+  let state = createInitialState({
+    systemPrompt: 's', providerName: 'faux', modelId: 'f', toolNames: [], sessionId: 't',
+  });
+  state = {
+    ...state,
+    phase: 'thinking',
+    steerQueue: [{ text: '顺便看下版本', at: 1 }],
+    followUpQueue: [{ text: '待会儿再说', at: 2 }],
+  };
+  const out = stripTerminalSequences(renderQueuePanel(state, 80));
+  const lines = out.split('\n');
+  assert.equal(lines.length, 2, '两行');
+  assert.match(lines[0] ?? '', /^Steering: 顺便看下版本$/);
+  assert.match(lines[1] ?? '', /^Follow-up: 待会儿再说$/);
+});
+
+test('renderQueuePanel：多行文本压成一行（面板只有一行高）', () => {
+  const state = {
+    ...createInitialState({
+      systemPrompt: 's', providerName: 'faux', modelId: 'f', toolNames: [], sessionId: 't',
+    }),
+    steerQueue: [{ text: '第一行\n第二行', at: 1 }],
+  };
+  const out = stripTerminalSequences(renderQueuePanel(state, 80));
+  assert.equal(out.split('\n').length, 1, '换行被压掉');
+  assert.match(out, /第一行 第二行/);
 });

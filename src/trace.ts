@@ -39,8 +39,31 @@
 export type TraceNodeKind =
   /** 一条用户消息。 */
   | 'user'
-  /** 一次 LLM 调用尝试（可能在跑，也已成功或失败）。 */
-  | 'llm.attempt'
+  /**
+   * 一个回合的开始（容器）。
+   *
+   * **不推进 tip** —— 它是容器，闭合点是它的 `turn.end`（或它下面推进 tip 的那个子节点）。
+   */
+  | 'turn.start'
+  /**
+   * 一个回合的结束（容器闭合）。
+   *
+   * 与 `llm.result` / `tool.result` 一样**推进 tip**：它是这一回合的最后一件事，
+   * 后面发生的（下一个 turn、用户消息）都从它下面长出来。
+   */
+  | 'turn.end'
+  /**
+   * 一步的开始 = 一次 LLM 调用加上它触发的工具批次（容器）。
+   *
+   * 取代了原先的 `llm.attempt`：语义相同（它就是「一次尝试」的容器，parent 取发起那一刻的 tip），
+   * 但名字不预设了「里面一定只有 LLM」—— 一个 step 里还有工具。
+   *
+   * **不推进 tip**：失败时不推进（否则重试会挂到错误节点下），
+   * 成功时也不推进 —— 推进的是它里面的 `llm.result` / `tool.result`。
+   */
+  | 'step.start'
+  /** 一步的结束（容器闭合，不推进 tip —— tip 由里面的 result / error 推进）。 */
+  | 'step.end'
   /** 一次 LLM 调用的成功结果。 */
   | 'llm.result'
   /** 一个工具调用尝试。 */
@@ -127,15 +150,16 @@ function nextNodeId(tree: TraceTree): { id: string; seq: number } {
 }
 
 /**
- * 只有这几类节点推进 tip。attempt 节点**永远不推进** —— 它是容器（分叉点），
- * 它的 result / error 子节点才是闭合点。
+ * 只有这几类节点推进 tip。**容器（turn.* / step.start）永远不推进** ——
+ * 它们是分叉的容器，闭合点是里面的 result / error / turn.end 子节点。
  *
- * 这条规则正是「重试的父 id 指向超时前的节点」的根本原因：失败的 attempt 自己不闭合，
- * 挂在它下面的 error 节点也不闭合（error 不在 TIP_ADVANCING_KINDS 里），
+ * 这条规则正是「重试的父 id 指向超时前的节点」的根本原因：失败的 step 容器自己不闭合，
+ * 挂在它下面的 error 节点也不闭合（error 不在这个集合里），
  * 于是 tip 原地不动，下一次尝试的 parent 仍然取到超时前那个节点。
  */
 const TIP_ADVANCING_KINDS: ReadonlySet<TraceNodeKind> = new Set<TraceNodeKind>([
   'user',
+  'turn.end',
   'llm.result',
   'tool.result',
   'stop',
@@ -253,6 +277,7 @@ export function headPath(tree: TraceTree): TraceNode[] {
 
 export interface TraceStats {
   turns: number;
+  steps: number;
   toolCalls: number;
   errors: number;
   retries: number;
@@ -262,37 +287,50 @@ export interface TraceStats {
 
 export function traceStats(tree: TraceTree): TraceStats {
   let turns = 0;
+  let steps = 0;
   let toolCalls = 0;
   let errors = 0;
   let durationMs = 0;
   for (const id of tree.order) {
     const node = tree.nodes[id];
     if (!node) continue;
-    if (node.kind === 'llm.result') turns += 1;
+    // 回合数 = `turn.end` 的个数（容器闭合点，与界面的「回合」口径一致）。
+    // 不数 `turn.start`：开了却没闭合的回合（比如用户 Ctrl-C 掉）也会被算进去，
+    // 那不是「一个完成的回合」。
+    if (node.kind === 'turn.end') turns += 1;
+    // 步数 = `step.end` 的个数 —— 与 `turns` 同理，数闭合点。
+    if (node.kind === 'step.end') steps += 1;
     if (node.kind === 'tool.result') toolCalls += 1;
-    // 只数 kind==='error' 的**错误节点**。不能按 status 数：失败的 attempt 节点本身也会被
+    // 只数 kind==='error' 的**错误节点**。不能按 status 数：失败的容器节点本身也会被
     // 标成 error（它闭合了，但没推进 tip），连同它的 error 子节点一起数就把一次失败数成两次。
     if (node.kind === 'error') errors += 1;
     if (node.endedAt !== null) durationMs += node.endedAt - node.createdAt;
   }
-  // 「重试」= 同一个父节点下有**多个 LLM 尝试**（说明前一个没成，走了分支）。
+  // 「重试」= 同一个父节点下有**多个 step 容器**（说明前一个没成，走了分支）。
   //
-  // 只数 llm.attempt，**不能把 tool.attempt 算进来**：模型一轮里并行发两个工具时，
+  // 只数 step.start，**不能把 tool.attempt 算进来**：模型一轮里并行发两个工具时，
   // 这两个 tool.attempt 是同一个 llm.result 下的兄弟节点，按「多兄弟即重试」的判据会被记成一次重试。
   // 之前把工具也算上，于是每轮并行调用都虚增一个「重试」（实测一轮 2 个 bash 就 +1）。
   let retries = 0;
   for (const id of tree.order) {
     const node = tree.nodes[id];
     if (!node || node.parentId === null) continue;
-    if (node.kind !== 'llm.attempt') continue;
-    const attempts = childrenOf(tree, node.parentId).filter((c) => c.kind === 'llm.attempt');
-    // index > 0：它是同父下的第 2 个及以后的尝试，也就是「前一个失败后的重试」。
-    if (attempts.indexOf(node) > 0) {
+    if (node.kind !== 'step.start') continue;
+    const siblings = childrenOf(tree, node.parentId).filter((c) => c.kind === 'step.start');
+    // index > 0：它是同父下的第 2 个及以后的尝试。
+    //
+    // **而且那组里必须有失败的** —— 一个回合里模型本来就会跑好几个 step
+    // （模型→工具→模型→工具…），那是**同一个回合的正常推进**，不是重试。
+    // 早期版本写成「同父下有多个 step.start 就是重试」，于是每个正常回合都虚增一次
+    // —— 而顶栏恰恰显示这个数，用户会看到「重试 3」却一次超时都没发生。
+    //
+    // 判据用 isForkGroup 是为了与渲染层同一口径（那边也是「有失败才画分叉」）。
+    if (siblings.indexOf(node) > 0 && isForkGroup(siblings)) {
       retries += 1;
     }
   }
 
-  return { turns, toolCalls, errors, retries, durationMs };
+  return { turns, steps, toolCalls, errors, retries, durationMs };
 }
 
 // ─── 渲染：ASCII 树（--graph 风格） ───

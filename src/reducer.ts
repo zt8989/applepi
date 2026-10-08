@@ -7,9 +7,11 @@ import {
   stopCauseText,
   type AgentState,
   type LlmErrorKind,
+  type QueuedInput,
   type StopCause,
+  type TurnEndReason,
 } from './state';
-import { appendNode, patchNode, type TraceNode, type TraceTree } from './trace';
+import { appendNode, patchNode, type TraceNode, type TraceNodeStatus, type TraceTree } from './trace';
 import { compactReasonText, type CompactReason } from './compact';
 /**
  * 一张纯表：action → (下一个状态, 该发哪些 effect)。
@@ -19,11 +21,23 @@ import { compactReasonText, type CompactReason } from './compact';
  * 完全平级 —— 它们各自有一行，各自的效果来自注入的 effect 表。
  *
  * 环写出来就是这个表自己接上的：
- *   user.message    → [agent.run]
- *   agent.run       → [llm.done]（effect 回流）
- *   llm.done        → 无工具：[ ]（结束）／有工具：[tool.call]
+ *   user.message    → [turn.start → step.start → agent.run]
+ *   step.start      → [agent.run]
+ *   agent.run       → [llm.started → llm.delta* → llm.done]（effect 回流）
+ *   llm.done        → 无工具：[queue.delivered?] / [turn.end]（回合收工）
+ *                   ／有工具：[tool.call]
  *   tool.call       → [tool.batch.done]（effect 回流）
- *   tool.batch.done → [agent.run]   ← 环在这里闭合
+ *   tool.batch.done → steer 有货：[queue.delivered → step.start]
+ *                   ／否则：[step.start → agent.run]   ← 环在这里闭合
+ *
+ * ## 两层容器：turn 与 step
+ *
+ * - **turn** = 一次用户输入引发的整个回合（user → 若干 step → 收工）。
+ * - **step** = 一次 LLM 调用 **加上它触发的工具批次**（取代了原先的 `llm.attempt`）。
+ *
+ * 轨迹树于是是 `user → turn → step → llm.result / tool.*`。
+ * 重试的分叉发生在 **step 这一层**：容器与失败都不推进 tip，所以重试的新 step
+ * 仍然挂回同一个 turn 节点。
  */
 export type ReducerEffects = {
   [K in AgentActionType]: (
@@ -46,14 +60,29 @@ type TransitionHandlers = {
  * 轨迹小工具：全部是纯函数，只是为了让下面的 transitions 表读起来像业务而不是像 XML。
  */
 
-/** 开一个新的 LLM 尝试节点。parent 取**调用发起那一刻**的 tip。 */
-function openLlmAttempt(state: AgentState, now: number): { state: AgentState; node: TraceNode } {
+/**
+ * 开一个新的 step 容器（一次 LLM 调用 + 它的工具批次）。
+ *
+ * ## parent 为什么仍然是 tip
+ *
+ * 这是整个分叉语义的所在地。原先它开的是 `llm.attempt`，现在叫 `step.start`，
+ * 但 parent 的取法**一模一样**：取**发起这一刻**的 tip。
+ *
+ * 于是第一次失败（step 不推进 tip、error 也不推进）之后，重试开的新 step 拿到的
+ * 仍然是超时前那个节点的 id —— 在 turn 容器下面长出 git 那样的分叉。
+ */
+function openStepNode(state: AgentState, now: number): { state: AgentState; node: TraceNode } {
   const attempt = state.llmAttempts + 1;
-  // 「重试」= 本轮不是第一次尝试（第一次失败后接线又发了 agent.run）。
+  // 「重试」= 本次 step 不是第一次尝试（第一次失败后接线又发了 agent.run）。
   const retry = attempt > 1;
-  const { tree, node } = appendNode(state.trace, state.trace.tipId, 'llm.attempt', {
+  // step 挂到 **turn 节点**下面（而不是 tip）—— 这是新层级里唯一需要改的地方：
+  // 工具结果会推进 tip（tool.result 在集合里），若 step 也挂 tip，
+  // 第二个 step 就会挂到第一个 step 的 tool.result 底下，层数无法控制。
+  const parentId = state.openTurnNodeId ?? state.trace.tipId;
+  const stepIndex = state.stepIndex + 1;
+  const { tree, node } = appendNode(state.trace, parentId, 'step.start', {
     status: 'pending',
-    label: retry ? `第 ${attempt} 次尝试（重试）` : `第 ${attempt} 次尝试`,
+    label: retry ? `第 ${stepIndex} 步（重试）` : `第 ${stepIndex} 步`,
     meta: { provider: state.providerName, model: state.modelId },
     createdAt: now,
   });
@@ -62,16 +91,20 @@ function openLlmAttempt(state: AgentState, now: number): { state: AgentState; no
       ...state,
       trace: tree,
       openLlmNodeId: node.id,
+      openStepNodeId: node.id,
+      stepIndex,
       llmAttempts: attempt,
       retrying: retry,
+      // 这个 step 里已经完成的工具数（step.end 要用它写节点标签）。
+      stepToolCalls: 0,
     },
     node,
   };
 }
 
-/** 成功：在 attempt 下挂 result 节点（它才是推进 tip 的那个）。 */
+/** 成功：在 step 下挂 result 节点（它才是推进 tip 的那个）。 */
 function closeLlmSuccess(state: AgentState, now: number, detail: string): AgentState {
-  const openId = state.openLlmNodeId;
+  const openId = state.openStepNodeId ?? state.openLlmNodeId;
   let { trace } = state;
   if (openId) trace = patchNode(trace, openId, { status: 'ok', endedAt: now });
   const { tree, node } = appendNode(
@@ -81,6 +114,67 @@ function closeLlmSuccess(state: AgentState, now: number, detail: string): AgentS
     { status: 'ok', label: summarize(detail), detail, createdAt: now, endedAt: now },
   );
   return { ...state, trace: tree, openLlmNodeId: null, retrying: false };
+}
+
+/** 关掉当前 step 容器（`step.end` 节点）。它**不推进 tip** —— tip 由里面的 result 推进。 */
+function closeStepNode(
+  state: AgentState,
+  now: number,
+  status: TraceNodeStatus,
+): AgentState {
+  const openId = state.openStepNodeId;
+  if (openId === null) return { ...state, openLlmNodeId: null };
+  // `stepToolCalls` **先**取出来写进标签，**然后**才在返回值里归零。
+  // 顺序反了的话标签会永远写 0（拿到的已是清零后的值）——
+  // 而这个数在 step.end 之后就再也没地方能重新取到了。
+  const toolCalls = state.stepToolCalls;
+  const { tree } = appendNode(state.trace, openId, 'step.end', {
+    status,
+    label: `第 ${state.stepIndex} 步结束（${toolCalls} 个工具调用）`,
+    meta: { tools: String(toolCalls) },
+    createdAt: now,
+    endedAt: now,
+  });
+  return {
+    ...state,
+    trace: tree,
+    openStepNodeId: null,
+    openLlmNodeId: null,
+    totalSteps: state.totalSteps + 1,
+    // 下一步的工具数从头数（否则每个 step.end 的标签会一直累加）。
+    stepToolCalls: 0,
+    // **`turnSteps` 在这里加，而不是在各个调用点加。**
+    //
+    // 为什么：调它的地方有四四处（llm.done 无工具、llm.failed、llm.giveup、
+    // tool.batch.done），少一处就少算一步 —— 而 turn.end 的标签会写「1 步」
+    // 而树上明明有两个 step.end。那种错误不报错，只是数字对不上。
+    // 「关掉一个 step」这件事只发生在这里，所以计数器也只该在这里动。
+    turnSteps: state.turnSteps + 1,
+  };
+}
+
+/**
+ * 关掉整个回合（`turn.end` 节点，**推进 tip**）。
+ *
+ * 与 step 不同，回合容器闭合时**要**推进 tip —— 后面发生的事（下一回合、用户消息）
+ * 都从它下面长出来，与 `compact` 节点同口径。
+ */
+function closeTurnNode(
+  state: AgentState,
+  now: number,
+  reason: TurnEndReason,
+  reasonText: string,
+): AgentState {
+  const openId = state.openTurnNodeId;
+  if (openId === null) return state;
+  const { tree } = appendNode(state.trace, openId, 'turn.end', {
+    status: reason === 'completed' ? 'ok' : reason === 'aborted' ? 'aborted' : 'error',
+    label: `回合 ${state.turnIndex} 结束：${reasonText}`,
+    meta: { reason, steps: String(state.turnSteps) },
+    createdAt: now,
+    endedAt: now,
+  });
+  return { ...state, trace: tree, openTurnNodeId: null, openTurnSeq: null };
 }
 
 /**
@@ -94,11 +188,18 @@ function closeLlmFailure(
   now: number,
   error: string,
   kind: LlmErrorKind,
+  /** effect 告诉我们的节点 id（它知道自己开的是哪个 step）。 */
   nodeId: string | null,
   cause: StopCause,
 ): AgentState {
-  // effect 若带了自己的 nodeId（它知道自己开的是哪个 attempt），以它为准。
-  const openId = nodeId ?? state.openLlmNodeId;
+  // **effect 若带了自己的 nodeId，以它为准**（与旧代码一致）。
+  //
+  // 为什么要这个优先级：step 容器**会被重开**。一次重试开的是新的兄弟 step，而失败的
+  // 那一步早已关掉（`llm.failed` 里的 `closeStepNode`）—— 于是到下一次失败时
+  // `openStepNodeId` 可能已经指向**下一个** step 或是 null。若无脑用 state 里的那个，
+  // error 节点会被挂到错误的父下（症状：树分叉位置对不上，且不报错）。
+  // effect 手里握着自己开的那一步，所以它的说法更权威。
+  const openId = nodeId ?? state.openStepNodeId;
   let { trace } = state;
   // 用户自己按停止不是故障：标成 aborted（灰的），别和真错误（红的）混为一谈。
   const status = kind === 'aborted' ? 'aborted' : 'error';
@@ -450,7 +551,7 @@ const transitions: TransitionHandlers = {
     // 这一步就是「进入会话不建节点，发了第一句话才建」：内核一装配时树上还是空的
     // （prompt.init / model.init 只改 state），到这里才第一次有节点。
     const withInit = beginTrace(state, now);
-    // 用户节点是一棵新树的根，并且推进 tip —— 后面所有的 LLM 尝试都挂在它下面。
+    // 用户节点是一棵新树的根，并且推进 tip —— 后面所有的回合都挂在它下面。
     const { tree, node } = appendNode(withInit, withInit.tipId, 'user', {
       status: 'ok',
       label: summarize(action.text),
@@ -477,26 +578,300 @@ const transitions: TransitionHandlers = {
       // 归零前这里必须是 0 起步：一次提问 = 一个 turn = 一条 react 循环（LLM→工具→LLM…）。
       // 漏了这一行，第二次提问就只剩「25 减去前几次累计」那么点额度，于是聊着聊着就停了。
       turns: 0,
+      // **`turnIndex` 不在这里加**：那是 `turn.start` 的活。
+      // 两处都加会让第一个回合就变成「回合 2」（实测），而且没有任何报错 ——
+      // 界面只是每个回合都从 2 开始报。
+      //
+      // `stepIndex` / `turnSteps` 每个新回合都从头数。
+      stepIndex: 0,
+      turnSteps: 0,
       streamingText: '',
       thinkingText: '',
       pendingToolCalls: [],
       executing: [],
       messages: [...state.messages, message],
       openLlmNodeId: null,
+      openStepNodeId: null,
+      // **不填 openTurnNodeId**：回合容器由 `turn.start` 开（它才是「回合开始」这件事）。
+      // 这里抢先填上会让 `turn.start` 的防重入守卫直接返回，于是树上永远没有 turn 节点。
+      openTurnNodeId: null,
     };
   },
 
   /**
-   * 开一个新的 LLM 尝试。**这里是分叉发生的地方**：parent 取此刻的 tip。
-   * 第一次失败后 tip 原地未动，所以重试开的新 attempt 挂回同一个父节点 —— 父 id 指向超时前的节点。
+   * ═══ steer / followUp ═══
    *
-   * `openLlmNodeId !== null` 的守卫是为了防重入：上一次 attempt 还开着时不要又开一个。
+   * 两个队列**互不影响**：一列在等什么，与另一列有没有东西无关。
+   * 这与 pi 同（`getSteeringMessages()` 与 `getFollowUpMessages()` 是两个独立列表）。
+   *
+   * 空闲时收到队列消息 = 用户在等一个回合，直接变成正常输入：
+   * 那不是「打断」，是「接着说」。
    */
-  'agent.run': (state) => {
-    if (state.phase === 'thinking' && state.openLlmNodeId !== null) return state;
-    const opened = openLlmAttempt(state, Date.now());
+  'queue.input': (state, action) => {
+    const item: QueuedInput = {
+      text: action.text,
+      content: action.content,
+      at: Date.now(),
+    };
+    // 空闲 = 没有正在跑的回合可打断。这条消息应该**立即开一个新回合**，
+    // 而不是入队等一个永远不会来的投递时机（相位 idle 时既不会有 tool.batch.done
+    // 也不会有 llm.done 来触发投递）。所以这里直接转成 `user.message` ——
+    // 与 pi 的 `prompt()` 在空闲时直接开跑是同一个道理。
+    if (state.phase === 'idle') {
+      // 直接跑 user.message 的迁移 —— 复用那段「归零计数器 + 开 user 节点」的逻辑，
+      // 而不是手写一遍。写两遍必然漂移（而漂移的后果是第二个回合的计数从 1 开始）。
+      return transitions['user.message'](state, {
+        type: 'user.message',
+        text: action.text,
+        content: action.content,
+      });
+    }
+    return action.as === 'steer'
+      ? { ...state, steerQueue: [...state.steerQueue, item] }
+      : { ...state, followUpQueue: [...state.followUpQueue, item] };
+  },
+
+  /**
+   * 投递一条排队消息：组装成 user 消息插进 `messages`，并开一个 user 轨迹节点。
+   *
+   * ## 与 `user.message` 的差别（为什么必须是两条 action）
+   *
+   * `user.message` 会把相位拉到 thinking、把 `turns` 与 step 计数清零。
+   * 而投递 steer 时一个 step 可能刚结束，相位必须保持「还要继续跑」——
+   * 走 `user.message` 那条路会把正在跑的回合重置（用户看到「对话重来了一遍」）。
+   *
+   * 所以这里只做两件事：**加消息 + 开 user 节点**（带 `as` 标记），
+   * 其余状态由 wiring 随后发的 `step.start` / `agent.run` 推进。
+   */
+  'queue.delivered': (state, action) => {
+    // 防重入：一条已经在途（deliveringInput 非 null）时不接新的一条。
+    // 否则连按两次「取队列」会把同一条消息发两遍。
+    if (state.deliveringInput !== null) return state;
+    const now = Date.now();
+    const message: Message = {
+      role: 'user',
+      content: action.content ?? action.text,
+      timestamp: now,
+    };
+    const isSteer = action.as === 'steer';
+    // steer 的 user 节点挂在**当前回合容器**下面（它是这回合里的一个额外输入）；
+    // followUp 的则是**新回合的起点**，所以要挂在 tip 下面（新容器稍后开在它底下）。
+    const parentId = isSteer ? (state.openTurnNodeId ?? state.trace.tipId) : state.trace.tipId;
+    const userNode = appendNode(state.trace, parentId, 'user', {
+      status: 'ok',
+      label: `${isSteer ? 'steer' : 'followUp'}: ${summarize(action.text)}`,
+      detail: action.text,
+      meta: { queued: action.as },
+      createdAt: now,
+      endedAt: now,
+    });
+    const base: AgentState = {
+      ...state,
+      trace: userNode.tree,
+      messages: [...state.messages, message],
+      deliveringInput: null,
+      deliveringAs: null,
+      steerQueue: isSteer ? state.steerQueue.slice(1) : state.steerQueue,
+      followUpQueue: isSteer ? state.followUpQueue : state.followUpQueue.slice(1),
+    };
+    if (isSteer) {
+      // steer 不碰回合容器：它属于**当前**回合（对齐 pi：「当前 step 的工具跑完后插进来」）。
+      // 但相位要离开 idle —— 「接着往下走」这件事本身说明还有活要干。
+      return { ...base, openTurnNodeId: state.openTurnNodeId, phase: 'thinking' };
+    }
+    // **followUp 开新回合 —— 所以必须先把旧容器收尾。**
+    //
+    // 两点理由：
+    // 1. `step.start` 的防重入守卫是「容器开着就返回」。而不先关旧容器，
+    //    新容器一开就立刻撞上那条守卫（见下面 `openTurnSeq` 那句注释）。
+    // 2. 旧容器不关就没有 `turn.end` 节点 —— 树上会看到一个**永远不闭合**的回合，
+    //    而回放出来的 `stats.turns` 会少算一个。
+    //
+    // 旧回合的结局记 'completed'：它确实是正常说完的（正要接下一句）。
+    const closed = closeTurnNode(base, now, 'completed', turnReasonText('completed'));
+    // 新容器挂在 **tip** 下面（即那条 followUp 的 user 节点，它推进了 tip）。
+    const opened = appendNode(closed.trace, closed.trace.tipId, 'turn.start', {
+      status: 'pending',
+      label: `回合 ${closed.turnIndex + 1}`,
+      createdAt: now,
+    });
+    return {
+      ...closed,
+      trace: opened.tree,
+      openTurnNodeId: opened.node.id,
+      // 容器已经换过了，所以序号也同步 —— `step.start` 靠它判断「有没有旧容器待收尾」。
+      openTurnSeq: closed.turnIndex + 1,
+      turnIndex: closed.turnIndex + 1,
+      stepIndex: 0,
+      turnSteps: 0,
+    };
+  },
+
+  /**
+   * 开一个新回合的容器（`turn.start`）。
+   *
+   * ## 为什么它不跟着 `user.message` 一起开
+   *
+   * `user.message` 之后**不一定**会开 turn —— 队列里的 followUp 也会走
+   * `queue.delivered` → `agent.run`，那才是开 turn 的地方。把开容器从
+   * 「收到用户消息」拆出来，可以让两种入口共用同一条路径。
+   */
+  'turn.start': (state) => {
+    // 回合已经在跑就别再开一个。
+    if (state.openTurnNodeId !== null) return state;
+    const now = Date.now();
+    const turnIndex = state.turnIndex + 1;
+    // turn 挂到 **tip**（即那条 user 节点）下面。
+    const { tree, node } = appendNode(state.trace, state.trace.tipId, 'turn.start', {
+      status: 'pending',
+      label: `回合 ${turnIndex}`,
+      createdAt: now,
+    });
+    return {
+      ...state,
+      trace: tree,
+      openTurnNodeId: node.id,
+      turnIndex,
+      // 新回合从头数 step（而 turnIndex 是会话级的，不归零）。
+      stepIndex: 0,
+      turnSteps: 0,
+    };
+  },
+
+  /**
+   * 关掉回合容器。**收工相位由各发起方（llm.done / llm.failed / 撞上限）决定** ——
+   * 那时相位已经是 idle，所以这里不发 Cmd，只改状态。
+   */
+  'turn.end': (state) => {
+    // 没有容器可关（还没开过回合、或已经关过）：什么也不做。
+    if (state.openTurnNodeId === null) return state;
+    // 结局由 state 推：stopReason 说出了什么让它停下，stopCause 说得更准。
+    // 两者都是 null = 还在跑，那不该走到这里。
+    const reason: TurnEndReason =
+      state.stopCause === 'maxTurns'
+        ? 'maxTurns'
+        : state.stopCause === 'completed' || state.stopReason === 'completed'
+          ? 'completed'
+          : state.stopReason === 'aborted' || state.aborted
+            ? 'aborted'
+            : 'error';
+    const closed = closeTurnNode(state, Date.now(), reason, turnReasonText(reason));
+    // **关回合后 followUp 直接开新回合 —— 在这条迁移里做，不是接线里。**
+    //
+    // 为什么：这条路是被 llm.done / llm.failed / tool.batch.done 触发的，
+    // 而那三个都是 `Cmd.run` 回来的 —— 那一刻 install() enhancer 的 cmdsQueue
+    // 已经被外层 dispatch 取走了。接线在这里 redispatch 出去的 `turn.start`
+    // 没人冲刷，于是「模型说完了，用户排的那句话就永远躺在队列里」。
+    //
+    // 而 reducer 是纯的，它可以直接开：开容器、算序号，全在这一条迁移里完成。
+    const queued = state.followUpQueue[0];
+    if (queued === undefined) {
+      return { ...closed, stepIndex: 0, turnSteps: state.turnSteps };
+    }
+    const now = Date.now();
+    // 先把 followUp 那句话作为 user 消息插进去（它开启新回合，所以算回合的起点），
+    // 再开回合容器 —— 于是 user 节点在树上排在 turn.start 之前，与正常入口一致。
+    const message: Message = {
+      role: 'user',
+      content: queued.content ?? queued.text,
+      timestamp: now,
+    };
+    const userNode = appendNode(closed.trace, closed.trace.tipId, 'user', {
+      status: 'ok',
+      label: `followUp: ${summarize(queued.text)}`,
+      detail: queued.text,
+      meta: { queued: 'followUp' },
+      createdAt: now,
+      endedAt: now,
+    });
+    const opened = appendNode(userNode.tree, userNode.tree.tipId, 'turn.start', {
+      status: 'pending',
+      label: `回合 ${closed.turnIndex + 1}`,
+      createdAt: now,
+    });
+    return {
+      ...closed,
+      trace: opened.tree,
+      openTurnNodeId: opened.node.id,
+      openTurnSeq: closed.turnIndex + 1,
+      turnIndex: closed.turnIndex + 1,
+      stepIndex: 0,
+      turnSteps: 0,
+      messages: [...closed.messages, message],
+      followUpQueue: closed.followUpQueue.slice(1),
+      // 新的一句话 = 上一回合的收工理由作废。
+      stopReason: null,
+      stopCause: null,
+      stopCauseDetail: null,
+      // 相位得离开 idle，否则 waitForIdle 会以为已经收工而提前返回。
+      phase: 'thinking',
+    };
+  },
+
+  /**
+   * 开一个新 step（一次 LLM 调用 + 它的工具批次）。
+   *
+   * 原先这一步叫 `llm.attempt`；现在 `step.start` 与 `step.end` 成对出现，
+   * 而 `llm.result` / `tool.*` 挂在两者之间。
+   */
+  'step.start': (state) => {
+    // 防重入：上一个 step 还开着时不要又开一个。
+    if (state.openStepNodeId !== null) return state;
+    let base = state;
+    // **先把上一个回合收尾（幂等）。**
+    //
+    // 为什么需要：「开了新回合但上一个还没关」是一种真实存在的中间态 ——
+    // followUp 到达时 reducer 直接开新容器（见 queue.delivered 的注释），
+    // 而给旧回合发 `turn.end` 在那条路上发不出去（Cmd.run 回来时没人冲刷，
+    // 见 `closeTurn()` 的注释）。
+    //
+    // 挂在**这一步**而不是统一交给 turn.end，是因为「开了新回合之后下一步一定是
+    // step.start」是必然的 —— 把收尾挂在一个必然到来的边上，就不会再出现
+    // 「容器一直开着、turn.end 永远不来」的挂起。
+    //
+    // 判据：`openTurnNodeId` 的序号（openTurnSeq）比当前 `turnIndex` 旧。
+    if (state.openTurnNodeId !== null && state.openTurnSeq !== null
+      && state.openTurnSeq < state.turnIndex) {
+      base = closeTurnNode(base, Date.now(), 'completed', turnReasonText('completed'));
+    }
+    const opened = openStepNode(base, Date.now());
     return {
       ...opened.state,
+      // **重试要清掉上一次的错误**。
+      //
+      // 为什么这里要清（`agent.run` 也会清）：重试路径是
+      // `llm.failed →（接线）step.start → agent.run`，而 `agent.run` 的守卫是
+      // 「phase 为 thinking 且 step 已开着就返回」。这一步已经把 step 开上了，
+      // 于是 `agent.run` 走进那条守卫直接返回 —— 它清不掉 error。
+      //
+      // 留着不清的症状是「重试已经成功，底栏还挂着上一条超时红字」。
+      error: null,
+      errorNodeId: null,
+      errorKind: null,
+      aborted: false,
+    };
+  },
+
+  /** 关掉 step 容器。它**不推进 tip** —— 推进的是里面的 result / error。 */
+  'step.end': (state, action) => {
+    const closed = closeStepNode(state, Date.now(), action.status);
+    return { ...closed, turnSteps: state.turnSteps };
+  },
+
+  /**
+   * 发起一次 LLM 调用。**这里只改相位与重试计数，不开轨迹节点** ——
+   * 开 `step.start` 的是它自己那条 action（两者由 wiring 连着）。
+   *
+   * 拆开的原因：step 容器是一个需要 `step.end` 配对的**区间**，
+   * 而 `agent.run` 只是「请求跑一次 LLM」。把两者混在一个 action 里，
+   * 重试时就得重新开一个容器而无法先关掉旧的那个。
+   *
+   * `openStepNodeId !== null` 的守卫是为了防重入：上一次 step 还开着时不要又跑。
+   */
+  'agent.run': (state) => {
+    if (state.phase === 'thinking' && state.openStepNodeId !== null) return state;
+    return {
+      ...state,
       phase: 'thinking',
       error: null,
       errorNodeId: null,
@@ -555,25 +930,32 @@ const transitions: TransitionHandlers = {
       .map((c) => (c.type === 'text' ? c.text : c.type === 'toolCall' ? `[调用 ${c.name}]` : ''))
       .join(' ')
       .trim();
-    // 成功：在这次 attempt 下面挂 llm.result，由它推进 tip。
+    // 成功：在当前 step 下面挂 llm.result，由它推进 tip。
+    //
+    // **这一步不开 step.end**：有工具时 step 还没完（工具批次也要算在这个 step 里），
+    // 它的闭合点是 tool.batch.done。只有「无工具」才在这一步就把 step 关掉。
     const closed = closeLlmSuccess(state, Date.now(), text);
+    const hasTools = toolCalls.length > 0;
+    // 无工具 = 模型自己说完了 —— 这是整个回合的终点，所以现在就把 step 与 turn 都关上。
+    // 有工具 = 还要跑下一轮，step 留着等 tool.batch.done 收尾。
+    const withStep = hasTools ? closed : closeStepNode(closed, Date.now(), 'ok');
     return {
-      ...closed,
-      messages: [...closed.messages, message],
+      ...withStep,
+      messages: [...withStep.messages, message],
       streamingText: '',
       thinkingText: '',
-      turns: closed.turns + 1,
-      usage: message.usage ?? closed.usage,
-      totalCost: closed.totalCost + (message.usage?.cost?.total ?? 0),
+      turns: withStep.turns + 1,
+      usage: message.usage ?? withStep.usage,
+      totalCost: withStep.totalCost + (message.usage?.cost?.total ?? 0),
       pendingToolCalls: toolCalls,
-      error: message.errorMessage ?? closed.error,
-      phase: toolCalls.length > 0 ? 'calling-tools' : 'idle',
+      error: message.errorMessage ?? withStep.error,
+      phase: hasTools ? 'calling-tools' : 'idle',
       // 有工具 = 这一轮还没完（要接着跑下一轮 LLM），所以不是「停」。
       // 无工具 = 模型自己说完了，这才是真正的收工。
-      stopReason: toolCalls.length > 0 ? null : 'completed',
+      stopReason: hasTools ? null : 'completed',
       // 正常收工的原因也记一份：界面不必再猜「completed」是被砍的还是真说完。
-      stopCause: toolCalls.length > 0 ? null : 'completed',
-      stopCauseDetail: toolCalls.length > 0 ? null : stopCauseText('completed'),
+      stopCause: hasTools ? null : 'completed',
+      stopCauseDetail: hasTools ? null : stopCauseText('completed'),
     };
   },
 
@@ -588,12 +970,26 @@ const transitions: TransitionHandlers = {
     const kind: LlmErrorKind = action.kind ?? 'unknown';
     const cause = causeFromKind(kind, action.cause);
     const closed = closeLlmFailure(state, Date.now(), action.error, kind, action.nodeId ?? null, cause);
-    // 只有一个确实在跑的 LLM 尝试才谈得上「重试」；工具批次的失败走这里时 openLlmNodeId 已是 null。
-    const wasLlmAttempt = state.openLlmNodeId !== null;
+    // 只有一个确实在跑的 step 才谈得上「重试」；工具批次的失败走这里时 openStepNodeId 已是 null。
+    const wasLlmAttempt = state.openStepNodeId !== null;
     const canRetry =
       wasLlmAttempt && isRetryable(kind) && closed.llmAttempts < closed.maxLlmAttempts;
+    // **无论要不要重试，都得先关掉这个 step 容器** —— 失败的那一步已经结束了。
+    //
+    // 为什么要重试也关：重试在树上长成的是**兄弟**（同一个 turn 下的另一个
+    // `step.start`），而不是同一个容器的第二次尝试。否则树会长成
+    // 「一个 step 里挤着两次尝试」，而失败与重试哪个在前就再也分不清了 ——
+    // 那正是原先 git 分叉语义要表达的东西。
+    //
+    // 而 `step.start` 的防重入守卫靠的正是 `openStepNodeId === null`，不关它，
+    // 重试开的新 step 会被直接丢掉（环停在 thinking，用户看到「卡住了」）。
+    const withStep = closeStepNode(
+      closed,
+      Date.now(),
+      kind === 'aborted' ? 'aborted' : 'error',
+    );
     return {
-      ...closed,
+      ...withStep,
       phase: canRetry ? 'thinking' : 'idle',
       error: action.error,
       errorKind: kind,
@@ -614,18 +1010,26 @@ const transitions: TransitionHandlers = {
   /** 重试用尽：留一个 stop 节点（它是闭合的，所以推进 tip），相位回 idle。 */
   'llm.giveup': (state, action) => {
     const cause = causeFromKind(action.kind, action.cause);
-    const { tree } = appendNode(state.trace, state.trace.tipId, 'stop', {
+    const now = Date.now();
+    // stop 节点挂在 **turn 容器**下面（与 step 同理：回合是它们共同的父）。
+    const parentId = state.openTurnNodeId ?? state.trace.tipId;
+    const { tree } = appendNode(state.trace, parentId, 'stop', {
       status: 'ok',
       label: action.error,
       detail: action.error,
       // 跟错误节点一样把 cause 记进 meta：树上就能看出「用户主动停了」而不是「模型坏了」。
       meta: { kind: action.kind, cause },
-      createdAt: Date.now(),
-      endedAt: Date.now(),
+      createdAt: now,
+      endedAt: now,
     });
+    // 重试已经用尽 = 这一步真的结束了，把 step 容器也关上。
+    const withStep = closeStepNode(
+      { ...state, trace: tree },
+      now,
+      action.kind === 'aborted' ? 'aborted' : 'error',
+    );
     return {
-      ...state,
-      trace: tree,
+      ...withStep,
       phase: 'idle',
       error: action.error,
       errorKind: action.kind,
@@ -669,6 +1073,9 @@ const transitions: TransitionHandlers = {
 
   /**
    * 工具开始：开一个 tool.attempt 节点，parent 是发起这一刻的 tip（即那条 llm.result）。
+   *
+   * 为什么仍用 tip 而不是 step 容器：llm.result 推进了 tip，所以它就是 step 容器
+   * 与工具节点之间的那个点。挂到 tip 上，工具就落在 llm.result 底下 —— 与原先一致。
    */
   'tool/start': (state, action) => {
     const now = Date.now();
@@ -774,6 +1181,9 @@ const transitions: TransitionHandlers = {
       trace: tree,
       openToolNodeIds,
       toolProgress,
+      // 工具数加一：`step.end` 的标签要写「这一步跑了几个工具」，
+      // 而 tool.batch.done 到来时容器已经关了 —— 所以得在每个 result 上累积。
+      stepToolCalls: state.stepToolCalls + 1,
       // 负数/NaN 一律不记：界面会拿它算 `Took x.xs`，一个 NaN 会显示成 "Took NaNs"。
       toolTimings:
         startedAt !== undefined && Number.isFinite(startedAt) && now >= startedAt
@@ -788,18 +1198,29 @@ const transitions: TransitionHandlers = {
 
   // 工具批次收尾：还能再来一轮就回 thinking（effect 会发 agent.run），
   // 撞上轮数上限就直接收工回 idle —— 相位必须在这里闭合，否则 waitForIdle 永远等不到。
+  //
+  // 它同时是 **steer 的投递点**（对齐 pi：「当前 step 的工具跑完后、下一次 LLM 调用前」）。
+  // 但投递本身**不在这里做** —— 接线在读到迁移后的 state 时看到 steerQueue 非空，
+  // 再发一条 `queue.delivered`。reducer 只负责算状态，不发 action。
   'tool.batch.done': (state) => {
     if (state.phase !== 'calling-tools') return state;
+    const now = Date.now();
+    // 工具跑完 = 这个 step 的区间结束了（LLM 调用 + 它的工具批次都齐了）。
+    const closed = closeStepNode(state, now, 'ok');
+    const withStep = closed; // turnSteps 已由 closeStepNode 加过
     if (state.turns >= state.maxTurns) {
       // 撞上限：留一个 stop 节点（推进 tip），这样「为什么停了」也在树上。
-      const { tree } = appendNode(state.trace, state.trace.tipId, 'stop', {
+      //
+      // stop 挂在 **turn 容器**下面，与 step 同父 —— 它们是同一回合里的两件事。
+      const parentId = state.openTurnNodeId ?? state.trace.tipId;
+      const { tree } = appendNode(withStep.trace, parentId, 'stop', {
         status: 'ok',
         label: `已达单回合上限（${state.maxTurns} 轮）`,
-        createdAt: Date.now(),
-        endedAt: Date.now(),
+        createdAt: now,
+        endedAt: now,
       });
       return {
-        ...state,
+        ...withStep,
         trace: tree,
         phase: 'idle',
         error: `已达单回合轮数上限（${state.maxTurns} 轮 LLM 调用），停止。`,
@@ -811,9 +1232,12 @@ const transitions: TransitionHandlers = {
         llmAttempts: 0,
       };
     }
-    // 工具批次结束 = 一轮结束，重试计数归零（下一轮又从第 1 次尝试开始）。
+    // 工具批次结束 = 这一步结束，重试计数归零（下一步又从第 1 次尝试开始）。
+    //
+    // 相位留在 thinking：接线看到它会发 step.start（然后 agent.run），
+    // 于是模型看到工具结果、继续干活。
     return {
-      ...state,
+      ...withStep,
       phase: 'thinking',
       streamingText: '',
       thinkingText: '',
@@ -1087,6 +1511,8 @@ export function createAgentReducer(
     if (!transition) return state;
 
     const nextState = transition(state, typed);
+
+
     // 接线要读的是**迁移之后**的状态：像 llm.failed 判出的 retrying，正是 transition 刚算出来的。
     // 传旧状态的话，接线永远看不到本次 action 造成的新事实，重试也就发不出去。
     const emit = (table[typed.type] ?? NO_EFFECT) as (a: AgentAction, s: AgentState) => CmdType[];
@@ -1112,10 +1538,111 @@ export function createAgentReducer(
  * 把一条 action 重新 dispatch 出去：让 reducer 再看到它一次，于是它自己的那行接线才发出下一个 Cmd。
  *
  * 这不是「直接调用下一个 effect」—— 中间隔着一次完整的 dispatch，状态先更新，接线再读新状态。
- * 少了这一步，`agent.run` 的迁移就不会跑，轨迹树上也就永远开不出 llm.attempt 节点。
+ * 少了这一步，`step.start` 的迁移就不会跑，轨迹树上也就永远开不出 step 节点。
+ *
+ * ## **不能**包成 `Cmd.list`（曾经在这里踩了很久）
+ *
+ * `createAgentReducer` 收一个命令数组：长度为 1 走 `loop(state, cmd)`，
+ * 大于 1 才走 `loop(state, Cmd.list(cmds))`。
+ * 若本函数返回 `Cmd.list([...])` 而接线又把它当一个命令放回数组，
+ * 就得到 `Cmd.list([Cmd.list([...])])` —— **嵌套的 LIST**。
+ *
+ * 而 redux-loop 的 `handleParallelList` 对**嵌套**的非 batch LIST 走这条分支：
+ * `cmds.map(nested => executeCmdInternal(nested, ctx).then(r => Promise.all(r.map(wrappedDispatch))))`。
+ * 内层 LIST 返回的 `[]` 于是既没被 dispatch 也没被报错 —— 那条 action **静默消失**。
+ *
+ * 症状极其隐蔽：reducer 迁移照跑（该开的节点都开了），只是链路在最后一步断掉，
+ * 表现为「回合永远关不上 / 环再也不转」，而代码里找不到任何错误。
+ * 这就是为什么这里写死**裸 Cmd**：打包是 `createAgentReducer` 的职责，不是接线的。
  */
 function redispatch(action: AgentAction): CmdType {
+  // **裸 Cmd，不能包成 `Cmd.list`**（注释在上一段的 doc 里）。
   return Cmd.action(action);
+}
+
+/** 开下一个 step：先 `step.start`（开容器），再 `agent.run`（真的调 LLM）。 */
+function startStep(): CmdType {
+  return Cmd.list([
+    redispatch({ type: 'step.start' }),
+    redispatch({ type: 'agent.run' }),
+  ]);
+}
+
+/**
+ * 从队列里取出一条待投递的输入，组装成 `queue.delivered`。
+ *
+ * 只在 reducer 说「该投递了」之后才调它 —— 它自己不判时机。
+ * 队列头不存在时返回 null（调用方发不发都行，发一条空的是 bug）。
+ */
+function deliverQueued(steer: boolean, state: AgentState): CmdType | null {
+  const queue = steer ? state.steerQueue : state.followUpQueue;
+  const head = queue[0];
+  if (head === undefined) return null;
+  return redispatch({
+    type: 'queue.delivered',
+    text: head.text,
+    content: head.content,
+    as: steer ? 'steer' : 'followUp',
+  });
+}
+
+/**
+ * 回合真的收工了（相位已 idle）之后的一步：**把回合容器关上**。
+ *
+ * ## 为什么绕一圈
+ *
+ * 「关回合」对几乎所有路都是「从 effect 里回到 reducer」那个时刻才发生的
+ * （llm.failed / llm.giveup / tool.batch.done 都是 Cmd.run 回来的）。
+ * 而那时 `install()` enhancer 的 cmdsQueue 已经被外层 dispatch 取走 ——
+ * 从那里 `redispatch` 出去的 action 没人冲刷，环就停在 idle 不再转。
+ *
+ * 所以这里**只**发一条 `turn.end`。它到达 reducer 时相位已是 idle，
+ * 于是 `turn.end` 的迁移自己判断「要不要开下一回合」（有 followUp 就开），
+ * 而那个判断是 reducer 做的 —— 接线不需要、也不应该在半路替它决定。
+ */
+/**
+ * 回合真的收工了（相位已 idle）之后的一步：**把回合容器关上**。
+ *
+ * ## 为什么绕一圈（而不是在迁移里直接关）
+ *
+ * 「收工」对几乎所有路都是「从 effect 里回到 reducer」那个时刻才发生的
+ * （llm.failed / llm.giveup / tool.batch.done 都是 Cmd.run 回来的）。
+ * 而那时 `install()` enhancer 的 cmdsQueue 已经被外层 dispatch 取走 ——
+ * 从那里 `redispatch` 出去的 action 没人冲刷，环就停在 idle 不再转。
+ *
+ * 所以这里**只**发一条 `turn.end`。它到达 reducer 时相位已是 idle，
+ * 迁移会关掉容器、算出结局标签，**并且**顺手开下一个 followUp 回合。
+ */
+function closeTurn(): CmdType {
+  // 裸 Cmd（不包 list）—— 理由见 `redispatch()` 的注释：包了会被
+  // `Cmd.list([Cmd.list([...])])` 吞掉那条 action，而且不报错。
+  return redispatch({ type: 'turn.end' });
+}
+
+/** 回合结束原因的人话版（与 stopCauseText 同风格，供 turn.end 标签用）。 */
+function turnReasonText(reason: TurnEndReason): string {
+  switch (reason) {
+    case 'completed':
+      return '模型说完了';
+    case 'maxTurns':
+      return '达到轮数上限';
+    case 'aborted':
+      return '用户中断';
+    case 'interrupted':
+      return '被新消息打断';
+    case 'error':
+      return '出错收工';
+  }
+}
+
+/**
+ * 从队列头取出一条待投递的输入（**不组装消息**，只是看一眼）。
+ *
+ * 真正的投递是 `queue.delivered`，由「投递点」那几行发出去。
+ */
+function peekQueued(steer: boolean, state: AgentState): QueuedInput | null {
+  const queue = steer ? state.steerQueue : state.followUpQueue;
+  return queue[0] ?? null;
 }
 
 export function loopWiring(table: {
@@ -1127,19 +1654,99 @@ export function loopWiring(table: {
 }): Pick<
   ReducerEffects,
   | 'user.message'
+  | 'turn.start'
+  | 'turn.end'
+  | 'step.start'
+  | 'step.end'
   | 'agent.run'
+  | 'queue.input'
+  | 'queue.delivered'
   | 'llm.started'
   | 'llm.done'
   | 'llm.failed'
+  | 'llm.giveup'
   | 'tool.call'
   | 'tool.batch.done'
   | 'compact.request'
 > {
   return {
-    // user.message 之后要走一次 agent.run，让它的迁移开出一个 llm.attempt 节点。
-    'user.message': () => [redispatch({ type: 'agent.run' })],
+    /**
+     * 新的一句用户消息 → 开回合容器 → 开第一步。
+     *
+     * 顺序要紧：`turn.start` 的迁移要先填上 `openTurnNodeId`，
+     * `step.start` 才能挂到它下面（而不是挂到 user 节点上）。
+     */
+    'user.message': () => [redispatch({ type: 'turn.start' })],
+
+    // turn.start 之后的起步：`step.start` 开容器，`agent.run` 真的调 LLM。
+    //
+    // 为什么不把 startStep() 写在 user.message 那行：queue.input 那条路径也要开回合
+    // （它同样靠 turn.start 起步），把起步挂在 `turn.start` 上两条路径共用一处。
+    //
+    // **这也是为什么 user.message 那一行只发 turn.start**：若它同时发 agent.run，
+    // turn.start 里的 startStep() 会再发一次 —— LLM 被调两遍，第二遍的结果
+    // 直接覆盖第一遍，而轨迹树上就是两个 llm.result 兄弟。症状是「模型白答了一遍」。
+    'turn.start': () => [startStep()],
+
+    'turn.end': (_action, state) => {
+      // **关回合之后还有可能继续**：followUp 的定义就是「模型说完了接着聊」。
+      // 队列里有货就开一个新回合（`turn.start` 会自己带起 startStep），
+      // 没有就真收工 —— 这时相位已是 idle，一条 Cmd 都不发。
+      if (peekQueued(false, state) === null) return [];
+      return [redispatch({ type: 'turn.start' })];
+    },
+
+    // step.start 只开容器；调 LLM 的 Cmd 在 startStep() 里与它一起发出。
+    'step.start': () => [],
+
+    // step.end 只改状态（关容器、totalSteps+1）。
+    'step.end': () => [],
 
     'agent.run': (action) => [table.runAgent((action as { text?: string }).text)],
+
+    /**
+     * 队列里的消息进来。
+     *
+     * reducer 的迁移已经处理了「空闲 → 直接转成 user.message」那种情况 ——
+     * 那种情况下它把相位拉到了 thinking 且回合容器尚未开，所以这里要补一个 `turn.start`
+     * （它自己会带起 startStep）。
+     *
+     * 而「真的入队」时不需要发任何 Cmd：入队本身不干活，等投递点到了自然会发。
+     *
+     * 判据是**回合容器开没开**而不是相位 —— 空闲转 user.message 与真入队两种情况下
+     * 相位都是 thinking，只有容器开没开能区分。
+     */
+    'queue.input': (_action, state) =>
+      state.openTurnNodeId === null && state.phase !== 'idle'
+        ? [redispatch({ type: 'turn.start' })]
+        : [],
+
+    /**
+     * 投递完成后干什么，**取决于它是哪一列**（这是两者的唯一区别）：
+     *
+     * - `steer`：投递完**紧接着开下一步**。因为 steer 的投递点就是「工具跑完、
+     *   下一次 LLM 调用前」—— 此刻模型还没看到新的话，必须马上跑一次。
+     * - `followUp`：投递完**不开新回合**，而是先把刚开着的回合收尾。
+     *   因为 followUp 的定义是「回合收工时才插」，它属于**下一个**回合；
+     *   若不开新回合，那条消息就成了「说完了又冒出来一句话，却没人回」。
+     *   开新回合的那一步由 wiring 的 `queue.input` 那行接（空队列入队 → 转 user.message
+     *   → turn.start），不在这条里。
+     */
+    'queue.delivered': (action, state) => {
+      const as = (action as { as: 'steer' | 'followUp' }).as;
+      if (as === 'steer') return [startStep()];
+      // followUp：**开启一个新回合**，由 `turn.start` 发出去。
+      //
+      // 容器为什么在这里（而不是接线里）：folllowUp 到达时通常**正有一个容器开着**
+      // （它就是「刚说完话」那个回合），而 `turn.start` 的防重入守卫是「容器开着就返回」。
+      // 接线不能自己关它（wiring 是纯函数，只发 Cmd）—— 所以关闭旧容器这件事
+      // 已经写在 `queue.delivered` 的**迁移**里（见上面那段注释），到这里容器已空。
+      //
+      // 一串 followUp 会连着开好几个回合 —— 每投递一条就开一个，这是对的：
+      // 它们本来就是「模型说完 → 我说一句 → 它再说」的每一轮。
+      if (peekQueued(false, state) === null) return [];
+      return [redispatch({ type: 'turn.start' })];
+    },
 
     // 流开始前先发一条 action：UI 靠它把「正在生成」的点亮，而不是等第一个 delta。
     'llm.started': () => [],
@@ -1151,33 +1758,70 @@ export function loopWiring(table: {
       // 该跑的判据是「这次确实带工具调用」，相位由 tool.call / runTools 自己去推进。
       const message = (action as { message: AssistantMessage }).message;
       const toolCalls = message.content.filter((c): c is ToolCall => c.type === 'toolCall');
-      if (toolCalls.length === 0) return [];
-      // 直接发 runTools（不是 redispatch）：工具 attempt 节点由 tool/start 的迁移开，
-      // 而 tool/start 本来就是 runTools 内部 dispatch 的第一条 action。
+      if (toolCalls.length > 0) {
+        // 直接发 runTools（不是 redispatch）：工具 attempt 节点由 tool/start 的迁移开，
+        // 而 tool/start 本来就是 runTools 内部 dispatch 的第一条 action。
+        //
+        // 为什么这里不用 redispatch 绕一圈：llm.done 是从 Cmd.run 的 successActionCreator 进来的，
+        // 此时 install() enhancer 的 cmdsQueue 已经被外层 dispatch 取走，从这里再 dispatch 一个 action，
+        // 它触发的 Cmd 没人冲刷 —— 环会停在 calling-tools。所以这一步老老实实发 Cmd。
+        return [table.runTools(toolCalls)];
+      }
+      // **无工具 = 回合真的收工了**（迁移里已经把 step 关掉）。
       //
-      // 为什么这里不用 redispatch 绕一圈：llm.done 是从 Cmd.run 的 successActionCreator 进来的，
-      // 此时 install() enhancer 的 cmdsQueue 已经被外层 dispatch 取走，从这里再 dispatch 一个 action，
-      // 它触发的 Cmd 没人冲刷 —— 环会停在 calling-tools。所以这一步老老实实发 Cmd。
-      return [table.runTools(toolCalls)];
+      // 队列里有货就不收工 —— 否则模型说完话就停下、用户输入的那句话永远没被看见。
+      //
+      // 判据是**队列**而不是相位：此时相位已是 idle，但 followUp 的意义就是
+      // 「模型说完了接着聊」，若只看相位就会把这条消息永远留在队列里。
+      if (peekQueued(true, state) !== null || peekQueued(false, state) !== null) {
+        return [closeTurn()];
+      }
+      return [closeTurn()];
     },
 
     /**
      * 失败后要不要重试。reducer 已经判好了：`state.retrying` 为真就说明「可重试且还有次数」，
      * 并且它把相位留在了 thinking（所以环没闭合，waitForIdle 不会提前返回）。
      *
-     * 这里补一条 agent.run，环就自己转起来了；新一轮 attempt 会挂在**同一个父节点**下，
-     * 因为失败没有推进 tip —— 树上于是长出一根分叉，和 git log --graph 一个形状。
+     * 这里补一个 step.start（它自带 agent.run），环就自己转起来了；新 step 会挂在
+     * **同一个 turn 节点**下，因为失败没有推进 tip —— 树上于是长出一根分叉，
+     * 和 git log --graph 一个形状。
+     *
+     * 不重试（重试用尽 / 不可重试）= 这一步结束。队列里有东西就继续，没有才关回合。
      */
-    // 同样要绕一圈：只有让 reducer 再看到一次 agent.run，才会开出新的 attempt 节点。
-    'llm.failed': (_action, state) =>
-      state.retrying ? [redispatch({ type: 'agent.run' })] : [],
+    'llm.failed': (_action, state) => {
+      if (state.retrying) return [startStep()];
+      return [closeTurn()];
+    },
+
+    /**
+     * 重试用尽（`llm.giveup`）。迁移里已经关了 step、留了 stop 节点，相位已回 idle。
+     * 与 `llm.failed` 不重试时同一条路。
+     */
+    'llm.giveup': () => [closeTurn()],
 
     'tool.call': (action) => [table.runTools((action as { calls: ToolCall[] }).calls)],
 
-    // 同样绕一圈，让 agent.run 的迁移开出新一轮的 llm.attempt 节点。
-    // 直接调 runAgent 的话，这一轮 LLM 在树上就没有 attempt 节点，result 变成孤儿。
-    'tool.batch.done': (_action, state) =>
-      state.turns >= state.maxTurns ? [] : [redispatch({ type: 'agent.run' })],
+    /**
+     * 工具批次跑完 = **一个 step 结束**（迁移里已关容器）。接下来：
+     *
+     * 1. **steer 队列里有东西** → 投递它并立即开下一步（对齐 pi：「当前 step 的工具
+     *    跑完后、下一次 LLM 调用前」）。这就是 steer 打断循环的地方。
+     * 2. **撞轮数上限** → 收工，关回合。
+     * 3. **否则** → 开下一步，让模型看到工具结果。
+     *
+     * 顺序要紧：steer 优先于「开下一步」。若先开下一步，模型会在**没看到**新话的情况下
+     * 先跑一次 LLM —— 那条 steer 消息要等两轮才生效，与「立即插进来」的语义不符。
+     */
+    'tool.batch.done': (_action, state) => {
+      // 撞轮数上限：迁移里已把相位推到 idle 并留了 stop 节点。收工，关回合。
+      if (state.phase === 'idle') return [closeTurn()];
+      const steer = peekQueued(true, state);
+      if (steer !== null) {
+        return [deliverQueued(true, state) ?? closeTurn()];
+      }
+      return [startStep()];
+    },
 
     /**
      * 压缩上下文。

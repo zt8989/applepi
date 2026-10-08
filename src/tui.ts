@@ -62,8 +62,9 @@ interface CliArgs {
 const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界面）
 
 用法:
-  redux-agent                      交互式
-  redux-agent -p "问题"            跑一条就退出（脚本/管道友好）
+  ela                            交互式
+  ela -p "问题"                  跑一条就退出（脚本/管道友好）
+  pnpm start                     完全等价的入口（在本仓库内开发时用）
 
 选项:
   -p, --print <text>     一次性提问
@@ -87,9 +88,16 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
 界面里:
   Ctrl+T                切换轨迹面板（git log --graph 那棵树，错误也在上面）
   Ctrl+O                展开/收起工具输出的完整内容（默认只留前 12 行）
+  Ctrl+Q                切换入队模式：steer（工具跑完后插进去）／followUp（说完再插）
   Ctrl+C                环在跑时中断这一轮；空闲时退出
   /skills               列出已装载的 skill
   /skill:<名字> [问题]  把某个 skill 的正文展开后连同你的问题一起发给模型
+
+生成中也能说话（不用等）:
+  直接敲字回车     → 按当前入队模式排队，默认 steer
+                    模型会在「本步工具跑完后」看到它
+  Ctrl+Q 切到 followUp 再敲 → 等模型说完、开一个新回合才插
+  底区会一直列着排队的消息（Steering: / Follow-up:），投递后自动消失
 `;
 
 function parseArgs(argv: string[]): CliArgs {
