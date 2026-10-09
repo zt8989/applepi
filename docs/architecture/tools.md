@@ -14,7 +14,51 @@ createReadOnlyTools(cwd, options)   → [read, grep, find, ls]
 `createGrepTool` / `createFindTool` / `createLsTool` / `createPowerShellTool`，
 以及对应的 `*Definition` 版本（不包装成可执行工具，只给扩展机制用）。
 
-本项目用的是 `createReadTool` / `createWriteTool` / `createEditTool` / `createBashTool` 四个。
+本项目用的是全部 8 个（下面那张表）。
+
+## 八个工具：四个默认开，四个默认关
+
+开关走 `settings.json` 的 `defaultTools`，**与 pi 同键同文件**：
+
+| 工具 | 默认 | 干什么 | 外部依赖 |
+| --- | --- | --- | --- |
+| `read` | **开** | 读文件 | — |
+| `write` | **开** | 写/覆盖文件 | — |
+| `edit` | **开** | 按 oldText 精确替换 | — |
+| `bash` | **开** | 执行 bash 命令 | bash |
+| `powershell` | **开** | 执行 PowerShell 命令 | pwsh |
+| `grep` | 关 | 按正则搜文件内容 | ripgrep |
+| `find` | 关 | 按 glob 找文件 | fd |
+| `ls` | 关 | 列目录内容 | — |
+
+默认那四个从 pi 的 `DEFAULT_TOOL_NAMES` **读**（不是抄一份字面量），所以 pi 调整默认清单时
+本项目跟着变。`grep` / `find` / `ls` 默认关是 pi 的判断：多数时候 `bash` 就够了。
+
+`powershell` 在**所有平台**都开（与 pi 一致）：`bash` 仍在，powershell 只是多给模型一个选择。
+少给一个会让模型在 pwsh 语法上反复失败 —— 它在 Linux 上学到的是 bash。
+
+### 怎么开
+
+`~/.pi/agent/settings.json`：
+
+```json
+{ "defaultTools": ["read", "bash", "edit", "write", "+grep"] }
+```
+
+规则逐条照抄 pi 的 `resolveDefaultTools()`（实现在 `tools.ts` 的 `resolveToolSelection`）：
+
+- **不给** → 默认那四个
+- 出现**不带前缀**的名字 → 整份清单**替换**默认那份（`["grep"]` = 只有 grep）
+- 只有 `+name` / `-name` → 在默认那份上按顺序增删
+
+未知名字不报错也不剔除，与 pi 一致 —— 那个工具不存在，于是没开成。
+
+### prompt 侧与工具侧必须是同一份清单
+
+`promptToolsFrom()`（system prompt）与 `getTools()`（注册表）**共用
+`selectedBuiltinToolNames()`**。两边若各读一次配置，就会在改配置时对不上，
+而症状是**静默**的：prompt 教了模型怎么用 `grep`，工具表里却没有，一调就回
+「未知工具」，日志里没有任何线索指向「清单不一致」。
 
 ## 换来了什么
 
@@ -38,8 +82,7 @@ execute(toolCallId, params, signal?, onUpdate?) => Promise<AgentToolResult>
 
 1. **签名收窄** —— 丢掉 `ctx`，并把 `onUpdate` **转成本项目的 `AgentToolUpdate`**，
    成本项目的 `AgentTool` 形状
-2. **补两个字段** —— `label`（官方给的是英文工具名；界面现在也显示英文工具名，
-   详见 [surfaces](surfaces.md#为什么不自己画这四种样式)，所以这个 label 只留在本项目内部）；
+2. **补两个字段** —— `label`（中文名，界面显示用）；
    `details` 归一（官方有些工具返回 `undefined`，本项目要求有值）
 
 逻辑一行不改。于是 `effects.ts` 完全不知道 pi-coding-agent 存在，环的逻辑一行都不用改。

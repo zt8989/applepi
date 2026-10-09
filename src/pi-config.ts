@@ -261,6 +261,21 @@ export interface PiSettings {
    * 与 pi 的 `resolveThemeSetting()` 同一条代码路径。
    */
   theme?: string;
+  /**
+   * 默认开启哪些内置工具（与 pi 用**同一个键、同一个配置文件**）。
+   *
+   * 语义逐条照抄 pi 的 `resolveDefaultTools()`（见 `tools.ts` 的
+   * `resolveToolSelection`）：
+   *   - 不给 → `["read","bash","edit","write"]`（pi 的 `DEFAULT_TOOL_NAMES`）
+   *   - 出现不带前缀的名字 → 整份清单**替换**默认那份
+   *   - 只有 `+name` / `-name` → 在默认那份上按顺序增删
+   *
+   * 例：`["read","bash","edit","write","+grep"]` = 加上 grep（find/ls 仍关）。
+   *
+   * 官方读的是**多层** settings（项目 / 全局 / 内置）；本项目只认这一个文件。
+   * 规则本身一致，所以最终选出来的清单与 pi 相同 —— 只是没有项目级覆盖层。
+   */
+  defaultTools?: string[];
 }
 
 export function loadPiSettings(): PiSettings {

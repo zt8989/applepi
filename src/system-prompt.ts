@@ -43,13 +43,19 @@ import { loadProjectContextFiles } from '@earendil-works/pi-coding-agent/dist/co
 import {
   createBashToolDefinition,
   createEditToolDefinition,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createLsToolDefinition,
+  createPowerShellToolDefinition,
   createReadToolDefinition,
   createWriteToolDefinition,
+  type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { configHome, PI_CONFIG_DIR as CONFIG_DIR_NAME } from './config-home';
 import { loadSkillRegistry } from './skills';
+import { BUILTIN_TOOL_NAMES, selectedBuiltinToolNames } from './tools';
 import type { Skill as PiSkill } from '@earendil-works/pi-coding-agent/dist/core/skills.js';
 import type { SkillInfo } from './skills';
 
@@ -96,14 +102,33 @@ export interface PromptToolLike {
  * `AgentTool`，它**不带** `promptSnippet` / `promptGuidelines`（那是给 prompt 用的
  * 扩展点，只在 `ToolDefinition` 上）。而 TUI 那边本来就用的是 `create*ToolDefinition()`
  * —— 同一个实例，不额外建。
+ *
+ * ## 只取**开着**的那些 —— 与 `tools.ts` 的 `getTools()` 同源
+ *
+ * 这里是 prompt 侧那份清单。若它与「真能跑的表」不一致，后果很具体：
+ * prompt 告诉了模型 `grep` 怎么用，而工具表里没有 `grep` —— 模型一调就回
+ * 「未知工具」，而日志里**看不到任何异常**（工具是按名字查表，查不到就是查不到）。
+ * 反过来（表里有、prompt 不说）只是模型不知道有它，不算坏。
+ *
+ * 所以开关走 `selectedBuiltinToolNames()` —— 与 `getTools()` **同一个函数**。
+ * 不是「两份各自读 settings.json 碰巧一致」，那种一致性只在没改配置时成立，
+ * 而它一破就是静默的（见 `tools.ts` 里那个函数的注释）。
  */
 export function promptToolsFrom(cwd: string): PromptToolLike[] {
-  const definitions = [
-    createReadToolDefinition(cwd),
-    createWriteToolDefinition(cwd),
-    createEditToolDefinition(cwd),
-    createBashToolDefinition(cwd),
-  ];
+  const factory: Record<string, (dir: string) => ToolDefinition<any, any>> = {
+    read: createReadToolDefinition,
+    write: createWriteToolDefinition,
+    edit: createEditToolDefinition,
+    bash: createBashToolDefinition,
+    powershell: createPowerShellToolDefinition,
+    grep: createGrepToolDefinition,
+    find: createFindToolDefinition,
+    ls: createLsToolDefinition,
+  };
+  const selected = selectedBuiltinToolNames(cwd);
+  const definitions = BUILTIN_TOOL_NAMES.map((name) =>
+    selected.has(name) ? factory[name]?.(cwd) : undefined,
+  ).filter((d): d is ToolDefinition<any, any> => d !== undefined);
   return definitions.map((d) => ({
     name: d.name,
     ...(d.promptSnippet !== undefined ? { promptSnippet: d.promptSnippet } : {}),

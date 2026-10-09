@@ -36,10 +36,15 @@ import type { AgentTool, AgentToolResult } from './agent-tool';
 import {
   createBashTool,
   createEditTool,
+  createFindTool,
+  createGrepTool,
+  createLsTool,
+  createPowerShellTool,
   createReadTool,
   createWriteTool,
 } from '@earendil-works/pi-coding-agent';
 import type { AgentTool as OfficialTool } from '@earendil-works/pi-agent-core';
+import { loadPiSettings } from './pi-config';
 
 /** 官方工具 → 本项目工具。只做签名收窄，逻辑一行不改。 */
 function adapt(official: OfficialTool<any>, label: string): AgentTool {
@@ -74,18 +79,199 @@ function adapt(official: OfficialTool<any>, label: string): AgentTool {
  * 工具注册表。cwd 是工作目录 —— 官方工具用它做路径边界检查
  * （防止 LLM 跑到工作目录外面去读写文件）。
  */
+
+/**
+ * 八个内置工具：哪些默认开、哪些默认关。
+ *
+ * 与 pi 完全一致（`DEFAULT_TOOL_NAMES` + 它帮助里的那张表）：
+ *
+ * | 工具 | 默认 | 说明 |
+ * | --- | --- | --- |
+ * | `read` / `write` / `edit` / `bash` | **开** | 四个基本工具 |
+ * | `powershell` | 开 | 在 `bash` 之外多给模型一个选择（Windows 上的原生 shell） |
+ * | `grep` / `find` / `ls` | **关** | 只读检索类，pi 觉得多数时候用 bash 就够了 |
+ *
+ * ## 为什么自己维护这张表而不调 pi 的 `createCodingTools()`
+ *
+ * 官方那两个工厂的分组表达不了这四件事：`powershell` 不在 `createCodingTools()`
+ * 里（它在 `createAllTools()`），而 `createAllTools()` 返回的是 map 不是数组；
+ * 更关键的是它**不区分默认开关** —— 语义上「有哪些工具」与「默认开哪些」是两件事。
+ *
+ * 默认集合从 pi 的 `DEFAULT_TOOL_NAMES` **读**（见 `resolveToolSelection`），
+ * 这样一个字都不重复维护：pi 改了默认清单，我们跟着变。
+ */
+
+/** 官方工具名（与 pi 的 `ToolName` 同一套拼写）。 */
+export const BUILTIN_TOOL_NAMES = [
+  'read',
+  'write',
+  'edit',
+  'bash',
+  'powershell',
+  'grep',
+  'find',
+  'ls',
+] as const;
+
+export type BuiltinToolName = (typeof BUILTIN_TOOL_NAMES)[number];
+
+/**
+ * pi 的默认值：`["read", "bash", "edit", "write"]`。
+ *
+ * **从 pi 读而不是抄一份字面量**：它是个 `export const`（不是内部实现），
+ * 改了会跟着变；而抄一份的后果是 pi 调整默认工具后我们无声地留在旧行为上。
+ * 读不到就退回我们自己那一份（见 `resolveToolSelection` 的注释）。
+ */
+function piDefaultToolNames(): readonly string[] {
+  try {
+    // 同步 require 拿常量：`dist/core/settings-manager.js` 被主入口拉进来时要 2.6s，
+    // 而这里只是要一个四元素的数组。require 走的是已加载的模块缓存，静态 import
+    // 则会把整个包拖进启动路径（`pi-config.ts` 的文件头解释了那个代价）。
+    const mod = require('@earendil-works/pi-coding-agent/dist/core/settings-manager.js') as {
+      DEFAULT_TOOL_NAMES?: readonly string[];
+    };
+    if (Array.isArray(mod.DEFAULT_TOOL_NAMES) && mod.DEFAULT_TOOL_NAMES.length > 0) {
+      return mod.DEFAULT_TOOL_NAMES;
+    }
+  } catch {
+    // 读不到就用下面那个字面量 —— 见 resolveToolSelection 的注释。
+  }
+  return ['read', 'bash', 'edit', 'write'];
+}
+
+/**
+ * 解出「默认开哪些工具」。
+ *
+ * ## 语义**逐条照抄** pi 的 `resolveDefaultTools()`
+ *
+ * 1. `entries` 为空（没有任何 `defaultTools` 配置）→ 用 `DEFAULT_TOOL_NAMES`；
+ * 2. 出现**不带前缀**的名字 → 整份清单被**替换**（不是追加），`+`/`-` 再在上面打补丁；
+ * 3. 只有 `+name` / `-name` → 先取默认清单，再按顺序应用增删。
+ *
+ * 为什么自己写而不调官方的 `SettingsManager`：那一整套要读磁盘上的多层 settings
+ * （项目 / 全局 / 内置），而本项目只认 `~/.pi/agent/settings.json` 一个文件
+ * （见 `pi-config.ts` 的 `loadPiSettings`）。引整个设置管理器会连它自己的
+ * 多层合并规则一起引进来，而我们只用得上最后那一步 —— 两处各有一份「最终值」
+ * 反而更危险。规则本身照抄，所以结果与 pi 一致。
+ *
+ * 未知名字**不报错也不剔除** —— 用户写错一个名字时的表现应该和 pi 一样：
+ * 那个工具不存在，于是没开成。（严格剔掉反而会让人以为「写了但被禁用了」。）
+ *
+ * @param settings `settings.json` 的 `defaultTools`；undefined = 没配。
+ */
+export function resolveToolSelection(settings: readonly string[] | undefined): readonly string[] {
+  const defaults = [...piDefaultToolNames()];
+  if (settings === undefined) return defaults;
+  const isModifier = (entry: string): boolean =>
+    entry.startsWith('+') || entry.startsWith('-');
+  const plain = settings.filter((entry) => !isModifier(entry));
+  // 「有 plain 就替换，没有 plain 才用默认」—— 与官方 resolveDefaultTools 一致。
+  // 官方那边 `entries.length === 0` 也走这一支（空数组 = 用默认）。
+  const tools = plain.length > 0 ? plain : defaults;
+  for (const entry of settings) {
+    if (!isModifier(entry)) continue;
+    const name = entry.slice(1);
+    const index = tools.indexOf(name);
+    if (entry.startsWith('+') && index === -1 && name) {
+      tools.push(name);
+    } else if (entry.startsWith('-') && index !== -1) {
+      tools.splice(index, 1);
+    }
+  }
+  return tools;
+}
+
+/**
+ * 按名字建一批工具实例（cwd 烤进闭包，所以必须真的构造，不能复用别处的实例）。
+ *
+ * **不在这里过滤未知名字**：表里列出的是「已知存在但默认关」的那几个，
+ * 开关由 `getTools()` 按 `defaultTools` 的解析结果来做。分两层是因为
+ * 「造得出来」与「开不开」是两件事 —— 前者是能力问题，后者是用户配置问题。
+ */
+function createBuiltin(cwd: string, name: BuiltinToolName): AgentTool | undefined {
+  switch (name) {
+    case 'read':
+      return adapt(createReadTool(cwd), '读文件');
+    case 'write':
+      return adapt(createWriteTool(cwd), '写文件');
+    case 'edit':
+      return adapt(createEditTool(cwd), '编辑文件');
+    case 'bash':
+      return adapt(createBashTool(cwd), '执行命令');
+    // **所有平台都给**：与 pi 一致 —— bash 仍然在，powershell 是多出来的一个选择。
+    // Windows 上这两个最像（bash 走 Git Bash/WSL，powershell 走 pwsh），让模型自己选；
+    // 少给一个会让模型在 pwsh 语法上反复失败（它在 Linux 上学到的是 bash）。
+    case 'powershell':
+      return adapt(createPowerShellTool(cwd), '执行 PowerShell 命令');
+    case 'grep':
+      return adapt(createGrepTool(cwd), '搜索文件内容');
+    case 'find':
+      return adapt(createFindTool(cwd), '按文件名查找');
+    case 'ls':
+      return adapt(createLsTool(cwd), '列目录');
+  }
+}
+
+/** 全部内置工具实例（**不区分默认开关**）。 */
+function build(cwd: string): readonly AgentTool[] {
+  return BUILTIN_TOOL_NAMES.map((name) => createBuiltin(cwd, name)).filter(
+    (tool): tool is AgentTool => tool !== undefined,
+  );
+}
+
 // 按 cwd 缓存：官方工具在**构造时**就把 cwd 烤进闭包（路径边界检查靠它），
 // 所以同一个 cwd 复用同一批实例；换个 cwd 必须重建，否则边界还是旧的。
-// 用绝对路径做 key，免得 'x' 和 './x' 各建一份。
+// 用绝对路径做 key，免得 'x' 与 './x' 各建一份。
+//
+// 缓存的是**全部**内置工具（不管开不开）：开关是**启动时**算一次的，
+// 不该有「同一个 cwd 先取一次、后取一次拿到不同集合」的诡异行为 ——
+// 那种不一致会让 prompt.tools 与实际能跑的表对不上，而症状是「模型说调了却回未知工具」。
 const registries = new Map<string, readonly AgentTool[]>();
 
-function build(cwd: string): readonly AgentTool[] {
-  return [
-    adapt(createReadTool(cwd), '读文件'),
-    adapt(createWriteTool(cwd), '写文件'),
-    adapt(createEditTool(cwd), '编辑文件'),
-    adapt(createBashTool(cwd), '执行命令'),
-  ];
+/** 全部内置工具实例，按 cwd 缓存。 */
+function allBuiltins(cwd: string): readonly AgentTool[] {
+  const key = path.resolve(cwd);
+  let tools = registries.get(key);
+  if (!tools) {
+    tools = build(cwd);
+    registries.set(key, tools);
+  }
+  return tools;
+}
+
+/**
+ * 记住上次算出来的开关。
+ *
+ * ## 为什么需要它
+ *
+ * `getTool(name)` 在**每次工具执行**时都调一次（`effects.ts` 的 `runToolCall`），
+ * 而它走 `getTools()`。而开关来自 `settings.json` —— 每次都 `readFileSync` 的话，
+ * 「跑一次工具」就变成「多一次同步磁盘读」。长会话里工具调用几十上百次，
+ * 那是白花开销，而配置文件在进程生命周期内基本不变。
+ *
+ * ## 什么时候重算
+ *
+ * 换 cwd（key 变了）→ 重算；测试调 `resetTools()` → 重算。
+ * 中途手改 settings.json **不**触发重算 —— 与 pi 一致（它的 `defaultTools` 也是
+ * 启动时读一次），改完重开即生效。
+ */
+let cachedOn: { key: string; names: ReadonlySet<string> } | undefined;
+
+/**
+ * 当前 cwd 下**开启**的内置工具名 —— prompt 侧与工具侧的唯一真相。
+ *
+ * `system-prompt.ts` 的 `promptToolsFrom` 与 `tools.ts` 的 `getTools` **都调它**。
+ * 这不是去重，是**必需**：两边若各读一次 settings.json，其中一边还带缓存，
+ * 就会在「中途改了配置 / 缓存失效时机不同」时对不上 —— 而症状是静默的
+ * 「模型调了工具却回未知工具」，没有任何报错指向它。
+ * 共用这一个函数，那种分叉就不可能发生。
+ */
+export function selectedBuiltinToolNames(cwd: string = process.cwd()): ReadonlySet<string> {
+  const key = path.resolve(cwd);
+  if (cachedOn?.key !== key) {
+    cachedOn = { key, names: new Set(resolveToolSelection(loadPiSettings().defaultTools)) };
+  }
+  return cachedOn.names;
 }
 
 /**
@@ -124,19 +310,21 @@ export function getExtensionTools(): readonly AgentTool[] {
 }
 
 export function getTools(cwd: string = process.cwd()): readonly AgentTool[] {
-  const key = path.resolve(cwd);
-  let tools = registries.get(key);
-  if (!tools) {
-    tools = build(cwd);
-    registries.set(key, tools);
-  }
-  return extensionTools.length === 0 ? tools : [...tools, ...extensionTools];
+  const on = selectedBuiltinToolNames(cwd);
+  // 开关只作用于**内置工具**。扩展工具不受 `defaultTools` 管 —— 那是用户为
+  // 「装了哪些扩展」负责的事，让内置工具的开关注入去连带控制扩展会两头不讨好。
+  const builtin = allBuiltins(cwd).filter((tool) => on.has(tool.name));
+  return extensionTools.length === 0 ? builtin : [...builtin, ...extensionTools];
 }
 
 function getOfficialToolNames(): Set<string> {
   // **只取官方那一层** —— 不能用 `getTools()`，那个已经把扩展工具合进来了，
   // 那样就成了「扩展工具在不在表里取决于它自己有没有被装上」的循环。
-  return new Set(build(process.cwd()).map((tool) => tool.name));
+  //
+  // 而且要**全部**内置工具名，不只是默认开的那几个：这道门的作用是「不让扩展
+  // 顶掉一个同名内置工具」，与它默认开不开无关 —— 否则 `defaultTools` 里关掉
+  // `read` 之后，一个叫 `read` 的扩展就能把内置实现顶掉，而那正是我们要防的。
+  return new Set(BUILTIN_TOOL_NAMES);
 }
 
 export function getTool(name: string, cwd: string = process.cwd()): AgentTool | undefined {
@@ -153,8 +341,12 @@ export function getTool(name: string, cwd: string = process.cwd()): AgentTool | 
  * **不动扩展工具**：它们不属于任何 cwd（见上面那个注释）。
  */
 export function resetTools(cwd: string = process.cwd()): readonly AgentTool[] {
-  const key = path.resolve(cwd);
-  const tools = build(cwd);
-  registries.set(key, tools);
-  return extensionTools.length === 0 ? tools : [...tools, ...extensionTools];
+  registries.set(path.resolve(cwd), build(cwd));
+  // 顺带丢掉开关缓存 —— 测试改完 settings.json 后重取，期望看到新选择。
+  // 只丢缓存，不重建别处的（工具实例按 cwd 存着，本来就该复用）。
+  cachedOn = undefined;
+  // 走 getTools 而不是把 build 的结果直接返回：**返回值必须与正常路径一致**。
+  // 直接返回 build() 会让调用方（测试）看到一个「全部开启」的表，而 getTools()
+  // 给的是按 defaultTools 过滤过的 —— 两处不一致时，测试断言的其实是另一套工具集。
+  return getTools(cwd);
 }

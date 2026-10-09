@@ -85,6 +85,17 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
       --trace-dir <dir> 轨迹目录（默认 .trace）
   -h, --help             显示本帮助
 
+内置工具（默认 read / write / edit / bash / powershell；grep / find / ls 默认关，
+在 ~/.pi/agent/settings.json 的 defaultTools 里用 "+grep" 这样开）：
+  read       - 读文件
+  write      - 写文件
+  edit       - 按 oldText 精确替换
+  bash       - 执行 bash 命令
+  powershell - 执行 PowerShell 命令
+  grep       - 搜文件内容（需要 ripgrep）
+  find       - 按 glob 找文件（需要 fd）
+  ls         - 列目录内容
+
 界面里:
   Ctrl+T                在「对话」与「轨迹」两页之间切换（顶部有页签）
   Alt+↑/↓ 或 Ctrl+P/N   翻当前页（半页）；纯 ↑↓ 是移动光标，不拿来滚
