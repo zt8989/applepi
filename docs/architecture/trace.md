@@ -20,7 +20,7 @@ interface TraceNode {
   kind: 'user' | 'turn.start' | 'turn.end'      // 回合容器
       | 'step.start' | 'step.end'               // 步容器（= 一次 LLM 调用 + 它的工具批次）
       | 'llm.result'
-      | 'tool.attempt' | 'tool.result' | 'error' | 'stop'
+      | 'tool.call' | 'tool.result' | 'error' | 'stop'
       // 上下文族（不推进 tip，见下）
       | 'prompt.base' | 'prompt.tools' | 'prompt.segment' | 'model.init';
   status: 'pending' | 'ok' | 'error' | 'aborted';
@@ -53,7 +53,7 @@ function advancesTip(node) {
 }
 ```
 
-**容器（`turn.start` / `step.start` / `step.end` / `tool.attempt`）一律不推进 tip**，
+**容器（`turn.start` / `step.start` / `step.end` / `tool.call`）一律不推进 tip**，
 `error` 也不推进。只有 `turn.end` 这个**回合的闭合点**推进。
 
 这条不变量就是「重试的父 id 指向超时前的节点」的全部实现：第一次失败时 step 自己闭合了
@@ -136,13 +136,22 @@ HEAD → n8
 
 ## 统计
 
-`traceStats(tree)` 返回 `{turns, toolCalls, errors, retries, durationMs}`。
+`traceStats(tree)` 返回 `{turns, steps, toolCalls, errors, retries, durationMs}`。
 
-一个坑：`errors` **只数 `kind === 'error'` 的节点**，不能按 `status` 数。失败的 attempt 节点
+`turns` 数 `turn.start`、`steps` 数 `step.start` —— **数开口，不数闭合点**。
+口径就是顶行那两个字：**你发了一句话 = 一轮；开始调模型 = 一步。**
+
+为什么不能数 `turn.end` / `step.end`：`turn.end` 是在 phase 转 idle **之后**才 flush 的
+（见 [loop.md](loop.md) 的第二个 redux-loop 陷阱），而顶行是实时的 —— 数闭合点的话，
+模型还在跑的那一轮在界面上就**不算**，「发了一句话」要等它彻底说完才出现。
+数开口则相反：正在跑的那一轮立刻计入。
+代价是「按 Ctrl-C 硬掐掉的回合」也会被算进去 —— 但那本来也是你发出去了的一句话。
+
+一个坑：`errors` **只数 `kind === 'error'` 的节点**，不能按 `status` 数。失败的容器节点
 本身也会被标成 error（它闭合了，只是没推进 tip），连同它的 error 子节点一起数就把一次失败
 数成两次。
 
-`retries` 的判据是「同一父节点下有多个 attempt 节点」。
+`retries` 的判据是「同一父节点下有多个 step 容器，且那组里有失败的」。
 ## 上下文族：提示词与模型也进树
 
 「系统提示词的生成」也在树上，看得到模型当时看到了什么。
@@ -204,7 +213,7 @@ HEAD → n8
 
 ### 统计不计入
 
-`traceStats` 的 `turns` 只数 `llm.result`、`toolCalls` 只数 `tool.result`，
+`traceStats` 的 `turns` 数 `turn.start`、`toolCalls` 数 `tool.result`，
 所以 `prompt.tools` 不会让「调用过工具」计数虚高。
 
 ## 相关

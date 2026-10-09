@@ -154,7 +154,7 @@ test('回放能恢复出改名后的 id —— 不重跑 dedupe，也不调模�
   for (const id of calls) assert.ok(results.includes(id), `${id} 有配对的 result`);
 });
 
-test('回放出来的轨迹树与内存里一致（含 tool.attempt / tool.result 节点）', () => {
+test('回放出来的轨迹树与内存里一致（含 tool.call / tool.result 节点）', () => {
   const { jsonl, state } = runSessionWithTrace(3);
   const replayed = replaySession(jsonl, 'S');
 

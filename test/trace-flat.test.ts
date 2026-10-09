@@ -14,7 +14,7 @@ import type { AgentAction } from '../src/actions';
  * ## 为什么要改
  *
  * 一次正常对话在树里是一条长链（user → attempt → result → tool → result → attempt…），
- * 有时还并排几个工具（多个 tool.attempt 兄弟）。照 git 那样层层缩进，它是 5~7 层的
+ * 有时还并排几个工具（多个 tool.call 兄弟）。照 git 那样层层缩进，它是 5~7 层的
  * 阶梯，右半边全空 —— 而它**没有任何分支**，那样的缩进是纯噪声。
  *
  * 规则：**一组兄弟节点里没有失败，就整组不缩进**；出现了失败才切回树枝画法。
@@ -164,7 +164,7 @@ test('树结构本身没变：拉平只影响画法，不影响父子关系', ()
 
 // ── 并行工具要走真环（工具节点是 effect 开的，reducer 造不出来） ──
 
-test('并行工具：一个 llm.result 下多个 tool.attempt', async () => {
+test('并行工具：一个 llm.result 下多个 tool.call', async () => {
   const faux = createFauxRuntime();
   let calls = 0;
   const store = createAgentStore({
@@ -199,14 +199,14 @@ test('并行工具：一个 llm.result 下多个 tool.attempt', async () => {
   // 两个都成功 → **不画分叉**。并行不是分叉：一行一个工具，顺序就是执行顺序，
   // 缩进去等于说「第二个工具依赖第一个」，那是假的结构。
   assertAllFlat(rendered, '并行工具（全成功）');
-  // 树形没被拉坏：两个 tool.result 仍挂在自己的 tool.attempt 下。
-  const attempts = state.trace.order.filter((id) => state.trace.nodes[id]?.kind === 'tool.attempt');
+  // 树形没被拉坏：两个 tool.result 仍挂在自己的 tool.call 下。
+  const attempts = state.trace.order.filter((id) => state.trace.nodes[id]?.kind === 'tool.call');
   assert.equal(attempts.length, 2);
   for (const id of attempts) {
     const kids = state.trace.order.filter(
       (other) => state.trace.nodes[other]?.parentId === id,
     );
-    assert.equal(kids.length, 1, 'tool.result 仍挂在自己那个 tool.attempt 下');
+    assert.equal(kids.length, 1, 'tool.result 仍挂在自己那个 tool.call 下');
     assert.equal(state.trace.nodes[kids[0] ?? '']?.kind, 'tool.result');
   }
 });
@@ -244,9 +244,9 @@ test('并行工具里有一个失败：这时才画出分叉（同伴一起挂�
   const rendered = renderTree(state.trace, { maxWidth: 0 });
   console.log(`\n${rendered}\n`);
 
-  // 有失败 → 切回树枝：两个 tool.attempt 兄弟都在里面。
-  assert.match(rendered, /├── (✓|✗) n\d+ tool\.attempt/);
-  assert.match(rendered, /└── (✓|✗) n\d+ tool\.attempt/);
+  // 有失败 → 切回树枝：两个 tool.call 兄弟都在里面。
+  assert.match(rendered, /├── (✓|✗) n\d+ tool\.call/);
+  assert.match(rendered, /└── (✓|✗) n\d+ tool\.call/);
   // 失败那个下面挂着 error 节点。
   assert.match(rendered, /\n\s+✗ n\d+ error:/);
 });
@@ -321,11 +321,11 @@ test('工具报错：error 节点落进去，那一组的兄弟一起挂成分�
   const failed = after.trace.order.map((id) => after.trace.nodes[id]).find((n) => n?.kind === 'error');
   assert.ok(failed, '工具失败要落一个 error 节点');
   assert.equal(failed?.status, 'error');
-  // 有失败 → 切回树枝：两个 tool.attempt 兄弟都在里面。
-  assert.match(rendered, /├── (✓|✗) n\d+ tool\.attempt/);
-  assert.match(rendered, /└── (✓|✗) n\d+ tool\.attempt/);
+  // 有失败 → 切回树枝：两个 tool.call 兄弟都在里面。
+  assert.match(rendered, /├── (✓|✗) n\d+ tool\.call/);
+  assert.match(rendered, /└── (✓|✗) n\d+ tool\.call/);
   // 失败那个下面挂着 error 节点。
   assert.match(rendered, /\n\s+✗ n\d+ error:/);
-  // 树本身没被拉坏：error 的父仍是那个 tool.attempt。
+  // 树本身没被拉坏：error 的父仍是那个 tool.call。
   assert.equal(after.trace.nodes[failed?.id ?? '']?.parentId?.startsWith('n') === true, true);
 });

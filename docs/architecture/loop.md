@@ -41,7 +41,7 @@ reducer 里没有一个 `await`、没有一个 `fetch`。真正干活的 `Cmd.ru
 | `llm.delta` / `llm.thinking` | 累积流式文本 | 无（渲染用） |
 | `llm.done`（有 toolCall） | 追加 assistant 消息，开 `llm.result`，相位 → `calling-tools` | `Cmd.run(执行工具)` |
 | `llm.done`（无 toolCall） | 开 `llm.result`，**关掉 step**，相位 → `idle`，**环在这里闭合** | `Cmd.action(turn.end)` |
-| `tool.start` | 开一个 `tool.attempt` 节点 | 无 |
+| `tool.start` | 开一个 `tool.call` 节点 | 无 |
 | `tool.result` | 开 `tool.result`（失败则开 `error`），并入 messages，累加本步工具数 | 无 |
 | `tool.batch.done` | **关掉 step**，相位 → `thinking`（撞上限则 → `idle` + `stop` 节点） | steer 有货：`Cmd.action(queue.delivered)`；否则 `step.start` + `agent.run` |
 | `llm.failed`（可重试且还有次数） | 开 `error` 节点、**关掉这个 step**，**相位留在 `thinking`** | `Cmd.action(step.start)` + `agent.run`（重试是**兄弟** step） |
@@ -81,11 +81,12 @@ reducer 里没有一个 `await`、没有一个 `fetch`。真正干活的 `Cmd.ru
 
 **2. `turn.end` 的 Cmd 是在「phase 已经 idle」之后才被冲刷的。**
 `waitForIdle` / 落盘器监听的是 `phase === 'idle'`，而 `turn.end` 是 `llm.done` 的接线在那之后
-才发出来的。所以：`waitForIdle` 返回的状态**不包含** `turn.end`（回合容器还开着），
-读 `stats.turns` 会得到 0。要断言回合数得等一拍再重新读 `store.getState()`。
+才发出来的。所以：`waitForIdle` 返回的状态**不包含** `turn.end`（回合容器还开着）。
+读 `traceStats` 的 `turns` 不受影响 —— 它数的是 `turn.start`（开口），拿到快照就已经有；
+要断言 `turn.end` 那种「回合确实收尾了」的事实，才得等一拍再重新读 `store.getState()`。
 
 `llm.done` 的工具分支是同一个陷阱的另一面：它发的是 `Cmd.run(执行工具)` 而不是 `redispatch`，
-因为 `llm.done` 是从 `Cmd.run` 的 `successActionCreator` 进来的。工具的 `tool.attempt` 节点由
+因为 `llm.done` 是从 `Cmd.run` 的 `successActionCreator` 进来的。工具的 `tool.call` 节点由
 `tool/start` 的迁移开，而 `tool/start` 本来就是 `executeToolCalls` 内部 dispatch 的第一条
 action，所以不会漏。
 

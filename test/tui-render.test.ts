@@ -474,7 +474,7 @@ test('主题：system 不直接用（终端没上报颜色时它会退化成灰�
 /**
  * 造一个带 trace 统计的状态（只喂 tabLine 读得到的那几个字段）。
  *
- * `kind` → traceStats 的口径：`turn.end` 算回合、`step.end` 算步、`tool.result`
+ * `kind` → traceStats 的口径：`turn.start` 算回合、`step.start` 算步、`tool.result`
  * 算工具、`error` 算错误；重试要同父下多个 step.start 且组里有失败的。
  */
 function stateWithTrace(
@@ -508,16 +508,16 @@ test('tabLine：页签 + 统计在同一行，且写明切换键', () => {
 test('tabLine：回合与步数合成 `x轮x步`（节点数不再占位）', () => {
   // 「3 轮 8 步」与「3轮8步」是同一件事；节点数是 order.length，开一轮就 +5 ——
   // 跳得又快又不 actionable，所以从这一行里删掉（按 Ctrl+T 能看全树）。
-  const out = stripTerminalSequences(tabLine(stateWithTrace(['turn.end', 'step.end', 'step.end', 'step.end']), 'chat'));
+  const out = stripTerminalSequences(tabLine(stateWithTrace(['turn.start', 'step.start', 'step.start', 'step.start']), 'chat'));
   assert.ok(out.includes('1轮3步'), out);
   assert.ok(!/节点\s*\d/.test(out), '顶行不该再报节点数：' + out);
 });
 
 test('tabLine：工具/重试/错误非 0 才出现（0 是噪声）', () => {
-  const quiet = stripTerminalSequences(tabLine(stateWithTrace(['turn.end', 'step.end']), 'chat'));
+  const quiet = stripTerminalSequences(tabLine(stateWithTrace(['turn.start', 'step.start']), 'chat'));
   assert.ok(!quiet.includes('工具') && !quiet.includes('重试') && !quiet.includes('错误'), quiet);
   const noisy = stripTerminalSequences(
-    tabLine(stateWithTrace(['turn.end', 'step.end', 'tool.result', 'error']), 'chat'),
+    tabLine(stateWithTrace(['turn.start', 'step.start', 'tool.result', 'error']), 'chat'),
   );
   assert.ok(noisy.includes('工具1'), noisy);
   assert.ok(noisy.includes('错误1'), noisy);
@@ -525,12 +525,12 @@ test('tabLine：工具/重试/错误非 0 才出现（0 是噪声）', () => {
 
 test('tabLine：不报花费（底栏 statsLine 已有同口径的会话累计 $）', () => {
   // 两个 $ 摆在两行里，用户第一反应是「这俩为什么不一样」。
-  const out = tabLine(stateWithTrace(['turn.end', 'step.end'], { totalCost: 0.0123 }), 'chat');
+  const out = tabLine(stateWithTrace(['turn.start', 'step.start'], { totalCost: 0.0123 }), 'chat');
   assert.ok(!stripTerminalSequences(out).includes('$'), out);
 });
 
 test('tabLine：统计始终显示（不管在哪个页），当前页高亮', () => {
-  const state = stateWithTrace(['turn.end', 'step.end']);
+  const state = stateWithTrace(['turn.start', 'step.start']);
   for (const page of ['chat', 'trace'] as const) {
     assert.ok(stripTerminalSequences(tabLine(state, page)).includes('1轮1步'), page);
   }
@@ -829,7 +829,7 @@ test('TraceChunks：只重算变化的那个节点（追加，不是全量重画
   const chunks = new TraceChunks();
   let tree = createTraceTree('s');
   for (let i = 0; i < 30; i++) {
-    tree = appendNode(tree, tree.tipId, 'tool.attempt', {
+    tree = appendNode(tree, tree.tipId, 'tool.call', {
       status: 'pending', label: '工具 ' + i, createdAt: i,
     }).tree;
   }
@@ -848,7 +848,7 @@ test('TraceChunks：只重算变化的那个节点（追加，不是全量重画
   }
   assert.equal(changed, 1, '只有一个节点的行变了');
   // 耗时是 endedAt - createdAt = 100 - 29 = 71ms（节点号从 1 起，所以是 n30）。
-  assert.match(after[29] ?? '', /✓ n30 tool\.attempt: 工具 29 71ms/, '最后那个节点闭合了');
+  assert.match(after[29] ?? '', /✓ n30 tool\.call: 工具 29 71ms/, '最后那个节点闭合了');
 });
 
 test('TraceChunks：节点变少时旧块被丢掉（/new、恢复别的会话之后不残留）', () => {

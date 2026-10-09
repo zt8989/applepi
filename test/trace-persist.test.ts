@@ -153,7 +153,7 @@ test('从 .trace/<id>.jsonl 能把整棵树读回来（loadTrace）', async () =
     const tree = await loadTrace(sessionId, dir);
     assert.ok(tree, '能从文件读回');
     const stats = traceStats(tree);
-    assert.equal(stats.turns, 1, '一个回合');
+    assert.equal(stats.turns, 1, '一个回合（数 turn.start，不是 turn.end）');
     assert.equal(stats.steps, 2, '两步 = 两次 LLM 调用');
     assert.equal(stats.toolCalls, 1, '一次工具');
     assert.equal(stats.errors, 0);

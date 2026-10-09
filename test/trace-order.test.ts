@@ -122,8 +122,8 @@ test('工具失败：isError 真的被置上（pi 的 bash 失败不抛异常）
   console.log(`\n${rendered}\n`);
 
   // 失败的工具在轨迹上必须是 ✗，且下面挂着 error 节点。
-  assert.match(rendered, /✗ n\d+ tool\.attempt: bash \{"command":"exit 1"\}/);
+  assert.match(rendered, /✗ n\d+ tool\.call: bash \{"command":"exit 1"\}/);
   assert.match(rendered, /✗ n\d+ error: .*Command exited with code 1/);
   // 成功那个仍然是 ✓ —— 不能把两个都判成失败。
-  assert.match(rendered, /✓ n\d+ tool\.attempt: bash \{"command":"echo one"\}/);
+  assert.match(rendered, /✓ n\d+ tool\.call: bash \{"command":"echo one"\}/);
 });

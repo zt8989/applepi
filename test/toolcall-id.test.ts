@@ -214,7 +214,7 @@ test('id 冲突时 tool/start 与 tool/result 用的都是新 id（轨迹才对�
   assert.equal(results.length, 2);
   for (const id of results) {
     assert.equal(state.trace.nodes[id]?.status, 'ok', '都闭合了');
-    assert.equal(state.trace.nodes[id]?.parentId !== null, true, '各自挂在自己的 tool.attempt 下');
+    assert.equal(state.trace.nodes[id]?.parentId !== null, true, '各自挂在自己的 tool.call 下');
   }
 });
 

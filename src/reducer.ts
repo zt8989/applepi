@@ -685,7 +685,7 @@ const transitions: TransitionHandlers = {
     // 1. `step.start` 的防重入守卫是「容器开着就返回」。而不先关旧容器，
     //    新容器一开就立刻撞上那条守卫（见下面 `openTurnSeq` 那句注释）。
     // 2. 旧容器不关就没有 `turn.end` 节点 —— 树上会看到一个**永远不闭合**的回合，
-    //    而回放出来的 `stats.turns` 会少算一个。
+    //    而回放出来的回合就少一个闭合点（`traceStats` 数的是 `turn.start`，不受影响）。
     //
     // 旧回合的结局记 'completed'：它确实是正常说完的（正要接下一句）。
     const closed = closeTurnNode(base, now, 'completed', turnReasonText('completed'));
@@ -1072,7 +1072,7 @@ const transitions: TransitionHandlers = {
   },
 
   /**
-   * 工具开始：开一个 tool.attempt 节点，parent 是发起这一刻的 tip（即那条 llm.result）。
+   * 工具开始：开一个 tool.call 节点，parent 是发起这一刻的 tip（即那条 llm.result）。
    *
    * 为什么仍用 tip 而不是 step 容器：llm.result 推进了 tip，所以它就是 step 容器
    * 与工具节点之间的那个点。挂到 tip 上，工具就落在 llm.result 底下 —— 与原先一致。
@@ -1080,7 +1080,7 @@ const transitions: TransitionHandlers = {
   'tool/start': (state, action) => {
     const now = Date.now();
     const argsText = JSON.stringify(action.call.arguments ?? {});
-    const { tree, node } = appendNode(state.trace, state.trace.tipId, 'tool.attempt', {
+    const { tree, node } = appendNode(state.trace, state.trace.tipId, 'tool.call', {
       status: 'pending',
       label: `${action.call.name} ${argsText}`,
       detail: argsText,

@@ -373,7 +373,7 @@ export interface AgentState {
    * ## 为什么单独存一份，而不是去轨迹树上刨
    *
    * 界面要显示 `Took 0.5s`（pi 的 bash 块底部那行）。轨迹树上其实也有时间戳
-   * （`tool.attempt.createdAt` / `endedAt`），但那条路要「按 toolName 猜是哪个节点」——
+   * （`tool.call.createdAt` / `endedAt`），但那条路要「按 toolName 猜是哪个节点」——
    * 同名工具连着调两次就猜错了，而猜错的表现是**显示一个错的数字**，不报错，最难发现。
    *
    * reducer 的 `tool.result` 拿得到这次调用的 id 与时刻，直接记一份即可：

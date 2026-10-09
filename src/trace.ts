@@ -66,8 +66,8 @@ export type TraceNodeKind =
   | 'step.end'
   /** 一次 LLM 调用的成功结果。 */
   | 'llm.result'
-  /** 一个工具调用尝试。 */
-  | 'tool.attempt'
+  /** 一个工具调用。 */
+  | 'tool.call'
   /** 一个工具调用的结果。 */
   | 'tool.result'
   /** 某个尝试的失败（超时 / 网络 / 模型报错 / 工具抛错）。 */
@@ -294,12 +294,17 @@ export function traceStats(tree: TraceTree): TraceStats {
   for (const id of tree.order) {
     const node = tree.nodes[id];
     if (!node) continue;
-    // 回合数 = `turn.end` 的个数（容器闭合点，与界面的「回合」口径一致）。
-    // 不数 `turn.start`：开了却没闭合的回合（比如用户 Ctrl-C 掉）也会被算进去，
-    // 那不是「一个完成的回合」。
-    if (node.kind === 'turn.end') turns += 1;
-    // 步数 = `step.end` 的个数 —— 与 `turns` 同理，数闭合点。
-    if (node.kind === 'step.end') steps += 1;
+    // 回合数 = `turn.start` 的个数 —— 「**你发了一句话**就是一个回合」。
+    //
+    // 为什么数开口而不是闭合点（原先数 `turn.end`）：`turn.end` 是 phase 转 idle
+    // **之后**才 flush 的（见 docs/architecture/loop.md 的第二个 redux-loop 陷阱），
+    // 而顶行是实时显示的 —— 数开口的话，模型还在跑那一轮就已经算上了。
+    // 反过来的代价是「按 Ctrl-C 硬掐掉的回合」也会被算进去：那本来也是你发出去了的一句话。
+    if (node.kind === 'turn.start') turns += 1;
+    // 步数 = `step.start` 的个数 —— 同理，与「轮」同口径：「**开始调模型**就是一步」。
+    //
+    // 重试会另开一个 step，所以「步」> 「轮」里的 ReAct 循环长度（含重试）；两个数一起看才说得清。
+    if (node.kind === 'step.start') steps += 1;
     if (node.kind === 'tool.result') toolCalls += 1;
     // 只数 kind==='error' 的**错误节点**。不能按 status 数：失败的容器节点本身也会被
     // 标成 error（它闭合了，但没推进 tip），连同它的 error 子节点一起数就把一次失败数成两次。
@@ -308,8 +313,8 @@ export function traceStats(tree: TraceTree): TraceStats {
   }
   // 「重试」= 同一个父节点下有**多个 step 容器**（说明前一个没成，走了分支）。
   //
-  // 只数 step.start，**不能把 tool.attempt 算进来**：模型一轮里并行发两个工具时，
-  // 这两个 tool.attempt 是同一个 llm.result 下的兄弟节点，按「多兄弟即重试」的判据会被记成一次重试。
+  // 只数 step.start，**不能把 tool.call 算进来**：模型一轮里并行发两个工具时，
+  // 这两个 tool.call 是同一个 llm.result 下的兄弟节点，按「多兄弟即重试」的判据会被记成一次重试。
   // 之前把工具也算上，于是每轮并行调用都虚增一个「重试」（实测一轮 2 个 bash 就 +1）。
   let retries = 0;
   for (const id of tree.order) {
@@ -378,14 +383,14 @@ function metaSuffix(node: TraceNode): string {
  * ## 渲染策略：整棵树拉平，**只有错误才画出分叉**
  *
  * 一次**正常**对话在树里是一条长链：user → attempt → result → tool → result →
- * attempt → result …，有时还会并排几个工具（多个 tool.attempt 兄弟）。按 git 那样
+ * attempt → result …，有时还会并排几个工具（多个 tool.call 兄弟）。按 git 那样
  * 层层缩进，它是 5~7 层的阶梯，右半边全空着，而它**没有任何分支** —— 树形在这里是噪声。
  *
  * 所以规则是：**一组兄弟节点里没有失败，就整组不缩进**（就是一串平铺的行）。
  * 只有出现了失败，才切回树枝画法：
  *
  *   - 重试：同父下第 2 个及以后的 llm.attempt（前面那次失败）;
- *   - 并行工具：一个 llm.result 下多个 tool.attempt，**其中至少一个失败**；
+ *   - 并行工具：一个 llm.result 下多个 tool.call，**其中至少一个失败**；
  *   - 失败的工具调用：它和兄弟（哪怕成功的）一起挂成一小棵树。
  *
  * 单孩子永远不缩进 —— 没有分叉就没有要画的树枝。根节点（prompt.* / model.init / user

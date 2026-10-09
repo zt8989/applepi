@@ -568,7 +568,7 @@ test('端到端：装载与对话都落盘，回放时零 token 复现', async (
       '消息链完整重建 —— 零 token 就能复现这一轮',
     );
     const stats = traceStats(session.tree);
-    // turns 数的是**回合**（turn.end 的个数），不是 LLM 调用次数 ——
+    // turns 数的是**回合**（turn.start 的个数），不是 LLM 调用次数 ——
     // 这一段只有一个回合（一条用户消息），模型在里面跑了两步。
     assert.equal(stats.turns, 1, '一个回合');
     assert.equal(stats.steps, 2, '两步 = 两次 LLM 调用');

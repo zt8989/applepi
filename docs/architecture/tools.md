@@ -92,7 +92,7 @@ export function getTools(cwd = process.cwd()) {
 ```
 llm.done（有 toolCall）
   → 接线发 Cmd.run(executeToolCalls)
-      → executeToolCalls 内部：dispatch(tool/start)   ← 开 tool.attempt 节点
+      → executeToolCalls 内部：dispatch(tool/start)   ← 开 tool.call 节点
                           await getTool(name).execute(call.id, args, signal)
                           dispatch(tool.result)      ← 开 tool.result / error 节点
       → 成功 actionCreator：tool.batch.done

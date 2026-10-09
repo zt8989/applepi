@@ -81,6 +81,38 @@ function hangingStream(options?: { signal?: AbortSignal | undefined }): Assistan
 
 // ─── 树的基本形状 ───
 
+test('统计数开口：发了一句话 = 一轮，开始调模型 = 一步（容器还没关就算）', () => {
+  const reducer = createAgentReducer({});
+  let state: AgentState = createInitialState({
+    systemPrompt: 's',
+    providerName: 'faux',
+    modelId: 'fake',
+    toolNames: [],
+    sessionId: 'test',
+  });
+
+  // 一句话 → 一轮 → 第一步超时（step 被关掉）→ 重试开第二步，**这一轮还没收工**
+  //（没有 turn.end），第二个 step 也还没结束（没有 step.end）。
+  state = reducer(state, { type: 'user.message', text: '你好' }) as AgentState;
+  state = reducer(state, { type: 'turn.start' }) as AgentState;
+  state = reducer(state, { type: 'step.start' }) as AgentState;
+  state = reducer(state, { type: 'agent.run' }) as AgentState;
+  state = reducer(state, { type: 'llm.failed', error: 'LLM 调用超时', kind: 'timeout' }) as AgentState;
+  state = reducer(state, { type: 'step.start' }) as AgentState;
+
+  const kindCount = (kind: string): number =>
+    state.trace.order.filter((id) => state.trace.nodes[id]?.kind === kind).length;
+  const stats = traceStats(state.trace);
+  // 数 turn.start / step.start 而不是 turn.end / step.end：
+  // 顶行是实时的，用户刚发完就该看到「1轮2步」，不能等这一轮彻底说完才出现。
+  // 数闭合点的话这里是 0 轮 1 步（重试那步还没关，回合也没关）。
+  assert.equal(stats.turns, 1, '发了一句话 = 一轮，即使回合容器还开着');
+  assert.equal(stats.steps, 2, '两次尝试 = 两步，虽然第二步还没结束');
+  // 前提事实：现在树上只有 1 个 step.end、0 个 turn.end —— 数字来自开口而非闭合点。
+  assert.equal(kindCount('step.end'), 1);
+  assert.equal(kindCount('turn.end'), 0);
+});
+
 test('轨迹树：成功的一次对话长成 user → turn → step → llm.result 的链', () => {
   const reducer = createAgentReducer({});
   let state: AgentState = createInitialState({
@@ -260,8 +292,8 @@ test('鉴权失败不重试：错误在树上，但没有分叉，环收工', ()
 
 
 test('并行工具调用不算「重试」', () => {
-  // 回归测试：traceStats 曾经把 tool.attempt 和 llm.attempt 一起当「尝试」，
-  // 于是模型一轮里并行发两个工具（两个同父的兄弟 tool.attempt）就被记成一次重试。
+  // 回归测试：traceStats 曾经把 tool.call 和 llm.attempt 一起当「尝试」，
+  // 于是模型一轮里并行发两个工具（两个同父的兄弟 tool.call）就被记成一次重试。
   // 现场表现：顶栏显示「重试 22」，而轨迹里一个 error 节点都没有。
   const reducer = createAgentReducer({});
   let state: AgentState = createInitialState({
@@ -404,7 +436,7 @@ test('端到端：第一次 LLM 调用真的超时，自动重试后成功；树
   assert.equal(stats.retries, 1, '树上记录了一次重试');
   assert.equal(stats.errors, 1, '超时那个错误节点被保留在树上');
   assert.equal(stats.turns, 1, '一个回合');
-  // 一步失败 + 一步成功 = 两个 step.end，所以 steps 是 2。
+  // 一步失败 + 一步成功 = 两个 step.start，所以 steps 是 2。
   //
   // 注意它**不等于** turns：一个回合里模型可以查很多轮（每轮一个 step）。
   assert.equal(stats.steps, 2);

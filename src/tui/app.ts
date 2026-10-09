@@ -151,7 +151,7 @@ function nodeColor(node: TraceNode): (t: string) => string {
       return node.status === 'error' ? red : dim;
     case 'llm.result':
       return green;
-    case 'tool.attempt':
+    case 'tool.call':
       return node.status === 'error' ? red : yellow;
     case 'tool.result':
       return green;
@@ -354,7 +354,7 @@ export function renderColoredTree(tree: TraceTree, maxWidth: number): string {
     .map((line) => {
       // 节点 kind 的全集。**漏一个就等于那个 kind 整族不上色**（静默退化，最难发现的一种 bug）。
       const match =
-        /^(.*?)(n\d+) (llm\.attempt|llm\.result|tool\.attempt|tool\.result|user|error|stop|compact|prompt\.base|prompt\.tools|prompt\.segment|prompt\.skills|model\.init):/.exec(
+        /^(.*?)(n\d+) (llm\.attempt|llm\.result|tool\.call|tool\.result|user|error|stop|compact|prompt\.base|prompt\.tools|prompt\.segment|prompt\.skills|model\.init):/.exec(
           line,
         );
       if (!match) return line.startsWith('HEAD') ? bold(line) : line;
