@@ -96,11 +96,34 @@ export interface PiAiEffectsOptions {
   model: Model<any>;
   /** 浏览器/宿主注入 key 的口子（node 下默认读 process.env）。 */
   resolveKey?: (provider: string) => string | undefined | Promise<string | undefined>;
+  /**
+   * 按 state 里的 `model.provider` / `model.modelId` 取**当时的**模型。
+   *
+   * ## 为什么需要它
+   *
+   * 没有它时 effect 表捕获的是**建表那一刻**的 `model`（闭包变量），于是 `/model`
+   * 换了模型之后底栏变了、轨迹树里也记了新模型，**实际请求仍发给旧模型** ——
+   * 症状是「换了没用」，而所有可见证据都说换了。
+   *
+   * 给了它之后模型是**每次请求现取**的：`model.changed` + `model.init` 一 dispatch，
+   * 下一个回合就用新的。`getModel` 返回 `undefined`（模型在盘上找不到了，配置坏过）时
+   * 退回闭包里那个 —— 那样至少还打得出请求，而抛 `undefined` 会让整条环崩在一个
+   * 「本该打网络」的位置上。
+   */
+  resolveModel?: ((state: AgentState) => Model<any> | undefined) | undefined;
 }
 
 export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable {
-  const { streamFn, model } = options;
+  const { streamFn, model: initialModel } = options;
   const keyOf = options.resolveKey ?? resolveApiKey;
+
+  /**
+   * 这一轮该用哪个模型。
+   *
+   * 读 state（`model.init` 装、`model.changed` 改），没有 `resolveModel` 时就是初始那个。
+   */
+  const modelOf = (state: AgentState): Model<any> =>
+    options.resolveModel?.(state) ?? initialModel;
 
   /**
    * 最近一次 `compact.request` 带的理由。
@@ -148,6 +171,7 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
     }, state.llmTimeoutMs);
     try {
       // await 是必要的：浏览器侧 resolveKey 是 async（key 在 IndexedDB 里）。
+      const model = modelOf(state);
       const apiKey = await keyOf(model.provider);
       const streamOptions: SimpleStreamOptions = { signal: controller.signal };
       if (apiKey !== undefined) streamOptions.apiKey = apiKey;
@@ -469,10 +493,10 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
       state.compactionSettings,
       state.model.contextWindow,
     );
-    const apiKey = await keyOf(model.provider);
+    const apiKey = await keyOf(state.model.provider);
     const outcome = await runCompaction({
       messages: state.messages,
-      model,
+      model: modelOf(state),
       streamFn,
       ...(apiKey !== undefined ? { apiKey } : {}),
       ...(state.model.thinkingLevel !== 'off' ? { thinkingLevel: state.model.thinkingLevel } : {}),

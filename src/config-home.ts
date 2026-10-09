@@ -63,6 +63,15 @@ import {
   CONFIG_DIR_NAME as PI_DIR_NAME,
   getAgentDir,
 } from '@earendil-works/pi-coding-agent/dist/config.js';
+import {
+  readJsonlHead,
+  readJsonlTail,
+  type SessionHeader,
+  type SessionInfoEntryLike,
+} from './session-file';
+
+/** 末尾读多少字节（找「最后一次说话」）。见 `listSessions` 的表。 */
+const TAIL_BYTES = 256 * 1024;
 
 /** pi 自己的配置目录名（`.pi`）。从官方常量拿，不手写字符串。 */
 export const PI_CONFIG_DIR: string = PI_DIR_NAME;
@@ -167,6 +176,24 @@ export interface SessionSummary {
   createdAt?: string | undefined;
   /** 消息条数（数文件行数，不解析）。 */
   entries: number;
+  /** 用户给会话起的名字（`session_info` entry）。没起过就 undefined。 */
+  name?: string | undefined;
+  /** 分叉来源（header 的 `parentSession`）。本项目还没接 fork，所以通常 undefined。 */
+  parentSession?: string | undefined;
+  /**
+   * **最后一次说话**的时间（ms）。
+   *
+   * 与 `mtimeMs` 的差别不是「精确一点」而是**另一个东西**：文件 mtime 会被任何写入改动
+   * （连改名都算），而这条是「最后一次 user/assistant 消息」。排序与「2 小时前」用它。
+   * 读不到就退回 `mtimeMs`。
+   */
+  lastActivityMs: number;
+}
+
+/** cwd 归一化（比大小写、去掉尾部分隔符）——「这条会话是不是当前目录的」就靠它。 */
+function normalizeCwd(cwd: string): string {
+  const trimmed = cwd.trim().replace(/[/\\]+$/, '');
+  return process.platform === 'win32' ? trimmed.toLowerCase() : trimmed;
 }
 
 /** 取一段文本的首行（调用方已经读到的那一截里找）。 */
@@ -242,22 +269,30 @@ function readHead(file: string, bytes = 65536): string {
 }
 
 /**
- * 列出所有会话，按最近修改倒序。
+ * 列出所有会话，按**最后说话**的时间倒序。
  *
  * 遍历 sessions/ 下的每个 `--<cwd>--` 目录（目录名本身就编码了 cwd，先用它，
  * 读得到 header 就用 header 里的 —— header 更权威）。
  *
- * ## 代价：18MB 的目录要读完一遍，但只扫**字节**
+ * ## 代价：18MB 的目录要扫两遍，但都只扫**字节**
  *
- * header 与条数都来自文件内容（header 给 cwd/createdAt，条数是列表副标题里那个数），
- * 所以这里确实要读一遍全部会话 —— 但读的是**字节**、数的是换行符，不建字符串数组、
- * 不 `JSON.parse`。实测 124 个会话 / 18MB 从 286ms 降到 37ms。
+ * | 字段 | 怎么拿 | 为什么 |
+ * | --- | --- | --- |
+ * | header（cwd / id / 时间） | 只读开头 64KB（`readHead`） | header 是首行，永远在这截里 |
+ * | 条数 | 分块流式数换行（`countLines`） | 精确；不把全文读进内存 |
+ * | 名字 / 分叉来源 | 从头扫 512KB，**不提前停**（`readJsonlHead`，见 `readSessionMeta`） | `session_info` 可以追加在**任何**位置 —— 给三个月前的会话改名，那条 entry 就在文件末尾 |
+ * | 最后说话时间 | 只读**末尾** 256KB（`readJsonlTail`） | 消息 timestamp 在每行里，但最后那次几乎总在末尾 |
  *
- * 「条数」必须**精确**：它显示给用户看，拿估算换速度是把一个可见的错换成看不见的慢。
- * 真正让弹窗等一分钟的不是这一步（是 `session-picker` 里的标题，见那里的注释），
- * 所以这里保住「精确」而不是去猜。
+ * 早先这里是「每个会话都 `readSession` 整份再 parse 一遍」：124 个会话、18MB 的目录，
+ * 光列列表就要 524ms。现在整条弹窗路径 128ms（见 docs/architecture/sessions.md）。
+ *
+ * ## 为什么**不**扫全文
+ *
+ * 「全文」只在**搜索**里才需要（找当时聊过的那句话）。而列表本身不需要 —— 显示标题用
+ * 第一条 user 消息（也在文件前几行），显示时间用末尾。所以这里坚持「为显示不读全文」。
+ * 搜索那侧仍只搜**头部**（见 `session-picker.ts` 的说明），两边的取舍写在同一处。
  */
-export function listSessions(): SessionSummary[] {
+export function listSessions(filter?: { cwd?: string }): SessionSummary[] {
   const root = sessionsDir();
   if (!existsSync(root)) return [];
 
@@ -268,6 +303,11 @@ export function listSessions(): SessionSummary[] {
   } catch {
     return [];
   }
+
+  // 作用域过滤（pi 的 `Current Folder` / `All`）：cwd 缺失的会话（坏 header）在
+  // 「当前目录」下**算作不属于** —— 它可能是任何目录的会话，而界面无法确认。
+  // 那一行仍然列在 `All` 里，用户还能看到它、删掉它。
+  const wanted = filter?.cwd !== undefined ? normalizeCwd(filter.cwd) : undefined;
 
   for (const dirName of dirs) {
     const dir = path.join(root, dirName);
@@ -296,23 +336,97 @@ export function listSessions(): SessionSummary[] {
       const line = head === '' ? null : firstLineOf(head);
       let cwd = '';
       let createdAt: string | undefined;
+      let parentSession: string | undefined;
       let id = file.replace(/\.jsonl$/, '');
       if (line) {
         try {
-          const header = JSON.parse(line) as { type?: string; cwd?: string; id?: string; timestamp?: string };
+          const header = JSON.parse(line) as {
+            type?: string;
+            cwd?: string;
+            id?: string;
+            timestamp?: string;
+            parentSession?: string;
+          };
           if (header.cwd) cwd = header.cwd;
           if (header.id) id = header.id;
           if (header.timestamp) createdAt = header.timestamp;
+          if (header.parentSession) parentSession = header.parentSession;
         } catch {
           // header 坏了也要列出来（用户还能看到它、删掉它），只是拿不到 cwd。
         }
       }
-      out.push({ id, cwd, file: full, mtimeMs, createdAt, entries: countLines(full) });
+      if (wanted !== undefined && normalizeCwd(cwd) !== wanted) continue;
+      out.push({
+        id,
+        cwd,
+        file: full,
+        mtimeMs,
+        createdAt,
+        entries: countLines(full),
+        ...(readSessionMeta(full) ?? {}),
+        lastActivityMs: readJsonlTail(full, TAIL_BYTES).lastActivityMs || mtimeMs,
+      });
     }
   }
 
-  out.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  // 按最后说话时间倒序；一样新时用 mtime 兜底（那个会话可能还没写 message entry，
+  // 例如只有 init 段 —— 于是 lastActivityMs 是 0）。
+  out.sort((a, b) => b.lastActivityMs - a.lastActivityMs || b.mtimeMs - a.mtimeMs);
   return out;
+}
+
+/**
+ * 把 `session_info`（名字）与分叉来源读出来。两个都没取到就返回 undefined。
+ *
+ * ## 为什么**不能** `stopAfter` 命中就停
+ *
+ * 直觉上「命中 `session_info` 就停」像是对的那个省法（`sessionTitleFromHead` 就是那么做的）。
+ * 它是错的：pi 的语义是**最后一条** `session_info` 说了算，而改名是**反复**发生的 ——
+ * 给同一个会话改两次名，就有两条。于是「命中就停」读到的是**第一次**的名字，
+ * 而用户在 pi 那边看到的是第二次那个。症状是「刚改完名，按 ctrl+n 只看到旧名字」，
+ * 而且只在该会话被改过名时出现 —— 极难归因。
+ *
+ * 更根本的是：一条 entry 可能追加在**文件末尾**（给一个三个月前的会话改名），
+ * 所以这里的 512KB 截断本来就不是「读全部」—— 它只是「前 512KB 里的最后一条
+ * `session_info`」。对一个**很长**的会话，被改名的那条落在窗口外，仍会读不到。
+ *
+ * ## 那能不能精确地做
+ *
+ * 能，但代价是扫全文（名字可能在任意一行），而 docs/architecture/sessions.md 已经为
+ * 「不扫全文」付出过代价。所以这里明确选「扫前 512KB」，并把这条限制写在上面。
+ * 对**当前**正在聊的会话改名（正是面板的主要用途），那条 entry 就在前几 KB 里，一定命中。
+ */
+function readSessionMeta(file: string): { name?: string; parentSession?: string } | undefined {
+  // 不给 `stopAfter`：见上面的「为什么不能提前停」。
+  const { content } = readJsonlHead(file, 512 * 1024);
+  // pi 的语义：**最后一条** `session_info` 说了算，且空串 = 显式清名。
+  //
+  // `name === undefined` **不能**直接当「还没找到」的哨兵 —— 因为空串那条会让它重新变回
+  // undefined，于是循环继续往回找，把上一个名字捞出来。那正是「清名之后又冒出旧名字」。
+  // 所以另用一个 `seen` 标记区分「没找到」与「找到了，但是空的」。
+  let name: string | undefined;
+  let nameSeen = false;
+  let parentSession: string | undefined;
+  for (let i = content.length - 1; i >= 0; i -= 1) {
+    const entry = content[i];
+    if (entry?.type === 'session_info' && !nameSeen) {
+      nameSeen = true;
+      // 空串 = 显式清掉上一个名字（pi 的 `getSessionName()` 同一语义）。
+      const trimmed = (entry as SessionInfoEntryLike).name?.trim();
+      name = trimmed === undefined || trimmed === '' ? undefined : trimmed;
+    }
+    if (parentSession === undefined && entry?.type === 'session') {
+      // 走 `SessionHeader` 而不是 `entry.parentSession`：后者在本项目里是
+      // `[key: string]: unknown` 的索引签名，拿到的是 `{}`（而 SessionInfoEntryLike
+      // 把它遮成 `string | undefined`）。父分叉来自 header，直接读那个形状。
+      const fromHeader = (entry as unknown as SessionHeader).parentSession;
+      if (fromHeader !== undefined && fromHeader !== '') parentSession = fromHeader;
+    }
+  }
+  // 空名字 = 没取到；两者都没取到就返回 undefined，调用方于是不写这两个字段。
+  return name === undefined && parentSession === undefined
+    ? undefined
+    : { ...(name !== undefined ? { name } : {}), ...(parentSession !== undefined ? { parentSession } : {}) };
 }
 
 export function ensureDir(dir: string): void {

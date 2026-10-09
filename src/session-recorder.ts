@@ -33,8 +33,6 @@ export interface SessionRecorderOptions {
   cwd: string;
   /** 传 null 就不写会话文件（只落轨迹）。 */
   enabled: boolean;
-  /** 模型变化时记一条（恢复历史时能看出当时用的哪个模型）。 */
-  onModelChange?(entry: { provider: string; modelId: string }): void;
 }
 
 export interface SessionRecorder {
@@ -68,11 +66,33 @@ export function createSessionRecorder(
     resetEntrySeq(options.resumeFrom);
   }
 
+  /**
+   * 已在盘上的「上一次模型」是什么。
+   *
+   * **建表时就记成「当前那个」**（而不是 `null`）：`model_change` 的语义是
+   * 「**换**成了什么」，而不是「这个会话用的是什���」。开机那个模型从来没换过，
+   * 写一条等于谎报。恢复场景（`resumeFrom > 0`）同样如此 —— 那一段的
+   * `model_change` 已经在文件里了。
+   *
+   * 不去重会怎样：订阅器**每帧**都跑，一次 `/model` 能写出几百条 —— 而会话文件
+   * 恰好是「打开 `/sessions` 面板要扫」的那些文件之一。
+   */
+  const modelKeyOf = (s: AgentState): string => `${s.model.provider}\0${s.model.modelId}`;
+  let lastModelKey = modelKeyOf(store.getState());
+
   const flush = (): void => {
     const state = store.getState();
-    // 模型换了要记一条 —— 恢复历史时得知道当时用的是哪个模型。
-    const last = state.messages[state.messages.length - 1];
-    void last;
+    // 模型换了要记一条（与 pi 同一个 entry type，pi 恢复时也认）。
+    //
+    // 为什么**在**这里而不在 `onModelChange` 回调里：那个回调字段早先是声明了但
+    // 没人调的（没有调用方传它），于是「换模型」这个事实**从来没进过会话文件** ——
+    // 恢复历史时看到的是一串消息，却不知道中间哪一段用的哪个模型。有一条能真跑的
+    // 路之后，回调字段就多余了，删掉比留一个永远不触发的钩子诚实。
+    const modelKey = modelKeyOf(state);
+    if (modelKey !== lastModelKey) {
+      writer.appendModelChange(state.model.provider, state.model.modelId);
+      lastModelKey = modelKey;
+    }
     for (let i = written; i < state.messages.length; i += 1) {
       const message = state.messages[i];
       if (!message) continue;

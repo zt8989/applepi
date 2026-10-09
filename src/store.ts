@@ -158,6 +158,9 @@ export function createAgentStoreWith(options: CreateAgentStoreOptions): AgentSto
     createPiAiEffectTable({
       streamFn: streamFn ?? defaultStreamFn(runtime),
       model: runtime.model,
+      // **每次请求现取**模型（而不是捕获建表那一个）—— /model 换了模型之后
+      // 下一个回合必须真的发给新的那个。症状见 `effects.ts` 的 `resolveModel` 注释。
+      resolveModel: (state) => runtime.models.getModel(state.model.provider, state.model.modelId),
     });
 
   const initialState = createInitialState({

@@ -2,11 +2,13 @@
  * 终端界面 —— pi-tui（差分渲染的 TUI 库）驱动，环仍然只由本项目的 Redux Loop 跑。
  *
  * 这个文件不含任何环的逻辑：它只是订阅 store，把状态画出来。
- * 界面分两块：
+ * 界面是**整页切换**的两块（中间那块按 `page` 换内容）：
  *
- *   - 对话区：用户说了什么、LLM 答了什么、工具做了什么（按消息流渲染）
- *   - 轨迹面板（Ctrl+T 切换）：**像 git log --graph 一样的一次尝试一节点的树**
+ *   - 对话页：用户说了什么、LLM 答了什么、工具做了什么（按消息流渲染）
+ *   - 轨迹页（Ctrl+T 切换）：**像 git log --graph 一样的一次尝试一节点的树**
  *     失败/超时也在上面，是一层能展开的节点，不是飘在下面的一行红字。
+ *
+ * 顶行是**页签 + 轨迹统计合一行**（`tabLine`），底栏两行是 cwd / 用量 + 模型。
  *
  * pi-tui 的好处是差分渲染：流式 token 一个个进来时只重画变化的那几行，
  * 不会整屏闪烁 —— 这对一个一直在吐 delta 的 agent 界面很关键。
@@ -41,8 +43,16 @@ import type { AgentState, QueuedInput, QueueKind } from '../state';
 import type { AgentStore } from '../store';
 import type { AgentAction } from '../actions';
 import type { ToolCall } from '@earendil-works/pi-ai';
-import { cleanSessionsExcept, listSessions, type SessionSummary } from '../config-home';
-import { loadSessionMessages, openSessionPicker } from './session-picker';
+import { cleanSessionsExcept, listSessions, sessionPath, type SessionSummary } from '../config-home';
+import { deleteSessionTrace, loadSessionMessages, openSessionPicker } from './session-picker';
+import {
+  openModelPicker,
+  openScopedModelsPicker,
+  modelRuntimeFor,
+} from './model-picker';
+import { NO_SCOPE, readScopedModels, writeDefaultModel, type ModelScope, type ScopedModelItem } from '../model-scope';
+import type { AgentRuntime } from '../provider';
+import type { Model } from '@earendil-works/pi-ai';
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -359,27 +369,61 @@ export function renderColoredTree(tree: TraceTree, maxWidth: number): string {
 }
 
 /**
- * 顶栏一行：轨迹统计（**刻意精简**）。
+ * 顶行：页签 + 轨迹统计（**兼两职**，刻意压成一行）。
  *
- * ## 为什么这么少
+ * ## 形状
  *
- * pi 的顶栏只有 logo + 版本 + 快捷键提示，模型/上下文用量都在**底栏**。我们反过来：
- * 原来顶栏塞了「provider/model · N 轮 · $花费 · 轨迹 节点 N」，一条顶栏混了四类信息，
- * 读起来像日志。现在顶栏只留轨迹统计（它与对话内容直接相关：节点数/重试/错误），
- * 模型与用量挪到底栏 —— 与 pi 一致。
+ * ```
+ * 对话 │ 轨迹 3轮2步  工具5  重试1  错误1 (Ctrl+T)
+ * ```
+ *
+ * - 「对话 / 轨迹」当前页加粗高亮，旁边写切换键（否则得另找地方说「Ctrl+T 能切」）。
+ * - 统计是**精简后的**：回合与步数合成 `x轮x步`（两个都是「事件次数」的口径，
+ *   连读不歧义 —— 「3 轮 2 步」= 三次用户输入、两次 LLM 往返），工具/重试/错误
+ *   非 0 才出现。
+ * - 统计**始终显示**（不管在对话页还是轨迹页）：这轮跑到哪了是「读对话」时就想要的信息，
+ *   不该逼用户切页才看得到。
+ *
+ * ## 为什么不再有独立顶栏
+ *
+ * 原来顶栏独占一行（轨迹统计），紧跟着下面还有一行页签 —— 两行都在讲同一件事
+ * （「我在哪页 / 这轮跑到哪了」），纵向各白占一行，而界面真正缺的是对话的高度。
+ * 合成一行后：那行要么讲页签要么讲统计，不讲别的。
+ *
+ * 节点数也删了：它是 `trace.order.length`，**开一轮就 +5**（user / turn.start /
+ * step.start / llm.attempt / …），跳得又快又不 actionable —— 要看节点数按 Ctrl+T。
+ * 花费 `$` 一并删掉：底栏 statsLine 里已有一个**同口径**的会话累计 `$`，两个 `$`
+ * 摆在两行里只会让人怀疑「这俩为什么不一样」。
+ *
+ * ## 为什么回合/步数要分开报过、现在又合起来了
+ *
+ * 早先报的是 `节点 N · 回合 N · 步 N · 工具 N · 重试 N · 错误 N`，六个数挤一行像日志。
+ * `回合 3 · 步 8` 与 `3轮8步` 说的是同一件事，写法不同而已；真正需要区分的是
+ * 「工具调用数」（模型自己发起的动作，与前两者不同口径），那个仍然单独报。
+ *
+ * ## 为什么 padToWidth 用 visibleWidth 而不是 stripAnsi().length
+ *
+ * pi-tui 是**增量**重绘：只重画变化的行。这一行的长度随统计变化（`3轮2步` → `3轮3步`），
+ * 不补齐的话旧内容的尾巴不会被擦掉，下一帧会叠着出现 —— 看起来像「重复刷屏」。
+ * 补齐长度让这一行恒定，增量重绘就不留残影。而汉字是双宽、`stripAnsi().length`
+ * 会把「一个汉字」当一个字符，所以按可见列宽算（padToWidth 的注释）。
  */
-export function statusLine(state: AgentState): string {
+export function tabLine(state: AgentState, page: 'chat' | 'trace'): string {
   const stats = traceStats(state.trace);
-  const traceBits = [`节点 ${state.trace.order.length}`];
-  // **回合与步数分开报**：它们是两个不同的口径，混成一句「N 轮」就分不清
-  // 「模型说了 5 句话」还是「模型调用了 5 次工具」。
-  if (stats.turns > 0) traceBits.push(`回合 ${stats.turns}`);
-  if (stats.steps > 0) traceBits.push(`步 ${stats.steps}`);
-  if (stats.toolCalls > 0) traceBits.push(`工具 ${stats.toolCalls}`);
-  if (stats.retries > 0) traceBits.push(`重试 ${stats.retries}`);
-  if (stats.errors > 0) traceBits.push(red(`错误 ${stats.errors}`));
-  const cost = state.totalCost > 0 ? ` · $${state.totalCost.toFixed(4)}` : '';
-  return `${dim('轨迹')} ${traceBits.join(dim(' · '))}${cost}`;
+  // `x轮x步` 一个就够：两者都是「事件次数」，0 就整个不出现（`0轮0步` 是噪声）。
+  // 注意与「工具」分开 —— 那是模型发起的动作数，不是时间维度。
+  const bits: string[] = [];
+  if (stats.turns > 0 || stats.steps > 0) bits.push(`${stats.turns}轮${stats.steps}步`);
+  if (stats.toolCalls > 0) bits.push(dim(`工具${stats.toolCalls}`));
+  if (stats.retries > 0) bits.push(dim(`重试${stats.retries}`));
+  if (stats.errors > 0) bits.push(red(`错误${stats.errors}`));
+  // 统计与 `(Ctrl+T)` 之间固定两个空格：既分开又不至于空出一大段。
+  const tail = [bits.join('  '), dim('(Ctrl+T)')].filter((s) => s !== '').join('  ');
+  const tabs =
+    page === 'chat'
+      ? `${bold(cyan('对话'))} ${dim('│ 轨迹')}`
+      : `${dim('对话')} ${bold(cyan('│ 轨迹'))}`;
+  return tail === '' ? tabs : `${tabs} ${tail}`;
 }
 
 /**
@@ -608,12 +652,6 @@ function lastContextUsage(messages: AgentState['messages']): number | undefined 
   return undefined;
 }
 
-/** 去掉 ANSI 序列，拿到可见宽度。 */
-function stripAnsi(text: string): string {
-  // eslint-disable-next-line no-control-regex
-  return text.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
-}
-
 /**
  * 底栏那行：左边路径 / 右边 `(provider) model`，中间空格补齐。
  *
@@ -634,14 +672,17 @@ export function twoColumn(left: string, right: string, width: number): string {
 }
 
 /**
- * 顶栏补到终端全宽。
+ * 一行补到终端全宽（可见列宽，不计 ANSI）。
  *
- * pi-tui 是**增量**重绘：只重画变化的行。顶栏本来是变长的（`0 轮` → `1 轮`、节点数增加），
- * 变长时旧内容的尾巴不会被擦掉，于是下一帧会叠着出现 —— 看起来像「重复刷屏」。
- * 补齐宽度让这一行长度恒定，增量重绘就不留残影。
+ * pi-tui 是**增量**重绘：只重画变化的行。页签行是变长的（`3轮2步` → `3轮3步`、
+ * 多了个错误数），变长时旧内容的尾巴不会被擦掉，于是下一帧会叠着出现 ——
+ * 看起来像「重复刷屏」。补齐宽度让这一行长度恒定，增量重绘就不留残影。
+ *
+ * 用 `visibleWidth` 而不是 `stripAnsi().length`：**汉字是双宽**，后者把一个汉字
+ * 当一个字符，补出来的空白会少一截（这一行固定含「对话」两个汉字）。
  */
 function padToWidth(text: string, width: number): string {
-  const visible = stripAnsi(text).length;
+  const visible = visibleWidth(text);
   return visible >= width ? text : text + ' '.repeat(width - visible);
 }
 
@@ -652,6 +693,14 @@ function padToWidth(text: string, width: number): string {
  * 以前 `/help` 里手抄了一份，两边会漂移。
  */
 const SLASH_COMMANDS: SlashCommand[] = [
+  {
+    name: 'model',
+    description: '换模型（弹窗选择；`/model <id>` 精确命中时直接切；与 pi 同名）',
+  },
+  {
+    name: 'scoped-models',
+    description: '启用/禁用哪些模型参与 Ctrl+P 循环（Ctrl+S 存进 settings）',
+  },
   {
     name: 'sessions',
     description: '恢复历史会话（弹窗选择，零 token 不重跑模型）',
@@ -757,6 +806,22 @@ export interface TuiOptions {
    */
   restoreSession?: ((file: string) => Promise<{ id: string; restored: number }>) | undefined;
   /**
+   * 换模型（`/model`）。**必须由内核出手** —— 与 `restoreSession` 同一类原因：
+   * 换模型要 dispatch `model.changed` + `model.init`（能力与窗口随模型变），
+   * 而 effect 表读的模型是**每次请求现取**的（`store.ts` 的 `resolveModel`）。
+   * 界面自己 dispatch 也能让底栏变，但那样就绕过了内核那道「先查模型存在再换」的闸。
+   *
+   * 不传 = `/model` 面板仍能开（能列、能搜），选完会**明说没接内核**而不是假装换了。
+   */
+  setModel?: ((provider: string, modelId: string) => boolean) | undefined;
+  /**
+   * 拿 provider 装配（模型目录的来源）。`/model` 面板要它列模型。
+   *
+   * 不给就退化成一个只有「当前模型」的面板（与 pi 的 `AgentSession` 缺 `modelRuntime`
+   * 时的行为一致）—— 但本项目正常路径下**一定**给得出来。
+   */
+  runtime?: AgentRuntime | undefined;
+  /**
    * 当前会话 id。`/clean` 要**放行**它 —— 记录器正开着那个文件，删了等于写到虚空里。
    */
   sessionId?: (() => string) | undefined;
@@ -815,10 +880,70 @@ export function gitBranch(cwd: string): string | undefined {
   }
 }
 
+/**
+ * 启用列表 → 面板要用的作用域条目。
+ *
+ * ## 为什么自己解析而不用官方的 `resolveModelScopeFromModels`
+ *
+ * 官方那个（`core/model-resolver.js`）还兼三件事，而这里只缺得起的只有一件：
+ *
+ * - 解析 `provider/id:high` 里那个**思考级别**（`:high`）——我们要，那部分直接用官方的结果形状；
+ * - **判重 / 报诊断**（`no-match`）——那要给用户看，而 `/model` 面板里没有报诊断的地方
+ *   （它自己会列「没有匹配的模型」）。真要报，应该报在 `/scoped-models` 那一侧。
+ * - **降级路径**（`runtime` 是 undefined）——面板得**能开**。官方的解析器要
+ *   `ModelRuntime`，我们降级时没有，于是不能只靠它。
+ *
+ * 所以这里的策略是：**拿得到官方结果就用它**（解析规则逐字复用，不自己写 `:level` 解析），
+ * 拿不到就只按 `provider/id` 精确匹配 —— 并把「解析不出来」**如实**表现为「列表短了」，
+ * 而不是编一条假条目去凑数。
+ *
+ * `null`（= 全开）不解析成条目：官方的「全开」语义是「面板列全部可用」，由组件自己算。
+ */
+export function scopeFrom(
+  enabledIds: readonly string[] | null,
+  runtime: AgentRuntime | undefined,
+): ModelScope {
+  if (enabledIds === null) return NO_SCOPE;
+  const available = runtime ? [...modelRuntimeFor(runtime).getAvailableSnapshot()] : [];
+  const items: ScopedModelItem[] = [];
+  for (const ref of enabledIds) {
+    // `provider/id:high`：级别是**末尾**的 `:片段`（`:` 在 model id 里的情形靠 split 判前缀匹配）。
+    const slash = ref.lastIndexOf('/');
+    const provider = slash > 0 ? ref.slice(0, slash) : undefined;
+    let idAndLevel = slash > 0 ? ref.slice(slash + 1) : ref;
+    let level: string | undefined;
+    const colon = idAndLevel.lastIndexOf(':');
+    if (colon > 0) {
+      const tail = idAndLevel.slice(colon + 1);
+      // 只认**已知的级别名**：model id 里带冒号（OpenRouter 的 `x:exacto`）很常见，
+      // 把它们当级别剥掉会得到一个找不到的 id —— 而那条配置本来是好的。
+      if (['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(tail)) {
+        level = tail;
+        idAndLevel = idAndLevel.slice(0, colon);
+      }
+    }
+    const model = available.find(
+      (m) => (provider ? m.provider === provider && m.id === idAndLevel : m.id === idAndLevel),
+    );
+    if (model) items.push(level === undefined ? { model } : { model, thinkingLevel: level });
+  }
+  return { enabledModelIds: [...enabledIds], models: items };
+}
+
 export async function runTui(options: TuiOptions): Promise<number> {
   const { store, prompt, newSession, sessionId, restoreSession: restoreHook } = options;
   const beforeAgentStartHook = options.beforeAgentStart;
   const cwd = options.cwd ?? process.cwd();
+  /**
+   * 当前会话**文件路径**（picker 用它把「正在用的这条」标出来并拒绝删除）。
+   *
+   * `sessionId` 是取值函数（`/new` 之后会变），所以每次开面板现算 —— 别缓存，
+   * 否则 `/new` 之后打开 `/sessions` 会去保护一个已经不存在的文件。
+   */
+  const currentSessionFile = (): string | undefined => {
+    const id = sessionId?.();
+    return id === undefined || id === '' ? undefined : sessionPath(id, cwd);
+  };
   // 主题**必须先于一切渲染**装上：pi 的 `theme` 是个 globalThis 上的 Proxy，
   // 没 initTheme() 时读它任何属性都抛 `Theme not initialized`。
   // 而对话区那三个官方组件（User/Assistant/ToolExecution）每一个都在 render 里读 theme。
@@ -837,27 +962,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
     copyOnSelect: true,
   });
 
-  const header = new Text('', 0, 0);
   /**
-   * 底栏：左边 cwd (+git 分支)，右边 `(provider) model`。
+   * 顶行：页签 + 轨迹统计（**两职合一**，见 tabLine）。
    *
-   * 为什么要它：模型与用量是「我在跟谁说话」，与对话内容无关，放顶栏会干扰读对话；
-   * 而它们又不能删 —— 换 provider 时最容易出的错就是以为还在用原厂模型。
-   * 形状照抄 pi（`~\path (main)` …… `(workbuddy) cn:space-bunny`）。
+   * 为什么**只有一个**顶行组件：早先是 header（统计）+ tabs（页签）两行，两行讲的是
+   * 同一件事（「我在哪页 / 这轮跑到哪了」），纵向白占一行，而对话区最缺高度。
    */
-  /**
-   * 底栏：**两行**（与 pi 同形）。
-   *
-   *     ~\Documents\workspace\event-loop-agent (main)
-   *     ↑6.8k ↓49 R143 CH2.1% 0.7%/1.0M        (workbuddy) cn:space-bunny
-   *
-   * 为什么要它：模型与用量是「我在跟谁说话、说了多少」，与对话内容无关；堆在顶箱
-   * 会干扰读对话。而它们又不能删 —— 换 provider 时最容易出的错就是以为还在用原厂模型。
-   *
-   * 一个 Text 组件装两行（内部用 `\n` 分行），而不是两个组件：布局里只占一个 slot，
-   * 也不用管两行之间的高度分配。
-   */
-  const footer = new Text('', 0, 0);
+  const tabs = new Text('', 0, 0);
   /**
    * 对话区：**按消息分块**的增量渲染（每条消息一个组件，内容没变就不重算）。
    *
@@ -899,13 +1010,18 @@ export async function runTui(options: TuiOptions): Promise<number> {
   });
   let scroll = new ScrollView(transcript, { follow: 'end', primary: true });
   /**
-   * 页签行：`对话` / `轨迹`，当前页高亮。
+   * 底栏：**两行**（与 pi 同形）。
    *
-   * **为什么要它而不是 Ctrl+T 直接换掉整页**：用户需要知道自己现在在哪个页 ——
-   * 否则「轨迹突然不见了」看起来像树坏了，而「树不见了」恰好是最容易出的症状
-   * （开场树就是空的，见 beginTrace 的注释）。
+   *     ~\Documents\workspace\event-loop-agent (main)
+   *     ↑6.8k ↓49 R143 CH2.1% 0.7%/1.0M        (workbuddy) cn:space-bunny
+   *
+   * 为什么要它：模型与用量是「我在跟谁说话、说了多少」，与对话内容无关；堆在顶行
+   * 会干扰读对话。而它们又不能删 —— 换 provider 时最容易出的错就是以为还在用原厂模型。
+   *
+   * 一个 Text 组件装两行（内部用 `\n` 分行），而不是两个组件：布局里只占一个 slot，
+   * 也不用管两行之间的高度分配。
    */
-  const tabs = new Text('', 0, 0);
+  const footer = new Text('', 0, 0);
   /**
    * 排队中的用户输入（steer / followUp）—— 与 pi 的 `pendingMessagesContainer` 同一形状：
    * 一行一条，前面标出它去哪一列。
@@ -940,6 +1056,24 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const IDLE_FRAMES: string[] = [];
   const BUSY_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   loader.setIndicator({ frames: IDLE_FRAMES });
+
+  /**
+   * 当前作用域（`Ctrl+P` 循环的候选集）——`/scoped-models` 改的就是它。
+   *
+   * ## 为什么在 `runTui` 的闭包里而不是 state 里
+   *
+   * 三个理由，与 `model-scope.ts` 的文件头同源：
+   *
+   * 1. 它**不是**「这次对话的事实」——`/new` / 恢复历史都不该动它。
+   * 2. state 里的东西要进 `reducer.ts` 的 `restoredConversationState` 清单（漏一项的症状
+   *    是「`/new` 之后循环集莫名变了」）。
+   * 3. 界面**重建**时（换会话时我们重建 transcript）闭包变量天然还在，而 state 要额外
+   *    一条 `conversation.reset` 的分支去保住它。
+   *
+   * 启动时从 `settings.json` 的 `enabledModels` 读一次（与 pi 同键）——
+   * 所以「上次设的」在下次启动仍然有效。
+   */
+  let currentScope: ModelScope = scopeFrom(readScopedModels(cwd), options.runtime);
 
   const editor = new Editor(tui, EDITOR_THEME);
   // 补全：`/` 触发命令列表（带说明），路径位置触发文件补全。
@@ -1055,9 +1189,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
 
   const refresh = (): void => {
     const state = store.getState();
-    // 补到全宽：顶栏长度变化会让 pi-tui 的增量重绘留下残影（见 padToWidth 的注释）。
-    header.setText(padToWidth(statusLine(state), terminal.columns ?? 100));
-    // 底栏同理：模型名 / 节点数会变，必须补齐到全宽，否则残影会叠出来。
+    // 底栏：模型名 / 用量数会变，必须补齐到全宽，否则残影会叠出来。
     // 底箱两行（形状拄 pi 截图）：
     //   第一行：`~\Documents\workspace\event-loop-agent (main)`            —— 左边
     //   第二行：`↑6.8k ↓49 R143 CH2.1% 0.7%/1.0M      (workbuddy) cn:space-bunny`
@@ -1093,12 +1225,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
       // 所以这句话得说清楚「不是坏了」，否则用户以为没记上。
       state.prompt.seeded ? '（发送第一条消息后这里开始记轨迹）' : '（还没有任何节点）',
     );
-    // 页签：当前页高亮，并把切换键写在旁边（否则得另找地方说「Ctrl+T 能切」）。
-    tabs.setText(
-      page === 'chat'
-        ? `${bold(cyan('对话'))} ${dim('│ 轨迹')} ${dim('(Ctrl+T)')}`
-        : `${dim('对话')} ${bold(cyan('│ 轨迹'))} ${dim('(Ctrl+T)')}`,
-    );
+    // 页签 + 统计：合在一行（见 tabLine）。当前页高亮，统计紧凑成 `x轮x步`。
+    // **补到全宽**：这一行长度随统计变化，不补齐的话增量重绘会叠出残影。
+    tabs.setText(padToWidth(tabLine(state, page), width));
     tui.requestRender();
   };
 
@@ -1162,6 +1291,28 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const activeScroll = (): ScrollView => (page === 'trace' ? traceScroll : scroll);
   const onInput: TuiInputListener = (data: string) => {
     /**
+     * **有弹窗时，本监听器整个让路。**
+     *
+     * pi-tui 的 `inputListeners` 在**聚焦组件之前**跑（`tui.js` 的 `handleInput`）：
+     * 没被 `consume` 的按键继续往聚焦组件走，而弹窗聚焦的正是它自己。所以这里
+     * `return undefined`（不消费）就是「我不处理，交给弹窗」。
+     *
+     * ## 为什么必须要
+     *
+     * 这个监听器无条件处理四个键，其中一个是致命的：`ctrl+c` 在空闲时
+     * `process.exit(0)`。弹窗里 `Ctrl+C` 的语义是**取消面板**，于是「打开 /sessions
+     * 然后想退出」会直接杀掉整个 pi —— 而且没有堆栈、没有日志，用户只会觉得「崩了」。
+     * 另外三个（`ctrl+t` 切轨迹页 / `ctrl+o` 展开工具 / `ctrl+q` 换队列模式）会让弹窗
+     * 开着的**同时**背后的主界面也变了，看着像面板没盖住背景。
+     *
+     * ## 为什么判「弹窗栈非空」而不是「picker 是否开着」
+     *
+     * 后者要 app 持一份状态，而前者白得一个连带好处：扩展用 `ctx.ui.custom()` /
+     * `ctx.ui.select()` 弹的对话框**也自动**拿到同样的让路（它们内部同样把 `Ctrl+C`
+     * 当取消）。那些面板各有自己的 `handleInput`，所以顺序仍然是「面板先、这里后」。
+     */
+    if (tui.hasOverlay()) return undefined;
+    /**
      * 滚轮：**必须在编辑器之前**。
      *
      * Alt+↑ / Ctrl+P 这些键编辑器不碰，但它们的兄弟（纯 ↑↓）要碰 ——
@@ -1184,6 +1335,52 @@ export async function runTui(options: TuiOptions): Promise<number> {
     }
     /** 内置的三个开关键。返回 true = 已消费。 */
     const builtins = (): boolean => {
+      // `Ctrl+L` = `app.model.select`（打开 /model 面板）。与 pi 同键。
+      //
+      // **为什么放在 ctrl+t/o/q 之前但与它们分开写**：pi 的 `app.model.select` 默认就是
+      // `ctrl+l`，而本项目的三个开关全是 `ctrl+<字母>`，两者没有冲突。放在这里是因为
+      // 它的语义与那几个一样——都是全局开关。
+      if (matchesKey(data, 'ctrl+l')) {
+        if (store.getState().phase !== 'idle') {
+          notify(yellow('上一回合还没结束，先 Ctrl-C 中断再换模型'));
+          return true;
+        }
+        if (!options.runtime) {
+          notify(yellow('未接内核（没有 provider 装配），换不了模型'));
+          return true;
+        }
+        openModelPicker({
+          tui,
+          runtime: options.runtime,
+          current: {
+            provider: store.getState().providerName,
+            modelId: store.getState().modelId,
+          },
+          cwd,
+          scope: currentScope,
+          onSelect: (model) => {
+            if (!options.setModel?.(model.provider, model.id)) {
+              notify(yellow(`换不了 ${model.provider}/${model.id}（未接内核或配置里没它）`));
+              return;
+            }
+            refresh();
+            notify(dim(`已切到 ${model.id}（${model.provider}）`));
+          },
+          onSelectAsDefault: (model) => {
+            if (!writeDefaultModel(model.provider, model.id, cwd)) {
+              notify(yellow('没能写进 settings.json，默认模型没变'));
+              return;
+            }
+            if (options.setModel?.(model.provider, model.id)) {
+              refresh();
+              notify(dim(`已存为默认并切到 ${model.id}（${model.provider}）`));
+            } else {
+              notify(yellow(`已存为默认，但换不了 ${model.id}（配置里没它）`));
+            }
+          },
+        });
+        return true;
+      }
       if (matchesKey(data, 'ctrl+c')) {
         if (store.getState().phase !== 'idle') {
           abortRun();
@@ -1345,7 +1542,15 @@ export async function runTui(options: TuiOptions): Promise<number> {
         }
         openSessionPicker({
           tui,
+          cwd,
+          ...(currentSessionFile() !== undefined ? { currentSessionFile: currentSessionFile() } : {}),
           onPick: (session) => restoreSession(session),
+          // 官方只删会话文件，轨迹那份要我们自己补 —— 见 session-picker 的注释。
+          onSessionDeleted: (session) => {
+            if (!deleteSessionTrace(session)) {
+              notify(dim(`已删会话 ${session.id}（轨迹文件 ${path.basename(session.file)} 旁边的 traces/ 那份没删掉，下次 /clean 会扫掉）`));
+            }
+          },
         });
         return;
       }
@@ -1366,6 +1571,101 @@ export async function runTui(options: TuiOptions): Promise<number> {
               (current ? '（当前这段保留）' : ''),
           ),
         );
+        return;
+      }
+      case 'model': {
+        // 环在跑时不能换：那条流正在等 token，而它的请求已经发出去了 ——
+        // 中途换模型会让这一轮的模型与下一轮不同，而对话里看不出这个断点。
+        if (store.getState().phase !== 'idle') {
+          notify(yellow('上一回合还没结束，先 Ctrl-C 中断再换模型'));
+          return;
+        }
+        if (!options.runtime) {
+          notify(yellow('未接内核（没有 provider 装配），换不了模型'));
+          return;
+        }
+        // 选了模型之后要**真的**换：内核 setModel() 发 `model.changed` + `model.init`。
+        const apply = (model: Model<any>, persist: boolean): void => {
+          if (persist && !writeDefaultModel(model.provider, model.id, cwd)) {
+            notify(yellow(`没能写进 settings.json（写权限？），默认模型没变；这一轮仍用 ${model.id}`));
+            return;
+          }
+          if (!options.setModel) {
+            notify(yellow(`未接内核，${model.id} 没换成（面板只是列了模型）`));
+            return;
+          }
+          if (!options.setModel(model.provider, model.id)) {
+            notify(yellow(`换不了 ${model.provider}/${model.id}：当前配置里没这个模型`));
+            return;
+          }
+          refresh();
+          notify(
+            dim(
+              persist
+                ? `已存为默认并切到 ${model.id}（${model.provider}）`
+                : `已切到 ${model.id}（${model.provider}）`,
+            ),
+          );
+        };
+        // `/model <词>`：精确命中就直接切（与 pi 的 `findExactModelMatch` 同一形状），
+        // 否则带词开面板（官方组件拿它当 `initialSearchInput`）。
+        //
+        // 为什么要区分：`/model cn:space-bunny` 每次都开一次弹窗会很烦 —— 而精确命中是
+        // 可验证的（列表里真有这个 id），不存在「弹窗里翻半天才找到」的风险。
+        if (arg !== '') {
+          const snapshot = modelRuntimeFor(options.runtime).getAvailableSnapshot();
+          const exact = snapshot.find(
+            (m) => m.id === arg || `${m.provider}/${m.id}` === arg,
+          );
+          if (exact) {
+            apply(exact, false);
+            return;
+          }
+        }
+        openModelPicker({
+          tui,
+          runtime: options.runtime,
+          current: {
+            provider: store.getState().providerName,
+            modelId: store.getState().modelId,
+          },
+          cwd,
+          scope: currentScope,
+          onSelect: (model) => {
+            apply(model, false);
+          },
+          onSelectAsDefault: (model) => {
+            apply(model, true);
+          },
+        });
+        return;
+      }
+      case 'scoped-models': {
+        if (store.getState().phase !== 'idle') {
+          notify(yellow('上一回合还没结束，等它跑完再改作用域'));
+          return;
+        }
+        if (!options.runtime) {
+          notify(yellow('未接内核（没有 provider 装配），改不了作用域'));
+          return;
+        }
+        openScopedModelsPicker({
+          tui,
+          runtime: options.runtime,
+          cwd,
+          currentScope,
+          onChange: (ids) => {
+            // **当场生效**：解析成条目，下次开 /model 面板与 Ctrl+P 循环都用它。
+            currentScope = scopeFrom(ids, options.runtime);
+            notify(dim(`作用域已改（${ids === null ? '全部' : `${ids.length} 个`}），Ctrl+S 存进 settings`));
+            refresh();
+          },
+          onPersist: (ids, written) => {
+            const count = ids === null ? '全部' : `${ids.length} 个`;
+            // 写失败**必须**说出来：用户以为存下了，下次启动发现没了，而那无处可查。
+            notify(written ? dim(`已写进 settings.json（${count}）`) : yellow('没能写进 settings.json（写权限？）'));
+          },
+        });
         return;
       }
       case 'compact': {
@@ -1521,7 +1821,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
   };
 
   // 布局：AltScreen = 真正的全屏（占满视口、终端不留回滚缓冲）。
-  // 纵向四段：顶栏一行 / 页签一行 / 中间那块（当前页，唯一可伸缩）/ 底部输入区。
+  // 纵向三段：顶行一行（页签 + 统计）/ 中间那块（当前页，唯一可伸缩）/ 底部输入区。
   //
   // 为什么不能用 addChild 平铺：那样每个组件各占若干行，内容一多就把输入框顶出屏幕，
   // 而且整屏重画时旧内容会留在回滚缓冲里（看起来像「重复刷屏」）。
@@ -1548,9 +1848,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // 早先的形状是「轨迹面板贴在对话区上面」（同一个 VStack 里两个可伸缩区），
     // 后果有两个：轨迹一多就把对话区挤没；而它自己又不可滚，于是只剩最早那几行。
     //
-    // 现在：顶部放一行**页面标签**，中间那块的**内容**按 `page` 换掉，
-    // 谁在中间谁就是 `primary`（pi-tui 的 key 处理只发给 primary ScrollView ——
-    // 见 layout.js 的 `node.state.primary || !context.primaryScrollView`）。
+    // 现在：顶部放一行**页面标签 + 统计**（tabLine，两职合一），中间那块的**内容**
+    // 按 `page` 换掉，谁在中间谁就是 `primary`（pi-tui 的 key 处理只发给 primary
+    // ScrollView —— 见 layout.js 的 `node.state.primary || !context.primaryScrollView`）。
     // 所以「滚轮 / PgUp / PgDn 在轨迹页滚轨迹、在对话页滚对话」是白得的，不用自己判。
     //
     // 不做分屏也就不用调两块的高度：中间那块永远 basis 0 + grow 1（唯一可伸缩的）。
@@ -1566,8 +1866,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
     ]);
     tui.setLayoutRoot(
       new VStack([
-        { component: header, basis: 1, grow: 0, minSize: 1 },
-        // 页签行：写清当前在哪个页、以及怎么切（**不写在别处**，否则得记两处）。
+        // 顶行：页签 + 统计（**一行顶行**，不是两行 —— 见 tabs 的注释）。
+        // 写清当前在哪个页、这轮跑到哪了、以及怎么切（**不写在别处**，否则得记两处）。
         { component: tabs, basis: 1, grow: 0, minSize: 1 },
         // 中间那块 = 当前页。primary 跟着 page 走。
         { component: page === 'trace' ? traceScroll : scroll, basis: 0, grow: 1, minSize: 3 },
@@ -1578,8 +1878,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
   applyLayout();
 
   tui.setFocus(editor);
-  // **先填内容再 start()**：header / footer 初始是空串，pi-tui 量高度时得到 0，
-  // 于是那两行在布局里塌掉 —— 屏幕上只剩编辑器那两条横线，顶栏与底栏都不见了。
+  // **先填内容再 start()**：tabs / footer 初始是空串，pi-tui 量高度时得到 0，
+  // 于是那两行在布局里塌掉 —— 屏幕上只剩编辑器那两条横线，顶行与底栏都不见了。
   // （首帧必须可见，所以这里就要有内容；不能指望「用户发一条消息后 store 变化触发
   //  refresh」—— 启动时 store 根本没变。）
   refresh();

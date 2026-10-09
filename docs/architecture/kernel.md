@@ -59,6 +59,22 @@ createKernel
 npm start              →  src/tui.ts     → createKernel() → runTui({store})
 ```
 
+## 换模型
+
+`kernel.setModel(provider, modelId)`：**两条** action，先 `model.changed` 后 `model.init`。
+
+两条都要的原因是能力：**`supportsMidConvoSystemMessages` / `contextWindow` 这些在模型之间
+不一样**。`model.changed` 只改标识、并把能力**保守地清掉**（标成不支持），`model.init`
+才是权威。能力错的后果是发出一份 provider 拒收的请求 —— 那种失败长得像「随机 400」。
+
+两个决定值得记下：
+
+- **先查模型存在再 dispatch**：从 `runtime.models` 取那个 Model 对象，取不到就返回
+  `false`、状态原封不动。半换（说要用某个模型、但没人知道它的能力）比拒绝更糟。
+- **不改 `runtime.spec` / `runtime.model`**：那是**初始**装配，`extensionModelRegistry()` 与
+  `createRuntime()` 都还指着它。改它等于「把历史也改了」—— `/new` 之后本该能回到命令行
+  给的那个模型。effect 表每次请求现取（`store.ts` 的 `resolveModel`），所以只换 state 就够。
+
 ## 相关
 
 - 环怎么转 → [loop](loop.md)

@@ -90,7 +90,10 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
   Alt+↑/↓ 或 Ctrl+P/N   翻当前页（半页）；纯 ↑↓ 是移动光标，不拿来滚
   Ctrl+O                展开/收起工具输出的完整内容（默认只留前 12 行）
   Ctrl+Q                切换入队模式：steer（工具跑完后插进去）／followUp（说完再插）
+  Ctrl+L                打开模型选择面板（与 pi 的 app.model.select 同键）
   Ctrl+C                环在跑时中断这一轮；空闲时退出
+  /model [id]           换模型（不给 id 就弹面板；给了精确命中就直接切）
+  /scoped-models        启用/禁用哪些模型参与 Ctrl+P 循环（Ctrl+S 存进 settings）
   /skills               列出已装载的 skill
   /skill:<名字> [问题]  把某个 skill 的正文展开后连同你的问题一起发给模型
 
@@ -281,6 +284,12 @@ async function main(): Promise<void> {
     newSession: () => kernel.newSession(),
     // 恢复历史：也必须走内核（换 id + 记录器游标对齐），界面自己做会把历史重写一遍。
     restoreSession: (file: string) => kernel.restoreSession(file),
+    // 换模型：dispatch `model.changed` + `model.init`（能力与窗口随模型变），
+    // 且**先查模型存在**。界面自己 dispatch 也能让底栏变，但那样绕过了那道闸。
+    setModel: (provider: string, modelId: string) => kernel.setModel(provider, modelId),
+    // 面板要列模型，就要有 provider 装配。**给真的 runtime**（内核持有的那个 `AgentRuntime`）——
+    // 它与 `createRuntime` 装的是同一个对象，面板看到的模型目录与实际发请求的目录同源。
+    runtime: kernel.runtime,
     // 当前会话 id 也要给：`/clean` 删历史时得放行它（记录器正开着那个文件）。
     // 注意它是**取值**不是常量：开新会话后 id 会变。
     sessionId: () => kernel.sessionId,

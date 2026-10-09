@@ -21,7 +21,7 @@
  * 的产物、落盘频繁；会话文件是给人读的历史。混在一起的话「读一个会话」要先跳过一堆
  * 与它无关的记录。
  */
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { ensureDir, sessionPath } from './config-home';
 import type { Message } from '@earendil-works/pi-ai';
@@ -285,6 +285,92 @@ export function readJsonlHead(
     if (options.stopAfter?.(parsed)) break;
   }
   return { header, content };
+}
+
+/**
+ * 只读 JSONL 的**最后**若干字节，倒着扫行（第一条命中的就是最新的那条）。
+ *
+ * ## 为什么需要「从尾巴读」
+ *
+ * 列表里有一栏是「这条会话最近一次活动是什么时候」。消息的 `timestamp` 在**每一行**里，
+ * 而最后一次活动几乎总在**文件末尾**（一个会话文件是只追加的）。于是从文件头扫到尾
+ * 是唯一能拿准的办法 —— 那等于把整个会话读一遍，18MB 的目录就是 18MB。
+ *
+ * 但 `session_info`（用户给会话起的名字）可能写在**任何**位置：给一个三个月前的会话
+ * 改名，那条 entry 追加在文件末尾，而后面可能又跟了几百条消息。所以名字**只能**全扫。
+ *
+ * ## 两种读法，按「值在哪儿」选
+ *
+ * | 要什么 | 怎么拿 |
+ * | --- | --- |
+ * | `session_info`（名字 / 分叉来源 `parentSession`） | 从头扫（`readJsonlHead` 那边已有），**命中就停** |
+ * | 最后活动时间（`modified`） | 从尾巴读这一段（这里） |
+ *
+ * ## 为什么「取最大 timestamp」而不是「最后一行的时间戳」
+ *
+ * 文件里留着**空壳会话**（header 之后一条消息都没有，见 `SessionWriter.start`），
+ * 而中途失败的那一轮可能留下「工具结果写完了、assistant 消息没写」的情况 ——
+ * 这时文件**末尾**那行的 timestamp 不代表最后一次真正说过话。
+ *
+ * 取最大值的代价只是「多读一点字节」（已经在读那一段了），收益是那一个数**准** ——
+ * 它决定列表的排序与「3 分钟前 / 2 小时前」这种显示。
+ *
+ * @param bytes 最多读文件末尾多少字节
+ */
+export function readJsonlTail(file: string, bytes: number): { lastActivityMs: number } {
+  let fd: number | undefined;
+  let text: string;
+  try {
+    fd = openSync(file, 'r');
+    // 先问文件多大，再决定从哪儿读、读多少 —— 单次 readSync 到末尾会读到 null。
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - bytes);
+    const buf = Buffer.allocUnsafe(size - start);
+    if (buf.length === 0) return { lastActivityMs: 0 };
+    const read = readSync(fd, buf, 0, buf.length, start);
+    text = buf.toString('utf8', 0, read);
+  } catch {
+    return { lastActivityMs: 0 };
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // 读失败后的清理失败不值得抛。
+      }
+    }
+  }
+
+  // 开头那一行可能被截断了（从中间开始读），不能当半行 JSON.parse。
+  const firstNewline = text.indexOf('\n');
+  const usable = firstNewline < 0 ? '' : text.slice(firstNewline + 1);
+
+  let lastActivityMs = 0;
+  for (const line of usable.split('\n')) {
+    if (line.trim() === '') continue;
+    let entry: SessionEntry & { message?: { role?: string; timestamp?: unknown } };
+    try {
+      entry = JSON.parse(line) as typeof entry;
+    } catch {
+      continue; // 崩溃截断的半行：跳过，不让整个会话读不出来。
+    }
+    // 与 pi 的 `getMessageActivityTime()` 同一口径：**只算** user/assistant。
+    // toolResult 的 timestamp 也会「动」，而那不该让会话看起来刚刚活跃过。
+    const message = entry.message;
+    if (!message || (message.role !== 'user' && message.role !== 'assistant')) continue;
+    const ms =
+      typeof message.timestamp === 'number'
+        ? message.timestamp
+        : Date.parse(String(entry.timestamp ?? ''));
+    if (Number.isFinite(ms) && ms > lastActivityMs) lastActivityMs = ms;
+  }
+  return { lastActivityMs };
+}
+
+export interface SessionInfoEntryLike extends SessionEntry {
+  type: 'session_info';
+  /** 用户给会话起的名字。空串 = 显式清掉上一个名字（与 pi 同一语义）。 */
+  name?: string;
 }
 
 /** 会话的第一句话（列表里做标题用）。 */

@@ -503,3 +503,105 @@ test('开新会话后，两段对话落在**两个文件**里（旧的不被续�
 function sessionPathIn(cwd: string): string {
   return path.join(configHome(), 'sessions', encodeCwd(path.resolve(cwd)));
 }
+
+// ── 记录器：换模型这件事本身也要落盘 ──
+
+test('记录器：换模型会写一条 model_change（之前那个字段声明了但没人调）', async () => {
+  // 这条盯的是一个**已存在**的静默退化：`SessionRecorderOptions.onModelChange` 早先是
+  // 声明了却**没有任何调用方传它**，于是「这段对话中途换了模型」这个事实从来没进过
+  // 会话文件。症状是恢复历史时看到一串消息，却不知道中间哪一段用的哪个模型 ——
+  // 而「换模型」在界面 上是有明确反馈的（底栏变了），所以那一段对不上时特别难查。
+  await withHome(async () => {
+    const reducer = createAgentReducer({});
+    let state: AgentState = createInitialState({
+      systemPrompt: 'p',
+      providerName: 'workbuddy',
+      modelId: 'cn:space-bunny',
+      toolNames: [],
+      sessionId: 'mc1',
+    });
+    let notify: (() => void) | null = null;
+    const dispatch = (a: AgentAction): void => {
+      state = reducer(state, a) as AgentState;
+      notify?.();
+    };
+    const store = {
+      getState: () => state,
+      subscribe: (l: () => void) => {
+        notify = l;
+        return () => {
+          notify = null;
+        };
+      },
+      dispatch,
+    };
+    const rec = createSessionRecorder(store, { sessionId: 'mc1', cwd: '/proj', enabled: true });
+    assert.ok(rec);
+
+    // 先说一句话（于是 header 与第一条消息落盘 —— 那个「空会话不建文件」的规则）。
+    dispatch({ type: 'user.message', text: '第一句' });
+    // 换模型：与 `kernel.setModel()` 发同样的两条 action。
+    dispatch({ type: 'model.changed', provider: 'workbuddy', modelId: 'cn:deepseek-v4.1-flash' });
+    dispatch({
+      type: 'model.init',
+      provider: 'workbuddy',
+      modelId: 'cn:deepseek-v4.1-flash',
+      thinkingLevel: 'off',
+      capabilities: { midConvoSystemMessages: false, midConvoToolAdditions: false, developerRole: false },
+      contextWindow: 0,
+    });
+    // 流式更新不该重复写 —— 订阅器每帧都跑，不去重的话会写出几百条 model_change。
+    dispatch({ type: 'llm.delta', delta: 'x' });
+    dispatch({ type: 'llm.delta', delta: 'y' });
+    rec?.dispose();
+
+    const session = readSession(rec.file);
+    assert.ok(session);
+    const changes = session.entries.filter((e) => e.type === 'model_change');
+    assert.equal(changes.length, 1, `只该有一条 model_change，实际 ${changes.length}：${JSON.stringify(changes)}`);
+    assert.equal(changes[0]?.modelId, 'cn:deepseek-v4.1-flash');
+    assert.equal(changes[0]?.provider, 'workbuddy');
+  });
+});
+
+test('记录器：没换模型时不写 model_change（不能每帧补一条）', async () => {
+  // 与上一条同一个机制的反面：不换就不该有任何 model_change。
+  // 漏了去重的话，这个文件会按帧增长 —— 而它恰好是「打开面板要扫」的那些文件之一。
+  await withHome(async () => {
+    const reducer = createAgentReducer({});
+    let state: AgentState = createInitialState({
+      systemPrompt: 'p',
+      providerName: 'workbuddy',
+      modelId: 'cn:space-bunny',
+      toolNames: [],
+      sessionId: 'mc2',
+    });
+    let notify: (() => void) | null = null;
+    const dispatch = (a: AgentAction): void => {
+      state = reducer(state, a) as AgentState;
+      notify?.();
+    };
+    const store = {
+      getState: () => state,
+      subscribe: (l: () => void) => {
+        notify = l;
+        return () => {
+          notify = null;
+        };
+      },
+      dispatch,
+    };
+    const rec = createSessionRecorder(store, { sessionId: 'mc2', cwd: '/proj', enabled: true });
+    assert.ok(rec);
+    dispatch({ type: 'user.message', text: '一句话' });
+    for (let i = 0; i < 50; i += 1) dispatch({ type: 'llm.delta', delta: 'z' });
+    rec.dispose();
+    const session = readSession(rec.file);
+    assert.ok(session);
+    assert.equal(
+      session.entries.filter((e) => e.type === 'model_change').length,
+      0,
+      '没换模型就不该有 model_change',
+    );
+  });
+});

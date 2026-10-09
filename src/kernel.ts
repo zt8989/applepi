@@ -41,9 +41,11 @@ import { loadSkillRegistry } from './skills';
  *   - `supportsDeveloperRole` 在 **compat** 里，而且只有 openai 一族的 compat 有这个字段。
  *
  * 读不到就当 false（保守）—— 详见 reducer.ts 里 UNKNOWN_CAPABILITIES 的理由。
+ *
+ * 导出是因为 `setModel()` 与它的测试都要用**同一个读法**：两处各写一份的话它们会漂移，
+ * 而漂移的症状是「底栏换了、实际请求还是按旧能力发」（那类失败极难归因）。
  */
-
-function readCapabilities(model: Model<any>): ModelCapabilities {
+export function readCapabilities(model: Model<any>): ModelCapabilities {
   // 这两个标志声明在 BaseModel 上，但 pi-ai 的 Model 类型没把它们带进公开面，
   // 所以这里按「运行时确实有这个字段」来读（模型目录里带就是 true）。
   const raw = model as Model<any> & {
@@ -129,6 +131,23 @@ export interface Kernel {
   restoreSession(file: string): Promise<{ id: string; restored: number }>;
   /** 把已经读出来的消息灌回 state。 */
   restore(messages: Message[]): void;
+  /**
+   * 换模型。**真换** —— 之后的每个回合都发给新的那个。
+   *
+   * ## 为什么是两条 action 而不是只一条
+   *
+   * `model.changed` 只改标识（provider / modelId），`model.init` 补上**能力与窗口**
+   * （`supportsMidConvoSystemMessages` / `contextWindow`…）。能力是**模型之间不一样**的：
+   * 一个支持中途插 system 的网关换成一个不支持的，还按旧的来会发出一份 provider 拒收的请求 ——
+   * 而那种失败长得像「随机 400」，极难归因。所以两条都要发，且顺序是先 changed 后 init
+   * （`model.changed` 把能力**保守地清掉**，`model.init` 才是权威，见 `reducer.ts`）。
+   *
+   * 思考级别**带着走**（从 state 读再传回去）：换模型不该顺手把 `high` 改成 `off`。
+   *
+   * @returns 换成功没有。找不���到那个模型就返回 `false` 并**不 dispatch** ——
+   *   状态原封不动，比 dispatch 一次半换更安全。
+   */
+  setModel(provider: string, modelId: string): boolean;
   /**
    * 扩展宿主（`settings.json` 的 `packages` 里装了什么）。
    *
@@ -407,6 +426,36 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     /** 当前会话记录器（换会话后指向新的那个）。 */
     get session(): SessionRecorder | null {
       return current.recorder;
+    },
+    /**
+     * 换模型：`model.changed`（改标识）+ `model.init`（补能力与窗口）。
+     *
+     * ## 先查存在再 dispatch
+     *
+     * 从 `runtime.models` 取那个 Model 对象 —— 能力与 contextWindow 都从它读。
+     * **取不到就不 dispatch**：那说明配置与当前目录对不上（比如 `models.json` 刚被改坏），
+     * 此时让状态停在一个「说要用某个模型、但没人知道它的能力」的状态比拒绝更糟 ——
+     * 底栏会显示一个新名字，而请求会带着**清零的能力**发出去。
+     *
+     * 为什么不**换掉** `runtime.spec` / `runtime.model`：那是降级路径之外的**初始**装配，
+     * `extensionModelRegistry()` / `createRuntime()` 那些都还指着它。改那两个字段等于
+     * 「把历史也改了」——`/new` 之后本该能回到命令行给的那个模型，而现在回不去了。
+     * effect 表是每次请求现取的（`store.ts` 的 `resolveModel`），所以只换 state 就够。
+     */
+    setModel(provider: string, modelId: string): boolean {
+      const model = runtime.models.getModel(provider, modelId);
+      if (!model) return false;
+      const thinkingLevel = store.getState().model.thinkingLevel;
+      store.dispatch({ type: 'model.changed', provider, modelId } as AgentAction);
+      store.dispatch({
+        type: 'model.init',
+        provider,
+        modelId,
+        thinkingLevel,
+        capabilities: readCapabilities(model),
+        contextWindow: model.contextWindow ?? 0,
+      } as AgentAction);
+      return true;
     },
     /**
      * 开一个新会话：换 sessionId（于是换文件），清空对话。

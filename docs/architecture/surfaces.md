@@ -11,19 +11,45 @@
 
 | 部件 | 是什么 |
 | --- | --- |
-| 顶栏 | 轨迹统计（节点数 / 轮数 / 重试 / 错误）—— **刻意精简** |
-| 对话区 | `TranscriptChunks`：每条消息一个官方组件，内容没变就不重算（见下） |
-| 轨迹面板 | `Ctrl+T` 切换，展开是 `renderColoredTree()` |
+| 顶行 | 页签 + 轨迹统计**合一行**（见下） |
+| 对话页 | `TranscriptChunks`：每条消息一个官方组件，内容没变就不重算（见下） |
+| 轨迹页 | `Ctrl+T` 切换，展开是 `renderColoredTree()` |
 | 编辑器 | pi-tui 的 `Editor`（多行、slash 命令补全、文件路径补全） |
 | Loader | 生成中动画 |
-| 底栏 | 左边 cwd (+git 分支)，右边 `(provider) model` |
+| 底栏 | 左边 cwd (+git 分支)，右边 `(provider) model` + token 用量 |
 
 按键：`Ctrl+T` 切换轨迹面板，`Ctrl+O` 展开/收起工具输出，`Ctrl+C` 在环跑时中断这一轮、
 空闲时退出。
 
+### 顶行是**两职合一**的（`tabLine`）
+
+```
+对话 │ 轨迹 3轮2步  工具5  重试1  错误1 (Ctrl+T)
+```
+
+早先是**两行**：顶栏报统计、下面一行页签。两行讲的是同一件事（「我在哪页 / 这轮跑到哪了」），
+纵向白占一行，而界面真正缺的是对话的高度。合成一行后，那行要么讲页签要么讲统计，不讲别的。
+
+统计怎么精简的：
+
+- **`x轮x步` 一个就够** —— `回合 3 · 步 8` 与 `3轮8步` 是同一件事，写法不同而已。
+  真正需要区分口径的是「工具调用数」（模型自己发起的动作），那个仍单独报。
+- **节点数删掉** —— 它是 `trace.order.length`，开一轮就 +5，跳得又快又不 actionable；
+  要看节点数按 Ctrl+T（那里是完整的一棵树）。
+- **花费 `$` 删掉** —— 底栏 `statsLine` 里已有一个**同口径**的会话累计 `$`，两个 `$`
+  摆在两行里只会让人怀疑「这俩为什么不一样」。
+- 工具/重试/错误都是 **0 就不出现**（`0轮0步` 是噪声）。
+
+统计**始终显示**（不管在对话页还是轨迹页）：这轮跑到哪了是「读对话」时就想要的信息，
+不该逼用户切页才看得到。
+
+这一行还必须**补到终端全宽**：pi-tui 是增量重绘，只重画变化的行，而这一行的长度随统计
+变化（`3轮2步` → `3轮3步`），不补齐的话旧内容的尾巴不会被擦掉，下一帧会叠着出现 ——
+看起来像「重复刷屏」。补齐按**可见列宽**算（`visibleWidth`）而不是字符数，**汉字是双宽**。
+
 ### 布局与对话样式都是照抄 pi 的
 
-整体形状照着 pi 的终端界面排（对比过它的截图）：顶栏只放与对话相关的统计，模型与
+整体形状照着 pi 的终端界面排（对比过它的截图）：模型与
 工作目录挪到底栏，工具调用渲染成**带底色的整块**而不是一行。
 
 **对话区直接用 pi 官方的渲染组件**（`UserMessageComponent` / `AssistantMessageComponent` /
@@ -155,6 +181,56 @@ transcript 容器 —— 也就是那套骨架，在当前架构下跑不起来�
 输出前**必须 `stripTerminalSequences()`**：官方渲染器给文件路径加 OSC 8 超链接
 （`renderToolPath` → `linkPath`），而管道里那些 `]8;;file:///…\…]8;;` 是肉眼可见的乱码。
 OSC 133 区域标记也被一并剥掉。
+
+## 两个弹窗都直接用 pi 官方的组件
+
+`/sessions` 用 `SessionSelectorComponent`（见 [sessions](sessions.md)），`/model` 与
+`/scoped-models` 用 `ModelSelectorComponent` / `ScopedModelsSelectorComponent`
+（`src/tui/model-picker.ts`）。三个都是同一个理由：
+
+| 面板 | 官方组件 | 那一屏要处理的东西 |
+| --- | --- | --- |
+| `/sessions` | `SessionSelectorComponent` | 树形前缀、分数排序、`re:`/引号查询、异步加载 + `Loading 7/112`、删除确认态、改名子面板 |
+| `/model` | `ModelSelectorComponent` | 后台刷目录 + 15s 超时 + 错误分级文案、模糊搜索 + `default` 特例、当前模型置顶排序、`Model Name:` 那行、滚动指示 |
+| `/scoped-models` | `ScopedModelsSelectorComponent` | 六个键（save / enableAll / clearAll / toggleProvider / reorderUp / reorderDown）、`null` = 全开的特例、越界不动 |
+
+手写这三块要 550+ 行，而且**必然与上游漂移**。`model-picker.ts` 与
+`session-picker.ts` 是**适配层**：喂给官方的形状（`ModelInfo` / `SessionInfo`），
+接回调（换模型 / 存默认 / 删会话）。
+
+### 「那一行按键提示在」就是 keybindings 装上了
+
+三个面板的提示行都是用 `keyDisplayText('app.models.save')` 之类渲染的，而
+`app.*` 是 **pi 应用层**的键位 —— 不把 `KeybindingsManager.create()` 装到 pi-tui 全局
+（`setKeybindings`）的话它们解析不出键名，于是**整行字消失**。
+
+症状值得记住：不是「按了没反应」，而是「面板上根本没写有这个键」—— 后者更容易被
+当成「这个版本没有这个功能」。`tui-startup.test.ts` 里那三条断言盯的就是这个：
+提示行**在**，就等于 `Ctrl+S` / `Ctrl+A` / `Ctrl+E` 认得。
+
+### 换模型要**真换**（与 `/sessions` 那一处最大的不同）
+
+面板选完不能只 `showStatus()` —— 那是 pi 能这么干的原因：它有 `session.setModel()`。
+本项目状态**只能由 action 改**，所以换模型是 `kernel.setModel()`：它 dispatch
+`model.changed` + `model.init`（能力与窗口随模型变），并且**先查模型存在再 dispatch** ——
+查不到就返回 `false`、状态原封不动。
+
+关键的一环在 `store.ts`：effect 表的 `resolveModel` 让模型**每次请求现取**。
+没有它时 effect 表捕获的是建表那一个，于是「底栏换了、轨迹树也换了、实际请求仍发给
+旧模型」—— 三个可见证据都说换了。`callLlm` 与 `compactContext` **两条路都要改**，
+只改前者的话压缩会静默地用旧模型（那条路平时看不见，效果要到窗口快满才显形）。
+`test/model-switch.test.ts` 两条测试各盯一个。
+
+### 降级路径：手写一个最小 `ModelRuntime` 门面
+
+`ModelRuntime.create()` 失败时 `provider.ts` 退回手写装配，`runtime.runtime` 是
+`undefined`。官方组件的构造签名要一个真的 `ModelRuntime`，硬传 `undefined` 会在
+`getAvailableSnapshot()` 那一行就崩 —— 症状是「按 `/model` 什么都不发生」。
+
+`model-picker.ts` 的 `fallbackModelRuntime()` 给一个**只实现组件用到的那几个方法**的
+门面，模型列表来自 `models.getModels()`。它的 `refresh()` 直接抛，于是官方组件把
+原因显示成面板里的一行红字、照常能列能搜能选 —— 比「假成功」诚实（假成功会让用户
+以为目录已经是新的），也比「面板禁用」好（后者在降级模式下让 `/model` 完全不可用）。
 
 ## 相关
 
