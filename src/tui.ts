@@ -85,8 +85,8 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
       --trace-dir <dir> 轨迹目录（默认 .trace）
   -h, --help             显示本帮助
 
-内置工具（默认 read / write / edit / bash / powershell；grep / find / ls 默认关，
-在 ~/.pi/agent/settings.json 的 defaultTools 里用 "+grep" 这样开）：
+内置工具（默认 read / write / edit / bash；powershell / grep / find / ls 默认关，
+在 ~/.pi/agent/settings.json 的 defaultTools 里用 "+powershell" 这样开）：
   read       - 读文件
   write      - 写文件
   edit       - 按 oldText 精确替换

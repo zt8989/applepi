@@ -88,7 +88,7 @@ function adapt(official: OfficialTool<any>, label: string): AgentTool {
  * | 工具 | 默认 | 说明 |
  * | --- | --- | --- |
  * | `read` / `write` / `edit` / `bash` | **开** | 四个基本工具 |
- * | `powershell` | 开 | 在 `bash` 之外多给模型一个选择（Windows 上的原生 shell） |
+ * | `powershell` | **关** | Windows 原生 shell；`bash` 走 Git Bash/WSL，用 `+powershell` 显式开 |
  * | `grep` / `find` / `ls` | **关** | 只读检索类，pi 觉得多数时候用 bash 就够了 |
  *
  * ## 为什么自己维护这张表而不调 pi 的 `createCodingTools()`
@@ -198,9 +198,10 @@ function createBuiltin(cwd: string, name: BuiltinToolName): AgentTool | undefine
       return adapt(createEditTool(cwd), '编辑文件');
     case 'bash':
       return adapt(createBashTool(cwd), '执行命令');
-    // **所有平台都给**：与 pi 一致 —— bash 仍然在，powershell 是多出来的一个选择。
-    // Windows 上这两个最像（bash 走 Git Bash/WSL，powershell 走 pwsh），让模型自己选；
-    // 少给一个会让模型在 pwsh 语法上反复失败（它在 Linux 上学到的是 bash）。
+    // **所有平台都给**（包括没显式开它的默认配置）：与 pi 一致 —— 一旦被选中就构造，
+    // 不按平台过滤。Windows 上这两个最像（bash 走 Git Bash/WSL，powershell 走 pwsh），
+    // 让模型自己选；少给一个会让模型在 pwsh 语法上反复失败（它在 Linux 上学到的是 bash）。
+    // 注意：这只管「造不造得出」，默认**不开**，要 `+powershell`（见 resolveToolSelection）。
     case 'powershell':
       return adapt(createPowerShellTool(cwd), '执行 PowerShell 命令');
     case 'grep':
