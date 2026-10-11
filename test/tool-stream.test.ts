@@ -6,7 +6,8 @@ import { createAgentReducer } from '../src/reducer';
 import { createFauxRuntime } from '../src/provider';
 import { getTool } from '../src/tools';
 import { createInitialState, type AgentState } from '../src/state';
-import { renderMessage } from '../src/tui/app';
+import { renderMessage, TranscriptChunks } from '../src/tui/app';
+import { stripTerminalSequences } from '@earendil-works/pi-tui';
 import { setupTheme } from '../src/tui/theme';
 import type { AgentAction } from '../src/actions';
 
@@ -210,7 +211,51 @@ test('工具跑完（progress 清空）后：不再画「正在跑」的块，�
 
 // ─── 端到端：确实在命令跑完之前就有了 progress ───
 
-test('渲染「正在跑的工具」不会留下永久定时器（否则进程永远不退出）', () => {
+test('Elapsed 自己会跳（组件跳帧复用，官方计时器活着；否则长命令全程显示 0.0s）', async () => {
+  const call = {
+    type: 'toolCall' as const,
+    id: 'c1',
+    name: 'bash',
+    // **长时间没有任何输出**：这正是「秒数卡住」唯一会显形的情形。边跑边有输出的命令
+    // 里，输出本身就会顺带刷新那一帧，看起来一切正常（而官方计时器其实没在工作）。
+    arguments: { command: 'sleep 30' },
+  };
+  const assistant = {
+    role: 'assistant',
+    content: [{ type: 'text', text: 'x' }, call],
+    timestamp: 1,
+  } as unknown as Message;
+  const running = (): AgentState => {
+    let state = seed() as AgentState;
+    state = { ...state, phase: 'calling-tools', messages: [assistant] } as AgentState;
+    state = { ...state, executing: [{ call, startedAt: Date.now() }] } as AgentState;
+    return {
+      ...state,
+      toolProgress: { c1: { toolCallId: 'c1', content: [{ type: 'text', text: 'running\n' }] } },
+    } as AgentState;
+  };
+  const chunks = new TranscriptChunks();
+  const elapsedOf = (): string | undefined =>
+    stripTerminalSequences(chunks.render(100).join('\n'))
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l.startsWith('Elapsed'));
+
+  chunks.update(running(), 100, false, { text: '' });
+  assert.match(elapsedOf() ?? '', /0\.0s/, '起手就该显示 Elapsed 0.0s');
+
+  // 输出**一个字都没变**（还是那份 running），变的只有时间 —— 所以这一行若跟着跳，
+  // 就只可能是官方的计时器在工作，而不是「碰巧有输出刷新了那一帧」。
+  await new Promise((r) => setTimeout(r, 2100));
+  chunks.update(running(), 100, false, { text: '' });
+  assert.match(
+    elapsedOf() ?? '',
+    /[12]\.\ds/,
+    `输出不变而秒数应该自己往前走。实际：${elapsedOf()}`,
+  );
+});
+
+test('渲染「正在跑的工具」不会让进程退不出来（interval 已 unref，跑完也会被回收）', () => {
   const call = {
     type: 'toolCall' as const,
     id: 'c1',

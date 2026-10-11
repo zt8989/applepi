@@ -1901,6 +1901,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
   refresh();
   tui.start();
 
+  // 让官方渲染器的计时器能真的推动重绘：bash 块跑着时它每秒发一次
+  // `requestRender()`（为了跳 `Elapsed` 那行）。不装就是 no-op，计时器空转、屏幕不重画。
+  setRendererRenderRequest(() => {
+    refresh();
+    tui.requestRender();
+  });
+
   // 把活着的界面交给扩展宿主：内核装扩展时界面还没起来（那时只拿到一个待填的引用），
   // 现在 tui / theme / raw input 都有了，扩展的 `ctx.ui.custom()` 才能真的画出东西。
   //
@@ -2097,12 +2104,27 @@ const TOOL_RENDERERS: Record<string, unknown> = Object.fromEntries(
 /**
  * 官方 `ToolExecutionComponent` 只需要一个能收下 `requestRender()` 的对象。
  *
- * 为什么不把真的 `tui` 传进去：它只在 bash 块跑流式计时器时用来发重绘请求
- * （`renderResult` 里那个每秒一次的 `setInterval`）。我们是一次性渲染整段文本
- * （`renderTranscript` 的输出直接进 `Text.setText`），没有帧循环可言，
- * 所以一个空实现就够了。传 null 会在执行到 `ui.requestRender()` 时崩。
+ * `requestRender` **必须真的去请求重绘**：官方 bash 渲染器靠它每秒刷新一次
+ * `Elapsed`（`renderResult` 里那个 `setInterval(() => context.invalidate(), 1000)`）。
+ * 给一个 no-op 的话计时器照跑，但屏幕不重画 —— 秒数还是不会跳。
+ *
+ * 默认是 no-op（管道一次性模式没有帧循环）；`runTui` 启动时把自己装上，
+ * 见 `setRendererRenderRequest`。
  */
-const TOOL_UI = { requestRender: () => {}, invalidate: () => {} };
+const TOOL_UI = {
+  requestRender: () => {
+    requestRenderFromRenderer();
+  },
+  invalidate: () => {},
+};
+
+/** `TOOL_UI.requestRender` 实际的落点。默认 no-op，见上面 `TOOL_UI` 的注释。 */
+let requestRenderFromRenderer: () => void = () => {};
+
+/** `runTui` 装上自己的重绘入口；管道/一次性模式不调，于是保持 no-op。 */
+export function setRendererRenderRequest(fn: () => void): void {
+  requestRenderFromRenderer = fn;
+}
 
 /** system 消息：pi 没有专门的样式，用淡色表示「这不是谁在说话」。 */
 function renderPlain(text: string): string[] {
@@ -2308,19 +2330,9 @@ function renderRunningTool(
 ): string[] {
   const progress = state.toolProgress?.[call.id];
   if (progress === undefined) return [];
-  const component = new ToolExecutionComponent(
-    call.name,
-    call.id,
-    (call.arguments ?? {}) as Record<string, unknown>,
-    { showImages: false, imageWidthCells: usableWidth(width) },
-    TOOL_RENDERERS[call.name] as never,
-    TOOL_UI as never,
-    process.cwd(),
-  );
-  // markExecutionStarted 必须在 updateResult **之前**：官方 bash 渲染器的
-  // `renderResult` 靠它记下的 startedAt 才能起那个计秒定时器（否则 `Elapsed` 永远是 0s）。
-  component.markExecutionStarted();
-  component.setArgsComplete();
+  // **组件跨帧复用**（而不是每帧新建一个）—— 这样官方渲染器自己的
+  // `setInterval(..., 1000)` 能一直在，`Elapsed` 才会每秒自己跳。
+  const component = liveToolComponent(call, width);
   component.setExpanded(expanded);
   // isPartial = true → 官方切到「进行中」渲染：pending 底色、接受不完整的输出。
   // `isError: false`（还不知道结果），content 是当前已有的那部分输出。
@@ -2336,24 +2348,114 @@ function renderRunningTool(
     },
     true,
   );
-  const lines = component.render(usableWidth(width));
-  // **收尾：停掉官方渲染器的计秒定时器。**
-  //
-  // 官方 bash 渲染器看到 `isPartial` 会 `setInterval(..., 1000)` 让 `Elapsed` 自己跳，
-  // 而它只在**同一个组件**收到非 partial 的 `updateResult` 时才 clearInterval。
-  // 我们每帧新建一个用完就扔的组件，于是没有任何一次「收尾」到来 ——
-  // 每渲染过一个正在跑的工具块就留下一个永久 interval，事件循环永远不空。
-  // 实测：进程渲染过一次就不会退出（得 timeout 才杀得掉）。这正是加这行的原因。
-  //
-  // **代价**：`Elapsed` 不再每秒自己跳，而是**跟着输出更新**。对「边跑边有输出」的
-  // 命令（`npm install`、`ls -R`、带 sleep 的脚本）没差别；对「长时间完全没有输出」
-  // 的命令，那几十秒里秒数会停着不动 —— 而那种命令屏幕上本来什么也不变，
-  // 用户要判断的也正是「它还有没有在动」（屏幕上仍然挂着命令与已有的输出）。
-  //
-  // 想把跳秒也拿回来，就得让组件跨帧活着（pi 自己的做法），而那要求对话区不再按
-  // 「字符串块」缓存 —— 那是 O(N²) → O(N) 那个优化的倒退，不划算。
-  stopRendererTimers(component);
-  return lines;
+  // 组件是跨帧复用的，interval 会一直留着 —— unref 一下，让它不阻止进程退出
+  // （见 unrefRendererTimers 的注释：为什么与 pruneLiveTools 是两件不同的事）。
+  unrefRendererTimers(component);
+  return component.render(usableWidth(width));
+}
+
+/**
+ * 正在跑的工具的**长生命周期**组件，按 toolCallId 缓存。
+ *
+ * ## 为什么必须有它（而不是每帧 new 一个）
+ *
+ * 官方 bash 渲染器在 `renderResult` 里看到 `isPartial` 时会
+ * `setInterval(() => context.invalidate(), 1000)`，让 `Elapsed` 那一行每秒重画一次。
+ * 而它只在**同一个组件**收到非 partial 的 `updateResult` 时才 clearInterval ——
+ * 中间没有「收尾」的话，每个 interval 都永久留着，事件循环永远不空。
+ *
+ * 每帧 new 一个 + 每帧 `stopRendererTimers()` 能避开泄漏，代价是 `Elapsed` 再也不跳
+ * （计时器刚起就被我们自己清了）：命令跑几十秒而中间没输出时，那行永远显示 `0.0s`。
+ * 组件跨帧活着，官方自己的定时器就能正常跑完整个生命周期 —— 与 pi 一致。
+ *
+ * ## 泄漏怎么收口
+ *
+ * 组件只在工具**真的在跑**时留在表里；`pruneLiveTools` 每帧按 state 里的
+ * `executing` 清掉已结束的，所以时长生命周期 = 工具执行时长，不是会话时长。
+ * 计时器在清掉时也被 `stopRendererTimers` 停掉（官方组件自己的
+ * `invalidate` 链路已经不适用了，所以由我们代劳）。
+ *
+ * ## 会不会拖累增量渲染
+ *
+ * 不会。带运行中工具的那个消息块**本来就不进缓存**（`TranscriptChunks.blockLines`
+ * 的 `isLive` 分支每帧重算），而且一轮里在跑的工具都挂在同一条 assistant 消息上，
+ * 这样的块至多一个。所以让组件活着不增加任何缓存失效 —— 保护长会话的那套
+ * 增量优化（O(N²) → O(N)）只作用于历史块，与这块无关。
+ */
+const liveTools = new Map<string, ToolExecutionComponent>();
+/** 建组件时的终端宽度 —— 变了要重建（官方组件按建时宽度折行）。 */
+const liveToolWidths = new Map<string, number>();
+
+/** 取（或建）某个正在跑的工具的组件。宽度变了要重建——官方组件按建时的宽度折行。 */
+function liveToolComponent(call: ToolCall, width: number): ToolExecutionComponent {
+  const existing = liveTools.get(call.id);
+  // `imageWidthCells` 是建时烤进去的，宽度变了不复用会被按旧宽度折行（行数凭空变化）。
+  if (existing !== undefined && liveToolWidths.get(call.id) === width) return existing;
+  if (existing !== undefined) stopRendererTimers(existing);
+  const component = new ToolExecutionComponent(
+    call.name,
+    call.id,
+    (call.arguments ?? {}) as Record<string, unknown>,
+    { showImages: false, imageWidthCells: usableWidth(width) },
+    TOOL_RENDERERS[call.name] as never,
+    TOOL_UI as never,
+    process.cwd(),
+  );
+  // markExecutionStarted 必须在第一次 updateResult **之前**：官方渲染器的
+  // `renderResult` 靠它记下的 startedAt 才能算出准的 Elapsed。
+  component.markExecutionStarted();
+  component.setArgsComplete();
+  liveTools.set(call.id, component);
+  liveToolWidths.set(call.id, width);
+  return component;
+}
+
+/**
+ * 丢掉已经不在跑的工具的组件（并停掉它们的定时器）。
+ *
+ * 每帧调用。判据是 `state.executing` —— 工具结束时 reducer 已经把它移出那里，
+ * 于是下一帧就被回收。**必须每帧调**：否则已结束的工具会永远留在表里，
+ * 而组件里的 interval 也永远不清 —— 症状是「跑过一次工具的进程退不出来」。
+ */
+function pruneLiveTools(state: AgentState): void {
+  if (liveTools.size === 0) return;
+  const running = new Set((state.executing ?? []).map((t) => t.call.id));
+  for (const [id, component] of liveTools) {
+    if (running.has(id)) continue;
+    stopRendererTimers(component);
+    liveTools.delete(id);
+    liveToolWidths.delete(id);
+  }
+}
+
+/**
+ * 让官方渲染器的计秒定时器**不阻止进程退出**（`unref`）。
+ *
+ * ## 为什么要这个
+ *
+ * 组件跳 `Elapsed` 靠官方的 `setInterval(..., 1000)`，而那个 interval 默认是 **ref'd**：
+ * 只要它在，Node 的事件循环就非空，进程就退不出来。而它的作用仅仅是「每秒叫醒一次
+ * 重画」—— 它不是任何待完成的工作。于是它完全不该成为进程退出的障碍。
+ *
+ * 这个坑的实际症状：任何跑过一次流式工具的进程（含全部测试）都会挂住不退出，
+ * 只能靠 `timeout` 杀掉 —— 症状与「组件每帧新建、interval 从不回收」那个旧 bug 一模
+ * 一样，但成因不同（一个是泄漏，一个是 ref）。所以**回收（`pruneLiveTools`）与
+ * `unref` 两道都要有**：
+ *   - `unref` 管「别卡住退出」（interval 继续跑、秒照跳）；
+ *   - `pruneLiveTools` 管「别无限堆积」（工具结束后组件与 interval 一起释放）。
+ *
+ * 只 `unref` 不回收 → 会话跑几百个工具就攒几百个组件（内存泄漏）。
+ * 只回收不 `unref` → 进程退不出来。
+ */
+function unrefRendererTimers(component: ToolExecutionComponent): void {
+  const state = (component as unknown as { rendererState?: Record<string, unknown> })
+    .rendererState;
+  if (state === undefined) return;
+  for (const value of Object.values(state)) {
+    if (value === null || typeof value !== 'object') continue;
+    const handle = value as { unref?: () => void };
+    if (typeof handle.unref === 'function') handle.unref();
+  }
 }
 
 /**
@@ -2604,6 +2706,10 @@ export class TranscriptChunks {
     notice: { text: string },
     banner?: { text: string },
   ): void {
+    // 回收已结束的工具组件（**在渲染任何块之前**：工具刚跑完时 reducer 已把它移出
+    // `executing`，于是这一帧就该把它的组件与 interval 一起清掉）。
+    // 每帧一次，而不是每条消息一次。
+    pruneLiveTools(state);
     const key = `${width}:${expanded}`;
     const widthChanged = width !== this.lastWidth;
     const messages = state.messages;
