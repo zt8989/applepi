@@ -1903,6 +1903,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
 
   // 让官方渲染器的计时器能真的推动重绘：bash 块跑着时它每秒发一次
   // `requestRender()`（为了跳 `Elapsed` 那行）。不装就是 no-op，计时器空转、屏幕不重画。
+  // 推迟执行与重入护栏在 `setRendererRenderRequest` 内部（理由见那里的注释）——
+  // 护栏必须放在**所有**调用方都躲不掉的地方，不能只在这一处记得。
   setRendererRenderRequest(() => {
     refresh();
     tui.requestRender();
@@ -2121,9 +2123,78 @@ const TOOL_UI = {
 /** `TOOL_UI.requestRender` 实际的落点。默认 no-op，见上面 `TOOL_UI` 的注释。 */
 let requestRenderFromRenderer: () => void = () => {};
 
-/** `runTui` 装上自己的重绘入口；管道/一次性模式不调，于是保持 no-op。 */
+/**
+ * 已排了一个微任务：官方组件每帧能发好几次请求，只要一次重画就够。
+ * @see setRendererRenderRequest
+ */
+let rendererRenderQueued = false;
+/** 正在跑回调：真正的递归路径（渲染途中又发请求）靠它挡住。@see setRendererRenderRequest */
+let rendererRendering = false;
+
+/**
+ * `runTui` 装上自己的重绘入口；管道/一次性模式不调，于是保持 no-op。
+ *
+ * ## 为什么这里必须推迟到微任务 + 重入护栏
+ *
+ * 官方 `ToolExecutionComponent` 在**我们自己的渲染过程中**就会调 `ui.requestRender()`：
+ * `markExecutionStarted()` 与 `setArgsComplete()` 的实现就是 `updateDisplay();
+ * ui.requestRender();`，而 `renderTool` 每渲染一个工具块都要走这两步。
+ *
+ * 同步接上 `refresh` 就是无限递归：
+ *
+ *     refresh → transcript.update → blockLines → renderMessage → renderTool
+ *            → component.markExecutionStarted → ui.requestRender → refresh → …
+ *
+ * 症状是 `RangeError: Maximum call stack size exceeded`，栈帧正好是上面这条链。
+ * `TOOL_UI.requestRender` 早先是空实现，链是断的，所以这条路径一直没暴露过。
+ *
+ * ## 为什么推迟就够
+ *
+ * `context.invalidate()` 才是官方的重画入口（`getRenderContext` 里绑的），而它已经
+ * 顺手清了组件自己的 `render()` 缓存 —— 官方要的是「下一帧被重画」，不是「此刻同步
+ * 重画」。状态变化本身由 `store.subscribe` → `refresh` 覆盖，不依赖这条路。
+ * 所以改成微任务后行为不变，只是不再递归。
+ *
+ * 两道闸缺一不可，而且**都必须在入口处判**：
+ *
+ *   - `queued`：合并一帧内的多次请求（官方组件一帧能发好几次）。
+ *   - `rendering`：渲染途中发来的请求**直接丢掉**。
+ *
+ * ## 为什么 `rendering` 一定要在入口判
+ *
+ * 这一点很反直觉，值得钉住：只把请求推迟到微任务、而 `rendering` 只在微任务里判，
+ * 得到的是**自激循环而不是爆栈**——
+ *
+ *     微任务: rendering=false → 进 fn → fn 里渲染 → 发请求 → 排队 → fn 返回
+ *     → rendering=false → 下一个微任务又进 fn → …
+ *
+ * 每轮都排一个新微任务，而微任务队列会一直有新任务，V8 根本没有机会走
+ * “栈太深”，于是栈一直是浅的、堆一直涨 —— 症状是跑几分钟后
+ * `FATAL ERROR: heap out of memory`，而不是 `Maximum call stack size exceeded`。
+ * （本仓库第一版修复就是这么翻车的：测试直接 OOM。）
+ *
+ * 入口处先看 `rendering` 就断了环：渲染途中来的请求一律丢弃。
+ * 丢弃是安全的 —— 此刻这一次 `fn` 正在把组件的新内容带上（官方组件的
+ * `context.invalidate()` 已经清了它自己的 `render()` 缓存），再画一帧只是白做一倍工作。
+ */
 export function setRendererRenderRequest(fn: () => void): void {
-  requestRenderFromRenderer = fn;
+  requestRenderFromRenderer = () => {
+    // **两道闸都在入口判**：渲染途中发来的请求直接丢掉（否则自激到 OOM），
+    // 同一帧内已排过微任务就不再排第二个。
+    if (rendererRendering || rendererRenderQueued) return;
+    rendererRenderQueued = true;
+    queueMicrotask(() => {
+      rendererRenderQueued = false;
+      // 排队期间可能已经进了另一次渲染（同步路径也走 fn），那就让那一次带上。
+      if (rendererRendering) return;
+      rendererRendering = true;
+      try {
+        fn();
+      } finally {
+        rendererRendering = false;
+      }
+    });
+  };
 }
 
 /** system 消息：pi 没有专门的样式，用淡色表示「这不是谁在说话」。 */

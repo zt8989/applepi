@@ -6,7 +6,7 @@ import { createAgentReducer } from '../src/reducer';
 import { createFauxRuntime } from '../src/provider';
 import { getTool } from '../src/tools';
 import { createInitialState, type AgentState } from '../src/state';
-import { renderMessage, TranscriptChunks } from '../src/tui/app';
+import { renderMessage, TranscriptChunks, setRendererRenderRequest } from '../src/tui/app';
 import { stripTerminalSequences } from '@earendil-works/pi-tui';
 import { setupTheme } from '../src/tui/theme';
 import type { AgentAction } from '../src/actions';
@@ -290,6 +290,106 @@ test('渲染「正在跑的工具」不会让进程退不出来（interval 已 u
     growth < 200 * 1024 * 1024,
     `渲染 50 帧不该堆积大量对象（漏了定时器/组件就是这个症状）。增长 ${Math.round(growth / 1024 / 1024)}MB`,
   );
+});
+
+test('渲染工具块不会爆栈（官方组件在渲染途中就发重绘请求，同步接上 refresh 就是无限递归）', () => {
+  // 症状：每渲染一个已完成的工具块就抛
+  // `RangeError: Maximum call stack size exceeded`，栈帧是
+  //   refresh → update → blockLines → chunkLines → renderMessage → renderTool
+  //        → markExecutionStarted → ui.requestRender → refresh → …
+  //
+  // 根因：官方 `markExecutionStarted()` / `setArgsComplete()` 内部就是
+  // `updateDisplay(); ui.requestRender();`，而 `TOOL_UI.requestRender` 接的是真的
+  // refresh，于是自己调自己。护栏在 `setRendererRenderRequest` 里（推迟到微任务 +
+  // 重入护栏），所以这个测试真的能复现：去掉护栏就会抛。
+  let rerenders = 0;
+  setRendererRenderRequest(() => {
+    rerenders += 1;
+  });
+  try {
+    const call = {
+      type: 'toolCall' as const,
+      id: 'c1',
+      name: 'bash',
+      arguments: { command: 'echo hi' },
+    };
+    const assistant = {
+      role: 'assistant',
+      content: [{ type: 'text', text: '跑完了' }, call],
+      timestamp: 1,
+    } as unknown as Message;
+    const toolResult = {
+      role: 'toolResult',
+      toolCallId: 'c1',
+      toolName: 'bash',
+      content: [{ type: 'text', text: 'hi' }],
+      isError: false,
+      timestamp: 2,
+    } as unknown as Message;
+
+    let state = seed() as AgentState;
+    state = { ...state, phase: 'idle', messages: [assistant, toolResult], executing: [], toolProgress: {} } as AgentState;
+
+    // 这里不走 runTui，模拟「渲染时重入 refresh」的最短路径。
+    const chunks = new TranscriptChunks();
+    assert.doesNotThrow(() => chunks.update(state, 100, false, { text: '' }));
+
+    // 同一个同步帧里跑完 → 官方发了几次请求。关键是它**不应该**递归到爆栈。
+    assert.equal(rerenders, 0, '同步渲染过程中不能真的重画（应该是微任务，且已在渲染中就跳过）');
+  } finally {
+    // 复位成默认 no-op，免得影响同文件后面的测试。
+    setRendererRenderRequest(() => {});
+  }
+});
+
+test('渲染工具块不会爆栈：真接上 refresh（runTui 装的那条路）也不会递归', async () => {
+  // 上面那条走的是「重入护栏」的判定；这条钉住更贴近线上的情形：
+  // 回调真的去调一个会渲染的工具块（也就是 refresh 干的事）。
+  const call = {
+    type: 'toolCall' as const,
+    id: 'c1',
+    name: 'bash',
+    arguments: { command: 'echo hi' },
+  };
+  const assistant = {
+    role: 'assistant',
+    content: [{ type: 'text', text: '跑完了' }, call],
+    timestamp: 1,
+  } as unknown as Message;
+  const toolResult = {
+    role: 'toolResult',
+    toolCallId: 'c1',
+    toolName: 'bash',
+    content: [{ type: 'text', text: 'hi' }],
+    isError: false,
+    timestamp: 2,
+  } as unknown as Message;
+  let state = seed() as AgentState;
+  state = { ...state, phase: 'idle', messages: [assistant, toolResult], executing: [], toolProgress: {} } as AgentState;
+
+  // refresh 的等价物：重新渲染整个对话区。
+  const rerender = (): void => {
+    const chunks = new TranscriptChunks();
+    chunks.update(state, 100, false, { text: '' });
+  };
+  let depth = 0;
+  let maxDepth = 0;
+  setRendererRenderRequest(() => {
+    depth += 1;
+    maxDepth = Math.max(maxDepth, depth);
+    try {
+      rerender();
+    } finally {
+      depth -= 1;
+    }
+  });
+  try {
+    assert.doesNotThrow(() => rerender(), '去掉护栏时这里就是 Maximum call stack size exceeded');
+    await new Promise((r) => setTimeout(r, 0));
+    assert.ok(maxDepth <= 1, `渲染不应自激递归，实际最深 ${maxDepth} 层`);
+  } finally {
+    setRendererRenderRequest(() => {});
+  }
 });
 
 test('端到端：命令还在跑时 state 里就有中间输出（而不是等 toolResult）', async () => {
