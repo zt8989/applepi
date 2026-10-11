@@ -82,8 +82,11 @@ import { getMarkdownTheme } from '@earendil-works/pi-coding-agent/dist/modes/int
 import { formatCwdForFooter, formatTokens } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js';
 import { addUsageToTotals, createUsageTotals } from '@earendil-works/pi-coding-agent/dist/core/usage-totals.js';
 import { setupTheme } from './theme';
+import { contextLabels, extensionLabels } from './resource-labels';
+import { contextFilePaths } from '../system-prompt';
 import type { HostUiOptions } from '../extension-ui';
 import type { ExtensionCommands } from '../extension-commands';
+import type { ExtensionEntry } from '../extension-host';
 import { expandSkillCommand, parseSkillMessage, skillCommands, skillsInPrompt, type SkillInfo } from '../skills';
 
 const useColor = !process.env.NO_COLOR;
@@ -755,7 +758,7 @@ export interface TuiOptions {
    */
   extensionCommands?: ExtensionCommands | undefined;
   /**
-   * 装了哪些 pi 扩展（工具名 + 装载诊断）。
+   * 装了哪些 pi 扩展（入口 + 装载诊断）。
    *
    * ## 为什么也要开场报
    *
@@ -767,6 +770,19 @@ export interface TuiOptions {
    * 诊断**刻意显眼**（黄字）：那不是「没装某个可选功能」，而是「你以为装上了」。
    */
   extensions?: {
+    /**
+     * 装上的扩展（入口文件 + 来源）。
+     *
+     * **不是工具名**：早先这里给的是 `tools`（扩展注册的工具名），于是界面上写着
+     * `[扩展] ask_user_question` —— 一个**工具**的名字被当成扩展名报了出去。用户照着
+     * 那一行去 `settings.json` 的 `packages` 里找，找不到，于是以为扩展没装上。
+     * 形状与 pi 的开场一致（`pi-web-access:dist` / `orca-agent-status.ts`），
+     * 见 [resource-labels.ts](resource-labels.ts)。
+     *
+     * `tools` 仍然留着：诊断信息（工具没有 `promptSnippet` 那些）由内核出，
+     * 而它要说清是**哪个扩展**的哪个工具。
+     */
+    entries: readonly ExtensionEntry[];
     tools: readonly string[];
     errors: readonly string[];
   } | undefined;
@@ -1933,18 +1949,29 @@ export async function runTui(options: TuiOptions): Promise<number> {
   // 已经是「展开工具输出」，这里不复用它 —— 名字一行本来就不长。
   const startupSkills = stateSkills();
   const startupDiagnostics = store.getState().prompt.skillDiagnostics ?? [];
-  const extensionNames = (options.extensions?.tools ?? []).slice().sort((a, b) => a.localeCompare(b));
+  const extensionEntries = (options.extensions?.entries ?? []).filter((e) => !e.hidden);
   const extensionErrors = options.extensions?.errors ?? [];
-  // 护栏要把扩展也算进去：只装了扩展没装 skill（或反过来）时，这一节**照样**要出。
+  // `[Context]` 那一节：进了 prompt 的上下文文件（`SYSTEM.md` / `APPEND_SYSTEM.md` /
+  // `AGENTS.md` …）。清单由 `contextFilePaths()` 给，与 `buildPromptOptions()` **同一个来源** ——
+  // 界面报的和模型收到的必须是同一批文件（理由见 `system-prompt.ts` 那个函数的注释）。
+  const contextFiles = contextFilePaths(cwd);
+  // 护栏要把上下文与扩展也算进去：只装了扩展没装 skill（或反过来）时，这几节**照样**要出。
   // 早先写成只看 skill，于是「一个 skill 都没装」的用户永远看不到扩展清单 ——
   // 而那恰好是最需要看到的人（他们不靠 skill，只靠扩展）。
   if (
+    contextFiles.length > 0 ||
     startupSkills.length > 0 ||
     startupDiagnostics.length > 0 ||
-    extensionNames.length > 0 ||
+    extensionEntries.length > 0 ||
     extensionErrors.length > 0
   ) {
     const lines: string[] = [];
+    // 与 pi 同形：家目录缩 `~`，在 cwd 下的保持相对。
+    if (contextFiles.length > 0) {
+      lines.push(
+        `${dim('[Context]')}\n${dim(contextLabels(contextFiles.map((p) => ({ path: p })), cwd, homedir()).join(', '))}`,
+      );
+    }
     if (startupSkills.length > 0) {
       // 形状照 pi 的 `formatCompactList()`：**排序**后逗号连排，剩下交给终端折行。
       // 不排序的话清单顺序取决于目录遍历，每次启动都不一样。
@@ -1953,23 +1980,25 @@ export async function runTui(options: TuiOptions): Promise<number> {
       const names = startupSkills.map((s) => s.name).sort((a, b) => a.localeCompare(b));
       lines.push(`${dim('[Skills]')}\n${dim(names.join(', '))}`);
     }
-    // 与 pi 同形（截图里的 `[Skill conflicts]`）：加载不上的 skill 要看得见 ——
+    // 与 pi 同形：`[Skill conflicts]`。加载不上的 skill 要看得见 ——
     // 否则就是「模型静默少了能力」，而用户与界面都不知道为什么。
     if (startupDiagnostics.length > 0) {
       lines.push(
-        `${yellow('[Skill 警告]')}\n` +
+        `${yellow('[Skill conflicts]')}\n` +
           startupDiagnostics.map((d) => yellow(`  ${d}`)).join('\n'),
       );
     }
     // **常驻**（不靠 notify）：pi 的开场那一节也是 `loadedResourcesContainer` 里的
     // 常驻组件，永不消失。skill 名单要反复对照着打 `/skill:x`，30 秒后就没了等于没有。
-    if (extensionNames.length > 0) {
-      // 与 `[Skills]` 同一个形状：逗号分隔的名字。
-      lines.push(`${dim('[扩展]')}\n${dim(extensionNames.join(', '))}`);
+    //
+    // 这一节报的是**扩展**（入口 + 来源），不是它注册的工具名 —— 见
+    // `resource-labels.ts` 的文件头：报工具名会让用户拿着工具名去 `packages` 里找扩展。
+    if (extensionEntries.length > 0) {
+      lines.push(`${dim('[Extensions]')}\n${dim(extensionLabels(extensionEntries).join(', '))}`);
     }
     if (extensionErrors.length > 0) {
       lines.push(
-        `${yellow('[扩展警告]')}\n` + extensionErrors.map((e) => yellow(`  ${e}`)).join('\n'),
+        `${yellow('[Extension issues]')}\n` + extensionErrors.map((e) => yellow(`  ${e}`)).join('\n'),
       );
     }
     banner.text = lines.join('\n\n');

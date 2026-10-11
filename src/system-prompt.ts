@@ -192,6 +192,23 @@ export function promptFileSources(cwd: string): PromptFileSources {
 }
 
 /**
+ * 「哪几个文件进了 prompt 的上下文」—— 开场 `[Context]` 那一节的清单。
+ *
+ * 与 `buildPromptOptions()` **同一个来源**（同样的三个函数）否则界面报的与模型收到
+ * 可能分家，而症状是「界面上说有 AGENTS.md，可模型显然不知道里面写了什么」。
+ *
+ * 顺序与 pi 一致（system prompt 源 → append 源 → AGENTS.md 家目录/项目/祖先）。
+ */
+export function contextFilePaths(cwd: string): string[] {
+  const sources = promptFileSources(cwd);
+  return [
+    ...(sources.system !== undefined ? [sources.system.path] : []),
+    ...(sources.append !== undefined ? [sources.append.path] : []),
+    ...loadProjectContextFiles({ cwd, agentDir: configHome() }).map((f) => f.path),
+  ];
+}
+
+/**
  * 把 pi 的 skill 映射成它 `buildSystemPrompt` 认的形状。
  *
  * 与 `skills.ts` 里的 `toInfo()` 互逆：那边把 pi 的 `Skill` 收成本项目的 `SkillInfo`，

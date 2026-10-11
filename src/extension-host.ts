@@ -48,6 +48,9 @@ import { loadExtensions } from '@earendil-works/pi-coding-agent/dist/core/extens
 import { ExtensionRunner } from '@earendil-works/pi-coding-agent/dist/core/extensions/runner.js';
 import { createEventBus } from '@earendil-works/pi-coding-agent/dist/core/event-bus.js';
 import { DefaultPackageManager } from '@earendil-works/pi-coding-agent/dist/core/package-manager.js';
+import { createSourceInfo } from '@earendil-works/pi-coding-agent/dist/core/source-info.js';
+import type { PathMetadata } from '@earendil-works/pi-coding-agent/dist/core/package-manager.js';
+import type { Extension } from '@earendil-works/pi-coding-agent/dist/core/extensions/types.js';
 import { SettingsManager } from '@earendil-works/pi-coding-agent';
 import type { AgentStore } from './store';
 import type { AgentTool, AgentToolResult } from './agent-tool';
@@ -62,6 +65,30 @@ import { configHome } from './config-home';
 import type { ToolInfo } from '@earendil-works/pi-coding-agent';
 import type { AgentRuntime } from './provider';
 import type { PromptToolLike } from './system-prompt';
+
+/**
+ * 装好的**一个**扩展（显示用，最少字段）。
+ *
+ * ## 为什么要留路径与来源
+ *
+ * 开场那一节要报的是「装了哪些**扩展**」，而扩展的身份是它的入口文件 + 来自哪里
+ * （npm 包 / git 仓库 / 本地路径）—— 与它注册了几个工具无关。
+ *
+ * 早先那一节报的是 `tools`（扩展注册的工具名），于是界面上写着 `[扩展] ask_user_question`，
+ * 看起来像「装了一个叫 ask_user_question 的扩展」。那既不是扩展的名字，也不是 pi 的口径：
+ * pi 的开场报的是入口（`pi-web-access:dist`），工具清单在别处（`/` 的工具列表）。
+ * 那个字段仍要留着（诊断里会用到），但**不用于那一节**。
+ */
+export interface ExtensionEntry {
+  /** 扩展入口文件（绝对路径）。 */
+  path: string;
+  /** 来源：`npm:<pkg>` / `git:<url>` / `local` / `cli` / `path`。 */
+  source: string;
+  /** 包根目录（npm/git 来源有），用来把路径缩成包内相对路径。 */
+  baseDir?: string | undefined;
+  /** 官方标记为隐藏的扩展不进开场清单（与 pi 一致）。 */
+  hidden: boolean;
+}
 
 /** 装好的扩展宿主。 */
 export interface ExtensionHost {
@@ -84,6 +111,10 @@ export interface ExtensionHost {
   readonly commands: ExtensionCommands;
   /** 装载诊断（扩展加载失败、注册了但形状不对…）。 */
   readonly errors: readonly string[];
+  /**
+   * 装上了哪些**扩展**（入口 + 来源）—— 开场清单报的是它，不是工具名（见 `ExtensionEntry`）。
+   */
+  readonly entries: readonly ExtensionEntry[];
   /** 有没有任何扩展真的装上了。 */
   readonly loaded: number;
   /**
@@ -153,6 +184,7 @@ function emptyHost(errors: readonly string[] = []): ExtensionHost {
     promptTools: [],
     commands: emptyCommands(),
     errors,
+    entries: [],
     loaded: 0,
     beforeAgentStart: async () => {},
     dispose: () => {},
@@ -171,8 +203,14 @@ function emptyCommands(): ExtensionCommands {
   };
 }
 
+/** 解析出来的入口 **加上它的包元数据**（官方 `ResolvedResource.metadata`）。 */
+interface ResolvedExtensionEntry {
+  path: string;
+  metadata: PathMetadata;
+}
+
 /**
- * 读 `settings.json` 的 `packages`，解析成**扩展入口文件**的绝对路径。
+ * 读 `settings.json` 的 `packages`，解析成**扩展入口文件**的绝对路径 + 包元数据。
  *
  * ## 直接用官方的 `DefaultPackageManager`
  *
@@ -183,8 +221,23 @@ function emptyCommands(): ExtensionCommands {
  * 自己读 `settings.json` 再拼路径，最后必然是「pi 装到哪儿我们不知道」——
  * 症状是 `pi list` 明明有，这边说没装。**取不到就当没装**（`onMissing: skip`），
  * 不自动 `npm install`：本项目不是包管理器，替 pi 装东西会让两边状态分家。
+ *
+ * ## 为什么连 `metadata` 一起带回来
+ *
+ * `loadExtensions(paths)` **不带**包信息：它的 `createExtension()` 给每个扩展硬写
+ * `source: 'local'`、`baseDir = dirname(入口文件)`。于是 npm 包里的 `dist/index.js`
+ * 被当成一个本地文件，开场清单会报成 `index.js`（而不是 `pi-web-access:dist`）——
+ * 而 `settings.json` 里明明写的是 `@juicesharp/pi-web-access`。用户照着那一行找
+ * 找不到自己配的包。
+ *
+ * 官方的 `DefaultResourceLoader` 有一步 `applyExtensionSourceInfo()` 专门补这个
+ * （它把 metadata 写到 `extension.sourceInfo` 上）。我们不接那整个 ResourceLoader，
+ * 所以自己补这一步 —— 用的还是它给的那份 metadata，不是自己猜的。
  */
-async function resolveExtensionEntries(cwd: string, errors: string[]): Promise<string[]> {
+async function resolveExtensionEntries(
+  cwd: string,
+  errors: string[],
+): Promise<ResolvedExtensionEntry[]> {
   let settings: SettingsManager;
   try {
     settings = SettingsManager.create(cwd, configHome(), { projectTrusted: true });
@@ -192,19 +245,60 @@ async function resolveExtensionEntries(cwd: string, errors: string[]): Promise<s
     errors.push(`扩展：读 settings 失败 —— ${msg(error)}`);
     return [];
   }
-  let paths: string[];
+  let entries: ResolvedExtensionEntry[];
   try {
     const resolved = await new DefaultPackageManager({
       cwd,
       agentDir: configHome(),
       settingsManager: settings,
     }).resolve(async () => 'skip');
-    paths = resolved.extensions.filter((r) => r.enabled).map((r) => r.path);
+    entries = resolved.extensions
+      .filter((r) => r.enabled)
+      .map((r) => ({ path: r.path, metadata: r.metadata }));
   } catch (error) {
     errors.push(`扩展：解析包失败 —— ${msg(error)}`);
     return [];
   }
-  return paths;
+  return entries;
+}
+
+/**
+ * 把包元数据写到每个扩展的 `sourceInfo` 上（官方 `applyExtensionSourceInfo` 的那一步）。
+ *
+ * ## 为什么连 command / tool 的 `sourceInfo` 一起改
+ *
+ * 官方那一步也顺带改了 `extension.commands` 与 `extension.tools` 里每一项的
+ * `sourceInfo`。扩展自己读 `tool.sourceInfo.source` 来判断「我这个工具是不是
+ * 被 `refreshTools` 重载过」（那种写法存在）—— 不改的话那些代码在 pi 那边是对的、
+ * 在这边读到 `'local'`，于是行为分家。**跟官方同步**，不自己发明一小份。
+ *
+ * ## 逐级回退到祖先目录
+ *
+ * metadata 是按**包根**记的，而扩展入口是包里的某个文件（`dist/index.js`）。
+ * 精确命中拿不到时就沿父目录往上找 —— 与官方 `findSourceInfoForPath()` 同一口径。
+ */
+function applyExtensionSourceInfo(
+  extensions: readonly Extension[],
+  entries: readonly ResolvedExtensionEntry[],
+): void {
+  const byPath = new Map(entries.map((e) => [e.path, e.metadata]));
+  const findMetadata = (p: string): PathMetadata | undefined => {
+    let current = p;
+    for (;;) {
+      const hit = byPath.get(current);
+      if (hit !== undefined) return hit;
+      const cut = Math.max(current.lastIndexOf('/'), current.lastIndexOf('\\'));
+      if (cut <= 0) return undefined;
+      current = current.slice(0, cut);
+    }
+  };
+  for (const extension of extensions) {
+    const metadata = findMetadata(extension.path);
+    if (metadata === undefined) continue;
+    extension.sourceInfo = createSourceInfo(extension.path, metadata);
+    for (const command of extension.commands.values()) command.sourceInfo = extension.sourceInfo;
+    for (const tool of extension.tools.values()) tool.sourceInfo = extension.sourceInfo;
+  }
 }
 
 function msg(error: unknown): string {
@@ -239,7 +333,14 @@ export async function loadExtensionHost(
   if (entries.length === 0) return emptyHost(errors);
 
   const eventBus = createEventBus();
-  const loaded = await loadExtensions(entries, cwd, eventBus);
+  const loaded = await loadExtensions(
+    entries.map((e) => e.path),
+    cwd,
+    eventBus,
+  );
+  // `loadExtensions` 只知道「一个文件」，包信息在这一步补上（理由见
+  // `resolveExtensionEntries` 与 `applyExtensionSourceInfo` 的注释）。
+  applyExtensionSourceInfo(loaded.extensions, entries);
   for (const e of loaded.errors) errors.push(`扩展 ${shortPath(e.path)}：${e.error}`);
   if (loaded.extensions.length === 0) return emptyHost(errors);
 
@@ -333,6 +434,12 @@ export async function loadExtensionHost(
     promptTools,
     commands,
     errors,
+    entries: loaded.extensions.map((ext) => ({
+      path: ext.path,
+      source: ext.sourceInfo?.source ?? 'local',
+      ...(ext.sourceInfo?.baseDir !== undefined ? { baseDir: ext.sourceInfo.baseDir } : {}),
+      hidden: ext.hidden === true,
+    })),
     loaded: loaded.extensions.length,
     beforeAgentStart: async (text?: string) => {
       await notifyBeforeAgentStart({

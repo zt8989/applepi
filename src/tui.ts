@@ -313,7 +313,11 @@ async function main(): Promise<void> {
       uiRef.current = options;
     },
     // 开场报一行装了哪些扩展 + 装载诊断（与 skill 清单同一个口径）。
+    //
+    // `entries`（入口 + 来源）才是那一节要报的：`tools` 是工具名，报出去会让人
+    // 拿着工具名去 settings 的 `packages` 里找那个扩展（见 resource-labels.ts）。
     extensions: {
+      entries: kernel.extensions.entries,
       tools: kernel.extensions.tools.map((tool) => tool.name),
       errors: kernel.extensions.errors,
     },
