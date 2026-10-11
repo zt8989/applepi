@@ -1969,7 +1969,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // 与 pi 同形：家目录缩 `~`，在 cwd 下的保持相对。
     if (contextFiles.length > 0) {
       lines.push(
-        `${dim('[Context]')}\n${dim(contextLabels(contextFiles.map((p) => ({ path: p })), cwd, homedir()).join(', '))}`,
+        `${yellow('[Context]')}\n${dim(contextLabels(contextFiles.map((p) => ({ path: p })), cwd, homedir()).join(', '))}`,
       );
     }
     if (startupSkills.length > 0) {
@@ -1978,7 +1978,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
       // 55 个名字折成十几行是正常的（pi 的截图里也是 6 行）—— 不截断：
       // 名字列表的价值就在于能扫到某一个。
       const names = startupSkills.map((s) => s.name).sort((a, b) => a.localeCompare(b));
-      lines.push(`${dim('[Skills]')}\n${dim(names.join(', '))}`);
+      lines.push(`${yellow('[Skills]')}\n${dim(names.join(', '))}`);
     }
     // 与 pi 同形：`[Skill conflicts]`。加载不上的 skill 要看得见 ——
     // 否则就是「模型静默少了能力」，而用户与界面都不知道为什么。
@@ -1994,7 +1994,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // 这一节报的是**扩展**（入口 + 来源），不是它注册的工具名 —— 见
     // `resource-labels.ts` 的文件头：报工具名会让用户拿着工具名去 `packages` 里找扩展。
     if (extensionEntries.length > 0) {
-      lines.push(`${dim('[Extensions]')}\n${dim(extensionLabels(extensionEntries).join(', '))}`);
+      lines.push(`${yellow('[Extensions]')}\n${dim(extensionLabels(extensionEntries).join(', '))}`);
     }
     if (extensionErrors.length > 0) {
       lines.push(
