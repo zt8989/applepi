@@ -13,7 +13,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { rm, writeFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import {
   BUILTIN_TOOL_NAMES,
   getTool,
@@ -23,6 +23,7 @@ import {
 } from '../src/tools';
 import { promptToolsFrom } from '../src/system-prompt';
 import { piSettingsPath } from '../src/pi-config';
+import { assertIsolatedHome } from './isolated-home-guard';
 
 /**
  * 写一份 settings.json 再取工具。
@@ -30,14 +31,36 @@ import { piSettingsPath } from '../src/pi-config';
  * 两个「必须」：
  * 1. 走 `resetTools()` —— 开关按 cwd 缓存（见 `tools.ts`），只写文件不重取
  *    的话拿到的是上一轮的缓存，测试会**假绿**。
- * 2. 用完**删掉** settings.json —— 配置家目录是整个测试进程共享的
- *    （`isolated-home.ts` 建一次），残留会让后面的用例继承上一条的选择。
- *    「不给 defaultTools」这个用例本身就靠「文件不存在」来表示默认，
- *    所以残留对它杀伤最大。
+ * 2. 用完**把原文件原样写回去** —— 配置家目录是整个测试进程共享的，残留会让后面的
+ *    用例继承上一条的选择（「不给 defaultTools」那个用例靠「文件不存在」来表示默认，
+ *    所以残留对它杀伤最大）。
+ *
+ * ## 为什么是**备份还原**而不是删掉（这里真出过事）
+ *
+ * 早先这里是 `finally { rm(file, { force: true }) }`。它的前提是「配置家目录一定是
+ * 测试的临时目录」—— 那个前提靠 `PI_CODING_AGENT_DIR`，而它由 `test/isolated-home.ts`
+ * 在**`pnpm test` 的脚本里**用 `--import` 装上。
+ *
+ * 于是**单独跑一个测试文件**就绕过了隔离：
+ *   `npx tsx --test test/tools.test.ts` ← 没带 isolated-home.ts
+ * 而 `piSettingsPath()` 于是解析到真实家目录 `~/.pi/agent/settings.json`，
+ * 那个 `rm` 把**用户真的配置文件**删掉了（provider / model / packages 全没了）。
+ *
+ * 删文件之所以危险还不只是「删掉」：它把用户那份**也**删了，而那与测试要造的
+ * 「文件不存在」根本不是一回事。现在改成备份/还原，两种情况下都不碰用户那份。
+ * `assertIsolatedHome` 再加一道闸：万一又有人单独跑，它会直接报错而不是默默删。
  */
 async function withSettings<T>(settings: unknown, fn: () => T | Promise<T>): Promise<T> {
   const cwd = process.cwd();
   const file = piSettingsPath();
+  assertIsolatedHome(file, 'test/tools.test.ts');
+  // 备份原文件（可能不存在 —— 那正是「不给 defaultTools」要表达的状态）。
+  let backup: string | undefined;
+  try {
+    backup = await readFile(file, 'utf8');
+  } catch {
+    backup = undefined;
+  }
   try {
     if (settings !== undefined) {
       await writeFile(file, JSON.stringify(settings), 'utf8');
@@ -45,8 +68,14 @@ async function withSettings<T>(settings: unknown, fn: () => T | Promise<T>): Pro
     resetTools(cwd);
     return await fn();
   } finally {
-    await rm(file, { force: true });
-    resetTools(cwd);
+    // 还原：**删掉我们写的，恢复原来那份**。不写回会让下一个用例看到一个
+    // 与进入时不同的配置家目录（比「多一个文件」更难查）。
+    try {
+      if (backup === undefined) await rm(file, { force: true });
+      else await writeFile(file, backup, 'utf8');
+    } finally {
+      resetTools(cwd);
+    }
   }
 }
 
