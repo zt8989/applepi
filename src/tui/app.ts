@@ -1043,10 +1043,21 @@ export async function runTui(options: TuiOptions): Promise<number> {
    *
    * 形状与 pi 的退出提示一样（`To resume this session: <命令>`，前缀暗色），
    * 只是命令是本项目的 `ela --session <id>`。
-   * 用 `process.stdout.write` 而不是界面里的 notify：这一刻 TUI 已经停了（`tui.stop()`），
-   * 往终端写一行才是用户看得到的地方 —— 也是 pi 的做法。
-   *
    * 判断与文案都在 config-home 的 `resumeCommand()`（那儿才有「真落过盘没」的事实）。
+   *
+   * ## 必须在 `tui.stop()` **之后**调
+   *
+   * 界面跑在**备用屏**（`\x1b[?1049h`）上，`tui.stop()` 才发 `\x1b[?1049l` 回到主屏。
+   * 备用屏那一整块内容在退出时被终端**丢掉**，所以在这之前 `process.stdout.write`
+   * 的那行会跟着一起没 —— 字节确实发出去了，用户却一个字也看不到，只看到
+   * `tui.stop()` 之后重画上来的那一帧界面。症状正是「退出时不显示 resume 提示」。
+   *
+   * pi 的顺序就是这个（`shutdown()`：先 `this.stop()`，再 `formatResumeCommand` 后写）：
+   * 先离开备用屏，行才落在主屏上、停在那儿。所以调用方**只能**是
+   * `tui.stop(); printResumeOnExit();` 这个次序 —— 别再把它挪到 `tui.stop()` 前面。
+   *
+   * 用 `process.stdout.write` 而不是界面里的 notify：这一刻界面已经停了，
+   * 往终端写一行才是用户看得到的地方 —— 也是 pi 的做法。
    */
   const printResumeOnExit = (): void => {
     const command = resumeCommand(sessionId?.(), cwd);
@@ -1602,8 +1613,10 @@ export async function runTui(options: TuiOptions): Promise<number> {
           abortRun();
           return true;
         }
-        printResumeOnExit();
+        // **顺序不能反**：`tui.stop()` 先离开备用屏，提示才落在主屏上看得见。
+        // 反过来写的话那行会被备用屏的退出一起丢掉（见 `printResumeOnExit` 的注释）。
         tui.stop();
+        printResumeOnExit();
         process.exit(0);
       }
       // `app.trace.toggle`（默认 Ctrl+R）：**切到轨迹页 / 切回对话页**。
