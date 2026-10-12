@@ -61,6 +61,7 @@ import type { Model } from '@earendil-works/pi-ai';
 import type { ViewportTUI } from '@earendil-works/pi-tui';
 import type { AgentRuntime } from '../provider';
 import { installProjectKeybindings } from './keybindings';
+import { composerOverlayOptions } from './composer-overlay';
 import {
   defaultModelRef,
   readScopedModels,
@@ -196,32 +197,22 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
     handle?.hide();
   }
 
-  // 覆盖层形状与 `/sessions` 同一套：`anchor: 'center'` + 宽度百分比。
+  // 覆盖层：**盖住 composer**（不是居中浮窗）—— 满宽、底边与 composer 底边齐平，
+  // 与 pi 的 `showSelector()` 换掉 `editorContainer` 内容同一形状。
+  // 为什么这么摆、`margin.bottom` 为什么跟着底栏走，见 `composer-overlay.ts`。
   //
-  // 宽用百分比而非固定列数：这一屏是「一行黄字提示 + 模型 id + `[provider]` 徽标」，
-  // 模型 id 有长有短（`cn:space-bunny` 到 `anthropic/claude-sonnet-4-5-20250929`），
-  // 固定 90 列在窄终端下会把徽标截掉，而截掉的正是「这是哪个 provider 的模型」。
+  // ## 为什么**不**给 `maxHeight`（这里曾经是 `'80%'`）
   //
-  // ## 为什么 `maxHeight` 给 80% 而不是 70%
+  // pi-tui 对 `maxHeight` 的处理是 `overlayLines.slice(0, maxHeight)` —— **从尾部切**，
+  // 切掉的正是最后几行：那行按键提示（「Enter to select · Ctrl+S to set as default ·
+  // Esc to cancel」）与下框线。而本面板渲染出来 24 行（上框线 + 黄字提示 + 搜索框 +
+  // 10 行模型 + 滚动指示 + `Model Name:` + 后台刷新状态 + 按键提示 + 下框线），30 行的
+  // 终端下 `70%` 只有 21 行 —— 必切。
   //
-  // 这个面板**渲染出来 24 行**（上框线 + 黄字提示 + 搜索框 + 10 行模型 + 滚动指示 +
-  // `Model Name:` + 后台刷新状态 + **那行按键提示** + 下框线）。而 pi-tui 对 `maxHeight`
-  // 的处理是 `overlayLines.slice(0, maxHeight)` —— **从尾部切**，所以切掉的正是最后几行：
-  // 按键提示（「Enter to select · Ctrl+S to set as default · Esc to cancel」）与下框线。
-  //
-  // 30 行的终端（测试与常见最小窗口）下 `70%` 只有 21 行 —— 必切。早先这里正好写着 70%，
-  // 症状是「面板里看不到那行按键提示」，而且**只有在模型目录装得满时**才出现：官方组件
-  // 列表空时那行提示之前还有空行富余，于是有的机器过、有的不过，很难归因。
-  //
-  // 那行提示是「Ctrl+S 存默认可用」的证据（`keyDisplayText('app.models.save')` 解析不出
-  // 键名时整行消失），所以让它在**装满 10 行**的最坏情况下也留着：24 行 / 30 行 ≈ 80%。
-  // 终端再矮时它仍会被切 —— 那时先切的是列表行数，用户还有搜索框可用。
-  const handle = tui.showOverlay(selector, {
-    anchor: 'center',
-    width: '90%',
-    minWidth: 56,
-    maxHeight: '80%',
-  });
+  // 早先为此把比例调到 `80%`（24/30 ≈ 80%），但那是**算着终端高度**去躲切片，终端一矮
+  // 还是会切。现在干脆不给上限：面板按内容自然展开、向上盖住对话区，一行都不丢。需要
+  // 控高时由组件自己决定（它内部本来就有列表行数上限）。
+  const handle = tui.showOverlay(selector, composerOverlayOptions());
 
   return close;
 }
@@ -310,12 +301,8 @@ export function openScopedModelsPicker(options: ScopedModelsOptions): () => void
     handle?.hide();
   }
 
-  const handle = tui.showOverlay(selector, {
-    anchor: 'center',
-    width: '90%',
-    minWidth: 56,
-    maxHeight: '70%',
-  });
+  // 与 `/model` 那个面板同一形状（同一份参数，见 `composer-overlay.ts`）。
+  const handle = tui.showOverlay(selector, composerOverlayOptions());
 
   return close;
 }

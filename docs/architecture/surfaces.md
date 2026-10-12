@@ -198,6 +198,35 @@ OSC 133 区域标记也被一并剥掉。
 `session-picker.ts` 是**适配层**：喂给官方的形状（`ModelInfo` / `SessionInfo`），
 接回调（换模型 / 存默认 / 删会话）。
 
+### 这三个面板**盖住 composer**，不是居中的弹窗（`src/tui/composer-overlay.ts`）
+
+pi 里这几个面板根本不是弹窗：`interactive-mode.js` 的 `showSelector()` 把 composer
+那一格（`editorContainer`）的**内容整个换掉** —— `clear()` 之后 `addChild(selector)`，
+关掉时再换回 `editor`。于是面板天然是 composer 的宽度，它的底边**就是** composer 的
+底边。用户按 Ctrl+L 看到的是「输入框那块变成了列表」。
+
+本项目没有可换内容的 `editorContainer`，所以用覆盖层**复刻同一个矩形**：
+
+```ts
+{ anchor: 'bottom-center', width: '100%', margin: { bottom: COMPOSER_BOTTOM_MARGIN } }
+```
+
+- **满宽**（`'100%'`，不是 `'90%'`）—— 早期三处各写各的（居中 + 90% + 各自的
+  `maxHeight`），症状是「面板飘在屏幕中间、左右还露着别的画面」，与 pi 不一致。
+- **底边对齐**：`margin.bottom` = composer 距屏幕底的行数 = 它下面那几格的高度
+  （当前是底栏两行）。所以 `composer-overlay.ts` 的 `FOOTER_ROWS` 与 `app.ts` 布局里
+  footer 的 `basis` **必须是同一个来源** —— 各写一个数字，底栏一改面板就悬空。
+- **不给 `maxHeight`**：pi-tui 对它的处理是 `overlayLines.slice(0, maxHeight)` ——
+  **从尾部切**，切掉的正是 `Model Name:` 下面的后台刷新状态与那行按键提示。早先为此把
+  比例调到 80% 去躲切片，但那是拿终端高度硬凑；现在让面板按内容自然展开。
+
+面板的框线与配色**全部来自 pi 的主题**（官方 `DynamicBorder` 走
+`theme.fg('accent', …)`），本项目一行颜色都不写 —— 写死的色值在浅色终端上会变成
+黑底黑字（见 [theme.ts](../../src/tui/theme.ts) 文件头）。
+`test/tui-startup.test.ts` 里那三条几何断言（底边对齐 / 顶框满宽 / composer 框线
+不残留）就是钉这件事的：它们**先把差分重绘重放成屏幕网格**再断言绝对行列 ——
+「词在不在」那类断言对「飘在中间的弹窗」同样会通过。
+
 ### 「那一行按键提示在」就是 keybindings 装上了
 
 三个面板的提示行都是用 `keyDisplayText('app.models.save')` 之类渲染的，而

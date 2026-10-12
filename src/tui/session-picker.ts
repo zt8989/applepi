@@ -56,6 +56,7 @@ import type { SessionListProgress } from '@earendil-works/pi-coding-agent/dist/c
 import type { ViewportTUI } from '@earendil-works/pi-tui';
 import { listSessions, findTraceFile, type SessionSummary } from '../config-home';
 import { installProjectKeybindings } from './keybindings';
+import { composerOverlayOptions } from './composer-overlay';
 import { readJsonlHead, readSessionMessages } from '../session-file';
 
 /** `SessionSelectorComponent` 的两个 loader 的第一个参数（进度回调）。 */
@@ -380,17 +381,10 @@ export function openSessionPicker(options: SessionPickerOptions): () => void {
     // 官方改了内部形状就算了 —— 它自己会 load，代价只是闪一下「Loading」。
   }
 
-  // 覆盖层：pi 把它当**输入区那块**（`editorContainer` 里的替换），我们是覆盖层，
-  // 所以 `anchor: 'center'` + 宽 90% + 上限 70% 视口。
-  //
-  // 宽用百分比而非固定列数：这一屏是「标题 + 右侧状态 + 两行按键提示」，窄终端下
-  // 固定 90 列会把提示截断（官方 `truncateToWidth(..., '…')`）。
-  handle = tui.showOverlay(selector, {
-    anchor: 'center',
-    width: '90%',
-    minWidth: 56,
-    maxHeight: '70%',
-  });
+  // 覆盖层：**盖住 composer**（不是居中浮窗）—— 满宽、底边与 composer 底边齐平，
+  // 与 pi 的 `showSelector()` 换掉 `editorContainer` 内容同一形状。
+  // 为什么这么摆、`margin.bottom` 为什么跟着底栏走，见 `composer-overlay.ts`。
+  handle = tui.showOverlay(selector, composerOverlayOptions());
 
   return close;
 }

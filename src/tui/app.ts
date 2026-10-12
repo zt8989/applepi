@@ -46,6 +46,7 @@ import type { AgentAction } from '../actions';
 import type { ToolCall } from '@earendil-works/pi-ai';
 import { cleanSessionsExcept, listSessions, findSessionFile, resumeCommand, type SessionSummary } from '../config-home';
 import { deleteSessionTrace, loadSessionMessages, openSessionPicker } from './session-picker';
+import { FOOTER_ROWS } from './composer-overlay';
 import {
   openModelPicker,
   openScopedModelsPicker,
@@ -2017,7 +2018,11 @@ export async function runTui(options: TuiOptions): Promise<number> {
       { component: queuePanel, minSize: 1 },
       { component: loader, minSize: 1 },
       { component: editor, minSize: 3 },
-      { component: footer, basis: 2, grow: 0, minSize: 2 },
+      // 底栏行数 = `FOOTER_ROWS`，与 `/model`、`/sessions` 那些面板的
+      // `margin.bottom` **同一个来源** —— 面板底边要落在 composer 的底边上，
+      // 而那个位置就是「底栏几行」决定的。两处各写一个数字就会漂移：
+      // 底栏改成三行时面板会悬空一行，且症状很难归因。见 `composer-overlay.ts`。
+      { component: footer, basis: FOOTER_ROWS, grow: 0, minSize: FOOTER_ROWS },
     ]);
     tui.setLayoutRoot(
       new VStack([

@@ -168,8 +168,10 @@ kernel.restore(messages);      // 只灌（消息已读出来时）
 ## 界面的入口
 
 `/sessions` → **pi 官方的 `SessionSelectorComponent`**（覆盖层，搜索框 + 输入即筛 + 上下键 +
-回车选定），背后走 `config-home.listSessions()` + `session-file.readSessionMessages()`，
-**零 token**。适配层在 `src/tui/session-picker.ts`，理由写在那个文件的头注释里。
+回车选定；**满宽、盖住 composer** —— 与 pi 的 `showSelector()` 同形状，见
+[surfaces](surfaces.md) 的「这三个面板盖住 composer」），背后走 `config-home.listSessions()` +
+`session-file.readSessionMessages()`，**零 token**。适配层在 `src/tui/session-picker.ts`，
+理由写在那个文件的头注释里。
 
 面板的完整交互（与 pi 逐行一致）：
 

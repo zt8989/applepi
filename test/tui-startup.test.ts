@@ -117,6 +117,121 @@ function onSameScreenLine(output: string, a: string, b: string): boolean {
 }
 
 /**
+ * 把 TUI 的输出**重放**成一个屏幕行数组（最后状态）。
+ *
+ * ## 为什么 `onSameScreenLine` 不够，非要真的重放
+ *
+ * 上面那个只回答「A 与 B 挨不挨着」，而这里要问的是**绝对行号**：「面板的底边落在
+ * 第几行」「它是不是占满一整行」。这两个问题靠「两个片段之间有没有换行序列」答不了
+ * —— 需要一个 (行, 列) 网格。
+ *
+ * ## 为什么重放是安全的（上面说过「重绘会累积」，这里为什么不累积）
+ *
+ * 累积只发生在「把每个新帧**追加**进数组」时。这里是**按顺序施加**每个控制序列到同一
+ * 个网格上：`ESC[r;cH` 移动光标、`ESC[2K` 擦掉当前行、普通字符覆写。同一行被重画
+ * 多次时，前面的内容被覆写/擦掉，网格里留下的就是**最后一次**的样子。
+ *
+ * 只处理 pi-tui 差分渲染真正会用的那几个 CSI：光标定位（`H`/`f`）、纵向/横向移动
+ * （`A`–`D`）、列定位（`G`）、擦行（`K`）。其余 CSI（颜色、超链接 OSC）跳过。
+ *
+ * @param output 子进程的原始 stdout（含 ANSI）
+ * @param cols   终端列数（与启动时的 `COLUMNS` 一致）
+ * @param rows   终端行数（与 `LINES` 一致）
+ * @returns 每行一个字符串（已去尾空格）；行号从 0 起
+ */
+function replayScreen(output: string, cols: number, rows: number): string[] {
+  const grid: string[][] = Array.from({ length: rows }, () => new Array<string>(cols).fill(' '));
+  let row = 0;
+  let col = 0;
+  let i = 0;
+  while (i < output.length) {
+    const rest = output.slice(i);
+    // OSC（超链接 / 标题）：整段丢掉。
+    const osc = /^\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/.exec(rest);
+    if (osc) {
+      i += osc[0].length;
+      continue;
+    }
+    // CSI。
+    const csi = /^\x1b\[([0-9;?]*)([a-zA-Z])/.exec(rest);
+    if (csi) {
+      const nums = (csi[1] ?? '').split(';').map((x) => (x === '' ? undefined : Number(x)));
+      const cmd = csi[2];
+      if (cmd === 'H' || cmd === 'f') {
+        row = (nums[0] ?? 1) - 1;
+        col = (nums[1] ?? 1) - 1;
+      } else if (cmd === 'A') row -= nums[0] ?? 1;
+      else if (cmd === 'B') row += nums[0] ?? 1;
+      else if (cmd === 'C') col += nums[0] ?? 1;
+      else if (cmd === 'D') col -= nums[0] ?? 1;
+      else if (cmd === 'G') col = (nums[0] ?? 1) - 1;
+      else if (cmd === 'K') {
+        // 擦行：2 = 整行、0 = 光标到行尾、1 = 行首到光标。
+        const mode = nums[0] ?? 0;
+        const line = grid[row];
+        if (line) {
+          if (mode === 2) line.fill(' ');
+          else if (mode === 0) for (let c = Math.max(0, col); c < cols; c += 1) line[c] = ' ';
+          else for (let c = 0; c <= Math.min(cols - 1, col); c += 1) line[c] = ' ';
+        }
+      }
+      i += csi[0].length;
+      continue;
+    }
+    const ch = output[i] as string;
+    if (ch === '\n') {
+      row += 1;
+      col = 0;
+    } else if (ch === '\r') {
+      col = 0;
+    } else if (ch === '\x1b') {
+      // 其它转义（字符集切换之类）：只跳过这一字节，不看待它。
+    } else {
+      const line = grid[row];
+      if (line && col >= 0 && col < cols) line[col] = ch;
+      col += 1;
+    }
+    i += 1;
+  }
+  return grid.map((line) => line.join('').replace(/\s+$/, ''));
+}
+
+/**
+ * 屏幕上每一条「框线行」的信息：行号 + 横线个数。
+ *
+ * ## 为什么需要「每条约多宽」，不能只要一个行号
+ *
+ * 面板的上下框线、以及（没被盖住时）composer 自己的上下框线**长的样子完全一样** ——
+ * 都是 100 个 `─`。所以「最后一条横线在第几行」单独回答不了「盖住没有」：居中 90% 的
+ * 面板不盖 composer，屏上会同时存在面板的框线与 composer 的框线，而**最后一条恰好是
+ * composer 的**（它在下、面板居中）—— 于是断言「最后一条 = composer 底边」**照样通过**。
+ * （我为此又花了一轮：第一版写成「几乎全是横线就算」，居中 90% 也绿。）
+ *
+ * 真正能分辨的是**宽度**：
+ *
+ * | 形状 | 面板顶框 | 面板底框 | 残留的 composer 框线 |
+ * | --- | --- | --- | --- |
+ * | 满宽（对） | 100 列 | 100 列 | 被盖掉，看不见 |
+ * | 居中 90%（错） | **90 列** | 100 列（左/右拼了旧内容） | 100 列，还露在外面 |
+ *
+ * 「面板顶框只有 90 列」是最干净的那条证据：它一定属于面板（屏幕最上方那条横线就是
+ * 面板顶框），而且它的宽度直接就是覆盖层宽度。
+ *
+ * @param screen {@link replayScreen} 的结果
+ * @returns 每条「≥ 20 个 `─`」的行的 `{ row, dashes }`（从上到下）
+ */
+function borderLines(screen: string[]): { row: number; dashes: number }[] {
+  const out: { row: number; dashes: number }[] = [];
+  screen.forEach((line, row) => {
+    const dashes = (line.match(/─/g) ?? []).length;
+    if (dashes >= 20) out.push({ row, dashes });
+  });
+  return out;
+}
+
+
+
+/**
  * 启动 TUI，等它画出首帧，然后杀掉。
  *
  * @param ms 存活多久（首帧很快，但 tsx 转译 + 启动有开销，给宽一点）
@@ -374,5 +489,118 @@ test('TUI：/scoped-models 打开的面板画出了标题、计数与六个键�
       frame.includes(word),
       `面板提示里该有 ${word}。实际输出：\n${frame.slice(-800)}`,
     );
+  }
+});
+
+// ── 面板的**位置与宽度**：它盖住 composer，不是居中浮窗 ──
+//
+// 这三条盯的是**几何**，不是「词在不在」—— 上面那些断言对「面板飘在屏幕中间、宽 90%」
+// 同样会通过。而 pi 的这几个面板**不是弹窗**：`interactive-mode.js` 的 `showSelector()`
+// 把 composer 那一格（`editorContainer`）的内容整个换掉，于是面板天然满宽、底边就是
+// composer 的底边。本项目用覆盖层复刻同一个矩形（见 `src/tui/composer-overlay.ts`）。
+//
+// 要在「真渲染」里验它，得把差分重绘**重放**成屏幕网格（`replayScreen`），因为差分渲染
+// 不用 `\n` 换行、而是绝对光标定位跳行 —— `split('\n')` 得到的不是真实屏幕行。
+
+/** 与 `envWithoutTestHome()` 里给终端定的尺寸保持一致（见那里的注释）。 */
+const TERM_COLS = 100;
+const TERM_ROWS = 30;
+
+/**
+ * 底栏占几行。**这就是「composer 底边距屏幕底的行数」** —— composer 下面是底栏，
+ * 底栏贴着屏幕底，所以 composer 的底框线落在 `TERM_ROWS - FOOTER_ROWS - 1`（0 起）。
+ *
+ * 硬编码 2 而不是 import `FOOTER_ROWS` 是**故意**的：这个测试要独立钉住「底栏是两行 +
+ * 面板底边对齐它」这个**外部可见**的事实。若哪天有人只改了 `FOOTER_ROWS` 而忘了布局，
+ * 从同一个常量 import 的断言会跟着一起错，等于没测。这里写死，改动就会红。
+ */
+const FOOTER_ROWS_EXPECTED = 2;
+
+test('TUI：面板的底框线与 composer 的底边同一条线（不是居中浮窗）', async () => {
+  const { raw } = await sessionsPanel('/model\r');
+  const screen = replayScreen(raw, TERM_COLS, TERM_ROWS);
+  const borders = borderLines(screen);
+
+  // composer 的底边：底栏两行之下就是屏幕底，所以底框线在倒数第 3 行（0 起）。
+  const expected = TERM_ROWS - FOOTER_ROWS_EXPECTED - 1;
+
+  // 屏幕上**只该有两条框线**：面板的上下框。多于两条就是「面板浮在上面、composer 还在
+  // 底下」—— 居中浮窗正是这个症状（面板的顶框 + 底框 + 没被盖住的 composer 底框）。
+  // 光看「最后一条框线在第几行」会被它骗过：居中时最后一条恰好是 composer 的底框，
+  // 行号与期望值一样。
+  assert.equal(
+    borders.length,
+    2,
+    `面板开着时该只有它的上下两条框线（composer 被盖住）。实际 ${borders.length} 条：` +
+      `${borders.map((b) => `第 ${b.row} 行/${b.dashes} 列`).join('、')}。\n` +
+      `屏幕：\n${screen.map((l, i) => `${i}|${l}`).join('\n')}`,
+  );
+
+  // 面板的**下框线** = 最后一条框线。它要和 composer 的底边同一条线。
+  const panelBottom = borders[borders.length - 1];
+  assert.equal(
+    panelBottom?.row,
+    expected,
+    `面板的下框线该落在第 ${expected} 行（composer 的底边），实际在第 ${panelBottom?.row} 行。\n` +
+      `居中浮窗会把面板整体推到屏幕中部（底边也跟着上移）。实际屏幕：\n` +
+      `${screen.map((l, i) => `${i}|${l}`).join('\n')}`,
+  );
+});
+
+test('TUI：面板满宽（100%）—— 顶框就占满一整行', async () => {
+  const { raw } = await sessionsPanel('/model\r');
+  const screen = replayScreen(raw, TERM_COLS, TERM_ROWS);
+  const borders = borderLines(screen);
+
+  // 屏幕**最上方**那条框线一定是面板的顶框（面板盖在对话区上面）。它有多宽，面板就有
+  // 多宽 —— 这是「满宽」最直接的证据，不受 composer 残留框线的干扰（见 `borderLines`）。
+  const panelTop = borders[0];
+  assert.equal(
+    panelTop?.dashes,
+    TERM_COLS,
+    `面板顶框该占满 ${TERM_COLS} 列，实际 ${panelTop?.dashes} 列（在第 ${panelTop?.row} 行）。\n` +
+      `居中 90% 时这里只有 90 列 —— 左右各留一截别的画面，看着就像「面板没盖住输入框」。\n` +
+      `实际屏幕：\n${screen.map((l, i) => `${i}|${l}`).join('\n')}`,
+  );
+
+  // 顶框必须**从屏幕最左边开始**（col 0）。居中 90% 时它从第 5 列起，左边那 5 列是上一帧
+  // 的内容 —— 宽度再对也对不上位置。
+  const topLine = screen[panelTop?.row ?? -1] ?? '';
+  assert.ok(
+    topLine.startsWith('─'),
+    `面板顶框该从第 0 列开始（满宽），实际开头是 ${JSON.stringify(topLine.slice(0, 8))}`,
+  );
+});
+
+test('TUI：面板盖住 composer —— 输入框的框线不再露在外面', async () => {
+  // 「覆盖」不只是「更大」：pi 是把 composer **换掉**，所以面板开着时看不到输入框本身。
+  //
+  // ## 怎么区分「盖住了」与「只是叠在上面」
+  //
+  // 两者的框线都是 `─`，只能数**条数**：
+  //
+  // | 形状 | 屏上的框线 |
+  // | --- | --- |
+  // | 满宽（对，盖住） | 面板顶框 + 面板底框 = **2** 条 |
+  // | 居中 90%（错，没盖住） | 面板顶框 + 面板底框 + 没被盖住的 composer 框线 = **3** 条 |
+  //
+  // 注意**不能**只数「满宽（100 列）的框线」：居中面板的底框虽然自己只有 90 列，但它左右
+  // 两侧是没被写过的旧内容 —— 而旧内容恰好是 composer 自己的满宽框线，拼起来看着也是
+  // 100 列（我第一版就跳了这个坑，错误也绿）。所以要数**所有** ≥ 20 列的框线行。
+  const { raw } = await sessionsPanel('/model\r');
+  const screen = replayScreen(raw, TERM_COLS, TERM_ROWS);
+  const borders = borderLines(screen);
+
+  assert.equal(
+    borders.length,
+    2,
+    `面板开着时该只有它的上下两条框线（composer 被盖住），实际 ${borders.length} 条：` +
+      `${borders.map((b) => `第 ${b.row} 行/${b.dashes} 列`).join('、')}。\n` +
+      `多出来的那条通常是没被盖住的 composer 框线。\n` +
+      `屏幕：\n${screen.map((l, i) => `${i}|${l}`).join('\n')}`,
+  );
+  // 两条都该是满宽 —— 这也是「面板顶框满宽」的另一个侧面证据。
+  for (const b of borders) {
+    assert.equal(b.dashes, TERM_COLS, `第 ${b.row} 行的框线该满宽（${TERM_COLS} 列），实际 ${b.dashes} 列`);
   }
 });
