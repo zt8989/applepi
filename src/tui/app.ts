@@ -1589,7 +1589,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
       // 默认键，用户改过就不生效（而提示行那边会显示新键 —— 两边说法不一致）。
       if (actionMatches(data, 'app.model.select')) {
         if (store.getState().phase !== 'idle') {
-          notify(yellow('上一回合还没结束，先 Ctrl-C 中断再换模型'));
+          notify(yellow(`上一回合还没结束，先按 ${keyLabel('app.interrupt')} 中断再换模型`));
           return true;
         }
         if (!options.runtime) {
@@ -1783,7 +1783,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
       // 所以先问一句「是不是 skill」，不是才当命令处理。
       if (expandSkillCommand(input, stateSkills()).startsWith('<skill ')) {
         if (store.getState().phase !== 'idle') {
-          notify(yellow('上一回合还没结束（Ctrl-C 可中断）'));
+          notify(yellow(`上一回合还没结束（按 ${keyLabel('app.interrupt')} 可中断）`));
           return;
         }
         send(expandSkillCommand(input, stateSkills()));
@@ -2183,7 +2183,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
       case 'resume': {
         // 环在跑时不能换会话（正在写消息）。
         if (store.getState().phase !== 'idle') {
-          notify(yellow('上一回合还没结束，先 Ctrl-C 中断再恢复历史'));
+          notify(yellow(`上一回合还没结束，先按 ${keyLabel('app.interrupt')} 中断再恢复历史`));
           return;
         }
         openSessionPicker({
@@ -2204,7 +2204,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
       case 'wipe': {
         // 环在跑时不能删：正在往某个会话文件里写。
         if (store.getState().phase !== 'idle') {
-          notify(yellow('上一回合还没结束，先 Ctrl-C 中断再清理'));
+          notify(yellow(`上一回合还没结束，先按 ${keyLabel('app.interrupt')} 中断再清理`));
           return;
         }
         // 当前会话放行：它的文件正被记录器开着。
@@ -2223,7 +2223,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
         // 环在跑时不能换：那条流正在等 token，而它的请求已经发出去了 ——
         // 中途换模型会让这一轮的模型与下一轮不同，而对话里看不出这个断点。
         if (store.getState().phase !== 'idle') {
-          notify(yellow('上一回合还没结束，先 Ctrl-C 中断再换模型'));
+          notify(yellow(`上一回合还没结束，先按 ${keyLabel('app.interrupt')} 中断再换模型`));
           return;
         }
         if (!options.runtime) {
@@ -2337,7 +2337,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
       case 'forget': {
         // 环在跑时不能换会话（正在写消息）。
         if (store.getState().phase !== 'idle') {
-          notify(yellow('上一回合还没结束，先 Ctrl-C 中断再开新会话'));
+          notify(yellow(`上一回合还没结束，先按 ${keyLabel('app.interrupt')} 中断再开新会话`));
           return;
         }
         // 上一段的卡/键位表属于旧会话（消息已清空），不能跟着漂到新会话里 ——

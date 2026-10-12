@@ -164,18 +164,22 @@ pnpm start --cwd ../other                  # 工具的文件操作边界换到�
 
 界面里：`Ctrl+R` **在「对话」与「轨迹」两页之间切换**（顶部有页签标出当前在哪页），
 `Alt+↑/↓` 或 `Ctrl+P/N` 翻当前页（半页），`Ctrl+O` 展开/收起工具输出，
-`Ctrl+T` 展开/收起模型的思考块，`Ctrl+C` 中断当前回合（空闲时退出），`Ctrl+Q` 切换入队模式，
-`Ctrl+L` 开模型面板。
+`Ctrl+T` 展开/收起模型的思考块，`Ctrl+Q` 切换入队模式，`Ctrl+L` 开模型面板。
+**pi 的整套键位都可用**（本轮补齐，冲突以 pi 为准）：`Ctrl+P`/`Shift+Ctrl+P` 循环换模型，
+`Shift+Tab` 循环思考级别，`Ctrl+G` 交给 `$EDITOR`，`Ctrl+X` 复制最后一条回答，
+`Ctrl+V` 粘贴（文件/图片/文本），`Ctrl+Z` 挂后台，`Alt+Enter` 排 follow-up，
+`Alt+Up` 把排队消息还回输入框。**中断是 `Escape`，`Ctrl+C` 是清空编辑器（连按两次退出）、
+`Ctrl+D` 退出** —— 这三个与 pi 一致（不再把 `Ctrl+C` 当中断）。
 `/hotkeys` 打出完整的一份（形状与 pi 的 `/hotkeys` 相同）。
 布局照抄 pi 的终端界面：**顶行把页签与轨迹统计合并成一行**（`对话 │ 轨迹 3轮2步 错误1 (Ctrl+R)`），
 模型与工作目录在底栏，工具调用是带底色的整块。
 
 **键位可改**：写在 `~/.pi/agent/keybindings.json`（与 pi **同一个文件**），例如
 `{ "app.trace.toggle": "ctrl+shift+r" }`。界面上的提示行、`/hotkeys`、`--help`
-显示的都是解析后的键 —— 改完不用重启。其中有三个 id 是本项目自己的
-（`app.trace.toggle` / `app.queue.cycle` / `app.abort`），其余全部复用 pi 的 id
-（所以同一个覆盖在 pi 与本项目里都生效）。`Ctrl+T` **留给 pi**（它的
-`app.thinking.toggle`）—— 两边共用一份键位文件，同一个键不能有两个含义。
+显示的都是解析后的键 —— 改完不用重启。本项目自己的 id 只有两个还默认占键
+（`app.trace.toggle` `Ctrl+R` / `app.queue.cycle` `Ctrl+Q`），其余全部复用 pi 的 id
+（所以同一个覆盖在 pi 与本项目里都生效）。`app.abort`（旧的「`Ctrl+C` 一键中断/退出」）
+默认不绑，写进 `keybindings.json` 就能拿回那个手感。
 
 ### 轨迹页：一直往下刷，也能往回滚
 

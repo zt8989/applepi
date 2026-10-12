@@ -106,7 +106,8 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
   ${keyLabel('app.thinking.toggle').padEnd(19)}展开/收起模型的思考块（与 pi 的 app.thinking.toggle 同键）
   ${keyLabel('app.queue.cycle').padEnd(19)}切换入队模式：steer（工具跑完后插进去）／followUp（说完再插）
   ${keyLabel('app.model.select').padEnd(19)}打开模型选择面板（与 pi 的 app.model.select 同键）
-  ${keyLabel('app.abort').padEnd(19)}环在跑时中断这一轮；空闲时退出
+  ${keyLabel('app.interrupt').padEnd(19)}中断当前回合（有排队消息时先还回输入框）
+  ${keyLabel('app.clear').padEnd(19)}清空编辑器（连按两次退出）；${keyLabel('app.exit')} 直接退出
   /hotkeys              列出全部键位（与 pi 的 /hotkeys 同形）
   /model [id]           换模型（不给 id 就弹面板；给了精确命中就直接切）
   /scoped-models        启用/禁用哪些模型参与 Ctrl+P 循环（Ctrl+S 存进 settings）
