@@ -331,6 +331,8 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     provider: runtime.spec.provider,
     modelId: runtime.model.id,
     thinkingLevel: options.thinkingLevel ?? 'off',
+    // 底栏据此决定显不显示 `• <级别>`（reasoning 模型才有思考级别这回事）。
+    reasoning: runtime.model.reasoning ?? false,
     capabilities: readCapabilities(runtime.model),
     // 底箱的「已用 / 1.0M」要用。取不到就 0，底箱会不画那个百分比。
     contextWindow: runtime.model.contextWindow ?? 0,
@@ -367,6 +369,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         provider: runtime.spec.provider,
         modelId: runtime.model.id,
         thinkingLevel: options.thinkingLevel ?? 'off',
+        reasoning: runtime.model.reasoning ?? false,
         capabilities,
       },
     ];
@@ -452,6 +455,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         provider,
         modelId,
         thinkingLevel,
+        reasoning: model.reasoning ?? false,
         capabilities: readCapabilities(model),
         contextWindow: model.contextWindow ?? 0,
       } as AgentAction);

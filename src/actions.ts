@@ -136,6 +136,13 @@ export type AgentAction =
       provider: string;
       modelId: string;
       thinkingLevel: ModelThinkingLevel;
+      /**
+       * 模型支不支持 reasoning（思考）。底栏据此决定显不显示 `• <级别>`。
+       *
+       * **可选**：省略就是 `false`（不显示）。真实运行时内核一定会给
+       * （它从模型对象读 `reasoning`），测试里造 action 不用关心这个。
+       */
+      reasoning?: boolean;
       capabilities: ModelCapabilities;
       /**
        * 上下文窗口（token）。底箱要算「已用 / 窗口」的百分比。

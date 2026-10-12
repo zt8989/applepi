@@ -490,9 +490,20 @@ export function cwdLine(cwd: string, branch: string | undefined): string {
  *
  * 左边是「你以为自己用的是谁」，右边是「实际用的哪个模型」。分开是因为换 provider
  * （走网关）时最容易出的错就是以为还在用原厂模型。
+ *
+ * ## 思考级别（`• high` / `• thinking off`）
+ *
+ * **只有 reasoning 模型才画** —— 与 pi 的 `footer.js` 同一条件（`state.model?.reasoning`）。
+ * 形状也逐字一致：级别是 `off` 时写 `• thinking off`（而不是 `• off`），其余写 `• <级别>`。
+ * 为什么 `off` 要加 `thinking` 前缀：`model • off` 读起来像「模型被关了」，而它说的是
+ * 「这个模型能思考，但这次没开」。
  */
 export function modelLine(state: AgentState): string {
-  return `(${state.providerName}) ${state.modelId}`;
+  const base = `(${state.providerName}) ${state.modelId}`;
+  // `?.` 与 pi 的 `state.model?.reasoning` 一致：测试或半装载状态下 model 块可能缺席。
+  if (!state.model?.reasoning) return base;
+  const level = state.thinkingLevel || 'off';
+  return level === 'off' ? `${base} • thinking off` : `${base} • ${level}`;
 }
 
 /**

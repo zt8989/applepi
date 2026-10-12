@@ -373,6 +373,7 @@ function appendModelNode(tree: TraceTree, model: AgentState['model'], now: numbe
     label: `${model.provider}/${model.modelId}`,
     meta: {
       thinking: String(model.thinkingLevel),
+      reasoning: String(model.reasoning),
       midConvoSystem: String(caps.midConvoSystemMessages),
       midConvoTools: String(caps.midConvoToolAdditions),
       developerRole: String(caps.developerRole),
@@ -521,6 +522,7 @@ const transitions: TransitionHandlers = {
       provider: action.provider,
       modelId: action.modelId,
       thinkingLevel: action.thinkingLevel,
+      reasoning: action.reasoning ?? false,
       capabilities: action.capabilities,
       contextWindow: action.contextWindow ?? 0,
       seeded: true,
@@ -1256,6 +1258,8 @@ const transitions: TransitionHandlers = {
       ...state.model,
       provider: action.provider,
       modelId: action.modelId,
+      // 新模型支不支持 reasoning 还不知道，保守地当不支持，等 model.init 补上。
+      reasoning: false,
       capabilities: UNKNOWN_CAPABILITIES,
     },
     providerName: action.provider,

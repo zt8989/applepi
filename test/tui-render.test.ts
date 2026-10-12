@@ -679,6 +679,30 @@ test('modelLine：底栏右栏是 (provider) model 形状（与 pi 同形）', (
   assert.equal(modelLine(state), '(workbuddy) cn:space-bunny');
 });
 
+test('modelLine：reasoning 模型带 `• <级别>`，非 reasoning 模型不带', () => {
+  // 非 reasoning 模型：无论 thinkingLevel 是什么都不画级别（与 pi 的 `state.model?.reasoning` 同一条件）。
+  const noThink = {
+    providerName: 'qwen-token-plan-cn',
+    modelId: 'deepseek-v4.1-flash',
+    thinkingLevel: 'high',
+    model: { reasoning: false },
+  } as unknown as AgentState;
+  assert.equal(modelLine(noThink), '(qwen-token-plan-cn) deepseek-v4.1-flash');
+
+  // reasoning 模型 + 级别：`• high`。
+  const thinking = {
+    providerName: 'qwen-token-plan-cn',
+    modelId: 'deepseek-v4.1-flash',
+    thinkingLevel: 'high',
+    model: { reasoning: true },
+  } as unknown as AgentState;
+  assert.equal(modelLine(thinking), '(qwen-token-plan-cn) deepseek-v4.1-flash • high');
+
+  // reasoning 模型但级别是 off：pi 写 `• thinking off`，不是 `• off`。
+  const off = { ...thinking, thinkingLevel: 'off' } as unknown as AgentState;
+  assert.equal(modelLine(off), '(qwen-token-plan-cn) deepseek-v4.1-flash • thinking off');
+});
+
 // ─── 底栏第二行：token 用量（数字格式与算法都取自 pi） ───
 
 /** 造一条带 usage 的 assistant 消息。 */

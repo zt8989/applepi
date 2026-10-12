@@ -194,6 +194,14 @@ export interface ModelState {
   modelId: string;
   /** 当前思考级别；`off` 表示不带 reasoning。 */
   thinkingLevel: ModelThinkingLevel;
+  /**
+   * 这个模型支不支持 reasoning（思考）。底栏据此决定显不显示 `• <级别>`。
+   *
+   * 为什么不看 `thinkingLevel !== 'off'`：非 reasoning 模型的级别**永远是** `off`，
+   * 而 reasoning 模型也可以被用户设成 `off`（那时 pi 显示 `• thinking off`）。
+   * 两种情况在 `thinkingLevel` 上长得一样，必须另存一个标志才分得开。
+   */
+  reasoning: boolean;
   /** 这个模型支持什么（中途插 system / developer role / 中途加工具）。 */
   capabilities: ModelCapabilities;
   /**
@@ -464,6 +472,8 @@ export function createInitialState(options: InitialStateOptions): AgentState {
     provider: options.providerName,
     modelId: options.modelId,
     thinkingLevel: options.thinkingLevel ?? 'off',
+    // 装载前不知道：保守地算不支持（底栏就不画 `• <级别>`）。model.init 会补上真值。
+    reasoning: false,
     capabilities: {
       midConvoSystemMessages: false,
       midConvoToolAdditions: false,

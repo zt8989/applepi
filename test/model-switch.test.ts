@@ -93,6 +93,29 @@ function seedModelInit(store: ReturnType<typeof createAgentStore>, runtime: Agen
   });
 }
 
+test('model.init 把 reasoning 装进 state，model.changed 会保守地清掉它', () => {
+  // 底栏的 `• <级别>` 只看 `state.model.reasoning`（与 pi 的 `state.model?.reasoning`
+  // 同一条件）。装反了 / 忘记清的症状是：非 reasoning 模型上底栏挂着个 `• off`，
+  // 而它根本没有思考这回事。
+  const { runtime } = twoModelRuntime();
+  const store = createAgentStore({ runtime, systemPrompt: 'test' });
+  const model = runtime.model;
+  store.dispatch({
+    type: 'model.init',
+    provider: model.provider,
+    modelId: model.id,
+    thinkingLevel: 'high',
+    reasoning: true,
+    capabilities: readCapabilities(model),
+    contextWindow: model.contextWindow ?? 0,
+  });
+  assert.equal(store.getState().model.reasoning, true, 'model.init 应把 reasoning 装进去');
+
+  // 换模型：能力与新模型的 reasoning 都还不知道，保守地当成不支持，等 model.init 补上。
+  store.dispatch({ type: 'model.changed', provider: model.provider, modelId: 'model-b' });
+  assert.equal(store.getState().model.reasoning, false, 'model.changed 应保守地把 reasoning 清成 false');
+});
+
 test('换了模型之后，下一个回合真的发给新的那个（不是建表那一个）', async () => {
   const { runtime, seen, queueFor } = twoModelRuntime();
   const store = createAgentStore({ runtime, systemPrompt: 'test' });

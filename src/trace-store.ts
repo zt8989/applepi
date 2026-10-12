@@ -47,6 +47,8 @@ export type InitRecord =
       provider: string;
       modelId: string;
       thinkingLevel: string;
+      /** 模型支不支持 reasoning（旧记录/测试里可能没有）。 */
+      reasoning?: boolean;
       capabilities: {
         midConvoSystemMessages: boolean;
         midConvoToolAdditions: boolean;
