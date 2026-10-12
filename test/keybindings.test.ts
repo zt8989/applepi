@@ -54,9 +54,28 @@ function withDefaultKeybindings(body: () => void): void {
 test('本项目自己的动作都在定义表里', () => {
   for (const action of Object.keys(PROJECT_KEYBINDINGS)) {
     assert.ok(action in ALL_KEYBINDINGS, `${action} 应该合并进 ALL_KEYBINDINGS`);
-    // 键名解析得出来 = 这个 id 真的能被 `matches()` 用。空串说明表里没有它。
-    assert.notEqual(keyLabel(action), '', `${action} 应该有键名`);
   }
+  // 默认有键的那两个：键名解析得出来 = 这个 id 真的能被 `matches()` 用。
+  // 空串说明表里没有它。
+  assert.notEqual(keyLabel('app.trace.toggle'), '', 'app.trace.toggle 应该有键名');
+  assert.notEqual(keyLabel('app.queue.cycle'), '', 'app.queue.cycle 应该有键名');
+  // **`app.abort` 默认不绑**（`ctrl+c` 已归 pi 的 `app.clear`，见 `keybindings.ts`）。
+  // 但它仍是一个可用的 id —— 写进 `keybindings.json` 就该生效。
+  assert.equal(keyLabel('app.abort'), '', 'app.abort 默认不该有键名（ctrl+c 归 pi）');
+  const rebound = createProjectKeybindings();
+  rebound.setUserBindings({ 'app.abort': 'ctrl+c' });
+  assert.deepEqual(rebound.getKeys('app.abort'), ['ctrl+c']);
+});
+
+test('冲突以 pi 为准：ctrl+c 是 pi 的 app.clear，不再是本项目的中断', () => {
+  withDefaultKeybindings(() => {
+    // 本项目的中断动作 id 还在（可被覆盖），但**默认不占 ctrl+c**。
+    assert.ok(!actionMatches('\x03', 'app.abort'), 'ctrl+c 不该再绑到 app.abort');
+    // 它归 pi 的 app.clear（清空编辑器，连按两次退出）。
+    assert.ok(actionMatches('\x03', 'app.clear'), 'ctrl+c 应当命中 pi 的 app.clear');
+    // 中断改由 pi 的 app.interrupt（escape）负责。
+    assert.ok(actionMatches('\x1b', 'app.interrupt'), 'escape 应当命中 pi 的 app.interrupt');
+  });
 });
 
 test('默认键：轨迹页是 ctrl+r，而 ctrl+t 留给 pi 的 thinking.toggle', () => {
@@ -197,12 +216,34 @@ test('/hotkeys：表里的键名是解析出来的，不是写死的', () => {
   }
 });
 
-test('/hotkeys：不列本项目没实现的键位（那是「按了没反应」的说明书）', () => {
+test('/hotkeys：与 pi 对齐的动作都列在表里（它们现在真的能按）', () => {
   const md = hotkeysMarkdown();
-  // pi 的 /hotkeys 里这些是真的能按的，本项目没有对应功能 —— 照抄过来会误导。
-  for (const dead of ['app.suspend', 'app.editor.external', 'app.message.dequeue', 'Ctrl+D']) {
-    assert.ok(!md.includes(`\`${dead}\``), `不该列 ${dead}：\n${md}`);
+  // `feat/pi-keybindings-parity` 之后，这批 pi 的动作本项目都实现了 ——
+  // 它们**应当**出现在表里（以前这条断言是反的：那时它们按不动，列出来会误导）。
+  for (const live of [
+    'app.suspend',
+    'app.editor.external',
+    'app.message.dequeue',
+    'app.message.followUp',
+    'app.message.copy',
+    'app.clipboard.pasteImage',
+    'app.thinking.cycle',
+    'app.model.cycleForward',
+    'app.interrupt',
+    'app.clear',
+    'app.exit',
+  ] as const) {
+    const label = keyLabel(live);
+    assert.notEqual(label, '', `${live} 默认该有键名`);
+    // 循环模型那一行是「两个键一个单元格」（`Ctrl+P / Shift+Ctrl+P`），所以
+    // 只要行里出现这个键名就算列了 —— 直接包含整个 `` `label` `` 会漏掉合行。
+    assert.ok(md.includes(label), `表里该出现 ${live}（${label}）：\n${md}`);
   }
+  // 本项目自己的两个开关也在。
+  assert.ok(md.includes(`\`${keyLabel('app.trace.toggle')}\``), md);
+  assert.ok(md.includes(`\`${keyLabel('app.queue.cycle')}\``), md);
+  // `app.abort` 默认不绑（`ctrl+c` 已归 pi 的 `app.clear`）—— 它的那一行不该出现在表里。
+  assert.ok(!md.includes('app.abort'), md);
 });
 
 test('/hotkeys：Extensions 一节只在有扩展快捷键时出现', () => {

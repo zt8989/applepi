@@ -17,11 +17,15 @@
  * 动作（`app.trace.toggle` 等），它们和 pi 的动作在同一份表里，因此**同一套**
  * `keyLabel()` 就够了。
  *
- * ## 表格里不写「本项目没实现」的行
+ * ## 表格里列什么
  *
- * pi 那份列了 suspend / external editor / copy message / dequeue / paste image 等一堆 ——
- * 那些在本项目里**没有绑定**（甚至没有对应功能）。照抄过来会得到一份「按了没反应」的
- * 说明书，那比少列几行坏得多。所以这里只列真的能按的键，**分节名字与顺序保持与 pi 一致**。
+ * **pi 那份能按的，这里都列**（`feat/pi-keybindings-parity` 之后本项目的动作与 pi 对齐了）——
+ * 这批：interrupt / clear / exit / suspend / 循环思考级别 / 循环模型 / 模型面板 / 展开工具 /
+ * 思考块 / 外部编辑器 / 复制 / followUp / dequeue / 粘贴图片。
+ *
+ * pi 有而本项目**确实没有**的（会话树、fork、login/logout、trust、name……）**不列** ——
+ * 照抄过来会得到一份「按了没反应」的说明书，那比少列几行坏得多。
+ * 分节名字与顺序保持与 pi 一致。
  */
 import {
   getMarkdownTheme,
@@ -93,18 +97,23 @@ export interface HotkeyExtension {
  */
 export function hotkeysMarkdown(extensions: readonly HotkeyExtension[] = []): string {
   const navigation: HotkeyRow[] = [
-    actionRow('tui.editor.cursorUp', '上移（多行输入里就是移动光标）'),
-    actionRow('tui.editor.cursorDown', '下移'),
-    actionRow('tui.editor.cursorLeft', '左移'),
-    actionRow('tui.editor.cursorRight', '右移'),
-    actionRow('tui.editor.cursorWordLeft', '按词左移'),
-    actionRow('tui.editor.cursorWordRight', '按词右移'),
+    // 形状与 pi 完全一致：一条「光标 / 历史」、一条「按词」、两条「行首行尾」、
+    // 两条「跳字符」、一条「整页」。光标键与 `Up/Down` 共用一行的写法也照抄 ——
+    // pi 的 `cursorUp` 那组的表意就是「上移 / 翻历史」两职合一。
+    rawRow(
+      `${keyLabel('tui.editor.cursorUp')} / ${keyLabel('tui.editor.cursorDown')} / ${keyLabel('tui.editor.cursorLeft')} / ${keyLabel('tui.editor.cursorRight')}`,
+      '移动光标 / 翻输入历史',
+    ),
+    rawRow(
+      `${keyLabel('tui.editor.cursorWordLeft')} / ${keyLabel('tui.editor.cursorWordRight')}`,
+      '按词移动',
+    ),
     actionRow('tui.editor.cursorLineStart', '行首'),
     actionRow('tui.editor.cursorLineEnd', '行尾'),
     actionRow('tui.editor.jumpForward', '跳到下一个字符'),
     actionRow('tui.editor.jumpBackward', '跳到上一个字符'),
-    actionRow('tui.editor.pageUp', '整页上翻'),
-    actionRow('tui.editor.pageDown', '整页下翻'),
+    rawRow(`${keyLabel('tui.editor.pageUp')} / ${keyLabel('tui.editor.pageDown')}`, '整页上/下翻'),
+    // 本项目自己的滚轮（pi 没有这两个绑定）：Alt+↑/Ctrl+P 翻当前页半页。
     rawRow('alt+up/ctrl+p', '当前页上翻半页（对话页/轨迹页各自滚自己那块）'),
     rawRow('alt+down/ctrl+n', '当前页下翻半页'),
   ];
@@ -123,10 +132,22 @@ export function hotkeysMarkdown(extensions: readonly HotkeyExtension[] = []): st
 
   const other: HotkeyRow[] = [
     actionRow('tui.input.tab', '路径补全 / 接受补全项'),
-    actionRow('app.abort', '中断这一回合；空闲时退出'),
-    actionRow('app.trace.toggle', '在「对话」与「轨迹」两页之间切换'),
-    actionRow('app.tools.expand', '展开 / 收起工具输出的完整内容'),
+    actionRow('app.interrupt', '取消补全 / 中断流式输出（有排队消息时先还回编辑器）'),
+    actionRow('app.clear', '清空编辑器（连按两次退出）'),
+    actionRow('app.exit', '退出（编辑器为空时）'),
+    actionRow('app.suspend', '挂起到后台'),
+    actionRow('app.thinking.cycle', '循环思考级别'),
+    rawRow(`${keyLabel('app.model.cycleForward')} / ${keyLabel('app.model.cycleBackward')}`, '循环切换模型'),
     actionRow('app.model.select', '打开模型选择面板（Ctrl+S 存成默认）'),
+    actionRow('app.tools.expand', '展开 / 收起工具输出的完整内容'),
+    actionRow('app.thinking.toggle', '展开 / 收起思考块'),
+    actionRow('app.editor.external', '用外部编辑器编辑当前输入'),
+    actionRow('app.message.copy', '复制选区或最后一条助手消息'),
+    actionRow('app.message.followUp', '把当前输入排成 follow-up'),
+    actionRow('app.message.dequeue', '把排队的消息还回输入框'),
+    actionRow('app.clipboard.pasteImage', '粘贴文件路径 / 图片 / 文本'),
+    // 本项目自己的两个开关（pi 没有对应语义，见 `PROJECT_KEYBINDINGS`）。
+    actionRow('app.trace.toggle', '在「对话」与「轨迹」两页之间切换'),
     actionRow('app.queue.cycle', '切换入队模式：steer / followUp'),
     rawRow('/', '斜杠命令（再按 Tab 补全命令名）'),
   ];

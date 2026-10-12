@@ -52,9 +52,10 @@ import {
 import { NO_SCOPE, readScopedModels, writeDefaultModel, readHideThinkingBlock, writeHideThinkingBlock, type ModelScope, type ScopedModelItem } from '../model-scope';
 import type { AgentRuntime } from '../provider';
 import type { Model } from '@earendil-works/pi-ai';
-import { readFileSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 // ─── pi 官方的对话/工具渲染器 ───
 //
 // 用户蓝底、思考灰斜体、工具块的绿/红底色、write 的内容预览、edit 的彩色 diff、
@@ -91,6 +92,14 @@ import { addUsageToTotals, createUsageTotals } from '@earendil-works/pi-coding-a
 import { setupTheme } from './theme';
 import { actionMatches, installProjectKeybindings, keyLabel } from './keybindings';
 import { hotkeysMarkdown, renderHotkeys } from './hotkeys';
+// 「完全复用 pi」里那几条纯逻辑（循环模型 / 循环思考级别）—— 见 pi-actions.ts 的文件头。
+import { modelKey, nextCycleIndex, supportedThinkingLevels } from './pi-actions';
+// pi 自己的外部编辑器与剪贴板实现 —— 复用它，不自己 spawn $EDITOR / 调 pbcopy。
+import { editInExternalEditor } from '@earendil-works/pi-coding-agent/dist/modes/interactive/external-editor.js';
+import { readClipboardFilePaths, readClipboardText, copyToClipboard } from '@earendil-works/pi-coding-agent/dist/utils/clipboard.js';
+import { SettingsManager } from '@earendil-works/pi-coding-agent/dist/core/settings-manager.js';
+import { piAgentDir } from '../pi-config';
+import { extensionForImageMimeType, readClipboardImage } from '@earendil-works/pi-coding-agent/dist/utils/clipboard-image.js';
 import { contextLabels, extensionLabels } from './resource-labels';
 import { contextFilePaths } from '../system-prompt';
 import type { HostUiOptions } from '../extension-ui';
@@ -1620,15 +1629,58 @@ export async function runTui(options: TuiOptions): Promise<number> {
         return true;
       }
       if (actionMatches(data, 'app.abort')) {
+        // 本项目的「一键中断 / 空闲退出」合体动作。**默认不绑**（`keybindings.json` 里
+        // 显式写 `"app.abort": "ctrl+c"` 才会走到这里），因为 `ctrl+c` 已归 pi 的
+        // `app.clear`。见 `keybindings.ts`。
         if (store.getState().phase !== 'idle') {
           abortRun();
           return true;
         }
         // **顺序不能反**：`tui.stop()` 先离开备用屏，提示才落在主屏上看得见。
         // 反过来写的话那行会被备用屏的退出一起丢掉（见 `printResumeOnExit` 的注释）。
-        tui.stop();
-        printResumeOnExit();
-        process.exit(0);
+        exitApp();
+        return true;
+      }
+      // pi 的 `app.model.cycleForward/Backward`（`Ctrl+P` / `Shift+Ctrl+P`）：
+      // 在作用域内循环换模型。用 pi 的 id，所以用户改过键这边跟着变。
+      if (actionMatches(data, 'app.model.cycleForward')) {
+        cycleModel('forward');
+        return true;
+      }
+      if (actionMatches(data, 'app.model.cycleBackward')) {
+        cycleModel('backward');
+        return true;
+      }
+      // pi 的 `app.thinking.cycle`（`Shift+Tab`）：循环 thinking 级别。
+      if (actionMatches(data, 'app.thinking.cycle')) {
+        cycleThinking();
+        return true;
+      }
+      // pi 的 `app.message.dequeue`（`Alt+Up`）：把排队消息还回编辑器。
+      if (actionMatches(data, 'app.message.dequeue')) {
+        if (restoreQueuedToEditor() === 0) notify(dim('没有排队的消息可还回'));
+        refresh();
+        return true;
+      }
+      // pi 的 `app.editor.external`（`Ctrl+G`）：交给 `$EDITOR` 改。
+      if (actionMatches(data, 'app.editor.external')) {
+        openExternalEditor();
+        return true;
+      }
+      // pi 的 `app.message.copy`（`Ctrl+X`）：复制最后一条助手消息。
+      if (actionMatches(data, 'app.message.copy')) {
+        copyLastMessage();
+        return true;
+      }
+      // pi 的 `app.clipboard.pasteImage`（`Ctrl+V`）：文件路径 / 图片 / 文本。
+      if (actionMatches(data, 'app.clipboard.pasteImage')) {
+        pasteFromClipboard();
+        return true;
+      }
+      // pi 的 `app.suspend`（`Ctrl+Z`）：挂到后台（再 fg 回来）。
+      if (actionMatches(data, 'app.suspend')) {
+        suspendToBackground();
+        return true;
       }
       // `app.trace.toggle`（默认 Ctrl+R）：**切到轨迹页 / 切回对话页**。
       //
@@ -1706,6 +1758,21 @@ export async function runTui(options: TuiOptions): Promise<number> {
   };
   tui.addInputListener(onInput);
 
+  // ─── 编辑器自己的 app 动作（pi 的 `CustomEditor.handleInput` 认这几个） ───
+  //
+  // 这一批**必须在编辑器上挂**（而不是像上面那几个全局开关挂在 input listener 上）：
+  //
+  //   1. 它们要改编**辑器自己的状态**（文字 / 光标）—— `Escape` 还要先给「取消补全」，
+  //      所以必须经过 `CustomEditor.handleInput` 那一层判「补全在不在」。
+  //   2. 它们**只在编辑器聚焦时才生效**：弹窗开着时不改编辑器（而全局开关那条路
+  //      靠 `tui.hasOverlay()` 挡，两者刚好互补）。
+  //
+  // 这就是 pi 的分法（`interactive-mode.js` 的 `setupKeyHandlers()`）—— 照搬过来。
+  editor.onAction('app.clear', () => clearEditorAndMaybeExit());
+  editor.onAction('app.interrupt', () => interrupt());
+  editor.onCtrlD = () => exitApp();
+  editor.onPasteImage = () => pasteFromClipboard();
+
   editor.onSubmit = (rawText: string) => {
     const input = rawText.trim();
     if (!input) return;
@@ -1759,6 +1826,321 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const cycleQueueMode = (): void => {
     queueMode = queueMode === 'steer' ? 'followUp' : 'steer';
     notify(dim(`入队模式：${queueMode === 'steer' ? 'steer（工具跑完后插进去）' : 'followUp（说完再插）'}`));
+    refresh();
+  };
+
+  // ══════════════ 「完全复用 pi」的那几个动作 ══════════════
+  //
+  // 这一段是 `feat/pi-keybindings-parity` 的主体：把 pi 键位表里那些**表里有、行为没有**
+  // 的 id 逐个接上。每个都尽量复用 pi 自己的实现（剪贴板 / 外部编辑器 / thinking 档位），
+  // 只在「本项目内核长什么样」这一层自己写接线。
+
+  /**
+   * 当前模型对象（pi-ai 的 `Model`）。
+   *
+   * `state.model` 是**本项目的 `ModelState`**（provider / reasoning / capabilities /
+   * contextWindow 那几项），不是 pi-ai 的 `Model` —— 所以不能直接当 `Model` 用。
+   *
+   * 拿不到就 `undefined`：需要模型能力（`reasoning`、支持的 thinking 档位）的地方
+   * 只能退到「不支持」。**不编一个假 Model**：`getSupportedThinkingLevels` 会读它的
+   * `api` / `reasoning` 等字段，假对象只会让症状出现在更靠里的地方。
+   */
+  const currentModelObject = (): Model<any> | undefined => {
+    if (!options.runtime) return undefined;
+    const state = store.getState();
+    return modelRuntimeFor(options.runtime).getModel(state.providerName, state.modelId) as
+      | Model<any>
+      | undefined;
+  };
+
+  /**
+   * 当前 thinking 级别该轮到的下一个（pi 的 `app.thinking.cycle`，`Shift+Tab`）。
+   *
+   * 与 pi 的 `cycleThinkingLevel()` 同口径：级别集合来自**模型支持的那几档**
+   * （`getSupportedThinkingLevels`），缺 `reasoning` 的模型返回空 -> 提示「不支持」。
+   *
+   * 落点：`thinking.changed`（reducer 改 `state.thinkingLevel`），随后内核在下一轮
+   * LLM 请求里带上新级别（`effects.ts` 从 `state.model.thinkingLevel` 读）。
+   */
+  const cycleThinking = (): void => {
+    const before = store.getState().thinkingLevel;
+    const model = currentModelObject();
+    const levels = supportedThinkingLevels(model);
+    if (levels.length === 0) {
+      notify(yellow('当前模型不支持 thinking（没有可切的级别）'));
+      return;
+    }
+    const index = levels.indexOf(before);
+    const next = levels[nextCycleIndex(levels.length, index, 'forward') ?? 0] as typeof before;
+    store.dispatch({ type: 'thinking.changed', level: next });
+    refresh();
+    notify(dim(`思考级别：${next}`));
+  };
+
+  /**
+   * 在作用域内循环换模型（pi 的 `app.model.cycleForward/Backward`，`Ctrl+P` / `Shift+Ctrl+P`）。
+   *
+   * ## 候选集：作用域非空就用作用域，否则用「当前 provider 的可用模型」
+   *
+   * 与 pi 的 `cycleModel()` 分歧一致（`_cycleScopedModel` vs `_cycleAvailableModel`）：
+   * 配过 `/scoped-models` 的人显然只想在那几个里转。
+   *
+   * 换模型走 `options.setModel()`（内核的 `setModel`）—— 它会发 `model.changed` +
+   * `model.init`，所以级别 / 能力 / 窗口都跟着一起重置，不需要这里手动改 state。
+   */
+  const cycleModel = (direction: 'forward' | 'backward'): void => {
+    if (!options.runtime) {
+      notify(yellow('未接内核（没有 provider 装配），换不了模型'));
+      return;
+    }
+    if (!options.setModel) {
+      notify(yellow('未接内核，换不了模型'));
+      return;
+    }
+    const available = [...modelRuntimeFor(options.runtime).getAvailableSnapshot()];
+    // 作用域里有模型就只用它们；作用域空（全开）就用**当前 provider** 的全部模型 ——
+    // 把全 provider 的 1500 条拿来循环没意义（Ctrl+P 会跨到别的厂商去）。
+    const scoped = currentScope.models.map((item) => item.model);
+    const candidates =
+      scoped.length > 0
+        ? scoped.filter((model) => available.some((m) => m.provider === model.provider && m.id === model.id))
+        : available.filter((m) => m.provider === store.getState().providerName);
+    const current = store.getState();
+    const currentIndex = candidates.findIndex(
+      (m) => modelKey(m) === `${current.providerName}\0${current.modelId}`,
+    );
+    const nextIndex = nextCycleIndex(candidates.length, currentIndex, direction);
+    const next = nextIndex === undefined ? undefined : candidates[nextIndex];
+    if (next === undefined) {
+      notify(yellow(scoped.length > 0 ? '作用域里没有可切的模型' : '这个 provider 下没有可切的模型'));
+      return;
+    }
+    if (nextIndex === currentIndex) {
+      notify(dim('只有这一个可切的模型'));
+      return;
+    }
+    if (!options.setModel(next.provider, next.id)) {
+      notify(yellow(`换不了 ${next.provider}/${next.id}（配置里没它）`));
+      return;
+    }
+    refresh();
+    notify(dim(`已切到 ${next.id}（${next.provider}）`));
+  };
+
+  /** 最后一条 assistant 消息里的可见文本（`app.message.copy` 用它，与 pi 的 `getLastAssistantText` 同口径）。 */
+  const lastAssistantText = (): string => {
+    const messages = store.getState().messages;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (message?.role !== 'assistant') continue;
+      return message.content
+        .filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text')
+        .map((block) => block.text)
+        .join('\n')
+        .trim();
+    }
+    return '';
+  };
+
+  /** pi 的 `app.message.copy`（`Ctrl+X`）：复制选区或最后一条 assistant 消息。 */
+  const copyLastMessage = (): void => {
+    // 有选区的优选区（与 pi 的 `preferSelection` 一致）—— 但本项目是 AltScreen，
+    // 选区复制由 `copyOnSelect` 自己处理，这里只管「最后一条消息」。
+    const text = lastAssistantText();
+    if (!text) {
+      notify(yellow('还没有助手消息可复制'));
+      return;
+    }
+    void copyToClipboard(text).then(
+      () => notify(dim('已复制最后一条助手消息')),
+      (error: unknown) =>
+        notify(yellow(`复制失败：${error instanceof Error ? error.message : String(error)}`)),
+    );
+  };
+
+  /** pi 的 `app.editor.external`（`Ctrl+G`）：把当前输入交给 `$EDITOR` 改完再收回来。 */
+  const openExternalEditor = (): void => {
+    const content = editor.getText();
+    // 读 settings 的 `externalEditor`（与 pi 同一个键）。读不到就用 pi 的默认
+    // （`editInExternalEditor` 内部同一条兜底链：`$VISUAL` / `$EDITOR` / vi）。
+    let command = 'vi';
+    try {
+      command = SettingsManager.create(cwd, piAgentDir()).getExternalEditorCommand();
+    } catch {
+      command = 'vi';
+    }
+    // 先离开备用屏（不然外部编辑器会画在备用屏里、退出后一起消失）。
+    tui.stop();
+    void editInExternalEditor({ command, content })
+      .then((result) => {
+        if (result.status === 'complete') editor.setText(result.content);
+      })
+      .catch((error: unknown) => {
+        // 回来之后再报 —— 这时 tui.start() 已把备用屏接回来。
+        pendingNotice = yellow(`外部编辑器出错：${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => {
+        tui.start();
+        refresh();
+        if (pendingNotice !== undefined) {
+          const text = pendingNotice;
+          pendingNotice = undefined;
+          notify(text);
+        }
+      });
+  };
+  /** `openExternalEditor` 在 tui 停摆期间攒下的一句话，回来后再报（内部用，不对外）。 */
+  let pendingNotice: string | undefined;
+
+  /** pi 的 `app.clipboard.pasteImage`（`Ctrl+V`）：文件路径 / 图片 / 文本三档兜底。 */
+  const pasteFromClipboard = (): void => {
+    void (async () => {
+      try {
+        const filePaths = await readClipboardFilePaths();
+        if (filePaths && filePaths.length > 0) {
+          // 文件路径：多行输入里一行一个（与 pi 非 bash 模式一致）。
+          // 路径里带控制字符是异常（可能是剪贴板投毒），拒绝并说清楚。
+          if (filePaths.some((p) => /\p{Cc}/u.test(p))) {
+            notify(yellow('剪贴板里的文件路径含控制字符，已忽略'));
+            return;
+          }
+          editor.insertTextAtCursor?.(filePaths.join('\n'));
+          refresh();
+          return;
+        }
+        const image = await readClipboardImage();
+        if (image) {
+          const ext = extensionForImageMimeType(image.mimeType) ?? 'png';
+          const file = path.join(tmpdir(), `ela-clipboard-${randomUUID()}.${ext}`);
+          writeFileSync(file, Buffer.from(image.bytes));
+          editor.insertTextAtCursor?.(file);
+          refresh();
+          return;
+        }
+        const text = await readClipboardText();
+        if (text) {
+          editor.insertTextAtCursor?.(text);
+          refresh();
+        }
+      } catch (error: unknown) {
+        notify(yellow(`粘贴失败：${error instanceof Error ? error.message : String(error)}`));
+      }
+    })();
+  };
+
+  /** 编辑器被清空 / 退出时的反馈（pi 的 `app.clear` / `app.exit`，见下方 `onAction` 接线）。 */
+  const clearEditorAndMaybeExit = (): void => {
+    // pi 的 `handleCtrlC()`：500ms 内第二次才退出，否则只清空编辑器。
+    const now = Date.now();
+    if (now - lastCtrlC < 500) {
+      tui.stop();
+      printResumeOnExit();
+      process.exit(0);
+    }
+    lastCtrlC = now;
+    editor.setText('');
+    refresh();
+  };
+  /** 上一次 `app.clear` 的时刻（两次之内退出，与 pi 的 `lastSigintTime` 同口径）。 */
+  let lastCtrlC = 0;
+
+  /** pi 的 `app.exit`（`Ctrl+D`，编辑器为空）：退出。 */
+  const exitApp = (): void => {
+    tui.stop();
+    printResumeOnExit();
+    process.exit(0);
+  };
+
+  /**
+   * pi 的 `app.suspend`（`Ctrl+Z`）：挂到后台，`fg` 回来时恢复界面。
+   *
+   * ## 与 pi 的 `handleCtrlZ()` 逐条对齐
+   *
+   * - **`setInterval` 抱一个 handle 不让事件循环结束**：停掉 TUI 后 Node 可能没有
+   *   活着的 handle，进程会在 `fg` 回来前就退出（那比「挂起」坏得多）。
+   * - **挂起期间忽略 `SIGINT`**：后台进程收到终端发给整个进程组的 Ctrl+C 时不该被杀。
+   * - **`kill(0, 'SIGTSTP')`**：`0` = 整个进程组，与本进程一起安静。
+   * - `SIGCONT` 里 `tui.start()` 把备用屏接回来。
+   *
+   * Windows 没有 SIGTSTP，与控制台挂起也不是同一回事 —— 照 pi 的做法给一句提示就好。
+   */
+  const suspendToBackground = (): void => {
+    if (process.platform === 'win32') {
+      notify(yellow('Windows 不支持挂起到后台'));
+      return;
+    }
+    const keepAlive = setInterval(() => {}, 2 ** 30);
+    const ignoreSigint = (): void => {};
+    process.on('SIGINT', ignoreSigint);
+    process.once('SIGCONT', () => {
+      clearInterval(keepAlive);
+      process.removeListener('SIGINT', ignoreSigint);
+      tui.start();
+      refresh();
+    });
+    try {
+      tui.stop();
+      process.kill(0, 'SIGTSTP');
+    } catch (error) {
+      clearInterval(keepAlive);
+      process.removeListener('SIGINT', ignoreSigint);
+      throw error;
+    }
+  };
+
+  /** pi 的 `app.interrupt`（`Escape`）：跑着就中断；有队列就把队列还回编辑器。 */
+  const interrupt = (): void => {
+    if (store.getState().phase !== 'idle') {
+      restoreQueuedToEditor();
+      abortRun();
+      refresh();
+      return;
+    }
+    // 空闲且没有队列：什么也不做（与 pi 的 double-escape 动作无关，本项目没那两个）。
+    const restored = restoreQueuedToEditor();
+    if (restored > 0) refresh();
+  };
+
+  /**
+   * 把两条队列里的内容**拼回编辑器**（pi 的 `restoreQueuedMessagesToEditor`）。
+   *
+   * ## 为什么要清队列
+   *
+   * 还回编辑器意味着「这些我先不发了」。不清的话它们会在下一次投递点又插进去 ——
+   * 于是编辑器里有一份、对话里也会冒出一份，看着像说重了。
+   *
+   * @returns 还了几条（0 = 队列本来就空）。
+   */
+  const restoreQueuedToEditor = (): number => {
+    const state = store.getState();
+    const all = [...state.steerQueue, ...state.followUpQueue];
+    if (all.length === 0) return 0;
+    const queued = all.map((item) => item.text).join('\n\n');
+    const current = editor.getText();
+    editor.setText([queued, current].filter((t) => t.trim() !== '').join('\n\n'));
+    store.dispatch({ type: 'queue.clear' });
+    notify(dim(`已把 ${all.length} 条排队消息还回输入框`));
+    return all.length;
+  };
+
+  /**
+   * pi 的 `app.message.followUp`（`Alt+Enter`）：流式时按 followUp 入队；空闲时等同回车。
+   *
+   * 与 pi 的 `handleFollowUp()` 同口径。**为什么不复用 `queueMode`**：那个是「模式开关」
+   * （切一次之后每条都按新列走），而这个是「这一条走 followUp」的一次性动作 ——
+   * 两个键位 pi 也分得很清（`app.queue.cycle` 是我们自己的，pi 没有）。
+   */
+  const followUp = (): void => {
+    const text = editor.getText().trim();
+    if (!text) return;
+    if (store.getState().phase === 'idle') {
+      editor.setText('');
+      editor.onSubmit?.(text);
+      return;
+    }
+    editor.setText('');
+    store.dispatch({ type: 'queue.input', text, as: 'followUp' });
+    notify(dim(`Follow-up: ${text}`));
     refresh();
   };
 

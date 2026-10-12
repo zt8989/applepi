@@ -634,6 +634,23 @@ const transitions: TransitionHandlers = {
   },
 
   /**
+   * 清空两条队列（`Alt+Up` 把排队消息还回编辑器时用）。
+   *
+   * ## 为什么不动 `deliveringInput`
+   *
+   * 那一条已经「取出、即将插」了（在途），还回编辑器管不到它 —— 它马上就会变成一条
+   * 真正的 user 消息。把它也算作「未发出」而回尸，会造成「模型看到了一条、编辑器里
+   * 也有一条」的重复。所以只清**还没取**的那两条队列。
+   *
+   * 纯函数：队列本来就是空的时候返回**原对象**（保持 reducer 的引用稳定，
+   * 让订阅者能靠 `===` 跳过无变化的帧）。
+   */
+  'queue.clear': (state) => {
+    if (state.steerQueue.length === 0 && state.followUpQueue.length === 0) return state;
+    return { ...state, steerQueue: [], followUpQueue: [] };
+  },
+
+  /**
    * 投递一条排队消息：组装成 user 消息插进 `messages`，并开一个 user 轨迹节点。
    *
    * ## 与 `user.message` 的差别（为什么必须是两条 action）
