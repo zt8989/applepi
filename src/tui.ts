@@ -68,7 +68,7 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
 
 选项:
   -p, --print <text>     一次性提问
-  -P, --provider <id>    LLM provider（默认 deepseek；可用: ${providerNames().join(', ')}）
+  -P, --provider <id>    LLM provider（默认 settings.json → models.json 里第一个；可用: ${providerNames().join(', ')})
   -m, --model <id>       模型 id（默认取该 provider 的第一个模型）
   -s, --system <text>    覆盖 system prompt 的前言（工具规则 / AGENTS.md / cwd 仍照旧拼上）
       --append-system <t> 追加一条规则（进 <addendum>；.pi/APPEND_SYSTEM.md 优先）
@@ -118,7 +118,8 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
     // provider/model 留空 → 走 defaultProviderSpec()：先读 ~/.pi/agent/settings.json，
-    // 再退到内置兜底 workbuddy / cn:space-bunny。命令行 -P/-m 仍然优先。
+    // 再退到**动态**兜底（models.json 里第一个 provider，见 fallbackProviderSpec）。
+    // 不写死任何 provider 名。命令行 -P/-m 仍然优先。
     provider: '',
     model: undefined,
     // **不给 system**：用 pi 拼的那份（工具规则 / AGENTS.md / cwd / skill）。
@@ -250,7 +251,7 @@ async function main(): Promise<void> {
   setupTheme();
   try {
     kernel = await createKernel({
-      // 没给 -P/-m 就用默认（settings.json → 兜底 workbuddy/cn:space-bunny）
+      // 没给 -P/-m 就用默认（settings.json → 动态兜底）
       ...defaultProviderSpec(),
       ...(args.provider ? { provider: args.provider } : {}),
       ...(args.model ? { model: args.model } : {}),

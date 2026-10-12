@@ -22,6 +22,7 @@
 import type { Model } from '@earendil-works/pi-ai';
 import { SettingsManager } from '@earendil-works/pi-coding-agent/dist/core/settings-manager.js';
 import { piAgentDir } from './pi-config';
+import { fallbackProviderSpec } from './provider';
 
 /**
  * 一个作用域条目：模型 + 可选的思考级别（`provider/id:high` 那种带级别的写法）。
@@ -95,23 +96,45 @@ export function writeScopedModels(
  * 两个键要**同时**有才算（只有 `defaultModel` 没有 provider 是配坏了的形态 ——
  * 那时给一个半截引用会让「· default」挂在一个解析不出来的模型上）。
  *
- * 读不到时退回**内置兜底** `workbuddy` / `cn:space-bunny`（与 `provider.ts` 的
- * `FALLBACK_DEFAULT` 同一个值）。那不是猜的：没有兜底的话，一个刚装好、还没跑过一次的
- * 配置里，`defaultProvider` 必然是 undefined，于是面板上**一个「· default」都没有**，
- * 而 `Ctrl+S` 存默认之后也只有那次是准的。
+ * 读不到时用**同一个**动态兜底（`provider.ts` 的 `fallbackProviderSpec()`：models.json
+ * 里的第一个 provider；再不行就是内置的 `anthropic`）。**不写死任何一个 provider 名** ——
+ * 早先这里与 `provider.ts` 都写死 `workbuddy` / `cn:space-bunny`，症状是换台机器（配置家目录
+ * 里没这个 provider）时启动就报「未知 provider：workbuddy」，而面板上那个 `· default`
+ * 也挂着一个解析不出来的模型。
+ *
+ * 两者共享同一个函数是刻意的：写死两遍、或各写一份兜底，症状就是「启动用的默认」与
+ * 「面板上标 default 的那个」在配置不同时对不上 —— 而它们本该是同一个东西。
+ */
+/**
+ * 面板上的 `· default`（provider + 模型 id）。
+ *
+ * 官方 `DefaultModelReference` 的 `id` 是必填的 `string`，所以拿不到具体模型时只能
+ * 返回 `undefined`（官方组件接受它 —— 那样就只是不显示 `· default` 那一行）。
+ *
+ * `runtime` 用来把「只有 provider」补成「provider + 它的第一个模型」：兜底选的 provider
+ * 来自 models.json 的**第一个**条目时，它的第一个模型本来就在 models.json 里；而
+ * 兜底退到内置 `anthropic` 时目录有 1500 条，得问 runtime 才不猜。
+ *
+ * 不传 `runtime`（测试、纯 settings 读取）时没有模型可补，就返回 undefined。
  */
 export function defaultModelRef(
   cwd: string = process.cwd(),
+  runtime?: { getModels(providerId?: string): readonly { id: string }[] },
 ): { provider: string; id: string } | undefined {
-  const FALLBACK = { provider: 'workbuddy', model: 'cn:space-bunny' } as const;
+  const fallback = fallbackProviderSpec();
+  let provider: string;
+  let id: string | undefined;
   try {
     const settings = SettingsManager.create(cwd, piAgentDir());
-    const provider = settings.getDefaultProvider() ?? FALLBACK.provider;
-    const id = settings.getDefaultModel() ?? FALLBACK.model;
-    return { provider, id };
+    provider = settings.getDefaultProvider() ?? fallback.provider;
+    id = settings.getDefaultModel() ?? fallback.model;
   } catch {
-    return { provider: FALLBACK.provider, id: FALLBACK.model };
+    provider = fallback.provider;
+    id = fallback.model;
   }
+  // 兜底只给了 provider（models.json 空目录）：问 runtime 要该 provider 的第一个模型。
+  if (id === undefined) id = runtime?.getModels(provider)[0]?.id;
+  return id === undefined ? undefined : { provider, id };
 }
 
 /** 写默认模型（`/model` 面板里 `Ctrl+S` 那条）。 */

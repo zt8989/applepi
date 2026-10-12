@@ -87,10 +87,14 @@ test('cwdLine：家目录里的路径会缩成 ~（与 pi 截图同形）', () =
 });
 
 test('cwdLine：不在家目录里时保持绝对路径（~ 只会骗人）', () => {
-  // D: 盘肯定不在 C:\Users\... 之下（除非有人把 home 设成 D 根）。
-  const out = cwdLine(String.raw`D:\some\proj`, 'main');
+  // 路径必须是**本机真实**的：pi 的 `formatCwdForFooter()` 内部先 `resolve()`，
+  // 而 `resolve('D:\\some\\proj')` 在 posix 上是把它当**相对路径**接到 cwd 之后 ——
+  // 结果正好落在 home 之下，于是被缩成 `~…`。那是 resolve 的规则，不是显示的 bug，
+  // 断言要验的是「home 之外不缩」，所以给一个真的在 home 之外的绝对路径。
+  const outside = path.resolve(homedir(), '..', '..', 'outside-home-proj');
+  const out = cwdLine(outside, 'main');
   assert.ok(!out.startsWith('~'), `家目录之外不该缩成 ~：${out}`);
-  assert.ok(out.includes('some'), out);
+  assert.ok(out.includes('outside-home-proj'), out);
 });
 
 // ─── git 分支：.git 是目录还是文件 ───

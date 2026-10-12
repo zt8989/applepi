@@ -26,6 +26,7 @@ import {
   loadPiAuth,
   loadPiModels,
   loadPiSettings,
+  normalizeModels,
   piModelsPath,
   type PiModelRuntime,
 } from './pi-config';
@@ -63,20 +64,53 @@ const PROVIDER_FACTORIES: Record<string, () => Provider<any>> = {
   openai: openaiProvider as () => Provider<any>,
 };
 
-/** 默认 provider / 模型：从 `~/.pi/agent/settings.json` 读，读不到用这组兜底。 */
-const FALLBACK_DEFAULT = { provider: 'workbuddy', model: 'cn:space-bunny' } as const;
+/**
+ * **不写死任何 provider 名**的兜底默认。
+ *
+ * 早先这里是 `{ provider: 'workbuddy', model: 'cn:space-bunny' }` —— 那是**当时这台
+ * 机器**的配置，不是协议里的一条规定。于是一切「家目录里没有 workbuddy」的场景
+ * （新装、换机器、别人拷了 settings.json 而没拷 models.json、测试的隔离家目录）
+ * 都在启动第一步就炸：
+ *
+ *     未知 provider：workbuddy。可用：amazon-bedrock, ant-ling, …
+ *
+ * 写死一个 provider 名等于把「我这台机器碰巧这么配」当成了配置格式的一部分。
+ *
+ * 现在按「用户真的有什么」逐级往下退：
+ *
+ *   1. `models.json` 里**第一个** provider 的第一个模型 —— 用户自己写的，一定存在；
+ *   2. 一个内置 provider（`anthropic`）且**不给 model** —— 内置目录一定在，
+ *      具体模型交给 `createRuntime()` 取第一个。
+ *
+ * 第 2 步失败（凭证没配）时错的是「缺 ANTHROPIC_API_KEY」，而不是「workbuddy 是谁」。
+ * 那是能照着修的错。
+ */
+export function fallbackProviderSpec(): ProviderSpec {
+  for (const [providerId, config] of Object.entries(loadPiModels()?.providers ?? {})) {
+    const first = normalizeModels(config?.models)[0];
+    if (first) return { provider: providerId, model: first.id };
+  }
+  return { provider: 'anthropic' };
+}
 
 /**
  * 默认 provider / 模型。
  *
- * 顺序：`~/.redux-agent/settings.json`（手写或从别处拷进来的）
- * → 内置兜底 `workbuddy` / `cn:space-bunny`。命令行显式给的参数永远优先。
+ * 顺序：`~/.pi/agent/settings.json`（手写或从别处拷进来的）
+ * → `fallbackProviderSpec()`（**动态**：models.json 里的第一个 provider，不是写死的名字）。
+ * 命令行显式给的参数永远优先。
+ *
+ * settings.json 里写了的值**原样**返回，即便此刻 provider 列表里还没有它 ——
+ * 用户显式指定的配置报错要指向那个配置，而不是被悄悄改成别的模型。
  */
 export function defaultProviderSpec(): ProviderSpec {
   const settings = loadPiSettings();
+  const fallback = fallbackProviderSpec();
   return {
-    provider: settings.defaultProvider ?? FALLBACK_DEFAULT.provider,
-    model: settings.defaultModel ?? FALLBACK_DEFAULT.model,
+    provider: settings.defaultProvider ?? fallback.provider,
+    // `exactOptionalPropertyTypes` 下不能显式传 undefined；兜底本来就没有 model 时
+    // 就不给这个键（`createRuntime` 会取该 provider 的第一个模型）。
+    ...(settings.defaultModel ?? fallback.model ? { model: settings.defaultModel ?? fallback.model } : {}),
   };
 }
 

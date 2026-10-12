@@ -87,13 +87,23 @@ test('带作用域的包名（`@scope/pkg`）也要能拆出来', () => {
 });
 
 test('[Context] 清单：cwd 下的相对显示，家目录缩 ~', () => {
-  const cwd = path.join('C:', 'work', 'proj');
-  const home = path.join('C:', 'Users', 'me');
+  // 路径用**分隔符无关**的手写形式，而不是 `path.join()`：
+  //
+  // `contextLabels()` 里 `path.isAbsolute()` / `path.relative()` 走的是**本机**语义。
+  // 在 posix 上 `path.join('C:', 'work', 'proj')` 得到的 `C:/work/proj` 是**相对**路径
+  // （posix 里不以 `/` 开头），于是三个文件全被当成「相对 cwd」解析，算出来的
+  // `relative` 非空且不逃 `..`，就全显示成 `C:/work/proj/AGENTS.md` 那种东西 ——
+  // 一个假失败：它测的是 Windows 形状的断言在 macOS/Linux 上跑。
+  //
+  // 用 posix 绝对路径就两边都对：win 上 `path.isAbsolute` 也认 `C:/`（那里 normalize
+  // 把 `\` 换成 `/`），posix 上认 `/`。
+  const cwd = '/work/proj';
+  const home = '/Users/me';
   const labels = contextLabels(
     [
-      { path: path.join(home, 'AGENTS.md') },
-      { path: path.join(cwd, 'AGENTS.md') },
-      { path: path.join(home, '.pi', 'agent', 'APPEND_SYSTEM.md') },
+      { path: `${home}/AGENTS.md` },
+      { path: `${cwd}/AGENTS.md` },
+      { path: `${home}/.pi/agent/APPEND_SYSTEM.md` },
     ],
     cwd,
     home,
