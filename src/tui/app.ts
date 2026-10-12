@@ -51,7 +51,7 @@ import {
   openScopedModelsPicker,
   modelRuntimeFor,
 } from './model-picker';
-import { NO_SCOPE, readScopedModels, writeDefaultModel, type ModelScope, type ScopedModelItem } from '../model-scope';
+import { NO_SCOPE, readScopedModels, writeDefaultModel, readHideThinkingBlock, writeHideThinkingBlock, type ModelScope, type ScopedModelItem } from '../model-scope';
 import type { AgentRuntime } from '../provider';
 import type { Model } from '@earendil-works/pi-ai';
 import { readFileSync, statSync } from 'node:fs';
@@ -1252,6 +1252,20 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 看到完整结果**，而截断到看不见东西等于工具白跑。
    */
   let expanded = false;
+  /**
+   * 思考块是否折叠（`Ctrl+T` 切换，pi 的 `app.thinking.toggle`）。
+   *
+   * `true` = 只留一行斜体的 `Thinking…`；`false` = 展开整段思考（默认，与 pi 的
+   * `hideThinkingBlock ?? false` 一致）。
+   *
+   * 为什么需要有这个开关：思考动辄几百上千字，展开着会与正文抢注意力；而
+   * 「模型为什么这么干」恰是排查时最想看的东西 —— 所以两个需求都真实，
+   * 交给用户一个键自己选（与 pi 同一行为、同一个键）。
+   *
+   * 初值从 `settings.json` 的 `hideThinkingBlock` 读（与 pi **同一个键、同一个文件**）——
+   * 在 pi 那边设过之后，本项目的默认行为跟着走。
+   */
+  let hideThinking = readHideThinkingBlock();
   let loading = false;
   let lastLoaderMessage = '';
   /**
@@ -1343,7 +1357,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // 提示过期就清掉（6 秒后自动消失，不留一行孤儿文本）。
     // banner 不过期（常驻）。
     if (notice.text !== '' && Date.now() > noticeUntil) notice.text = '';
-    transcript.update(state, terminal.columns ?? 100, expanded, notice, banner, hotkeysLines(width), hotkeysAtMessageIndex ?? -1);
+    transcript.update(state, terminal.columns ?? 100, expanded, notice, banner, hotkeysLines(width), hotkeysAtMessageIndex ?? -1, hideThinking);
     // 轨迹：**每帧都同步**（即使不在轨迹页）—— 否则切过去的第一帧看到的是
     // 上一次 refresh 的快照，而那时可能已经落后好几步（症状：切过去先看到一棵
     // 少了几步的树，然后才突然补齐）。同步是增量的，成本与节点数无关。
@@ -1539,9 +1553,10 @@ export async function runTui(options: TuiOptions): Promise<number> {
       // 而它自己不可滚（只看得到最早那几行）。现在是整页切换，布局要重设
       // （中间那块换了组件，primary ScrollView 也跟着换）。
       //
-      // **不再用 `ctrl+t`**：那是 pi 的 `app.thinking.toggle`，而两边共用一份
-      // `~/.pi/agent/keybindings.json` —— 同一个键在两个应用里含义不同时，写覆盖的
-      // 人没法表达「我想要哪个」。详情见 `keybindings.ts` 的文件头。
+      // **轨迹页仍在 `ctrl+r`**：`ctrl+t` 是 `app.thinking.toggle`（展开/收起思考块），
+      // 而两边共用一份 `~/.pi/agent/keybindings.json` —— 同一个键在两个应用里含义不同时，
+      // 写覆盖的人没法表达「我想要哪个」。详情见 `keybindings.ts` 的文件头。
+      // （`ctrl+t` 现在由下面那个 `app.thinking.toggle` 分支接，语义与 pi 一致。）
       if (actionMatches(data, 'app.trace.toggle')) {
         page = page === 'trace' ? 'chat' : 'trace';
         applyLayout();
@@ -1552,6 +1567,25 @@ export async function runTui(options: TuiOptions): Promise<number> {
       if (actionMatches(data, 'app.tools.expand')) {
         expanded = !expanded;
         refresh();
+        return true;
+      }
+      // `app.thinking.toggle`（默认 Ctrl+T）：展开/收起思考块。**与 pi 同 id 同键**。
+      //
+      // 以前这里写的是「不用 ctrl+t，那是 pi 的键」（见下面的 app.trace.toggle 注释），
+      // 所以 ctrl+t 在本项目里是空的 —— 现在**补上它**：只要含义与 pi 一致（“切思考块”），
+      // 共用一份 keybindings.json 就不再有歧义，而“按了没反应”正是一类静默退化。
+      //
+      // 切换后写进 `settings.json` 的 `hideThinkingBlock`（与 pi 同一个键）——
+      // 一个偏好不该只活到进程退出。
+      if (actionMatches(data, 'app.thinking.toggle')) {
+        hideThinking = !hideThinking;
+        refresh();
+        notify(dim(`思考块：${hideThinking ? '已折叠（只留一行）' : '已展开'}`));
+        // 落盘是**尽力而为**：内存里那个值已经是权威（界面当然立刻跟着变），
+        // 写不进去（没权限）只影响「下次启动的默认值」—— 那种情况下说一句，别静默。
+        void writeHideThinkingBlock(hideThinking, cwd).then((ok) => {
+          if (!ok) notify(yellow('思考块已切换（这次生效），但没能写进 settings.json（写权限？）'));
+        });
         return true;
       }
       // `app.queue.cycle`（Ctrl+Q）：切换入队模式（steer ↔ followUp）。
@@ -2394,6 +2428,8 @@ function renderAssistant(
   content: readonly unknown[],
   width: number,
   isStreaming = false,
+  /** 思考块是否折叠（`Ctrl+T`）。折叠时官方组件只留一行斜体 `Thinking…`。 */
+  hideThinking = false,
 ): string[] {
   // 先筛掉空的：Markdown 对空白文本返回 []，而 toolCall 块在这里不画
   // （它由紧接着的 toolResult 消息负责）—— 不筛的话每条纯工具调用消息会多出空行。
@@ -2405,7 +2441,9 @@ function renderAssistant(
   });
   if (visible.length === 0) return [];
   const message = { role: 'assistant', content: visible } as never;
-  const component = new AssistantMessageComponent(message, false, getMarkdownTheme(), 'Thinking…', 1);
+  // 第二个参数就是官方的 `hideThinkingBlock` —— 折叠的渲染（那一行 `Thinking…`）由
+  // 它自己负责，我们只管把开关传对。
+  const component = new AssistantMessageComponent(message, hideThinking, getMarkdownTheme(), 'Thinking…', 1);
   // 构造器已经渲染过一次；显式再调一次是为了把「是否还在流式」告诉它 ——
   // 官方用它决定列表编号等细节要不要稳定。
   component.updateContent(message, isStreaming);
@@ -2780,6 +2818,12 @@ export function renderMessage(
   message: Extract<AgentState['messages'][number], { role: string }>,
   width: number,
   expanded: boolean,
+  /**
+   * 思考块是否折叠（`Ctrl+T`，pi 的 `hideThinkingBlock`）。
+   *
+   * 默认 `false`（展开）—— 一次性模式与老调用方不需要知道这个开关。
+   */
+  hideThinking = false,
 ): string[] {
   // pi-ai 1.x：Message 联合多了 system，且 content 可能是纯字符串 ——
   // 先按 role 收窄，再把 content 归一成「文本片段数组」再渲染。
@@ -2806,7 +2850,7 @@ export function renderMessage(
     // 后面接上「正在跑的工具」：那些工具还没产出 toolResult，所以它们的块
     // 只能在这里画（位置也正好：紧跟发起它的那条消息）。
     const running = runningToolsAfter(state, message);
-    const lines = renderAssistant(message.content, width);
+    const lines = renderAssistant(message.content, width, false, hideThinking);
     for (const call of running) {
       lines.push(...renderRunningTool(state, call, width, expanded));
     }
@@ -2847,11 +2891,11 @@ export function renderMessage(
  *
  * 实测（1208 条消息的真实会话）：整段 291.9ms/帧 → 分块 **0.30ms/帧**（≈160×）。
  *
- * ## 缓存键为什么是「宽度 + 折叠」而不是只有消息本身
+ * ## 缓存键为什么是「宽度 + 折叠 + 思考可见性」而不是只有消息本身
  *
- * 同一个 `message` 对象在两种情况下渲染结果不同：终端宽度变了（要重新折行），
- * Ctrl+O 切了 `expanded`（工具块展开/折叠）。这两个都进了键，所以宽度变化或
- * 切换折叠后不会读到过期的行。
+ * 同一个 `message` 对象在几种情况下渲染结果不同：终端宽度变了（要重新折行），
+ * Ctrl+O 切了 `expanded`（工具块展开/折叠），Ctrl+T 切了思考块可见性
+ * （`hideThinking`）。这些都进了键，所以切换后不会读到过期的行。
  *
  * 用 `WeakMap` 而不是 `Map`：键是消息对象，会话被 `/new` 清空后旧消息就能被回收 ——
  * 用 `Map` 的话整段历史会一直被钉在内存里。
@@ -2877,7 +2921,7 @@ export class TranscriptChunks {
   private readonly tail: Text;
   /**
    * 按消息缓存渲染结果。`WeakMap<object, Map<string, string[]>>`：
-   * 外层按消息对象，内层按 `${width}:${expanded}` 键。
+   * 外层按消息对象，内层按 `${width}:${expanded}:${hideThinking}` 键。
    */
   private readonly cache = new WeakMap<object, Map<string, string[]>>();
   /** 上一帧的宽度：变了就得让 pi-tui 重新折行（`Text` 自己会重算）。 */
@@ -2963,12 +3007,19 @@ export class TranscriptChunks {
      */
     hotkeys?: readonly string[],
     hotkeysAt: number = -1,
+    /**
+     * 思考块是否折叠（`Ctrl+T`，pi 的 `app.thinking.toggle`）。见 `blockLines` 的缓存键注释。
+     *
+     * 排在**最后**且默认为 `false`：一次性模式与老调用方不需要知道这个开关，
+     * 而把它插在中间会让所有现有调用点一起改。
+     */
+    hideThinking = false,
   ): void {
     // 回收已结束的工具组件（**在渲染任何块之前**：工具刚跑完时 reducer 已把它移出
     // `executing`，于是这一帧就该把它的组件与 interval 一起清掉）。
     // 每帧一次，而不是每条消息一次。
     pruneLiveTools(state);
-    const key = `${width}:${expanded}`;
+    const key = `${width}:${expanded}:${hideThinking}`;
     const widthChanged = width !== this.lastWidth;
     const messages = state.messages;
     const count = messages.length;
@@ -2984,7 +3035,7 @@ export class TranscriptChunks {
     for (let i = 0; i < count; i += 1) {
       const message = messages[i];
       if (!message) continue;
-      this.blockLines(message, i, key, state, width, expanded, widthChanged);
+      this.blockLines(message, i, key, state, width, expanded, hideThinking, widthChanged);
     }
     // 三个尾块各自独立，不合成一个 —— 合起来每帧就要 join 一次 1.9MB 字符串，
     // 那正是本次要消掉的开销（而且会把整段对话重复画一遍，见下面的注释）。
@@ -2999,7 +3050,7 @@ export class TranscriptChunks {
       this.streamBlock,
       'stream',
       state.phase === 'thinking' && state.streamingText
-        ? renderAssistant([{ type: 'text', text: state.streamingText }], width, true).join('\n')
+        ? renderAssistant([{ type: 'text', text: state.streamingText }], width, true, hideThinking).join('\n')
         : '',
       state.streamingText,
     );
@@ -3048,6 +3099,7 @@ export class TranscriptChunks {
     state: AgentState,
     width: number,
     expanded: boolean,
+    hideThinking: boolean,
     widthChanged: boolean,
   ): string[] {
     // 带「正在跑的工具」的那个块**不进缓存**。
@@ -3062,11 +3114,11 @@ export class TranscriptChunks {
     const cached = isLive
       ? [
           ...userSpacer(message, index),
-          ...renderMessage(state, message, width, expanded),
+          ...renderMessage(state, message, width, expanded, hideThinking),
         ]
       : this.chunkLines(message, key, () => [
           ...userSpacer(message, index),
-          ...renderMessage(state, message, width, expanded),
+          ...renderMessage(state, message, width, expanded, hideThinking),
         ]);
     let block = this.blocks[index];
     if (!block) {
@@ -3175,6 +3227,8 @@ export function renderTranscript(
   width: number,
   expanded: boolean,
   notice?: { text: string },
+  /** 思考块是否折叠（`Ctrl+T`）。排在最后且默认 `false`，老调用方不受影响。 */
+  hideThinking = false,
 ): string {
   const lines: string[] = [];
   // 命令反馈贴在最上面，6 秒后自动消失。
@@ -3185,13 +3239,13 @@ export function renderTranscript(
     const message = state.messages[i];
     if (!message) continue;
     lines.push(...userSpacer(message, offset));
-    lines.push(...renderMessage(state, message, width, expanded));
+    lines.push(...renderMessage(state, message, width, expanded, hideThinking));
     offset = lines.length;
   }
   // 正在流式生成的这一段。**`renderTail` 里刻意不含它**（那边由独立的一块负责，
   // 合成一个就会画两遍）—— 一次性模式不走 TranscriptChunks，所以要在这里补上，
   if (state.phase === 'thinking' && state.streamingText) {
-    lines.push(...renderAssistant([{ type: 'text', text: state.streamingText }], width, true));
+    lines.push(...renderAssistant([{ type: 'text', text: state.streamingText }], width, true, hideThinking));
   }
   // 否则管道输出会丢掉模型正在说的话。
   lines.push(...renderTail(state, width));

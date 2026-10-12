@@ -24,6 +24,7 @@ import {
   shouldIgnoreKey,
   renderQueuePanel,
   renderTranscript,
+  TranscriptChunks,
   statsLine,
   tabLine,
   twoColumn,
@@ -404,6 +405,48 @@ test('助手文字：无底色、无前缀（与 pi 一致）', () => {
   assert.ok(plain.includes('好，我按工具逐个演示。'));
   assert.ok(!plain.includes('助手 ›'), `不该有角色前缀：${plain}`);
   assert.ok(!raw.includes('48;2;'), `助手文字不该铺底色：${JSON.stringify(raw)}`);
+});
+
+// ── Ctrl+T：展开/收起思考块（pi 的 `app.thinking.toggle`） ──
+
+test('Ctrl+T 折叠思考：正文仍在，思考文字消失、只剩一行提示', () => {
+  const state = {
+    messages: [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '先想一下用户的意图' },
+          { type: 'text', text: '答案是 42。' },
+        ],
+        timestamp: 0,
+      },
+    ],
+  } as unknown as AgentState;
+
+  const shown = stripTerminalSequences(renderTranscript(state, 0, 60, false, undefined, false));
+  assert.ok(shown.includes('先想一下用户的意图'), `展开时看得到思考：${shown}`);
+  assert.ok(shown.includes('答案是 42。'));
+
+  const hidden = stripTerminalSequences(renderTranscript(state, 0, 60, false, undefined, true));
+  assert.ok(!hidden.includes('先想一下用户的意图'), `折叠后思考正文不该在：${hidden}`);
+  assert.ok(hidden.includes('Thinking'), `折叠后应留一行提示：${hidden}`);
+  assert.ok(hidden.includes('答案是 42。'), `正文不受影响：${hidden}`);
+});
+
+test('Ctrl+T 切换后历史块要重画（缓存键带了 hideThinking）', () => {
+  const chunks = new TranscriptChunks();
+  const state = {
+    messages: [
+      { role: 'assistant', content: [{ type: 'thinking', thinking: '一段思考' }], timestamp: 0 },
+    ],
+  } as unknown as AgentState;
+  chunks.update(state, 60, false, { text: '' });
+  assert.ok(stripTerminalSequences(chunks.render(60).join('\n')).includes('一段思考'));
+  // 同一状态、只打开折叠：必须重算（不能命中上一次展开时的缓存）。
+  chunks.update(state, 60, false, { text: '' }, undefined, undefined, -1, true);
+  const hidden = stripTerminalSequences(chunks.render(60).join('\n'));
+  assert.ok(!hidden.includes('一段思考'), `折叠后不该读到展开时的缓存：${hidden}`);
+  assert.ok(hidden.includes('Thinking'), hidden);
 });
 
 test('纯 toolCall 的助手消息不产生空行（它由紧跟的 toolResult 块负责）', () => {

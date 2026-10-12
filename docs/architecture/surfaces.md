@@ -19,6 +19,7 @@
 | 底栏 | 左边 cwd (+git 分支)，右边 `(provider) model` + token 用量 |
 
 按键（**键名都从键位表解析**，见下节）：`Ctrl+R` 切轨迹页，`Ctrl+O` 展开/收起工具输出，
+`Ctrl+T` 展开/收起思考块（pi 的 `app.thinking.toggle`，与 pi 同 id），
 `Ctrl+C` 在环跑时中断这一轮、空闲时退出。完整的一份在 `/hotkeys` 里。
 
 ### 顶行是**两职合一**的（`tabLine`）

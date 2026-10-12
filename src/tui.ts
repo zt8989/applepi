@@ -103,6 +103,7 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
   ${keyLabel('app.trace.toggle').padEnd(19)}在「对话」与「轨迹」两页之间切换（顶部有页签）
   Alt+↑/↓ 或 Ctrl+P/N   翻当前页（半页）；纯 ↑↓ 是移动光标，不拿来滚
   ${keyLabel('app.tools.expand').padEnd(19)}展开/收起工具输出的完整内容（默认只留前 12 行）
+  ${keyLabel('app.thinking.toggle').padEnd(19)}展开/收起模型的思考块（与 pi 的 app.thinking.toggle 同键）
   ${keyLabel('app.queue.cycle').padEnd(19)}切换入队模式：steer（工具跑完后插进去）／followUp（说完再插）
   ${keyLabel('app.model.select').padEnd(19)}打开模型选择面板（与 pi 的 app.model.select 同键）
   ${keyLabel('app.abort').padEnd(19)}环在跑时中断这一轮；空闲时退出

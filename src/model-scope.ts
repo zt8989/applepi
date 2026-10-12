@@ -147,3 +147,43 @@ export function writeDefaultModel(provider: string, modelId: string, cwd: string
     return false;
   }
 }
+
+/**
+ * 思考块是否默认折叠（`settings.json` 的 `hideThinkingBlock`）。
+ *
+ * 与 pi **同一个键、同一个文件** —— 在 pi 那边按 `Ctrl+T` 折过一次之后，
+ * 本项目启动时也默认折叠（反之亦然）。读不到（没配过 / 文件坏了 / 没权限）就当 `false`：
+ * 展开是默认值（与 pi 的 `settings.hideThinkingBlock ?? false` 一致）。
+ *
+ * ## 为什么是**同步**的
+ *
+ * 它在界面启动那一刻就要一个值（决定首次渲染怎么画思考块），而那里不是 async 上下文。
+ * pi 那个 `SettingsManager` 的读是同步的（只有写是异步的），所以这里也同步。
+ */
+export function readHideThinkingBlock(cwd: string = process.cwd()): boolean {
+  try {
+    return SettingsManager.create(cwd, piAgentDir()).getHideThinkingBlock();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 写 `hideThinkingBlock`（`Ctrl+T` 切换时落盘，与 pi 的 `setHideThinkingBlock` 同一效果）。
+ *
+ * ## 为什么是 async
+ *
+ * pi 的 `save()` 是**入队异步写**（`enqueueWrite`），`setHideThinkingBlock()` 返回时
+ * 可能一个字节都还没落盘。这里 `await flush()` 等它真的写完 —— 否则调用方紧接着
+ * `readHideThinkingBlock()` 会读到旧值（而写失败也拿不到）。
+ */
+export async function writeHideThinkingBlock(hide: boolean, cwd: string = process.cwd()): Promise<boolean> {
+  try {
+    const settings = SettingsManager.create(cwd, piAgentDir());
+    settings.setHideThinkingBlock(hide);
+    await settings.flush();
+    return settings.drainErrors().length === 0;
+  } catch {
+    return false;
+  }
+}

@@ -25,11 +25,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createModels, fauxAssistantMessage, fauxProvider } from '@earendil-works/pi-ai';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { createAgentStore, waitForIdle } from '../src/store';
 import type { AgentRuntime } from '../src/provider';
 import { createKernel, readCapabilities } from '../src/kernel';
 import { scopeFrom } from '../src/tui/app';
-import { readScopedModels } from '../src/model-scope';
+import { readScopedModels, readHideThinkingBlock, writeHideThinkingBlock } from '../src/model-scope';
 
 /**
  * 一个有两个模型的 faux 装配，并把**每次请求用的模型 id** 记进 `seen`。
@@ -342,4 +346,35 @@ test('readScopedModels：没配 / 配坏时是 null（= 全开），不抛', () 
   // `PI_CODING_AGENT_DIR` 在测试里指向临时目录（见 test/isolated-home.ts），
   // 那个目录里没有 settings.json —— 所以这里走的就是「读不到」那条路。
   assert.equal(readScopedModels(process.cwd()), null);
+});
+
+// ── Ctrl+T 的偏好落盘：`settings.json` 的 `hideThinkingBlock`（与 pi 同键） ──
+
+/** 在一个隔离的家目录里跑 fn（`PI_CODING_AGENT_DIR` 指向临时目录）。 */
+async function withHome(fn: (home: string) => Promise<void> | void): Promise<void> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'thinking-home-'));
+  const previous = process.env['PI_CODING_AGENT_DIR'];
+  process.env['PI_CODING_AGENT_DIR'] = dir;
+  try {
+    await fn(dir);
+  } finally {
+    if (previous === undefined) delete process.env['PI_CODING_AGENT_DIR'];
+    else process.env['PI_CODING_AGENT_DIR'] = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test('hideThinkingBlock：写进 settings.json 之后读得回来（与 pi 同一个键）', async () => {
+  await withHome(async (home) => {
+    // 没配过 = 默认展开（false）。
+    assert.equal(readHideThinkingBlock(process.cwd()), false, '默认不折叠');
+    assert.equal(await writeHideThinkingBlock(true, process.cwd()), true);
+    // 落盘的就是 pi 认的那个键。
+    const raw = JSON.parse(readFileSync(path.join(home, 'settings.json'), 'utf8')) as Record<string, unknown>;
+    assert.equal(raw['hideThinkingBlock'], true, '键名与 pi 一致');
+    assert.equal(readHideThinkingBlock(process.cwd()), true, '读回来也是 true');
+    // 切回去也要能写。
+    assert.equal(await writeHideThinkingBlock(false, process.cwd()), true);
+    assert.equal(readHideThinkingBlock(process.cwd()), false);
+  });
 });

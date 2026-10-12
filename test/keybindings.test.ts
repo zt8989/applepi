@@ -32,8 +32,9 @@ import path from 'node:path';
  * 2. **pi 的动作 id 没有被我们覆盖掉**。本项目用 `app.tools.expand` / `app.model.select`
  *    这些 pi 的 id（好处是同一份 `keybindings.json` 两边生效），一旦把默认键改成
  *    与 pi 不同，pi 那边的提示与本项目就会开始不一致。
- * 3. **`ctrl+t` 不再被本项目占用**。那是 pi 的 `app.thinking.toggle`，两边共用一份
- *    键位文件 —— 同一个键两个含义时，写覆盖的人没法表达「我想要哪个」。
+ * 3. **`ctrl+t` 的含义与 pi 一致**。它是 pi 的 `app.thinking.toggle`，而本项目现在
+ *    也实现了「展开/收起思考块」—— 两边共用一份键位文件，同一个键必须是同一个意思。
+ *    （轨迹页仍在 `ctrl+r`，不复用这个 id，见 `app.trace.toggle`。）
  * 4. **用户的覆盖真的生效**（`keybindings.json`），且**提示文字跟着变** ——
  *    手写 `'(Ctrl+T)'` 的写法正是死在这里。
  * 5. `/hotkeys` 的表里出现的是**解析后**的键名，而且不为「本项目没实现的动作」凑行。
