@@ -178,12 +178,12 @@ test('快捷键：扩展声明的两个键真的被消费，没声明的不被�
   }
 });
 
-test('快捷键：内置键优先（扩展抢不走 Ctrl+T / Ctrl+O / Ctrl+C）', { skip }, async () => {
+test('快捷键：内置键优先（扩展抢不走切页 / 展开工具 / 中断）', { skip }, async () => {
   try {
     const { host } = await load();
     // 内置的先跑 —— 界面的 onInput 里也是这个顺序。
     //
-    // 顺序反了的后果：`Ctrl+T`（轨迹面板）被扩展吃掉，界面看着「按了没反应」。
+    // 顺序反了的后果：切页键（轨迹面板）被扩展吃掉，界面看着「按了没反应」。
     // 而 `handleKey(data, () => true)` 就是「内置已消费」，此时**不该**再问扩展。
     assert.equal(
       await host.commands.handleKey('\x1b[20;5u', () => true),
@@ -274,7 +274,7 @@ test('界面：扩展的 widget 槽在底部布局里（applyLayout 读它）', 
   assert.ok(extAt > 0, 'onInput 里该问扩展的快捷键');
   assert.ok(
     builtinAt < extAt,
-    '内置键必须在扩展的快捷键**之前**跑（否则扩展能抢走 Ctrl+T）',
+    '内置键必须在扩展的快捷键**之前**跑（否则扩展能抢走切页键）',
   );
 });
 

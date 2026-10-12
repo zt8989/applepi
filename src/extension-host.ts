@@ -200,6 +200,8 @@ function emptyCommands(): ExtensionCommands {
       throw new Error('没有装任何扩展');
     },
     handleKey: async () => false,
+    // 没有扩展就没有扩展快捷键（`/hotkeys` 的 `Extensions` 一节也不出现）。
+    shortcuts: () => [],
   };
 }
 

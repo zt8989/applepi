@@ -5,7 +5,7 @@
  * 界面是**整页切换**的两块（中间那块按 `page` 换内容）：
  *
  *   - 对话页：用户说了什么、LLM 答了什么、工具做了什么（按消息流渲染）
- *   - 轨迹页（Ctrl+T 切换）：**像 git log --graph 一样的一次尝试一节点的树**
+ *   - 轨迹页（默认 Ctrl+R 切换，键位可改）：**像 git log --graph 一样的一次尝试一节点的树**
  *     失败/超时也在上面，是一层能展开的节点，不是飘在下面的一行红字。
  *
  * 顶行是**页签 + 轨迹统计合一行**（`tabLine`），底栏两行是 cwd / 用量 + 模型。
@@ -83,6 +83,8 @@ import { getMarkdownTheme } from '@earendil-works/pi-coding-agent/dist/modes/int
 import { formatCwdForFooter, formatTokens } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js';
 import { addUsageToTotals, createUsageTotals } from '@earendil-works/pi-coding-agent/dist/core/usage-totals.js';
 import { setupTheme } from './theme';
+import { actionMatches, installProjectKeybindings, keyLabel } from './keybindings';
+import { hotkeysMarkdown, renderHotkeys } from './hotkeys';
 import { contextLabels, extensionLabels } from './resource-labels';
 import { contextFilePaths } from '../system-prompt';
 import type { HostUiOptions } from '../extension-ui';
@@ -262,7 +264,7 @@ export class TraceChunks implements Component {
       }
     }
     // 空树时给一句说明，而不是留一个 0 高的块（0 高度会让整块在布局里消失，
-    // 于是「按了 Ctrl+T 没反应」与「面板塌了」看起来一模一样）。
+    // 于是「按了切页键没反应」与「面板塌了」看起来一模一样）。
     if (order.length === 0) {
       if (this.lastHead !== emptyText) {
         this.headBlock.setText(dim(emptyText));
@@ -378,10 +380,12 @@ export function renderColoredTree(tree: TraceTree, maxWidth: number): string {
  * ## 形状
  *
  * ```
- * 对话 │ 轨迹 3轮2步  工具5  重试1  错误1 (Ctrl+T)
+ * 对话 │ 轨迹 3轮2步  工具5  重试1  错误1 (Ctrl+R)
  * ```
  *
- * - 「对话 / 轨迹」当前页加粗高亮，旁边写切换键（否则得另找地方说「Ctrl+T 能切」）。
+ * - 「对话 / 轨迹」当前页加粗高亮，旁边写切换键（否则得另找地方说「按哪个键能切」）。
+ *   那个键名来自 `app.trace.toggle`（可用 `~/.pi/agent/keybindings.json` 改），
+ *   所以改名之后这一行跟着变 —— 手写 `'Ctrl+R'` 迟早会开始骗人。
  * - 统计是**精简后的**：回合与步数合成 `x轮x步`（两个都是「事件次数」的口径，
  *   连读不歧义 —— 「3 轮 2 步」= 三次用户输入、两次 LLM 往返），工具/重试/错误
  *   非 0 才出现。
@@ -395,7 +399,7 @@ export function renderColoredTree(tree: TraceTree, maxWidth: number): string {
  * 合成一行后：那行要么讲页签要么讲统计，不讲别的。
  *
  * 节点数也删了：它是 `trace.order.length`，**开一轮就 +5**（user / turn.start /
- * step.start / llm.attempt / …），跳得又快又不 actionable —— 要看节点数按 Ctrl+T。
+ * step.start / llm.attempt / …），跳得又快又不 actionable —— 要看节点数切到轨迹页。
  * 花费 `$` 一并删掉：底栏 statsLine 里已有一个**同口径**的会话累计 `$`，两个 `$`
  * 摆在两行里只会让人怀疑「这俩为什么不一样」。
  *
@@ -421,8 +425,12 @@ export function tabLine(state: AgentState, page: 'chat' | 'trace'): string {
   if (stats.toolCalls > 0) bits.push(dim(`工具${stats.toolCalls}`));
   if (stats.retries > 0) bits.push(dim(`重试${stats.retries}`));
   if (stats.errors > 0) bits.push(red(`错误${stats.errors}`));
-  // 统计与 `(Ctrl+T)` 之间固定两个空格：既分开又不至于空出一大段。
-  const tail = [bits.join('  '), dim('(Ctrl+T)')].filter((s) => s !== '').join('  ');
+  // 统计与切换键之间固定两个空格：既分开又不至于空出一大段。
+  //
+  // `keyLabel` 而不是字面量：用户改了 `app.trace.toggle` 之后这一行说的是新键
+  // （空串只在动作 id 写错时出现 —— 那是编程错误，`()` 比一个看着对的过期键名更该被发现）。
+  const traceKey = keyLabel('app.trace.toggle');
+  const tail = [bits.join('  '), dim(`(${traceKey})`)].filter((s) => s !== '').join('  ');
   const tabs =
     page === 'chat'
       ? `${bold(cyan('对话'))} ${dim('│ 轨迹')}`
@@ -547,10 +555,10 @@ export function isScrollDown(data: string): boolean {
  * pi-tui 的 Kitty 键盘协议请求里带了 flag 2（`terminal.js` 的 `1|2|4`），
  * flag 2 的语义是「报告事件类型」—— 于是**一次按键产生两个序列**：一个 press
  * （`:1u`）和一个 release（`:3u`）。macOS 上的 iTerm2 / Ghostty / kitty /
- * WezTerm 都支持这套协议，所以按一下 `Ctrl+T` 收到两条。
+ * WezTerm 都支持这套协议，所以按一下切页键（默认 `Ctrl+R`）收到两条。
  *
  * 而 release 序列**也能匹配 `matchesKey()`**（`keys.js` 的 parseKey 读的是
- * `<code>;<mod>`，事件类型那第三段不参与匹配）。于是 `Ctrl+T` 切换两次 ——
+ * `<code>;<mod>`，事件类型那第三段不参与匹配）。于是轨迹页被切换两次 ——
  * 切到轨迹页再切回对话页，按键看起来「完全没反应」。`Ctrl+O` 展开两次、
  * `Ctrl+Q` 换两次模式也是同样的症状。
  *
@@ -563,7 +571,8 @@ export function isScrollDown(data: string): boolean {
  * if (isKeyRelease(data) && !this.focusedComponent.wantsKeyRelease) return;
  * ```
  *
- * 本项目的 `Ctrl+T/O/Q/C/L` 与滚轮全部挂在 **input listener** 上（不是聚焦组件），
+ * 本项目的几个全局开关（轨迹页 / 展开工具 / 队列模式 / 中断 / 模型面板）与滚轮全部挂在
+ * **input listener** 上（不是聚焦组件），
  * 所以官方那层过滤管不到它们。扩展的 `ctx.ui.onTerminalInput()` 更是直接透传到
  * `tui.addInputListener()`，同一个坑。
  *
@@ -772,6 +781,10 @@ const SLASH_COMMANDS: SlashCommand[] = [
   {
     name: 'compact',
     description: '把老对话换成一段摘要（上下文快满了时用；与 pi 同名）',
+  },
+  {
+    name: 'hotkeys',
+    description: '列出全部键位（键名实时解析，与 pi 的 /hotkeys 同形）',
   },
   { name: 'help', description: '列出全部命令' },
 ];
@@ -1019,6 +1032,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
   // 扩展自己的组件（那些组件直接调 `theme.fg(...)`），拿到 undefined 会在**渲染那一帧**
   // 抛 “cannot read property of undefined” —— 症状出现在扩展内部，与真因隔了两层。
   const theme = setupTheme();
+  // 键位表必须在**任何会读键名的地方之前**装好：`keyDisplayText()` 与 pi-tui 的
+  // Editor / SelectList 都从 `getKeybindings()` 这个进程级全局取键名 —— 没装的话
+  // 提示行整行消失（不是「按了没反应」），而那种症状很难往键位表上想。
+  //
+  // 这里装的是 **pi 的全套 + 本项目自己的几个**（`app.trace.toggle` 等），
+  // 并读 `~/.pi/agent/keybindings.json` 里用户自己的覆盖。见 `keybindings.ts`。
+  installProjectKeybindings();
   const terminal = new ProcessTerminal();
   // AltScreen 是 viewport 实现，setLayoutRoot 在 ViewportTUI 上（TUI 接口没有）。
   const tui: ViewportTUI = new TuiAltScreen(terminal, true, undefined, {
@@ -1189,7 +1209,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
    *
    * 刻意是一个**活着的 Map** 而不是一个组件：官方那套 widget 可以按 key 增删换，
    * 而我们布局里要的是「当前有哪些」。用 Map 才不用在每次 setWidget 时重建整个布局对象
-   * —— 而 `applyLayout()` 每帧可能被 Ctrl+T 调，它读这个 Map 就够。
+   * —— 而 `applyLayout()` 每帧可能被切页键调，它读这个 Map 就够。
    */
   const widgetSlots = new Map<string, Component>();
 
@@ -1244,6 +1264,29 @@ export async function runTui(options: TuiOptions): Promise<number> {
    */
   const banner = { text: '' };
   /**
+   * `/hotkeys` 的 markdown 源码（`undefined` = 没显示过）。
+   *
+   * 存**源码**而不是渲染好的行：终端改宽度之后要重排（表格框线是按宽度画的），
+   * 而宽度只有 `refresh()` 知道。渲染结果的缓存也放在那里（`hotkeysLines()`）。
+   */
+  let hotkeysSource: string | undefined;
+  /** 上面那份源码渲染成的行；按宽度缓存（同一宽度下每帧复用同一个数组引用）。 */
+  let hotkeysLinesCache: { width: number; lines: readonly string[] } | undefined;
+  /**
+   * `/hotkeys` 当前该显示的行。
+   *
+   * 「按宽度缓存」不是优化而是**必需**：`TranscriptChunks.update()` 靠**数组引用**
+   * 判断这一块变没变，每帧新造一个数组就等于每帧都重排整张表（还把它自己的折行缓存
+   * 打掉）。宽度没变时返回同一个数组，那一块就一帧都不重算。
+   */
+  const hotkeysLines = (width: number): readonly string[] | undefined => {
+    if (hotkeysSource === undefined) return undefined;
+    if (hotkeysLinesCache?.width !== width) {
+      hotkeysLinesCache = { width, lines: renderHotkeys(width, options.extensionCommands?.shortcuts() ?? []) };
+    }
+    return hotkeysLinesCache.lines;
+  };
+  /**
    * 已经报过一次的那次压缩（避免每帧都报一遍）。
    *
    * 为什么要单独记：`lastCompaction` 是**粘在 state 上的**（不会自动清），
@@ -1278,7 +1321,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // 提示过期就清掉（6 秒后自动消失，不留一行孤儿文本）。
     // banner 不过期（常驻）。
     if (notice.text !== '' && Date.now() > noticeUntil) notice.text = '';
-    transcript.update(state, terminal.columns ?? 100, expanded, notice, banner);
+    transcript.update(state, terminal.columns ?? 100, expanded, notice, banner, hotkeysLines(width));
     // 轨迹：**每帧都同步**（即使不在轨迹页）—— 否则切过去的第一帧看到的是
     // 上一次 refresh 的快照，而那时可能已经落后好几步（症状：切过去先看到一棵
     // 少了几步的树，然后才突然补齐）。同步是增量的，成本与节点数无关。
@@ -1358,7 +1401,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
      * **先扔掉「松开」事件。**
      *
      * Kitty 键盘协议 flag 2（pi 主动请求的）让一次按键产生 press + release 两个序列，
-     * 而 release 同样能匹配 `matchesKey()` —— 所以不扔的话 `Ctrl+T` 会切换两次，
+     * 而 release 同样能匹配 `matchesKey()` —— 所以不扔的话每个快捷键都会触发两次，
      * 等于没切。这是 macOS（iTerm2/Ghostty/kitty/WezTerm 支持那套协议）上
      * 「快捷键触发两次」的根因。详见 `shouldIgnoreKey()` 的注释。
      *
@@ -1376,10 +1419,11 @@ export async function runTui(options: TuiOptions): Promise<number> {
      *
      * ## 为什么必须要
      *
-     * 这个监听器无条件处理四个键，其中一个是致命的：`ctrl+c` 在空闲时
-     * `process.exit(0)`。弹窗里 `Ctrl+C` 的语义是**取消面板**，于是「打开 /sessions
-     * 然后想退出」会直接杀掉整个 pi —— 而且没有堆栈、没有日志，用户只会觉得「崩了」。
-     * 另外三个（`ctrl+t` 切轨迹页 / `ctrl+o` 展开工具 / `ctrl+q` 换队列模式）会让弹窗
+     * 这个监听器无条件处理那几个全局开关，其中一个是致命的：中断键（默认 `ctrl+c`）
+     * 在空闲时 `process.exit(0)`。弹窗里 `Ctrl+C` 的语义是**取消面板**，于是
+     * 「打开 /sessions 然后想退出」会直接杀掉整个界面 —— 而且没有堆栈、没有日志，
+     * 用户只会觉得「崩了」。
+     * 另外几个（切轨迹页 / 展开工具 / 换队列模式）会让弹窗
      * 开着的**同时**背后的主界面也变了，看着像面板没盖住背景。
      *
      * ## 为什么判「弹窗栈非空」而不是「picker 是否开着」
@@ -1410,14 +1454,14 @@ export async function runTui(options: TuiOptions): Promise<number> {
       refresh();
       return { consume: true };
     }
-    /** 内置的三个开关键。返回 true = 已消费。 */
+    /** 内置的几个开关键。返回 true = 已消费。 */
     const builtins = (): boolean => {
-      // `Ctrl+L` = `app.model.select`（打开 /model 面板）。与 pi 同键。
+      // `Ctrl+L` = `app.model.select`（打开 /model 面板）—— **用 pi 的动作 id**，
+      // 不自己编一个：用户的 `keybindings.json` 里改了这个 id，pi 与本项目同时生效。
       //
-      // **为什么放在 ctrl+t/o/q 之前但与它们分开写**：pi 的 `app.model.select` 默认就是
-      // `ctrl+l`，而本项目的三个开关全是 `ctrl+<字母>`，两者没有冲突。放在这里是因为
-      // 它的语义与那几个一样——都是全局开关。
-      if (matchesKey(data, 'ctrl+l')) {
+      // 判断也走 `actionMatches` 而不是裸的 `matchesKey(data, 'ctrl+l')`：后者写死了
+      // 默认键，用户改过就不生效（而提示行那边会显示新键 —— 两边说法不一致）。
+      if (actionMatches(data, 'app.model.select')) {
         if (store.getState().phase !== 'idle') {
           notify(yellow('上一回合还没结束，先 Ctrl-C 中断再换模型'));
           return true;
@@ -1458,7 +1502,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
         });
         return true;
       }
-      if (matchesKey(data, 'ctrl+c')) {
+      if (actionMatches(data, 'app.abort')) {
         if (store.getState().phase !== 'idle') {
           abortRun();
           return true;
@@ -1466,29 +1510,32 @@ export async function runTui(options: TuiOptions): Promise<number> {
         tui.stop();
         process.exit(0);
       }
-      // Ctrl+T：**切到轨迹页 / 切回对话页**。
+      // `app.trace.toggle`（默认 Ctrl+R）：**切到轨迹页 / 切回对话页**。
       //
       // 早先是「显示/隐藏一块贴在对话区上面的面板」，两个毛病：轨迹一多把对话区挤没，
       // 而它自己不可滚（只看得到最早那几行）。现在是整页切换，布局要重设
       // （中间那块换了组件，primary ScrollView 也跟着换）。
-      if (matchesKey(data, 'ctrl+t')) {
+      //
+      // **不再用 `ctrl+t`**：那是 pi 的 `app.thinking.toggle`，而两边共用一份
+      // `~/.pi/agent/keybindings.json` —— 同一个键在两个应用里含义不同时，写覆盖的
+      // 人没法表达「我想要哪个」。详情见 `keybindings.ts` 的文件头。
+      if (actionMatches(data, 'app.trace.toggle')) {
         page = page === 'trace' ? 'chat' : 'trace';
         applyLayout();
         refresh();
         return true;
       }
-      // Ctrl+O：展开/收起工具输出的完整内容。与 pi 同键。
-      if (matchesKey(data, 'ctrl+o')) {
+      // `app.tools.expand`（Ctrl+O）：展开/收起工具输出的完整内容。与 pi 同 id 同键。
+      if (actionMatches(data, 'app.tools.expand')) {
         expanded = !expanded;
         refresh();
         return true;
       }
-      // Ctrl+Q：切换入队模式（steer ↔ followUp）。
+      // `app.queue.cycle`（Ctrl+Q）：切换入队模式（steer ↔ followUp）。
       //
-      // **不用 Ctrl+S / Ctrl+U**（pi 用的那两个）：它们在某些终端里会被流控吃掉
-      // （Ctrl+S 是 XOFF），按下去「什么反应都没有」—— 而那正好是最需要反馈的时刻。
-      // Ctrl+Q 与本项目已用的三个（Ctrl+T/O/C）不冲突，扩展也抢不走（内置优先）。
-      if (matchesKey(data, 'ctrl+q')) {
+      // **不用 Ctrl+S / Ctrl+U**：它们在某些终端里会被流控吃掉（Ctrl+S 是 XOFF），
+      // 按下去「什么反应都没有」—— 而那正好是最需要反馈的时刻。
+      if (actionMatches(data, 'app.queue.cycle')) {
         cycleQueueMode();
         return true;
       }
@@ -1501,7 +1548,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // 的话界面看着「按了没反应」，而那比「扩展的键偶尔不生效」难查得多。
     //
     // 为什么扩展的**先问**（而不是内置消费掉就完全不问）：`handleKey` 内部也会调
-    // `builtins()` —— 那样就会跑两遍，于是 `Ctrl+T` 切换**两次**（等于没切）。
+    // `builtins()` —— 那样就会跑两遍，于是轨迹页切换**两次**（等于没切）。
     // 所以这里先自己跑一遍，**已经消费就不再问扩展**。
     if (builtins()) return { consume: true };
 
@@ -1784,6 +1831,21 @@ export async function runTui(options: TuiOptions): Promise<number> {
         notify(dim(`已开新会话 ${created.id}（上一段仍在 sessions/ 里，/sessions 可回来）`));
         return;
       }
+      case 'hotkeys': {
+        // 与 pi 的 `/hotkeys` 同形：一张键位表，贴在这轮对话之后。
+        //
+        // **不弹面板**是刻意的：pi 也是把它 append 进对话区。理由是这样能一边看表
+        // 一边往下翻自己的对话，而弹窗会盖住上下文、关掉之后表也没了。
+        //
+        // 表里的键名是**实时解析**的（`keyLabel()` → `getKeybindings()`），所以用户改过
+        // `~/.pi/agent/keybindings.json` 之后这里显示的就是新键 —— 与顶行那个 `(Ctrl+R)`、
+        // 与面板底部的提示行同一个来源。
+        hotkeysSource = hotkeysMarkdown(options.extensionCommands?.shortcuts() ?? []);
+        hotkeysLinesCache = undefined;
+        notify(dim('键位表已插到对话末尾（改键位：~/.pi/agent/keybindings.json）'));
+        refresh();
+        return;
+      }
       case 'help':
         // 念同一份命令表 —— 手抄一份迟早会和补全列表漂移。
         notify(
@@ -1903,7 +1965,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
   // 为什么不能用 addChild 平铺：那样每个组件各占若干行，内容一多就把输入框顶出屏幕，
   // 而且整屏重画时旧内容会留在回滚缓冲里（看起来像「重复刷屏」）。
   //
-  // 为什么写成函数：Ctrl+T 换页会改变中间那块是哪个组件（primary 也跟着变），
+  // 为什么写成函数：切轨迹页会改变中间那块是哪个组件（primary 也跟着变），
   // 布局得跟着重设。
   //
   // 用函数声明（不是 const 箭头）：onInput 里会调它，const 有 TDZ，声明会提升。
@@ -2799,12 +2861,22 @@ export class TranscriptChunks {
   private lastBanner = '';
   private lastStream = '';
   private lastTail = '';
+  /**
+   * `/hotkeys` 那一块（贴在这轮对话**之后**，与 pi 把键位表 append 进 chat 一致）。
+   *
+   * 按**数组引用**判断变没变：调用方（`refresh`）按宽度缓存了渲染结果，所以宽度不变
+   * 时引用也不变。用「拼成一个字符串再比」也行，但那要每帧 join 一次整张表 —— 而这张表
+   * 有二十来行、带表格框线，而对话区的铁律是「没变的块不重算」。
+   */
+  private readonly hotkeysBlock: Text;
+  private lastHotkeysLines: readonly string[] | undefined;
 
   constructor() {
     this.noticeBlock = new Text('', 0, 0);
     this.bannerBlock = new Text('', 0, 0);
     this.streamBlock = new Text('', 0, 0);
     this.tail = new Text('', 0, 0);
+    this.hotkeysBlock = new Text('', 0, 0);
   }
 
   private chunkLines(
@@ -2837,6 +2909,13 @@ export class TranscriptChunks {
     expanded: boolean,
     notice: { text: string },
     banner?: { text: string },
+    /**
+     * `/hotkeys` 的行（不给 = 不显示）。
+     *
+     * 为什么是**渲染好的行**而不是原始 markdown：宽度一变就要重排，而宽度只有调用方
+     * 知道（它还顺便按宽度缓了那份结果）。组件这一侧只负责「内容变了就 setText」。
+     */
+    hotkeys?: readonly string[],
   ): void {
     // 回收已结束的工具组件（**在渲染任何块之前**：工具刚跑完时 reducer 已把它移出
     // `executing`，于是这一帧就该把它的组件与 interval 一起清掉）。
@@ -2878,6 +2957,13 @@ export class TranscriptChunks {
       state.streamingText,
     );
     this.setIfChanged(this.tail, 'tail', renderTail(state, width).join('\n'), state.error ?? '');
+    // 引用比对（见字段注释）：同一份行数组就不碰组件，重排与 markdown 解析都省了。
+    if (hotkeys !== this.lastHotkeysLines) {
+      this.lastHotkeysLines = hotkeys;
+      this.hotkeysBlock.setText(
+        hotkeys === undefined || hotkeys.length === 0 ? '' : `${hotkeys.join('\n')}\n`,
+      );
+    }
     this.lastWidth = width;
   }
 
@@ -2966,6 +3052,7 @@ export class TranscriptChunks {
     lines.push(...this.noticeBlock.render(at));
     lines.push(...this.bannerBlock.render(at));
     for (const block of this.blocks) lines.push(...block.render(at));
+    lines.push(...this.hotkeysBlock.render(at));
     lines.push(...this.streamBlock.render(at));
     lines.push(...this.tail.render(at));
     return lines;
@@ -2977,6 +3064,7 @@ export class TranscriptChunks {
     this.bannerBlock.invalidate();
     this.streamBlock.invalidate();
     this.tail.invalidate();
+    this.hotkeysBlock.invalidate();
   }
 }
 
@@ -3012,7 +3100,7 @@ export function renderTail(state: AgentState, width: number): string[] {
     } else {
       // 真失败：带上原因（超时 / 鉴权 / 网络…），免得只看到一句干巴巴的英文。
       lines.push(`  ${red('✗')} ${red(`${cause}${state.error}`)} ${dim(node)}`);
-      lines.push(dim('  按 Ctrl+T 看轨迹树'));
+      lines.push(dim(`  按 ${keyLabel('app.trace.toggle')} 看轨迹树`));
     }
   }
   return lines;

@@ -3,7 +3,7 @@
  *
  * 这是原来 `src/cli.ts`（readline + 手写 ANSI 渲染）的替代品。区别在于：
  *   - 渲染交给 pi-tui 的差分引擎，流式 token 进来时不会整屏闪；
- *   - 界面里有一块**轨迹面板**（Ctrl+T），画的是像 git log --graph 一样的一次尝试一节点的树，
+ *   - 界面里有一块**轨迹面板**（默认 Ctrl+R 切页，键位可改），画的是像 git log --graph 一样的一次尝试一节点的树，
  *     超时/失败是树上的节点而不是一行飘过去的红字；
  *   - 轨迹同时追加写进 `.trace/<sessionId>.jsonl`，进程崩了也不丢。
  *
@@ -15,6 +15,7 @@ import { defaultProviderSpec, providerNames } from './provider';
 import { createKernel, type Kernel } from './kernel';
 import { runTui } from './tui/app';
 import { setupTheme } from './tui/theme';
+import { keyLabel } from './tui/keybindings';
 import type { Theme } from '@earendil-works/pi-coding-agent';
 // pi 的 theme 是 globalThis 上的一个 Proxy —— initTheme() 之后一直可读。
 // 直接 import（不缓存）是为了「initTheme 可能被再调」时读到的是当时那个。
@@ -96,13 +97,14 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
   find       - 按 glob 找文件（需要 fd）
   ls         - 列目录内容
 
-界面里:
-  Ctrl+T                在「对话」与「轨迹」两页之间切换（顶部有页签）
+界面里（键名按当前键位解析，改过 ~/.pi/agent/keybindings.json 就会跟着变）:
+  ${keyLabel('app.trace.toggle').padEnd(19)}在「对话」与「轨迹」两页之间切换（顶部有页签）
   Alt+↑/↓ 或 Ctrl+P/N   翻当前页（半页）；纯 ↑↓ 是移动光标，不拿来滚
-  Ctrl+O                展开/收起工具输出的完整内容（默认只留前 12 行）
-  Ctrl+Q                切换入队模式：steer（工具跑完后插进去）／followUp（说完再插）
-  Ctrl+L                打开模型选择面板（与 pi 的 app.model.select 同键）
-  Ctrl+C                环在跑时中断这一轮；空闲时退出
+  ${keyLabel('app.tools.expand').padEnd(19)}展开/收起工具输出的完整内容（默认只留前 12 行）
+  ${keyLabel('app.queue.cycle').padEnd(19)}切换入队模式：steer（工具跑完后插进去）／followUp（说完再插）
+  ${keyLabel('app.model.select').padEnd(19)}打开模型选择面板（与 pi 的 app.model.select 同键）
+  ${keyLabel('app.abort').padEnd(19)}环在跑时中断这一轮；空闲时退出
+  /hotkeys              列出全部键位（与 pi 的 /hotkeys 同形）
   /model [id]           换模型（不给 id 就弹面板；给了精确命中就直接切）
   /scoped-models        启用/禁用哪些模型参与 Ctrl+P 循环（Ctrl+S 存进 settings）
   /skills               列出已装载的 skill
@@ -111,7 +113,7 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
 生成中也能说话（不用等）:
   直接敲字回车     → 按当前入队模式排队，默认 steer
                     模型会在「本步工具跑完后」看到它
-  Ctrl+Q 切到 followUp 再敲 → 等模型说完、开一个新回合才插
+  ${keyLabel('app.queue.cycle')} 切到 followUp 再敲 → 等模型说完、开一个新回合才插
   底区会一直列着排队的消息（Steering: / Follow-up:），投递后自动消失
 `;
 

@@ -38,11 +38,11 @@
  *
  * `pi.registerShortcut` 声明的是按键 + handler。`pi-web-access` 要两个
  * （`ctrl+shift+s` 审搜索结果、`ctrl+shift+w` 活动面板）。我们把它们挂到同一个
- * `tui.addInputListener` 上 —— 与 `Ctrl+T` / `Ctrl+O` / `Ctrl+C` 并列。
+ * `tui.addInputListener` 上 —— 与内置的那几个开关（轨迹页 / 展开工具 / 中断…）并列。
  *
  * **冲突怎么办**：`handleInput` 返回 `{consume: true}` 表示吃掉了。我们**先问扩展**
  * 再走内置的 —— 于是扩展可以覆盖内置键（那是它的本意），但也**可能抢走用户的
- * `Ctrl+T`**。所以先查内置的三个键：它们是本项目的「开关」，被抢走的话界面看着
+ * 那些开关**。所以先查内置的键：它们是本项目的「开关」，被抢走的话界面看着
  * 没反应。顺序即优先级，写在这里。
  */
 import type { ExtensionRunner } from '@earendil-works/pi-coding-agent/dist/core/extensions/runner.js';
@@ -75,9 +75,18 @@ export interface ExtensionCommands {
   /**
    * 快捷键的 raw input 钩子。**必须挂在内置键之后调**（见文件头「冲突怎么办」）。
    *
-   * @param builtins 先跑内置的 `Ctrl+T` / `Ctrl+O` / `Ctrl+C`；返回 true 表示已消费。
+   * @param builtins 先跑内置的那几个开关；返回 true 表示已消费。
    */
   handleKey(data: string, builtins: () => boolean): Promise<boolean>;
+  /**
+   * 扩展声明的快捷键清单 —— `/hotkeys` 的 `Extensions` 一节要它。
+   *
+   * 与 pi 一样单独一节、排在最后（它的 `handleHotkeysCommand()` 也是这么做的）。
+   * 这里给的是**声明值**（`ctrl+shift+s` 这种 `KeyId` 形状），不是解析后的键：
+   * pi 那边的 `getShortcuts()` 拿一份 `resolvedKeybindings` 是为了做冲突检查，
+   * 而本项目不做冲突检查（见文件头），所以不需要那份输入。
+   */
+  shortcuts(): readonly { key: string; description?: string | undefined }[];
 }
 
 /**
@@ -150,6 +159,12 @@ export function installExtensionCommands(options: {
         ...(c.description !== undefined ? { description: c.description } : {}),
       })),
 
+    shortcuts: () =>
+      shortcuts.map((s) => ({
+        key: s.key,
+        ...(s.description !== undefined ? { description: s.description } : {}),
+      })),
+
     has: (name) => commands.has(name),
 
     run: async (name, args) => {
@@ -164,7 +179,7 @@ export function installExtensionCommands(options: {
     },
 
     handleKey: async (data, builtins) => {
-      // 内置的先走（Ctrl+T / Ctrl+O / Ctrl+C 是本项目的开关，被抢走界面就没反应了）。
+      // 内置的先走（那几个开关被扩展抢走的话，界面看着「按了没反应」）。
       if (builtins()) return true;
       for (const shortcut of shortcuts) {
         if (!matchesKey(data, shortcut.key as never)) continue;

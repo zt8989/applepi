@@ -134,7 +134,7 @@ API key，比如 exa / tavily / brave。）
 `--no-extensions` 跳过。装了什么、开场那节 `[扩展]` 会报出来，坏了是 `[扩展警告]`。
 
 **命令与快捷键也接了**：`/websearch` `/curator` `/google-account` `/search` 四个命令
-与两个键位都可用。内置的 `Ctrl+T`/`Ctrl+O`/`Ctrl+C` **优先**——扩展抢不走它们。
+与两个键位都可用。**内置的几个开关优先**——扩展抢不走它们。
 
 **工具集与 prompt 一样是装载时定下的** —— 不在一轮对话中间换工具（那会让已发出的
 消息与 prompt 对不上，而 prompt-cache 的前缀整个作废）。改工具集要 `/new` 换会话。
@@ -157,11 +157,19 @@ pnpm start --llm-timeout 30000 --attempts 3   # 短超时 + 三次尝试，好�
 pnpm start --cwd ../other                  # 工具的文件操作边界换到别的目录
 ```
 
-界面里：`Ctrl+T` **在「对话」与「轨迹」两页之间切换**（顶部有页签标出当前在哪页），
+界面里：`Ctrl+R` **在「对话」与「轨迹」两页之间切换**（顶部有页签标出当前在哪页），
 `Alt+↑/↓` 或 `Ctrl+P/N` 翻当前页（半页），`Ctrl+O` 展开/收起工具输出，
-`Ctrl+C` 中断当前回合（空闲时退出），`Ctrl+Q` 切换入队模式。
-布局照抄 pi 的终端界面：**顶行把页签与轨迹统计合并成一行**（`对话 │ 轨迹 3轮2步 错误1 (Ctrl+T)`），
+`Ctrl+C` 中断当前回合（空闲时退出），`Ctrl+Q` 切换入队模式，`Ctrl+L` 开模型面板。
+`/hotkeys` 打出完整的一份（形状与 pi 的 `/hotkeys` 相同）。
+布局照抄 pi 的终端界面：**顶行把页签与轨迹统计合并成一行**（`对话 │ 轨迹 3轮2步 错误1 (Ctrl+R)`），
 模型与工作目录在底栏，工具调用是带底色的整块。
+
+**键位可改**：写在 `~/.pi/agent/keybindings.json`（与 pi **同一个文件**），例如
+`{ "app.trace.toggle": "ctrl+shift+r" }`。界面上的提示行、`/hotkeys`、`--help`
+显示的都是解析后的键 —— 改完不用重启。其中有三个 id 是本项目自己的
+（`app.trace.toggle` / `app.queue.cycle` / `app.abort`），其余全部复用 pi 的 id
+（所以同一个覆盖在 pi 与本项目里都生效）。`Ctrl+T` **留给 pi**（它的
+`app.thinking.toggle`）—— 两边共用一份键位文件，同一个键不能有两个含义。
 
 ### 轨迹页：一直往下刷，也能往回滚
 
@@ -216,7 +224,7 @@ HEAD → n10
 
 顶行把**回合数与步数合成 `x轮x步`**（连着读不歧义），工具/重试/错误非 0 才出现。节点数被删掉了：
 它是 `trace.order.length`，**开一轮就 +5**（user / turn.start / step.start / llm.attempt / …），
-跳得又快又不 actionable —— 要看节点数按 Ctrl+T。花费 `$` 也删了：底栏已有一个同口径的会话累计 `$`。
+跳得又快又不 actionable —— 要看节点数切到轨迹页。花费 `$` 也删了：底栏已有一个同口径的会话累计 `$`。
 重试的分叉长在 **step 这一层**：
 失败的 step 自己关掉，重试另开一个兄弟 step（`turn.start` / `step.start` 都不推进 tip，
 所以兄弟都挂在同一个 turn 下面，与原先 `llm.attempt` 的 git 语义一致）。

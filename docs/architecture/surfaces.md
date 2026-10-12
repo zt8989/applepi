@@ -13,18 +13,18 @@
 | --- | --- |
 | 顶行 | 页签 + 轨迹统计**合一行**（见下） |
 | 对话页 | `TranscriptChunks`：每条消息一个官方组件，内容没变就不重算（见下） |
-| 轨迹页 | `Ctrl+T` 切换，展开是 `renderColoredTree()` |
+| 轨迹页 | `Ctrl+R`（`app.trace.toggle`）切换，展开是 `renderColoredTree()` |
 | 编辑器 | pi-tui 的 `Editor`（多行、slash 命令补全、文件路径补全） |
 | Loader | 生成中动画 |
 | 底栏 | 左边 cwd (+git 分支)，右边 `(provider) model` + token 用量 |
 
-按键：`Ctrl+T` 切换轨迹面板，`Ctrl+O` 展开/收起工具输出，`Ctrl+C` 在环跑时中断这一轮、
-空闲时退出。
+按键（**键名都从键位表解析**，见下节）：`Ctrl+R` 切轨迹页，`Ctrl+O` 展开/收起工具输出，
+`Ctrl+C` 在环跑时中断这一轮、空闲时退出。完整的一份在 `/hotkeys` 里。
 
 ### 顶行是**两职合一**的（`tabLine`）
 
 ```
-对话 │ 轨迹 3轮2步  工具5  重试1  错误1 (Ctrl+T)
+对话 │ 轨迹 3轮2步  工具5  重试1  错误1 (Ctrl+R)
 ```
 
 早先是**两行**：顶栏报统计、下面一行页签。两行讲的是同一件事（「我在哪页 / 这轮跑到哪了」），
@@ -35,7 +35,7 @@
 - **`x轮x步` 一个就够** —— `回合 3 · 步 8` 与 `3轮8步` 是同一件事，写法不同而已。
   真正需要区分口径的是「工具调用数」（模型自己发起的动作），那个仍单独报。
 - **节点数删掉** —— 它是 `trace.order.length`，开一轮就 +5，跳得又快又不 actionable；
-  要看节点数按 Ctrl+T（那里是完整的一棵树）。
+  要看节点数切到轨迹页（那里是完整的一棵树）。
 - **花费 `$` 删掉** —— 底栏 `statsLine` 里已有一个**同口径**的会话累计 `$`，两个 `$`
   摆在两行里只会让人怀疑「这俩为什么不一样」。
 - 工具/重试/错误都是 **0 就不出现**（`0轮0步` 是噪声）。
@@ -201,12 +201,39 @@ OSC 133 区域标记也被一并剥掉。
 ### 「那一行按键提示在」就是 keybindings 装上了
 
 三个面板的提示行都是用 `keyDisplayText('app.models.save')` 之类渲染的，而
-`app.*` 是 **pi 应用层**的键位 —— 不把 `KeybindingsManager.create()` 装到 pi-tui 全局
+`app.*` 是 **pi 应用层**的键位 —— 不把含它们的键位表装到 pi-tui 全局
 （`setKeybindings`）的话它们解析不出键名，于是**整行字消失**。
 
 症状值得记住：不是「按了没反应」，而是「面板上根本没写有这个键」—— 后者更容易被
 当成「这个版本没有这个功能」。`tui-startup.test.ts` 里那三条断言盯的就是这个：
 提示行**在**，就等于 `Ctrl+S` / `Ctrl+A` / `Ctrl+E` 认得。
+
+### 键位表只有一处（`src/tui/keybindings.ts`）
+
+    defs = { ...pi 的 KEYBINDINGS, ...本项目的 PROJECT_KEYBINDINGS }
+
+- **键名解析只有一个来源**：顶行的 `(Ctrl+R)`、面板底部的提示行、`/hotkeys` 的表、
+  `--help` 的那几行，全部走 `keyLabel(action)` → `keyDisplayText()`。手写键名的地方
+  一律是 bug —— 用户改了 `~/.pi/agent/keybindings.json` 之后它会开始骗人，而只有改了
+  键的那个人自己能发现。
+- **判断按键也走键位表**（`actionMatches(data, action)`），不写 `matchesKey(data, 'ctrl+o')`。
+  理由同上：`keybindings.json` 里的覆盖要真的生效。
+- **能用 pi 的 id 就用 pi 的**：展开工具输出 = `app.tools.expand`（ctrl+o）、
+  打开模型面板 = `app.model.select`（ctrl+l）。同一个 id 意味着同一份
+  `keybindings.json` 在 pi 与本项目里同时生效。本项目独有的只有三个：
+  `app.trace.toggle`（ctrl+r）、`app.queue.cycle`（ctrl+q）、`app.abort`（ctrl+c）。
+- **`ctrl+t` 让给 pi**：那是 pi 的 `app.thinking.toggle`。两边共用一份键位文件，
+  同一个键两个含义时，写覆盖的人没法表达「我想要哪个」—— 所以轨迹页改用 `ctrl+r`。
+- **只有一处创建**。早先 `model-picker.ts` / `session-picker.ts` 各自
+  `KeybindingsManager.create()`，那份**不含**本项目的动作 —— 症状是「打开过一次面板
+  之后，顶行那块 `(Ctrl+R)` 变成 `()`」。
+
+### `/hotkeys` 与 pi 同形
+
+分节（Navigation / Editing / Other / Extensions）、Markdown 表格、上下边框、标题
+`Keyboard Shortcuts` 都照抄 pi 的 `handleHotkeysCommand()`，并贴在这轮对话**之后**
+（pi 也是 append 进对话区，不是弹面板）。与 pi 的唯一差别是**不列本项目没实现的动作** ——
+照抄 pi 的表会得到一份「按了没反应」的说明书。
 
 ### 换模型要**真换**（与 `/sessions` 那一处最大的不同）
 

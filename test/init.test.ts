@@ -331,7 +331,7 @@ test('进来看一眼就退出：树上 0 个节点，traces/ 里也不会有文
     });
     try {
       const state = kernel.store.getState();
-      assert.equal(state.trace.order.length, 0, '装载不建节点（Ctrl+T 一打开不该是一屏提示词）');
+      assert.equal(state.trace.order.length, 0, '装载不建节点（切到轨迹页不该是一屏提示词）');
       assert.equal(state.traceBegun, false);
       // 但 state 里该有的东西一个字不少：开场报 skill 清单、底栏显示模型都靠它们。
       assert.equal(state.prompt.seeded, true);

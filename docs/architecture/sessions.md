@@ -165,9 +165,13 @@ kernel.restore(messages);      // 只灌（消息已读出来时）
 1. **`modified` 必须是「最后一次说话」**，不是文件 mtime（`readJsonlTail`）。mtime 会被
    追加一条 `model_change`、或用户改名而改变 —— 而「我半小时前说过话」不该被一次改名改掉。
    官方用它排「N 分钟前」并作为默认排序依据。
-2. **keybindings 要装到 pi-tui 全局**（`setKeybindings(KeybindingsManager.create())`）。
-   `app.session.*` 是 pi 应用层定义的，不装的话 `Ctrl+S`/`Ctrl+R` **静默失效** ——
-   连那行按键提示都会一起消失（它用同一个 keybindings 渲染）。
+2. **keybindings 要装到 pi-tui 全局**（`installProjectKeybindings()`，见
+   [surfaces](surfaces.md) 的「键位表只有一处」）。`app.session.*` 是 pi 应用层定义的，
+   不装的话 `Ctrl+S`/`Ctrl+R` **静默失效** —— 连那行按键提示都会一起消失（它用同一个
+   keybindings 渲染）。
+   > 面板里的 `Ctrl+R`（重命名）与面板外的 `Ctrl+R`（切轨迹页）是**同一个键的两个上下文**：
+   > 面板打开时全局那几个开关整个让路（`onInput` 开头的 `hasOverlay()` 早返回），
+   > 所以不会同时生效。这与 pi 自己的做法一致（它的 `Ctrl+R` 也只在会话面板里有含义）。
 3. **弹窗开着时 `onInput` 要让路**（`if (tui.hasOverlay()) return undefined`）。pi-tui 的
    `inputListeners` 在聚焦组件**之前**跑，而 `app.ts` 的 `onInput` 无条件处理 `ctrl+c` ——
    空闲时它 `process.exit(0)`。于是「打开 /sessions 按 Ctrl+C 取消」会杀掉整个 pi。

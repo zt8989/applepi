@@ -242,7 +242,14 @@ test('Elapsed 自己会跳（组件跳帧复用，官方计时器活着；否则
       .find((l) => l.startsWith('Elapsed'));
 
   chunks.update(running(), 100, false, { text: '' });
-  assert.match(elapsedOf() ?? '', /0\.0s/, '起手就该显示 Elapsed 0.0s');
+  // 起手那个数**不能写死 0.0s**：`startedAt` 与这一帧之间隔了一次 `Date.now()` 与
+  // 若干次渲染，机器忙的时候（本文件与别的测试并行跑）实测会到 0.1s。断言意图是
+  // 「这一行从头就在报秒数，而不是一开始就卡在某个旧值」，所以给一个「小于 5 秒」。
+  const first = /(\d+(?:\.\d+)?)s/.exec(elapsedOf() ?? '');
+  assert.ok(
+    first !== null && Number.parseFloat(first[1] ?? '') < 5,
+    `起手就该显示接近 0 的 Elapsed（实际 ${elapsedOf()}）`,
+  );
 
   // 输出**一个字都没变**（还是那份 running），变的只有时间 —— 所以这一行若跟着跳，
   // 就只可能是官方的计时器在工作，而不是「碰巧有输出刷新了那一帧」。

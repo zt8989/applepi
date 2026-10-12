@@ -4,7 +4,14 @@ import { homedir } from 'node:os';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { stripTerminalSequences, visibleWidth, isKeyRelease, matchesKey } from '@earendil-works/pi-tui';
+import {
+  stripTerminalSequences,
+  visibleWidth,
+  isKeyRelease,
+  matchesKey,
+  getKeybindings,
+  setKeybindings,
+} from '@earendil-works/pi-tui';
 import { formatCwdForFooter } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js';
 import {
   cwdLine,
@@ -23,6 +30,12 @@ import {
 } from '../src/tui/app';
 import { gitBranch } from '../src/tui/app';
 import { resolveThemeName, setupTheme } from '../src/tui/theme';
+import {
+  createProjectKeybindings,
+  formatKeyId,
+  installProjectKeybindings,
+  keyLabel,
+} from '../src/tui/keybindings';
 import { createTraceTree, appendNode, patchNode } from '../src/trace';
 import { createInitialState, type AgentState } from '../src/state';
 import type { Message } from '@earendil-works/pi-ai';
@@ -104,32 +117,32 @@ test('cwdLine：不在家目录里时保持绝对路径（~ 只会骗人）', ()
 // press（`:1u`）与 release（`:3u`）。
 //
 // 而 `matchesKey()` 只读 `<code>;<mod>` 两段、第三段事件类型不参与匹配，所以 release
-// 也「匹配」上了 —— 按一下 `Ctrl+T` 切换两次，等于没切。
+// 也「匹配」上了 —— 按一下切页键切换两次，等于没切。
 //
 // 官方那层过滤（`tui.js` 的 `isKeyRelease(data) && !focusedComponent.wantsKeyRelease`）
 // 在 inputListeners **之后**跑且只查聚焦组件，而本项目的快捷键全挂在 input listener
 // 上，管不到 —— 所以要自己滤。
 
-test('Kitty flag 2：release 序列同样匹配 ctrl+t（这就是重复触发的机制）', () => {
+test('Kitty flag 2：release 序列同样匹配 ctrl+r（这就是重复触发的机制）', () => {
   // 先把前提钉住：这个 bug 的根因是 release 能匹配。哪天 pi-tui 改了 matchesKey
   // 让事件类型参与匹配，这条会失败并提醒更新 `shouldIgnoreKey()` 的前提说明。
-  const press = `${String.fromCharCode(27)}[116;5:1u`; // t=116, ctrl=5
-  const release = `${String.fromCharCode(27)}[116;5:3u`;
-  assert.ok(matchesKey(press, 'ctrl+t'), 'press 应当匹配 ctrl+t');
-  assert.ok(matchesKey(release, 'ctrl+t'), 'release 也匹配 ctrl+t —— 所以要滤');
+  const press = `${String.fromCharCode(27)}[114;5:1u`; // r=114, ctrl=5
+  const release = `${String.fromCharCode(27)}[114;5:3u`;
+  assert.ok(matchesKey(press, 'ctrl+r'), 'press 应当匹配 ctrl+r');
+  assert.ok(matchesKey(release, 'ctrl+r'), 'release 也匹配 ctrl+r —— 所以要滤');
 });
 
 test('shouldIgnoreKey：只扔 release，press 与普通键都放行', () => {
   const esc = String.fromCharCode(27);
-  const release = `${esc}[116;5:3u`; // ctrl+t 的 release
-  const repeat = `${esc}[116;5:2u`; // ctrl+t 的 auto-repeat：长按应该重复生效
-  const press = `${esc}[116;5:1u`;
+  const release = `${esc}[114;5:3u`; // ctrl+r 的 release
+  const repeat = `${esc}[114;5:2u`; // ctrl+r 的 auto-repeat：长按应该重复生效
+  const press = `${esc}[114;5:1u`;
   assert.ok(shouldIgnoreKey(release), 'release 要扔');
   assert.ok(!shouldIgnoreKey(press), 'press 要放行');
   // repeat 不是 release：长按连发是**期望行为**（翻页要能按住一直翻）。
   assert.ok(!shouldIgnoreKey(repeat), 'repeat 不该被当 release 扔掉');
   // Kitty 协议没启用时的传统字节序列（macOS 终端没启用 flag 2 时就是这个）。
-  assert.ok(!shouldIgnoreKey(String.fromCharCode(20)), '传统 Ctrl+T 要放行');
+  assert.ok(!shouldIgnoreKey(String.fromCharCode(18)), '传统 Ctrl+R（非 kitty 协议）要放行');
 });
 
 test('shouldIgnoreKey：粘贴内容放行（isScrollUp 是前缀匹配，误判就会误翻页）', () => {
@@ -558,13 +571,34 @@ test('tabLine：页签 + 统计在同一行，且写明切换键', () => {
   const out = tabLine(stateWithTrace([]), 'chat');
   // 关键性质：**没有独立顶栏了**，页签与统计挤在一行，所以两个都得在这一行里。
   assert.ok(out.includes('对话') && out.includes('轨迹'), out);
-  assert.ok(out.includes('Ctrl+T'), out);
+  // 切换键**不写死键名**：它来自 `app.trace.toggle`（用户可以用
+  // `~/.pi/agent/keybindings.json` 改）。断言「那一行的键名 = 解析出来的键名」，
+  // 这样改键之后测试仍然在验那件事（「顶行写明了切换键」），而不是在验「默认值是
+  // Ctrl+R」—— 后者属于 keybindings 模块的测试。
+  assert.ok(out.includes(keyLabel('app.trace.toggle')), out);
   assert.ok(!out.includes('\n'), '顶行只能一行：' + JSON.stringify(out));
+});
+
+test('tabLine：改键位（keybindings.json）之后顶行的提示跟着改', () => {
+  // 手写键名（`'(Ctrl+R)'`）的旧写法在这里会露馅：键改了、提示不改，于是那一行开始骗人，
+  // 而只有改了键的人自己能发现。
+  const patched = createProjectKeybindings();
+  patched.setUserBindings({ 'app.trace.toggle': 'alt+r' });
+  setKeybindings(patched);
+  try {
+    const out = stripTerminalSequences(tabLine(stateWithTrace([]), 'chat'));
+    assert.ok(!out.includes('Ctrl+R'), `不该还是默认键：${out}`);
+    // 用了 override 之后显示的就是 override 那个键（macOS 上 `alt` 显示成 `Option`）。
+    assert.ok(out.includes(`(${formatKeyId('alt+r')})`), out);
+    assert.equal(getKeybindings().getKeys('app.trace.toggle')[0], 'alt+r');
+  } finally {
+    installProjectKeybindings();
+  }
 });
 
 test('tabLine：回合与步数合成 `x轮x步`（节点数不再占位）', () => {
   // 「3 轮 8 步」与「3轮8步」是同一件事；节点数是 order.length，开一轮就 +5 ——
-  // 跳得又快又不 actionable，所以从这一行里删掉（按 Ctrl+T 能看全树）。
+  // 跳得又快又不 actionable，所以从这一行里删掉（切到轨迹页能看全树）。
   const out = stripTerminalSequences(tabLine(stateWithTrace(['turn.start', 'step.start', 'step.start', 'step.start']), 'chat'));
   assert.ok(out.includes('1轮3步'), out);
   assert.ok(!/节点\s*\d/.test(out), '顶行不该再报节点数：' + out);

@@ -431,7 +431,7 @@ const transitions: TransitionHandlers = {
  * 也就是**用户真的发出第一句话时**才建。
  *
  * 为什么推迟：内核一装配就 dispatch 这两条装载，于是「打开界面还没说话」也已经有了
- * 四个节点（Ctrl+T 一打开就是一屏提示词与工具名），并且 `traces/<id>.jsonl` 立刻被建出来。
+ * 四个节点（切到轨迹页一打开就是一屏提示词与工具名），并且 `traces/<id>.jsonl` 立刻被建出来。
  * 而「进来看一眼就退出」是常态 —— 那些会话文件里只有装载段、零条对话，
  * 是纯粹的噪声（会话文件那边早就有同样的处理：`SessionWriter.start()` 不落盘，
  * 见 docs/architecture/sessions.md「空会话不落盘」；这里是它的轨迹侧对应物）。

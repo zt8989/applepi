@@ -33,7 +33,7 @@
  * | `scopedModels` | 内核当前的作用域列表（`/scoped-models` 改的那份） |
  * | `defaultModel` | `settings.json` 的 `defaultProvider` / `defaultModel` |
  * | `onSelectAsDefault` | `SettingsManager.setDefaultModelAndProvider()` |
- * | `keybindings` | `KeybindingsManager.create()` 并装到 pi-tui 全局（与 `/sessions` 同一句理由） |
+ * | `keybindings` | `installProjectKeybindings()` 并装到 pi-tui 全局（与 `/sessions` 同一句理由） |
  *
  * ## 但**换模型要真的换**（与 `/sessions` 那一处最大的不同）
  *
@@ -52,16 +52,15 @@
  * （手写装配也有，那是 pi-ai 的 `Models` 接口），`refresh()` 报「不可用」而不是假装成功。
  * 面板能列、能搜、能选 —— 只是列出来的是 models.json 里的那几个，而不是 1500+ 内置目录。
  */
-import { KeybindingsManager } from '@earendil-works/pi-coding-agent/dist/core/keybindings.js';
 import { ModelSelectorComponent } from '@earendil-works/pi-coding-agent';
 // `ScopedModelsSelectorComponent` **不在**主入口的导出里（只有 `ModelSelectorComponent` 有），
 // 所以走子路径 —— 与 `session-picker.ts` 引 `SessionSelectorComponent` 同一层理由。
 import { ScopedModelsSelectorComponent } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/scoped-models-selector.js';
 import type { ModelRuntime } from '@earendil-works/pi-coding-agent/dist/core/model-runtime.js';
 import type { Model } from '@earendil-works/pi-ai';
-import { setKeybindings } from '@earendil-works/pi-tui';
 import type { ViewportTUI } from '@earendil-works/pi-tui';
 import type { AgentRuntime } from '../provider';
+import { installProjectKeybindings } from './keybindings';
 import {
   defaultModelRef,
   readScopedModels,
@@ -146,10 +145,14 @@ function currentModelOf(runtime: AgentRuntime, current: { provider: string; mode
 export function openModelPicker(options: ModelPickerOptions): () => void {
   const { tui, runtime, cwd } = options;
 
-  // 装 pi 的 keybindings 到 pi-tui 全局 —— 与 `session-picker.ts` 同一句理由：
-  // `app.models.save`（Ctrl+S）是 **pi 应用层**的键位，不装的话它恒为 false，
+  // 装键位表到 pi-tui 全局 —— 与 `session-picker.ts` 同一句理由：
+  // `app.models.save`（Ctrl+S）在 pi-tui 默认那份里**不存在**，不装的话它恒为 false，
   // 于是「Ctrl+S 存默认」**静默失效**，连那行提示都会一起消失。
-  setKeybindings(KeybindingsManager.create());
+  //
+  // 用 `installProjectKeybindings()` 而不是 pi 的 `KeybindingsManager.create()`：
+  // 那份**不含**本项目自己的动作（`app.trace.toggle` 等），覆盖掉全局之后
+  // 顶行那块 `(Ctrl+R)` 会变成 `()`。只有一处创建才不会出现这种“谁最后装谁说话”。
+  installProjectKeybindings();
 
   // 默认模型：官方组件拿它排「· default」并支持搜 `default` 前缀直达。
   // 读法与「读作用域」都在 `model-scope.ts` 里（那里才是 settings 那一侧的唯一入口）——
@@ -263,8 +266,8 @@ export interface ScopedModelsOptions {
 export function openScopedModelsPicker(options: ScopedModelsOptions): () => void {
   const { tui, runtime, cwd } = options;
 
-  // 与上面同一句理由：`app.models.*` 是 pi 应用层的键位，不装就全静默失效。
-  setKeybindings(KeybindingsManager.create());
+  // 与上面同一句理由：`app.models.*` 在 pi-tui 默认那份里没有，不装就全静默失效。
+  installProjectKeybindings();
 
   // 全集 = 当前可用快照（`Ctrl+A` / `Ctrl+X` 的「全部」就是它的全集）。
   const allModels = [...modelRuntimeFor(runtime).getAvailableSnapshot()];

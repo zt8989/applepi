@@ -26,7 +26,7 @@
  * | `currentSessionsLoader` / `allSessionsLoader`：`(onProgress, signal) => Promise<SessionInfo[]>` | `listSessions({cwd})` / `listSessions()` 适配成 `SessionInfo` |
  * | `renameSession(path, name)` | 往那个会话文件追加一条 `session_info`（与 pi 同一个 entry type） |
  * | 删除 | 官方自己删会话文件（先 `trash` 再 `unlink`）；**轨迹文件它不管**，我们从外部补 |
- * | `keybindings` | pi 的 `KeybindingsManager.create()`，并 `setKeybindings()` 装到 pi-tui 全局 |
+ * | `keybindings` | `installProjectKeybindings()`，并装到 pi-tui 全局 |
  * | `currentSessionFilePath` | 当前会话文件 —— 官方用它把「正在用的这条」染成 accent 色**并拒绝删它** |
  *
  * ## 搜索**不**扫全文（有意与 pi 不同）
@@ -42,20 +42,20 @@
  * ## 弹窗开着时 `onInput` 必须让路（见 `app.ts` 那里的注释）
  *
  * pi-tui 的 `inputListeners` 在**聚焦组件之前**跑（`tui.js` 的 `handleInput`），而
- * `app.ts` 的 `onInput` 无条件处理 `ctrl+t` / `ctrl+o` / `ctrl+q` / `ctrl+c`。
- * 致命的那条是 `ctrl+c`：空闲时它 `process.exit(0)`，在弹窗里按一下「取消」整个 pi 就没了。
+ * `app.ts` 的 `onInput` 无条件处理轨迹页切换 / 展开工具 / 队列模式 / 中断这四个键。
+ * 致命的那条是中断（默认 `ctrl+c`）：空闲时它 `process.exit(0)`，在弹窗里按一下
+ * 「取消」整个界面就没了。
  */
 import { appendFileSync, closeSync, existsSync, fstatSync, openSync, readSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { KeybindingsManager } from '@earendil-works/pi-coding-agent/dist/core/keybindings.js';
 import {
   SessionSelectorComponent,
   type SessionInfo,
 } from '@earendil-works/pi-coding-agent';
 import type { SessionListProgress } from '@earendil-works/pi-coding-agent/dist/core/session-manager.js';
-import { setKeybindings } from '@earendil-works/pi-tui';
 import type { ViewportTUI } from '@earendil-works/pi-tui';
 import { listSessions, tracePathFor, type SessionSummary } from '../config-home';
+import { installProjectKeybindings } from './keybindings';
 import { readJsonlHead, readSessionMessages } from '../session-file';
 
 /** `SessionSelectorComponent` 的两个 loader 的第一个参数（进度回调）。 */
@@ -268,7 +268,7 @@ export function openSessionPicker(options: SessionPickerOptions): () => void {
   const { tui } = options;
   const cwd = options.cwd || process.cwd();
 
-  // 装 pi 的 keybindings 到 pi-tui 全局。
+  // 装键位表到 pi-tui 全局。
   //
   // **为什么必须做**：`SessionList` / `Input` 判键走的是 pi-tui 的 `getKeybindings()`，
   // 它默认只含 `TUI_KEYBINDINGS`。而 `app.session.*`（toggleSort / rename / delete…）
@@ -276,11 +276,18 @@ export function openSessionPicker(options: SessionPickerOptions): () => void {
   // false，于是 `ctrl+r` **静默失效**（连那行提示都会一起消失 —— 它也是用同一个
   // keybindings 渲染的，于是症状是「面板里没写有 rename」而不是「按了没反应」）。
   //
-  // `KeybindingsManager.create()` 读 `~/.pi/agent/keybindings.json`（用户自己的键位）。
-  // 那是 pi 应用层的事，与本项目界面自己的键位表（`app.ts` 的 `ctrl+t`/`ctrl+o`/`ctrl+q`）
-  // 无关，所以不做冲突检查 —— 与 pi 界面看到的行为一致。
-  const keybindings = KeybindingsManager.create();
-  setKeybindings(keybindings);
+  // 用 `installProjectKeybindings()`（= pi 的全套 + 本项目自己的动作）而不是 pi 的
+  // `KeybindingsManager.create()`：两者都读同一份 `~/.pi/agent/keybindings.json`，
+  // 但后者**不含** `app.trace.toggle` 那一组 —— 装上去之后顶行那块 `(Ctrl+R)`
+  // 会变成 `()`（查不到这个动作），而这是开着面板时才出现的症状。
+  //
+  // 与 pi 一样**不做** `ctrl+r` 在面板内（重命名）与面板外（轨迹页）的冲突检查：
+  // 面板打开时本项目那四个全局键整个让路（`onInput` 开头的 `hasOverlay()` 早返回），
+  // 两者不会同时生效。
+  //
+  // 返回值继续往下传：官方组件的构造参数要它（`SessionSelectorComponent` 的
+  // `keybindings`），它内部的 `Input` / `SessionList` 用同一份判键。
+  const keybindings = installProjectKeybindings();
 
   /** 当前 scope 下已加载的摘要（`onPick` 按**文件路径**回查用）。 */
   let listed: SessionSummary[] = listSessions();
