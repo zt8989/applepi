@@ -34,6 +34,7 @@ import { createAgentReducer } from '../src/reducer';
 import { createSessionRecorder } from '../src/session-recorder';
 import { SessionWriter, readSessionMessages, readJsonlHead, type MessageEntry } from '../src/session-file';
 import { listSessions, sessionPath } from '../src/config-home';
+import { loadTrace } from '../src/trace-file';
 import { waitForIdle } from '../src/store';
 import type { AgentAction, ModelCapabilities } from '../src/actions';
 import type { Message } from '@earendil-works/pi-ai';
@@ -60,18 +61,24 @@ async function withHome(fn: (home: string) => Promise<void> | void): Promise<voi
 /**
  * 轮询到 `predicate()` 为真，最多等 `timeoutMs`。
  *
- * 用在「等某个**异步冲刷**的结果」上（本文件的 `turn.end` 就是：它的 Cmd 在 phase
- * 转 idle 之后才执行）。这类等待**不能**写成 `setTimeout(魔数)` —— 套件是多文件并行跑
- * 的，磁盘一忙那个魔数就不够，于是变成一条偶发失败，而报出来的错（「节点数对不上」）
- * 指向的是完全无关的地方。
+ * 用在「等某个**异步**结果」上 —— 本文件两处都是：`turn.end` 的 Cmd 在 phase 转 idle
+ * 之后才执行，而轨迹落盘本身是异步的（`createFileSink()` 内部是一条 Promise 链，
+ * `append()` 立刻返回、写盘在后面）。
+ *
+ * 这类等待**不能**写成 `setTimeout(魔数)`：套件是多文件并行跑的，磁盘一忙那个魔数
+ * 就不够，于是变成一条偶发失败，而报出来的错（「恢复后节点数对不上」）指向的是
+ * 完全无关的地方。
  *
  * 超时后**返回**而不是抛：调用方的断言会带着真实的节点数报错，比这里抛一句
  * 「超时了」信息量大得多。
  */
-async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<void> {
+async function waitUntil(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await new Promise((r) => setTimeout(r, 10));
   }
 }
@@ -529,17 +536,19 @@ test('恢复历史：轨迹树跟着回来（对话区有图、轨迹却是空�
     // 会不够（磁盘慢一点就只跑了一半），症状是「轨迹节点数对不上」，
     // 而真因跟被测的恢复路径毫无关系。本文件其它用例都是这么等的。
     await waitForIdle(first.store, 20_000);
-    // 再等 `turn.end` 真的出现在树上：那个节点的 Cmd 是在 phase 转 idle **之后**才
-    // 冲刷的（见 reducer 的 closeTurn 注释），不等它就会漏掉最后一个节点，症状是
-    // 「恢复后节点数对不上」—— 与要验的恢复路径毫无关系。
+    // 等到**盘上**那份轨迹与内存里那份一样长，再往下走。
     //
-    // **不用 `setTimeout(50)`**：整个套件是多文件并行跑的，磁盘忙的时候 50ms 不够，
-    // 于是就变成一条偶发。这里轮询到「树上的最后一个节点是 turn.end」为止，
-    // 上界给足（真出不来时下面的断言会带着真实节点数报错，不会静默通过）。
-    await waitUntil(() => {
-      const order = first.store.getState().trace.order;
-      const last = order[order.length - 1];
-      return last !== undefined && first.store.getState().trace.nodes[last]?.kind === 'turn.end';
+    // 两道异步都要等（这是这条测试早先偶发失败的真因）：
+    //   1. `turn.end` 的 Cmd 在 phase 转 idle **之后**才执行（见 reducer 的 closeTurn 注释）；
+    //   2. 轨迹落盘是异步的 —— `createFileSink()` 的 `append()` 立刻返回，写盘排在那条
+    //      Promise 链后面。所以「节点已经进 state」**不等于**「已经落盘」，而这条测试
+    //      接下来要做的正是「把盘上那份读回来」。
+    //
+    // 早先这里是 `await setTimeout(50)`：并行跑套件时磁盘一忙就不够，漏掉最后一个节点，
+    // 症状是「恢复后节点数对不上」—— 指向的是完全无关的地方。
+    await waitUntil(async () => {
+      const onDisk = await loadTrace('with-image');
+      return onDisk !== null && onDisk.order.length === first.store.getState().trace.order.length;
     }, 20_000);
     const beforeTree = first.store.getState().trace;
     assert.ok(beforeTree.order.length > 0, '跑之前轨迹上有节点');
