@@ -1285,6 +1285,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 而宽度只有 `refresh()` 知道。渲染结果的缓存也放在那里（`hotkeysLines()`）。
    */
   let hotkeysSource: string | undefined;
+  /**
+   * 键位表当时插在第几条消息之后（`state.messages` 的下标）。
+   *
+   * 敲 `/hotkeys` 的那一刻定下，之后新消息排在它下面（见 `TranscriptChunks.hotkeysAtIndex`）。
+   * `undefined` = 没显示过。
+   */
+  let hotkeysAtMessageIndex: number | undefined;
   /** 上面那份源码渲染成的行；按宽度缓存（同一宽度下每帧复用同一个数组引用）。 */
   let hotkeysLinesCache: { width: number; lines: readonly string[] } | undefined;
   /**
@@ -1336,7 +1343,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // 提示过期就清掉（6 秒后自动消失，不留一行孤儿文本）。
     // banner 不过期（常驻）。
     if (notice.text !== '' && Date.now() > noticeUntil) notice.text = '';
-    transcript.update(state, terminal.columns ?? 100, expanded, notice, banner, hotkeysLines(width));
+    transcript.update(state, terminal.columns ?? 100, expanded, notice, banner, hotkeysLines(width), hotkeysAtMessageIndex ?? -1);
     // 轨迹：**每帧都同步**（即使不在轨迹页）—— 否则切过去的第一帧看到的是
     // 上一次 refresh 的快照，而那时可能已经落后好几步（症状：切过去先看到一棵
     // 少了几步的树，然后才突然补齐）。同步是增量的，成本与节点数无关。
@@ -1848,7 +1855,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
         return;
       }
       case 'hotkeys': {
-        // 与 pi 的 `/hotkeys` 同形：一张键位表，贴在这轮对话之后。
+        // 与 pi 的 `/hotkeys` 同形：一张键位表，插进对话流里。
         //
         // **不弹面板**是刻意的：pi 也是把它 append 进对话区。理由是这样能一边看表
         // 一边往下翻自己的对话，而弹窗会盖住上下文、关掉之后表也没了。
@@ -1858,7 +1865,10 @@ export async function runTui(options: TuiOptions): Promise<number> {
         // 与面板底部的提示行同一个来源。
         hotkeysSource = hotkeysMarkdown(options.extensionCommands?.shortcuts() ?? []);
         hotkeysLinesCache = undefined;
-        notify(dim('键位表已插到对话末尾（改键位：~/.pi/agent/keybindings.json）'));
+        // 插在**当前对话末尾**（= 现有消息数）。之后的对话排在这张表下面，于是它会被
+        // 往上顶开 —— 与 pi 把键位表 `addChild` 进对话区同一效果（见 hotkeysAtMessageIndex）。
+        hotkeysAtMessageIndex = store.getState().messages.length;
+        notify(dim('键位表已插进对话（改键位：~/.pi/agent/keybindings.json）'));
         refresh();
         return;
       }
@@ -2878,7 +2888,18 @@ export class TranscriptChunks {
   private lastStream = '';
   private lastTail = '';
   /**
-   * `/hotkeys` 那一块（贴在这轮对话**之后**，与 pi 把键位表 append 进 chat 一致）。
+   * `/hotkeys` 那一块。
+   *
+   * ## 位置：**插在当时的消息边界**，不是永远贴在最后
+   *
+   * pi 的做法是 `chatContainer.addChild(markdown)` —— 键位表成为对话流里的一个节点，
+   * 之后的对话（`addChild`）排在**它下面**，所以新消息一来它就往上滚。
+   *
+   * 我们把它做成一个单独的长生命块（不是一条消息），所以必须自己记住
+   * 「当时插在第几条消息之后」（`hotkeysAtIndex`），`render()` 时把它的行 splice 进
+   * 那两条消息之间。不这样做的话它会**永远贴在消息末尾**：新消息追加在它**上面**，
+   * 而 `ScrollView` 的 `follow:'end'` 盯的是底部 —— 于是视口永远停在键位表的尾部，
+   * 用户看到的就是「打 /hotkeys 之后会话区冻在键位表，最新消息看不见」。
    *
    * 按**数组引用**判断变没变：调用方（`refresh`）按宽度缓存了渲染结果，所以宽度不变
    * 时引用也不变。用「拼成一个字符串再比」也行，但那要每帧 join 一次整张表 —— 而这张表
@@ -2886,6 +2907,12 @@ export class TranscriptChunks {
    */
   private readonly hotkeysBlock: Text;
   private lastHotkeysLines: readonly string[] | undefined;
+  /**
+   * 键位表插在第几条消息之后（`state.messages` 的下标）。
+   *
+   * `-1` = 不显示。0 表示「插在第一条消息之前」（用户在说第一句话之前敲了 `/hotkeys`）。
+   */
+  private hotkeysAtIndex = -1;
 
   constructor() {
     this.noticeBlock = new Text('', 0, 0);
@@ -2930,8 +2957,12 @@ export class TranscriptChunks {
      *
      * 为什么是**渲染好的行**而不是原始 markdown：宽度一变就要重排，而宽度只有调用方
      * 知道（它还顺便按宽度缓了那份结果）。组件这一侧只负责「内容变了就 setText」。
+     *
+     * @param hotkeysAt 键位表插在第几条消息之后。见 `hotkeysAtIndex`。
+     *   与 `hotkeys` 一起传：两者是同一个事实（「表在这儿」）的两个部分。
      */
     hotkeys?: readonly string[],
+    hotkeysAt: number = -1,
   ): void {
     // 回收已结束的工具组件（**在渲染任何块之前**：工具刚跑完时 reducer 已把它移出
     // `executing`，于是这一帧就该把它的组件与 interval 一起清掉）。
@@ -2980,6 +3011,14 @@ export class TranscriptChunks {
         hotkeys === undefined || hotkeys.length === 0 ? '' : `${hotkeys.join('\n')}\n`,
       );
     }
+    // 插入位置只跟「什么时候敲的」有关，与内容无关，所以单独存。
+    // `hotkeys` 为空（没显示过 / 已清掉）时归 -1（= 不显示）；合法位置为 0..N，
+    // 负数（调用方没给）当成「插在末尾」。
+    this.hotkeysAtIndex = hotkeys === undefined || hotkeys.length === 0
+      ? -1
+      : hotkeysAt < 0
+        ? Number.MAX_SAFE_INTEGER
+        : hotkeysAt;
     this.lastWidth = width;
   }
 
@@ -3067,8 +3106,16 @@ export class TranscriptChunks {
     const lines: string[] = [];
     lines.push(...this.noticeBlock.render(at));
     lines.push(...this.bannerBlock.render(at));
-    for (const block of this.blocks) lines.push(...block.render(at));
-    lines.push(...this.hotkeysBlock.render(at));
+    // 键位表插在**当时的消息边界**上（见 `hotkeysAtIndex`）：这样它后面的对话会把它
+    // 往上顶，而不是永远贴在屏幕底部。
+    const hotkeysAt = this.hotkeysAtIndex;
+    for (let i = 0; i < this.blocks.length; i += 1) {
+      if (i === hotkeysAt) lines.push(...this.hotkeysBlock.render(at));
+      const block = this.blocks[i];
+      if (block) lines.push(...block.render(at));
+    }
+    // 插在最后一条消息之后（`hotkeysAt >= blocks.length`）或一条消息都没有时。
+    if (hotkeysAt >= this.blocks.length) lines.push(...this.hotkeysBlock.render(at));
     lines.push(...this.streamBlock.render(at));
     lines.push(...this.tail.render(at));
     return lines;

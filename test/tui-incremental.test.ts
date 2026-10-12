@@ -166,6 +166,42 @@ test('notice 贴在对话区顶部（命令反馈滚上去就看不见了）', (
   assert.ok(!stripTerminalSequences(chunks.render(80).join('\n')).includes('已清理 3 条历史会话'));
 });
 
+/**
+ * `/hotkeys` 的插入位置。
+ *
+ * 回归：以前键位表是一个永远贴在**消息末尾**的块，而新消息追加在它**上面** ——
+ * `ScrollView` 的 `follow:'end'` 盯的是底部，于是视口永远停在键位表尾部，用户看到的
+ * 就是「打 /hotkeys 之后会话区冻在键位表，最新消息看不见」。
+ * 修法是记住「当时插在第几条消息之后」，让后续对话把它往上顶开。
+ */
+test('/hotkeys：新消息排在键位表**下面**（不是被表压在下面看不见）', () => {
+  const chunks = new TranscriptChunks();
+  const HOTKEYS = ['─── 键位表 ───', '| Ctrl+R | 轨迹 |'];
+  // 对话进行到第 4 条（2 轮）时敲 /hotkeys。
+  const before = history(2);
+  chunks.update(stateOf(before), 80, false, notice, undefined, HOTKEYS, before.length);
+  const atInsert = stripTerminalSequences(chunks.render(80).join('\n'));
+  assert.ok(atInsert.includes('键位表'), `表要画出来：${atInsert}`);
+
+  // 之后的对话：新消息追加在表**下面**。
+  const after = [...before, { role: 'user', content: '表之后的新消息' } as Message];
+  chunks.update(stateOf(after), 80, false, notice, undefined, HOTKEYS, before.length);
+  const out = stripTerminalSequences(chunks.render(80).join('\n'));
+  assert.ok(out.includes('表之后的新消息'), `新消息要画出来：${out}`);
+  assert.ok(
+    out.indexOf('键位表') < out.indexOf('表之后的新消息'),
+    `键位表要排在新消息前面（这样它才会被往上顶开，而不是挡住最新内容）：\n${out}`,
+  );
+});
+
+test('/hotkeys：不给位置时退化到末尾（老调用方不会崩）', () => {
+  const chunks = new TranscriptChunks();
+  chunks.update(stateOf(history(2)), 80, false, notice, undefined, ['KEYTABLE']);
+  const out = stripTerminalSequences(chunks.render(80).join('\n'));
+  assert.ok(out.includes('KEYTABLE'));
+  assert.ok(out.indexOf('KEYTABLE') > out.indexOf('回答 1'), '默认插在末尾');
+});
+
 test('banner 是常驻的（开场那节永不消失），与 6 秒的 notice 分开', () => {
   // 回归：开场那节原先走 notify() + 30 秒，于是用户往上翻找刚才那条提示时它已经没了。
   // 而「我装了哪些 skill」正是要反复对照着打 `/skill:x` 的东西。
