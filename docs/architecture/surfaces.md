@@ -14,13 +14,37 @@
 | 顶行 | 页签 + 轨迹统计**合一行**（见下） |
 | 对话页 | `TranscriptChunks`：每条消息一个官方组件，内容没变就不重算（见下） |
 | 轨迹页 | `Ctrl+R`（`app.trace.toggle`）切换，展开是 `renderColoredTree()` |
-| 编辑器 | pi-tui 的 `Editor`（多行、slash 命令补全、文件路径补全） |
-| Loader | 生成中动画 |
+| 编辑器 | pi 的 `CustomEditor`（多行、slash 命令补全；**工作状态画在上框线里**，见下） |
 | 底栏 | 左边 cwd (+git 分支)，右边 `(provider) model` + token 用量 |
 
 按键（**键名都从键位表解析**，见下节）：`Ctrl+R` 切轨迹页，`Ctrl+O` 展开/收起工具输出，
 `Ctrl+T` 展开/收起思考块（pi 的 `app.thinking.toggle`，与 pi 同 id），
 `Ctrl+C` 在环跑时中断这一轮、空闲时退出。完整的一份在 `/hotkeys` 里。
+
+### composer 与 pi 一致：横线颜色 + 状态画在上框线
+
+composer 是 pi 的 `CustomEditor`（`embedWorkingStatus: true`），配色是 pi 的
+`getEditorTheme()` —— 不是自己手写一份。两个具体后果：
+
+**1. 横线颜色跟主题/思考级别走。** pi 的 composer 横线是
+`theme.getThinkingBorderColor(level)`（默认级别 `off` → 主题 token `thinkingOff`），
+`refresh()` 每帧按 `state.thinkingLevel` 设一次。早先手写成 `(s) => dim(s)` ——
+那是**文本属性**（`\x1b[2m`，变淡）而不是颜色 token，在浅色终端上与 pi 不一致。
+
+**2. 工作状态画在**上框线**里**（不另占一行）：
+
+```
+── ⠋ 思考中… ─────────────────────────────────────────────
+── ⠋ ↻ 正在重试（第 2/2 次尝试） ─────────────────────────
+```
+
+三个状态（思考 / 压缩 / 重试）由纯函数 `workingStatusText(state)` **从 state 现推**，
+优先级 重试 > 压缩 > 生成。早先是一个单独的 loader 行加一个 `lastLoaderMessage` 变量
+手工收尾（三处各自记得停动画），漏一处的症状是「圈一直转」；现推就没有这笔账。
+重试那句也因此从 `renderTail`（对话区尾巴）搬到了这里 —— 放两处就是同一件事报两遍。
+
+状态文字的颜色跟**边框自己的颜色**走（`(text) => editor.borderColor(text)`）—— 与 pi
+嵌入时的做法一致；写死 `accent` 的话，边框随思考级别变色时会像两套东西拼在一起。
 
 ### 顶行是**两职合一**的（`tabLine`）
 
@@ -215,6 +239,35 @@ OSC 133 区域标记也被一并剥掉。
 手写这三块要 550+ 行，而且**必然与上游漂移**。`model-picker.ts` 与
 `session-picker.ts` 是**适配层**：喂给官方的形状（`ModelInfo` / `SessionInfo`），
 接回调（换模型 / 存默认 / 删会话）。
+
+### 这三个面板**盖住 composer**，不是居中的弹窗（`src/tui/composer-overlay.ts`）
+
+pi 里这几个面板根本不是弹窗：`interactive-mode.js` 的 `showSelector()` 把 composer
+那一格（`editorContainer`）的**内容整个换掉** —— `clear()` 之后 `addChild(selector)`，
+关掉时再换回 `editor`。于是面板天然是 composer 的宽度，它的底边**就是** composer 的
+底边。用户按 Ctrl+L 看到的是「输入框那块变成了列表」。
+
+本项目没有可换内容的 `editorContainer`，所以用覆盖层**复刻同一个矩形**：
+
+```ts
+{ anchor: 'bottom-center', width: '100%', margin: { bottom: COMPOSER_BOTTOM_MARGIN } }
+```
+
+- **满宽**（`'100%'`，不是 `'90%'`）—— 早期三处各写各的（居中 + 90% + 各自的
+  `maxHeight`），症状是「面板飘在屏幕中间、左右还露着别的画面」，与 pi 不一致。
+- **底边对齐**：`margin.bottom` = composer 距屏幕底的行数 = 它下面那几格的高度
+  （当前是底栏两行）。所以 `composer-overlay.ts` 的 `FOOTER_ROWS` 与 `app.ts` 布局里
+  footer 的 `basis` **必须是同一个来源** —— 各写一个数字，底栏一改面板就悬空。
+- **不给 `maxHeight`**：pi-tui 对它的处理是 `overlayLines.slice(0, maxHeight)` ——
+  **从尾部切**，切掉的正是 `Model Name:` 下面的后台刷新状态与那行按键提示。早先为此把
+  比例调到 80% 去躲切片，但那是拿终端高度硬凑；现在让面板按内容自然展开。
+
+面板的框线与配色**全部来自 pi 的主题**（官方 `DynamicBorder` 走
+`theme.fg('accent', …)`），本项目一行颜色都不写 —— 写死的色值在浅色终端上会变成
+黑底黑字（见 [theme.ts](../../src/tui/theme.ts) 文件头）。
+`test/tui-startup.test.ts` 里那三条几何断言（底边对齐 / 顶框满宽 / composer 框线
+不残留）就是钉这件事的：它们**先把差分重绘重放成屏幕网格**再断言绝对行列 ——
+「词在不在」那类断言对「飘在中间的弹窗」同样会通过。
 
 ### 「那一行按键提示在」就是 keybindings 装上了
 
