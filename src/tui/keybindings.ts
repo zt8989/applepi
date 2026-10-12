@@ -128,12 +128,28 @@ export const PROJECT_KEYBINDINGS = {
   /**
    * 中断当前回合；空闲时退出。
    *
-   * 不复用 pi 的三个 id（`app.interrupt` = escape 中断流、`app.clear` = ctrl+c 清空编辑器、
-   * `app.exit` = ctrl+d 退出）：本项目的 ctrl+c 是**一个键干两件事**（跑着就中断、
-   * 空闲就退出），与那三个各自的语义都不重合。挂到其中任何一个上都会让
-   * `keybindings.json` 里的覆盖产生「改了 escape 却没改中断」这种说不清的后果。
+   * ## 默认**不绑**（`[]`）—— 因为「冲突以 pi 为准」
+   *
+   * 早先它的默认键是 `ctrl+c`（一个键干两件事：跑着就中断、空闲就退出）。但 pi 的
+   * `ctrl+c` 是 `app.clear`（清空编辑器，连按两次才退出），而两边共用一份
+   * `keybindings.json` —— 同一个键在两个应用里含义不同时，写覆盖的人没法表达
+   * 「我想要哪个」。按「完全复用 pi」这条线，`ctrl+c` 归 pi。
+   *
+   * 中断改由 pi 的 `app.interrupt`（默认 `escape`）承担；退出由 pi 的
+   * `app.clear`（`ctrl+c` 两次）/ `app.exit`（`ctrl+d`）承担。
+   *
+   * ## 那这个 id 为什么还留着
+   *
+   * 它是本项目**一个键干两件事**的合体动作。有人可能就喜欢那个手感 —— 留着 id、
+   * 默认不绑，写 `{ "app.abort": "ctrl+c" }` 就能拿回旧行为（那时它会把 `ctrl+c`
+   * 从 pi 的 `app.clear` 那里抢回来，是用户显式的选择）。删掉 id 的话，这个覆盖无处可写。
+   *
+   * ## 与 `app.clear` 的分工（都在 `app.ts` 里）
+   *
+   * - `app.clear`（`ctrl+c`）：清空编辑器；500ms 内第二次 → 退出。
+   * - `app.abort`（默认无）：跑着就中断，空闲就退出（旧手感）。
    */
-  'app.abort': { defaultKeys: 'ctrl+c', description: '中断当前回合（空闲时退出）' },
+  'app.abort': { defaultKeys: [], description: '中断当前回合（空闲时退出）—— 默认不绑，`Ctrl+C` 已归 pi 的「清空编辑器」' },
 } as const satisfies KeybindingDefinitions;
 
 /** pi 的 + 本项目的，合成一份定义表。 */

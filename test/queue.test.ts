@@ -275,6 +275,29 @@ test('运行中入队：steer 与 followUp 各自进各自的列，互不干扰'
   assert.equal(state.messages.length, base.messages.length);
 });
 
+test('queue.clear：两条队列一次清空，且不碰在途的那条', () => {
+  const reducer = createAgentReducer({});
+  let state = runningState();
+  state = reducer(state, { type: 'queue.input', text: 'a', as: 'steer' }) as AgentState;
+  state = reducer(state, { type: 'queue.input', text: 'b', as: 'steer' }) as AgentState;
+  state = reducer(state, { type: 'queue.input', text: 'c', as: 'followUp' }) as AgentState;
+
+  const cleared = reducer(state, { type: 'queue.clear' }) as AgentState;
+  assert.equal(cleared.steerQueue.length, 0, 'steer 列清空');
+  assert.equal(cleared.followUpQueue.length, 0, 'followUp 列清空');
+  // 清队列只是「这些先不发」——不该动相位、容器、消息。
+  assert.equal(cleared.phase, state.phase);
+  assert.equal(cleared.messages.length, state.messages.length);
+  assert.equal(cleared.openTurnNodeId, state.openTurnNodeId);
+});
+
+test('queue.clear：队列本来就空时返回**原对象**（订阅者靠 === 跳帧）', () => {
+  const reducer = createAgentReducer({});
+  const base = runningState();
+  // 引用不变 —— 这样 `store.subscribe` 的「没变就别重绘」判定仍然成立。
+  assert.equal(reducer(base, { type: 'queue.clear' }), base);
+});
+
 test('投递 steer：消息进对话，但**不开新回合**（它是这回合里的一个输入）', () => {
   const reducer = createAgentReducer({});
   const base = runningState();
