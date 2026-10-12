@@ -92,7 +92,9 @@ pi-tui 的 `MIN_RENDER_INTERVAL_MS` 是 16ms —— 每帧 1.2 秒时渲染永�
    `render()` 的结果，只在 `setText()` 时失效，所以历史块在后续帧里直接命中。
 2. **渲染结果再缓存一层**（`WeakMap<message, Map<`${width}:${expanded}`, lines>>`）——
    连折行都不用重做。键里带宽度与折叠状态，因为这两者都会改变渲染结果。
-3. **尾部三个独立块**（命令反馈 / 流式那段 / 收工原因）。流式只碰中间那个。
+3. **尾部独立的几块**（状态卡 / 键位表 / 流式那段 / 收工原因）。流式只碰中间那个。
+   状态卡与键位表都**钉在当时的消息边界**上（各自的锚点 `at`），所以新消息排在它们
+   下面、把它们往上顶 —— 形状与 pi 的 `chatContainer.addChild` 一致。
 
 三条不能省的细节：
 
@@ -105,6 +107,21 @@ pi-tui 的 `MIN_RENDER_INTERVAL_MS` 是 16ms —— 每帧 1.2 秒时渲染永�
 
 这条结构是照抄 pi 官方的：`interactive-mode.js` 里 `chatContainer` 也是每条消息一个
 组件，流式那一条原地 `updateContent`。
+
+### 命令反馈卡：照抄 pi 的 `showStatus`
+
+`notify()`（命令结果、换模型、切思考块…）不再是「贴顶一行、6 秒消失」，而是
+**钉进对话流的卡片**，与 pi 的 `showStatus` 同形：
+
+- 卡存在 `statusCards: { text; at }[]` 里，`at` = 显示时的**消息条数**；渲染时按它
+  splice 在那条消息边界上。于是新消息排在卡**下面**，卡被往上顶、随会话一起滚。
+- **尾部还是这张卡就覆盖**：`notify` 时若 `messages.length` 没变，`at` 相同 →
+  就地改 `text`。连续改配置（换模型 → 切思考级别）不会刷屏。
+- **中间插过东西就另起一张**：一旦有了新消息，`at` 不再相等 → push 一张新卡，
+  旧卡留在历史里。
+
+pi 判定的是「`chatContainer` 末尾两项还是不是自己那对 spacer+text」；这里用
+「锚点是否还等于当前消息条数」等价表达同一件事。
 
 `renderTranscript()` 保留着 —— 一次性模式（管道输出）与测试走它，仍然是逐行一致的
 （`test/tui-incremental.test.ts` 钉住这一点）。

@@ -440,10 +440,10 @@ test('Ctrl+T 切换后历史块要重画（缓存键带了 hideThinking）', () 
       { role: 'assistant', content: [{ type: 'thinking', thinking: '一段思考' }], timestamp: 0 },
     ],
   } as unknown as AgentState;
-  chunks.update(state, 60, false, { text: '' });
+  chunks.update(state, 60, false, []);
   assert.ok(stripTerminalSequences(chunks.render(60).join('\n')).includes('一段思考'));
   // 同一状态、只打开折叠：必须重算（不能命中上一次展开时的缓存）。
-  chunks.update(state, 60, false, { text: '' }, undefined, undefined, -1, true);
+  chunks.update(state, 60, false, [], undefined, undefined, -1, true);
   const hidden = stripTerminalSequences(chunks.render(60).join('\n'));
   assert.ok(!hidden.includes('一段思考'), `折叠后不该读到展开时的缓存：${hidden}`);
   assert.ok(hidden.includes('Thinking'), hidden);

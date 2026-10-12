@@ -241,7 +241,7 @@ test('Elapsed 自己会跳（组件跳帧复用，官方计时器活着；否则
       .map((l) => l.trim())
       .find((l) => l.startsWith('Elapsed'));
 
-  chunks.update(running(), 100, false, { text: '' });
+  chunks.update(running(), 100, false, []);
   // 起手那个数**不能写死 0.0s**：`startedAt` 与这一帧之间隔了一次 `Date.now()` 与
   // 若干次渲染，机器忙的时候（本文件与别的测试并行跑）实测会到 0.1s。断言意图是
   // 「这一行从头就在报秒数，而不是一开始就卡在某个旧值」，所以给一个「小于 5 秒」。
@@ -254,7 +254,7 @@ test('Elapsed 自己会跳（组件跳帧复用，官方计时器活着；否则
   // 输出**一个字都没变**（还是那份 running），变的只有时间 —— 所以这一行若跟着跳，
   // 就只可能是官方的计时器在工作，而不是「碰巧有输出刷新了那一帧」。
   await new Promise((r) => setTimeout(r, 2100));
-  chunks.update(running(), 100, false, { text: '' });
+  chunks.update(running(), 100, false, []);
   assert.match(
     elapsedOf() ?? '',
     /[12]\.\ds/,
@@ -339,7 +339,7 @@ test('渲染工具块不会爆栈（官方组件在渲染途中就发重绘请�
 
     // 这里不走 runTui，模拟「渲染时重入 refresh」的最短路径。
     const chunks = new TranscriptChunks();
-    assert.doesNotThrow(() => chunks.update(state, 100, false, { text: '' }));
+    assert.doesNotThrow(() => chunks.update(state, 100, false, []));
 
     // 同一个同步帧里跑完 → 官方发了几次请求。关键是它**不应该**递归到爆栈。
     assert.equal(rerenders, 0, '同步渲染过程中不能真的重画（应该是微任务，且已在渲染中就跳过）');
@@ -377,7 +377,7 @@ test('渲染工具块不会爆栈：真接上 refresh（runTui 装的那条路�
   // refresh 的等价物：重新渲染整个对话区。
   const rerender = (): void => {
     const chunks = new TranscriptChunks();
-    chunks.update(state, 100, false, { text: '' });
+    chunks.update(state, 100, false, []);
   };
   let depth = 0;
   let maxDepth = 0;

@@ -1309,14 +1309,27 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 显式一个键位切换更清楚，也与 pi 的两个独立键位一致。
    */
   let queueMode: QueueKind = 'steer';
-  /** 命令反馈：插在对话区顶部，6 秒后自动消失（不占输入区）。 */
-  const notice = { text: '' };
-  let noticeUntil = 0;
+  /**
+   * 命令反馈：**钉进对话流的卡片**（对齐 pi 的 `showStatus`）。
+   *
+   * ## 与 pi 同形的三条规则
+   *
+   * 1. **卡是会话里的一节**（`at` = 当时的消息条数，渲染时 splice 在那儿），
+   *    所以之后的对话会把它往上顶、随会话一起滚 —— 不是贴顶 6 秒后消失。
+   * 2. **尾部还是这张卡就覆盖**：连续改配置（换模型 → 切思考级别）时
+   *    `messages.length` 没变，`notify` 就地改 `text`，不新开一行、不刷屏。
+   * 3. **中间插过东西就另起一张**：一旦有了新消息，`messages.length` 变了，
+   *    下一句反馈会 push 一张新卡（旧卡留在历史里）。
+   *
+   * pi 判定的是「`chatContainer` 末尾两项还是不是自己那对 spacer+text」，
+   * 这里用「锚点是否还等于当前消息条数」等价地表达同一件事。
+   */
+  const statusCards: { text: string; at: number }[] = [];
   /**
    * 开场那一节（已装载的 skill 名单 / 警告）—— **常驻，永不消失**。
    *
-   * 与 `notice` 分开是因为两者寿命不同：`notice` 是命令反馈（6 秒），而这一节是
-   * 「本次会话装了什么」，应该像 pi 的 `loadedResourcesContainer` 那样一直在对话区顶部。
+   * 与 `statusCards` 分开是因为两者位置不同：状态卡钉在对话流里（会随会话滚走），
+   * 而这一节是「本次会话装了什么」，应该像 pi 的 `loadedResourcesContainer` 那样一直在对话区顶部。
    *
    * 早先它走 `notify()` + 30 秒 —— 结果用户滚上去找刚才那条提示时它已经没了，而
    * 「我装了哪些 skill」正是需要反复对照的东西（打 `/skill:x` 时要对着名字打）。
@@ -1384,10 +1397,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
         // 直接 dim(带色文本) 的话，内层的 \x1b[0m 会把外层 dim 提前关掉。
         dimLine(padToWidth(statsRow, width), ...stats.warnings),
     );
-    // 提示过期就清掉（6 秒后自动消失，不留一行孤儿文本）。
-    // banner 不过期（常驻）。
-    if (notice.text !== '' && Date.now() > noticeUntil) notice.text = '';
-    transcript.update(state, terminal.columns ?? 100, expanded, notice, banner, hotkeysLines(width), hotkeysAtMessageIndex ?? -1, hideThinking);
+    // 状态卡**不过期**（与 pi 一致）：它是会话里的一节，随对话滚走，而不是到点消失。
+    // banner 同样常驻。
+    transcript.update(state, terminal.columns ?? 100, expanded, statusCards, banner, hotkeysLines(width), hotkeysAtMessageIndex ?? -1, hideThinking);
     // 轨迹：**每帧都同步**（即使不在轨迹页）—— 否则切过去的第一帧看到的是
     // 上一次 refresh 的快照，而那时可能已经落后好几步（症状：切过去先看到一棵
     // 少了几步的树，然后才突然补齐）。同步是增量的，成本与节点数无关。
@@ -1905,6 +1917,12 @@ export async function runTui(options: TuiOptions): Promise<number> {
           notify(yellow('上一回合还没结束，先 Ctrl-C 中断再开新会话'));
           return;
         }
+        // 上一段的卡/键位表属于旧会话（消息已清空），不能跟着漂到新会话里 ——
+        // pi 换会话时也是 `chatContainer.clear()`。
+        statusCards.length = 0;
+        hotkeysSource = undefined;
+        hotkeysAtMessageIndex = undefined;
+        hotkeysLinesCache = undefined;
         // 走内核的 newSession：**换 sessionId**，于是换文件。
         // 只 dispatch conversation.reset 的话 id 不变，新消息会续写进旧文件 ——
         // 界面上看着像新会话，实际上把上一段历史污染了。
@@ -1958,10 +1976,22 @@ export async function runTui(options: TuiOptions): Promise<number> {
     void arg;
   };
 
-  /** 在对话区插一行提示（命令结果、错误）。 */
+  /**
+   * 往对话流里插一张命令反馈卡（命令结果、错误）。
+   *
+   * 规则见 `statusCards` 的注释：尾部还是这张卡就**覆盖**，中间插过东西就**另起一张**。
+   * `at` 取「当前消息条数」，渲染时按它 splice —— 于是新消息排在卡**下面**，
+   * 卡被往上顶开、随会话滚走（`ScrollView` 的 `follow:'end'` 盯的是底部）。
+   */
   const notify = (text: string): void => {
-    notice.text = text;
-    noticeUntil = Date.now() + 6000;
+    const at = store.getState().messages.length;
+    const last = statusCards[statusCards.length - 1];
+    if (last && last.at === at) {
+      // 尾部仍是这张卡（之后没插过任何东西）→ 就地覆盖，不新开一行。
+      last.text = text;
+    } else {
+      statusCards.push({ text, at });
+    }
     refresh();
   };
 
@@ -1988,6 +2018,12 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 并行的记录，历史轨迹在 `traces/<id>.jsonl`（`/trace` 面板只看当前轮）。
    */
   const restoreSession = (session: SessionSummary): void => {
+    // 恢复的是**另一段历史**：上一段留下的卡/键位表归位（它们的锚点是旧会话的下标），
+    // 否则会在新灌进来的对话里插到莫名位置。
+    statusCards.length = 0;
+    hotkeysSource = undefined;
+    hotkeysAtMessageIndex = undefined;
+    hotkeysLinesCache = undefined;
     // 先走内核那条，而且**先**判断再读文件：内核的 restoreSession(file) 自己会读，
     // 这里要是先 loadSessionMessages 就等于把 1MB 多的文件读两遍。
     if (restoreHook) {
@@ -2941,9 +2977,20 @@ export class TranscriptChunks {
    * 而且这份数组还能顺手当「哪些块需要重画」的依据。
    */
   private readonly lastTexts: string[] = [];
-  /** 命令反馈（`/clean` 的结果、恢复会话的提示）—— 形状是**贴在对话区顶部**。 */
-  private readonly noticeBlock: Text;
-  /** 开场那节（常驻，永不消失）—— 与 6 秒的 notice 分开。 */
+  /**
+   * 命令反馈卡（`notify` 插的那些）—— **钉在对话流里**，不是贴顶一行。
+   *
+   * 每张卡对应一个 `Text`，与 `update()` 收到的 `statusCards` 一一对应；
+   * 位置由卡自己的 `at`（锚点消息条数）决定，见 `render()`。
+   * 为什么是数组而不是一个块：连续反馈要能各自留在历史里（对齐 pi 的
+   * `chatContainer.addChild`）—— 只有一个块的话旧反馈会被新反馈冲掉。
+   */
+  private readonly statusBlocks: Text[] = [];
+  /** `statusBlocks[i]` 上一次 `setText` 的内容，避免每帧重设让折行缓存失效。 */
+  private readonly lastStatus: string[] = [];
+  /** `statusBlocks[i]` 的锚点（第几条消息之后）—— 渲染时据此 splice。 */
+  private readonly statusAnchors: number[] = [];
+  /** 开场那节（常驻，永不消失）—— 与状态卡分开。 */
   private readonly bannerBlock: Text;
   /** 正在流式生成的文字：每帧都在变，**只渲染这一条**。 */
   private readonly streamBlock: Text;
@@ -2957,7 +3004,6 @@ export class TranscriptChunks {
   /** 上一帧的宽度：变了就得让 pi-tui 重新折行（`Text` 自己会重算）。 */
   private lastWidth = 0;
   /** 三个尾块上一次的内容，避免每帧都 `setText`（那会让它们的缓存失效）。 */
-  private lastNotice = '';
   private lastBanner = '';
   private lastStream = '';
   private lastTail = '';
@@ -2989,7 +3035,6 @@ export class TranscriptChunks {
   private hotkeysAtIndex = -1;
 
   constructor() {
-    this.noticeBlock = new Text('', 0, 0);
     this.bannerBlock = new Text('', 0, 0);
     this.streamBlock = new Text('', 0, 0);
     this.tail = new Text('', 0, 0);
@@ -3024,7 +3069,12 @@ export class TranscriptChunks {
     state: AgentState,
     width: number,
     expanded: boolean,
-    notice: { text: string },
+    /**
+     * 命令反馈卡（`notify` 插的那些）。每张带一个锚点 `at`：
+     * 渲染时 splice 在「第 `at` 条消息之后」，于是它是对话流里的一节，
+     * 新消息排在它下面、把它往上顶。**不过期**（与 pi 一致）。
+     */
+    statusCards: readonly { text: string; at: number }[],
     banner?: { text: string },
     /**
      * `/hotkeys` 的行（不给 = 不显示）。
@@ -3067,9 +3117,28 @@ export class TranscriptChunks {
       if (!message) continue;
       this.blockLines(message, i, key, state, width, expanded, hideThinking, widthChanged);
     }
-    // 三个尾块各自独立，不合成一个 —— 合起来每帧就要 join 一次 1.9MB 字符串，
-    // 那正是本次要消掉的开销（而且会把整段对话重复画一遍，见下面的注释）。
-    this.setIfChanged(this.noticeBlock, 'notice', notice.text === '' ? '' : `${notice.text}\n`, notice.text);
+    // 状态卡：张数变了就增减 `Text`（每张一块，独立缓存），内容变了才 setText。
+    // 与消息块同一个道理 —— 没变的卡一帧都不重算。
+    if (this.statusBlocks.length > statusCards.length) {
+      this.statusBlocks.length = statusCards.length;
+      this.lastStatus.length = statusCards.length;
+      this.statusAnchors.length = statusCards.length;
+    }
+    for (let i = 0; i < statusCards.length; i += 1) {
+      const card = statusCards[i]!;
+      let block = this.statusBlocks[i];
+      if (!block) {
+        block = new Text('', 0, 0);
+        this.statusBlocks[i] = block;
+      }
+      this.statusAnchors[i] = card.at;
+      // 卡后面跟一个空行，与 pi 的「spacer + text」同形（稍后 `render` 里也这样接）。
+      const text = card.text === '' ? '' : `${card.text}\n`;
+      if (this.lastStatus[i] !== card.text) {
+        this.lastStatus[i] = card.text;
+        block.setText(text);
+      }
+    }
     this.setIfChanged(
       this.bannerBlock,
       'banner',
@@ -3104,19 +3173,18 @@ export class TranscriptChunks {
   }
 
   /** 内容真变了才 `setText`（它会清掉块自己的折行缓存）。 */
-  private setIfChanged(block: Text, slot: 'notice' | 'banner' | 'stream' | 'tail', text: string, identity: string): void {
+  private setIfChanged(block: Text, slot: 'banner' | 'stream' | 'tail', text: string, identity: string): void {
     if (this.lastOf(slot) === identity) return;
     this.remember(slot, identity);
     block.setText(text);
   }
 
-  private lastOf(slot: 'notice' | 'banner' | 'stream' | 'tail'): string {
-    return slot === 'notice' ? this.lastNotice : slot === 'banner' ? this.lastBanner : slot === 'stream' ? this.lastStream : this.lastTail;
+  private lastOf(slot: 'banner' | 'stream' | 'tail'): string {
+    return slot === 'banner' ? this.lastBanner : slot === 'stream' ? this.lastStream : this.lastTail;
   }
 
-  private remember(slot: 'notice' | 'banner' | 'stream' | 'tail', value: string): void {
-    if (slot === 'notice') this.lastNotice = value;
-    else if (slot === 'banner') this.lastBanner = value;
+  private remember(slot: 'banner' | 'stream' | 'tail', value: string): void {
+    if (slot === 'banner') this.lastBanner = value;
     else if (slot === 'stream') this.lastStream = value;
     else this.lastTail = value;
   }
@@ -3186,17 +3254,36 @@ export class TranscriptChunks {
   render(width: number): string[] {
     const at = this.lastWidth > 0 ? this.lastWidth : width;
     const lines: string[] = [];
-    lines.push(...this.noticeBlock.render(at));
     lines.push(...this.bannerBlock.render(at));
-    // 键位表插在**当时的消息边界**上（见 `hotkeysAtIndex`）：这样它后面的对话会把它
-    // 往上顶，而不是永远贴在屏幕底部。
+    // 状态卡与键位表都**钉在当时的消息边界**上（各自的 `at`）：这样它后面的对话会把它
+    // 往上顶、随会话一起滚，而不是永远贴在屏幕底部。
+    //
+    // 同一锚点上键位表排前面：它是用户主动拉出来看的一张长表，先看到；
+    // 命令反馈是刚发生的事，紧跟其后。
     const hotkeysAt = this.hotkeysAtIndex;
+    const cardsAt = (index: number): string[] => {
+      const out: string[] = [];
+      for (let k = 0; k < this.statusBlocks.length; k += 1) {
+        if ((this.statusAnchors[k] ?? -1) === index) out.push(...this.statusBlocks[k]!.render(at));
+      }
+      return out;
+    };
+    /** 锚点在末尾或更后（如 `/new` 截短了消息）的卡一律排在最后。 */
+    const cardsAtEnd = (): string[] => {
+      const out: string[] = [];
+      for (let k = 0; k < this.statusBlocks.length; k += 1) {
+        if ((this.statusAnchors[k] ?? -1) >= this.blocks.length) out.push(...this.statusBlocks[k]!.render(at));
+      }
+      return out;
+    };
     for (let i = 0; i < this.blocks.length; i += 1) {
+      lines.push(...cardsAt(i));
       if (i === hotkeysAt) lines.push(...this.hotkeysBlock.render(at));
       const block = this.blocks[i];
       if (block) lines.push(...block.render(at));
     }
-    // 插在最后一条消息之后（`hotkeysAt >= blocks.length`）或一条消息都没有时。
+    // 锚点落在末尾（`at >= blocks.length`）或一条消息都没有时。
+    lines.push(...cardsAtEnd());
     if (hotkeysAt >= this.blocks.length) lines.push(...this.hotkeysBlock.render(at));
     lines.push(...this.streamBlock.render(at));
     lines.push(...this.tail.render(at));
@@ -3205,7 +3292,7 @@ export class TranscriptChunks {
 
   invalidate(): void {
     for (const block of this.blocks) block.invalidate();
-    this.noticeBlock.invalidate();
+    for (const block of this.statusBlocks) block.invalidate();
     this.bannerBlock.invalidate();
     this.streamBlock.invalidate();
     this.tail.invalidate();
@@ -3256,13 +3343,22 @@ export function renderTranscript(
   from: number,
   width: number,
   expanded: boolean,
-  notice?: { text: string },
+  /**
+   * 命令反馈卡（与 `TranscriptChunks.update` 同一形状）：每张带锚点 `at`，
+   * 渲染时 splice 在那条消息边界上。一次性模式（管道输出/测试）走这条。
+   */
+  statusCards?: readonly { text: string; at: number }[],
   /** 思考块是否折叠（`Ctrl+T`）。排在最后且默认 `false`，老调用方不受影响。 */
   hideThinking = false,
 ): string {
   const lines: string[] = [];
-  // 命令反馈贴在最上面，6 秒后自动消失。
-  if (notice && notice.text !== '') lines.push(notice.text, '');
+  // 卡按其锚点 splice，不再是「贴顶一行」。
+  const cardsAt = (index: number): void => {
+    for (const card of statusCards ?? []) {
+      if (card.at === index && card.text !== '') lines.push(card.text, '');
+    }
+  };
+  cardsAt(from);
   // `offset` 跟着实际插进去的行数走 —— 用户消息前面多了一行空隙，下标才不会错位。
   let offset = lines.length;
   for (let i = from; i < state.messages.length; i += 1) {
@@ -3271,6 +3367,8 @@ export function renderTranscript(
     lines.push(...userSpacer(message, offset));
     lines.push(...renderMessage(state, message, width, expanded, hideThinking));
     offset = lines.length;
+    // 下标 +1：卡片锚点是「第几条消息」（条数），而这里是 0 基的 i。
+    cardsAt(i + 1);
   }
   // 正在流式生成的这一段。**`renderTail` 里刻意不含它**（那边由独立的一块负责，
   // 合成一个就会画两遍）—— 一次性模式不走 TranscriptChunks，所以要在这里补上，

@@ -45,7 +45,7 @@ function stateOf(messages: Message[], extra: Partial<AgentState> = {}): AgentSta
   } as unknown as AgentState;
 }
 
-const notice = { text: '' };
+const noCards: { text: string; at: number }[] = [];
 
 /** 轨迹块渲染出来的行（剔色 + 去空行）—— 与 tui-render.test.ts 里那个同形。 */
 function linesOf(chunks: TraceChunks, width = 80): string[] {
@@ -58,7 +58,7 @@ function linesOf(chunks: TraceChunks, width = 80): string[] {
 test('分块渲染的内容与整段渲染逐行一致（优化不能改画面）', () => {
   const state = stateOf(history(6));
   const chunks = new TranscriptChunks();
-  chunks.update(state, 80, false, notice);
+  chunks.update(state, 80, false, noCards);
   // Text 组件会把每行补空格到全宽，而 renderTranscript 不补 —— 断言时比剥色 + 去尾空格。
   const viaChunks = stripTerminalSequences(chunks.render(80).join('\n'))
     .split('\n')
@@ -72,14 +72,14 @@ test('分块渲染的内容与整段渲染逐行一致（优化不能改画面�
 test('流式的那一段画在最后，且只有它在变', () => {
   const chunks = new TranscriptChunks();
   const base = stateOf(history(3));
-  chunks.update(base, 80, false, notice);
+  chunks.update(base, 80, false, noCards);
   const before = chunks.render(80).length;
   // 流式：phase=thinking 且 streamingText 有值。
   chunks.update(
     stateOf(history(3), { phase: 'thinking', streamingText: '正在生成的话' }),
     80,
     false,
-    notice,
+    noCards,
   );
   const after = stripTerminalSequences(chunks.render(80).join('\n'));
   assert.ok(after.includes('正在生成的话'), `流式文字要画出来：${after}`);
@@ -89,7 +89,7 @@ test('流式的那一段画在最后，且只有它在变', () => {
     stateOf(history(3), { phase: 'thinking', streamingText: '正在生成的话，而且更长了' }),
     80,
     false,
-    notice,
+    noCards,
   );
   const grown = stripTerminalSequences(chunks.render(80).join('\n'));
   assert.ok(grown.includes('而且更长了'), grown);
@@ -99,11 +99,11 @@ test('流式的那一段画在最后，且只有它在变', () => {
 test('流式收工后 streamingText 被清掉：那段文字消失，不再残留在界面上', () => {
   const chunks = new TranscriptChunks();
   const msgs = history(3);
-  chunks.update(stateOf(msgs, { phase: 'thinking', streamingText: '临时的一段' }), 80, false, notice);
+  chunks.update(stateOf(msgs, { phase: 'thinking', streamingText: '临时的一段' }), 80, false, noCards);
   assert.ok(stripTerminalSequences(chunks.render(80).join('\n')).includes('临时的一段'));
   // llm.done 之后：phase 回 idle、streamingText 清空，但**消息列表里多了一条**助手消息。
   const settled = [...msgs, { role: 'assistant', content: [{ type: 'text', text: '临时的一段' }] } as Message];
-  chunks.update(stateOf(settled), 80, false, notice);
+  chunks.update(stateOf(settled), 80, false, noCards);
   const out = stripTerminalSequences(chunks.render(80).join('\n'));
   // 一次（作为正式消息），不是两次（正式 + 残留的流式块）。
   assert.equal(out.split('临时的一段').length - 1, 1, `不该残留流式块：${out}`);
@@ -112,14 +112,14 @@ test('流式收工后 streamingText 被清掉：那段文字消失，不再残�
 test('宽度变了要重新折行（不能拿旧宽度的行凑合）', () => {
   const chunks = new TranscriptChunks();
   const state = stateOf(history(3));
-  chunks.update(state, 40, false, notice);
+  chunks.update(state, 40, false, noCards);
   const narrow = chunks.render(40);
-  chunks.update(state, 120, false, notice);
+  chunks.update(state, 120, false, noCards);
   const wide = chunks.render(120);
   assert.notEqual(narrow.join('\n'), wide.join('\n'), '宽度不同，折行结果就该不同');
   // 切回原宽度：要重新折回窄版（而不是留在宽版的行上）。
   // 注意必须先 `update` 再 `render` —— 宽度以 update 为准（见 render 的注释）。
-  chunks.update(state, 40, false, notice);
+  chunks.update(state, 40, false, noCards);
   assert.equal(chunks.render(40).join('\n'), narrow.join('\n'), '切回窄宽度仍是原折行');
 });
 
@@ -141,21 +141,21 @@ test('Ctrl+O 切折叠后工具块要重画（键里带了 expanded，不会读�
     } as Message,
   ]);
   const chunks = new TranscriptChunks();
-  chunks.update(state, 80, false, notice);
+  chunks.update(state, 80, false, noCards);
   const collapsed = chunks.render(80).length;
-  chunks.update(state, 80, true, notice);
+  chunks.update(state, 80, true, noCards);
   const expanded = chunks.render(80).length;
   assert.ok(expanded > collapsed, `展开后行数应变多：${collapsed} → ${expanded}`);
   // 再折回去：要回到折叠态（不能停在展开态）。
-  chunks.update(state, 80, false, notice);
+  chunks.update(state, 80, false, noCards);
   assert.equal(chunks.render(80).length, collapsed, '折回后应与第一次一致');
 });
 
 test('/new 之后消息变少：多余的块不再被画出来', () => {
   const chunks = new TranscriptChunks();
-  chunks.update(stateOf(history(10)), 80, false, notice);
+  chunks.update(stateOf(history(10)), 80, false, noCards);
   const long = chunks.render(80).length;
-  chunks.update(stateOf(history(2)), 80, false, notice);
+  chunks.update(stateOf(history(2)), 80, false, noCards);
   const short = chunks.render(80).length;
   assert.ok(short < long, `消息变少后行数应变少：${long} → ${short}`);
   const out = stripTerminalSequences(chunks.render(80).join('\n'));
@@ -163,16 +163,48 @@ test('/new 之后消息变少：多余的块不再被画出来', () => {
   assert.ok(out.includes('回答 1'), '保留的消息仍在');
 });
 
-test('notice 贴在对话区顶部（命令反馈滚上去就看不见了）', () => {
+test('命令反馈卡钉进对话流：随会话走，不再是贴顶一行', () => {
+  // 对齐 pi 的 `showStatus`：反馈是 chatContainer 里的一节（addChild），
+  // 位置在**当时的消息边界**上，之后的对话把它往上顶。
   const chunks = new TranscriptChunks();
-  chunks.update(stateOf(history(3)), 80, false, { text: '已清理 3 条历史会话' });
+  const before = history(3);
+  chunks.update(stateOf(before), 80, false, [{ text: '已清理 3 条历史会话', at: before.length }]);
   const lines = stripTerminalSequences(chunks.render(80).join('\n')).split('\n');
   const at = lines.findIndex((l) => l.includes('已清理 3 条历史会话'));
-  assert.ok(at >= 0, `命令反馈要画出来：${lines[0]}`);
-  assert.ok(at <= 1, `应该在顶部，实际在第 ${at} 行`);
-  // 清掉之后就不留孤儿行。
-  chunks.update(stateOf(history(3)), 80, false, { text: '' });
-  assert.ok(!stripTerminalSequences(chunks.render(80).join('\n')).includes('已清理 3 条历史会话'));
+  assert.ok(at >= 0, `命令反馈要画出来：${lines.join('\n')}`);
+  // 钉在末尾（当时没有更晚的消息）。
+  const lastMsg = lines.findIndex((l) => l.includes('回答 2'));
+  assert.ok(at > lastMsg, `反馈排在最后一条消息之后：第 ${at} 行（最后消息在第 ${lastMsg} 行）`);
+
+  // 之后又有了新对话：卡留在原位（在旧消息之后、新消息之前），被往上顶开。
+  const after = [...before, { role: 'user', content: '卡之后的新消息' } as Message];
+  chunks.update(stateOf(after), 80, false, [{ text: '已清理 3 条历史会话', at: before.length }]);
+  const out = stripTerminalSequences(chunks.render(80).join('\n'));
+  assert.ok(
+    out.indexOf('已清理 3 条历史会话') < out.indexOf('卡之后的新消息'),
+    `卡要被新消息顶到上面（这才是「随会话滚走」）：\n${out}`,
+  );
+});
+
+test('连续反馈（中间没有新对话）在同一张卡上覆盖，不刷屏', () => {
+  // 这就是「换模型 → 切思考级别」这类连续配置变更：`at` 没变，应是同一张卡。
+  const chunks = new TranscriptChunks();
+  const msgs = history(2);
+  chunks.update(stateOf(msgs), 80, false, [{ text: 'Model: deepseek', at: msgs.length }]);
+  chunks.update(stateOf(msgs), 80, false, [{ text: 'Thinking level: high', at: msgs.length }]);
+  const out = stripTerminalSequences(chunks.render(80).join('\n'));
+  assert.ok(out.includes('Thinking level: high'), `新反馈要画出来：${out}`);
+  assert.ok(!out.includes('Model: deepseek'), `旧反馈被覆盖，不该还留一行：${out}`);
+
+  // 中间插过新对话之后，下一句反馈会另起一张卡（旧卡留在历史里）。
+  const grown = [...msgs, { role: 'user', content: '又问了一句' } as Message];
+  chunks.update(stateOf(grown), 80, false, [
+    { text: 'Model: deepseek', at: msgs.length },
+    { text: 'Thinking level: high', at: grown.length },
+  ]);
+  const two = stripTerminalSequences(chunks.render(80).join('\n'));
+  assert.ok(two.includes('Model: deepseek'), `旧卡应留在历史里：${two}`);
+  assert.ok(two.includes('Thinking level: high'), two);
 });
 
 /**
@@ -188,13 +220,13 @@ test('/hotkeys：新消息排在键位表**下面**（不是被表压在下面�
   const HOTKEYS = ['─── 键位表 ───', '| Ctrl+R | 轨迹 |'];
   // 对话进行到第 4 条（2 轮）时敲 /hotkeys。
   const before = history(2);
-  chunks.update(stateOf(before), 80, false, notice, undefined, HOTKEYS, before.length);
+  chunks.update(stateOf(before), 80, false, noCards, undefined, HOTKEYS, before.length);
   const atInsert = stripTerminalSequences(chunks.render(80).join('\n'));
   assert.ok(atInsert.includes('键位表'), `表要画出来：${atInsert}`);
 
   // 之后的对话：新消息追加在表**下面**。
   const after = [...before, { role: 'user', content: '表之后的新消息' } as Message];
-  chunks.update(stateOf(after), 80, false, notice, undefined, HOTKEYS, before.length);
+  chunks.update(stateOf(after), 80, false, noCards, undefined, HOTKEYS, before.length);
   const out = stripTerminalSequences(chunks.render(80).join('\n'));
   assert.ok(out.includes('表之后的新消息'), `新消息要画出来：${out}`);
   assert.ok(
@@ -205,33 +237,33 @@ test('/hotkeys：新消息排在键位表**下面**（不是被表压在下面�
 
 test('/hotkeys：不给位置时退化到末尾（老调用方不会崩）', () => {
   const chunks = new TranscriptChunks();
-  chunks.update(stateOf(history(2)), 80, false, notice, undefined, ['KEYTABLE']);
+  chunks.update(stateOf(history(2)), 80, false, noCards, undefined, ['KEYTABLE']);
   const out = stripTerminalSequences(chunks.render(80).join('\n'));
   assert.ok(out.includes('KEYTABLE'));
   assert.ok(out.indexOf('KEYTABLE') > out.indexOf('回答 1'), '默认插在末尾');
 });
 
-test('banner 是常驻的（开场那节永不消失），与 6 秒的 notice 分开', () => {
+test('banner 是常驻的（开场那节永不消失），与命令反馈卡分开', () => {
   // 回归：开场那节原先走 notify() + 30 秒，于是用户往上翻找刚才那条提示时它已经没了。
   // 而「我装了哪些 skill」正是要反复对照着打 `/skill:x` 的东西。
   const chunks = new TranscriptChunks();
-  chunks.update(stateOf(history(3)), 80, false, { text: '' }, { text: '[Skills]\ndemo, other' });
+  chunks.update(stateOf(history(3)), 80, false, [], { text: '[Skills]\ndemo, other' });
   const withBanner = stripTerminalSequences(chunks.render(80).join('\n'));
   assert.ok(withBanner.includes('[Skills]'), `banner 要画出来：${withBanner}`);
   assert.ok(withBanner.includes('demo, other'), withBanner);
-  // notice 清空**不该**带走 banner —— 两者是独立的槽位。
-  chunks.update(stateOf(history(3)), 80, false, { text: '一条命令反馈' }, { text: '[Skills]\ndemo, other' });
+  // 反馈卡清空**不该**带走 banner —— 两者是独立的槽位。
+  chunks.update(stateOf(history(3)), 80, false, [{ text: '一条命令反馈', at: 6 }], { text: '[Skills]\ndemo, other' });
   const both = stripTerminalSequences(chunks.render(80).join('\n'));
-  assert.ok(both.includes('[Skills]'), `notice 出现后 banner 仍在：${both}`);
-  assert.ok(both.includes('一条命令反馈'), `notice 也要在：${both}`);
-  // banner 排在 notice 下面（同在顶部，命令反馈更即时）。
+  assert.ok(both.includes('[Skills]'), `反馈卡出现后 banner 仍在：${both}`);
+  assert.ok(both.includes('一条命令反馈'), `反馈卡也要在：${both}`);
+  // banner 在**顶部**（开场那节），反馈卡在对话流末尾 —— banner 在前。
   assert.ok(
-    both.indexOf('一条命令反馈') < both.indexOf('[Skills]'),
-    `顺序：notice 在 banner 之前\n${both}`,
+    both.indexOf('[Skills]') < both.indexOf('一条命令反馈'),
+    `顺序：banner（顶部）在反馈卡（末尾）之前\n${both}`,
   );
   // 不给 banner 也不该崩（没装 skill 的会话）。
   const bare = new TranscriptChunks();
-  bare.update(stateOf(history(2)), 80, false, { text: '' });
+  bare.update(stateOf(history(2)), 80, false, []);
   assert.ok(bare.render(80).length > 0);
 });
 
@@ -250,7 +282,7 @@ test('收工原因画在最后（流式/重试提示之后）', () => {
 
 function chunksLines(state: AgentState, width: number): string {
   const chunks = new TranscriptChunks();
-  chunks.update(state, width, false, notice);
+  chunks.update(state, width, false, noCards);
   return chunks.render(width).join('\n');
 }
 
@@ -267,7 +299,7 @@ test('renderTail 不含流式文字（它由独立的块负责，否则会画两
 test('性能：流式时每帧只重画尾部（1200 条历史，每帧必须在 16ms 预算内）', () => {
   const chunks = new TranscriptChunks();
   const history400 = history(400);
-  chunks.update(stateOf(history400), 100, false, notice);
+  chunks.update(stateOf(history400), 100, false, noCards);
   const frames = 30;
   const started = Date.now();
   for (let i = 0; i < frames; i += 1) {
@@ -275,7 +307,7 @@ test('性能：流式时每帧只重画尾部（1200 条历史，每帧必须在
       stateOf(history400, { phase: 'thinking', streamingText: `片段 ${i}` }),
       100,
       false,
-      notice,
+      noCards,
     );
     chunks.render(100);
   }
@@ -294,12 +326,12 @@ test('性能：首帧要为整段历史付出代价（一次性），但不该�
 
   const chunks = new TranscriptChunks();
   const firstStarted = Date.now();
-  chunks.update(state, 100, false, notice);
+  chunks.update(state, 100, false, noCards);
   chunks.render(100);
   const first = Date.now() - firstStarted;
 
   const secondStarted = Date.now();
-  chunks.update(state, 100, false, notice);
+  chunks.update(state, 100, false, noCards);
   chunks.render(100);
   const second = Date.now() - secondStarted;
 

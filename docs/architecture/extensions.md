@@ -320,7 +320,7 @@ ask_user_question
 
 | 成员 | 落在哪 |
 | --- | --- |
-| `ctx.ui.notify` | 界面那行 `notice`（`extension-ui.ts`） |
+| `ctx.ui.notify` | 界面那张命令反馈卡（`extension-ui.ts` → `notify()`） |
 | `pi.sendMessage` | 落成一条**用户消息**（于是环会跑起来） |
 
 那六个仍然 reject 掉（pi 的会话层，见 [surfaces](surfaces.md)），而不是给假 no-op ——

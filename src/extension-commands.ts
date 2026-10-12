@@ -94,7 +94,7 @@ export interface ExtensionCommands {
  *
  * @param runner     扩展运行时（造 `ctx` 用）
  * @param store      本项目的 store（`sendMessage` 往里 dispatch）
- * @param onError    handler 抛错时的去处（界面那行 notice）
+ * @param onError    handler 抛错时的去处（界面那张命令反馈卡）
  * @param onMessage  `pi.sendMessage` 的落点 —— 界面把它当用户消息发出去
  */
 export function installExtensionCommands(options: {

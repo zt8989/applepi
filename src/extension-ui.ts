@@ -68,7 +68,7 @@ export interface HostUiOptions {
   theme: Theme;
   /** raw input 的注册口（pi-tui 的 `addInputListener`）。 */
   addInputListener(listener: TuiInputListener): () => void;
-  /** 扩展的提示写进哪里（界面对话区顶部那行 `notice`）。 */
+  /** 扩展的提示写进哪里（界面 `notify()` 插的那张命令反馈卡）。 */
   onNotice(text: string): void;
   /**
    * 放一块内容到输入区上方（`setWidget` 的落点）。
