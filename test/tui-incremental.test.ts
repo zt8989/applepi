@@ -14,7 +14,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { stripTerminalSequences } from '@earendil-works/pi-tui';
-import { renderTranscript, TranscriptChunks, renderTail } from '../src/tui/app';
+import { renderTranscript, TranscriptChunks, renderTail, TraceChunks } from '../src/tui/app';
+import { createTraceTree, appendNode, patchNode, renderTree, traceStats, type TraceTree } from '../src/trace';
 import { setupTheme } from '../src/tui/theme';
 import type { AgentState } from '../src/state';
 import type { Message } from '@earendil-works/pi-ai';
@@ -45,6 +46,14 @@ function stateOf(messages: Message[], extra: Partial<AgentState> = {}): AgentSta
 }
 
 const notice = { text: '' };
+
+/** 轨迹块渲染出来的行（剔色 + 去空行）—— 与 tui-render.test.ts 里那个同形。 */
+function linesOf(chunks: TraceChunks, width = 80): string[] {
+  return stripTerminalSequences(chunks.render(width).join('\n'))
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line !== '');
+}
 
 test('分块渲染的内容与整段渲染逐行一致（优化不能改画面）', () => {
   const state = stateOf(history(6));
@@ -301,4 +310,137 @@ test('性能：首帧要为整段历史付出代价（一次性），但不该�
     second * 5 < Math.max(whole, 50),
     `第二帧 ${second}ms 仍然太慢（整段 ${whole}ms）：历史块没被缓存住`,
   );
+});
+
+// ══════════════════════ 轨迹侧的增量与复杂度 ══════════════════════
+
+/**
+ * 一批「同一父下的 step」—— 这是重试链与「一轮里并行工具」的形状。
+ *
+ * 之所以专门造这个形状：旧的 `traceStats()` / `renderTree()` 在这上面退化成 O(k²)
+ * （对每个节点把整组兄弟扫一遍）。而 `refresh()` 是每个流式 token 一次的 ——
+ * 长会话下每个 token 都为这个付钱，界面就卡了。
+ */
+function traceWithSiblingSteps(steps: number): TraceTree {
+  let tree = createTraceTree('s');
+  const root = appendNode(tree, null, 'turn.start', { status: 'pending', label: '回合', createdAt: 0 });
+  tree = root.tree;
+  for (let i = 0; i < steps; i += 1) {
+    tree = appendNode(tree, root.node.id, 'step.start', {
+      status: 'pending', label: `第 ${i + 1} 步`, createdAt: i,
+    }).tree;
+  }
+  return tree;
+}
+
+test('轨迹：节点数翻倍，traceStats 耗时不该翻两番（O(N²) 回归）', () => {
+  // 先用小的把 JIT 烘一下，否则第一次调用的编译开销会淹掉信号。
+  traceStats(traceWithSiblingSteps(50));
+
+  const timeFor = (steps: number): number => {
+    const tree = traceWithSiblingSteps(steps);
+    const started = performance.now();
+    for (let i = 0; i < 10; i += 1) traceStats(tree);
+    return performance.now() - started;
+  };
+
+  const small = timeFor(200);
+  const large = timeFor(800);
+  // 节点变 4 倍。线性应该是 ~4 倍，旧的 O(N²) 是 ~16 倍。
+  // 阈值取 8 倍（远低于 16），留足 CI 抖动的余量，又足以抓住 O(N²)。
+  assert.ok(
+    large < Math.max(small * 8, 5),
+    `200 节点 ${small.toFixed(2)}ms → 800 节点 ${large.toFixed(2)}ms：增长太快，像 O(N²)`,
+  );
+});
+
+test('轨迹：节点数翻倍，renderTree 耗时不该翻两番（O(N²) 回归）', () => {
+  renderTree(traceWithSiblingSteps(50));
+
+  const timeFor = (steps: number): number => {
+    const tree = traceWithSiblingSteps(steps);
+    const started = performance.now();
+    for (let i = 0; i < 5; i += 1) renderTree(tree);
+    return performance.now() - started;
+  };
+
+  const small = timeFor(200);
+  const large = timeFor(800);
+  assert.ok(
+    large < Math.max(small * 8, 5),
+    `200 节点 ${small.toFixed(2)}ms → 800 节点 ${large.toFixed(2)}ms：增长太快，像 O(N²)`,
+  );
+});
+
+test('TraceChunks：节点一个字没动时，一帧不做任何重算（含 Intl.Segmenter）', () => {
+  const tree = traceWithSiblingSteps(400);
+  const chunks = new TraceChunks();
+  chunks.update(tree, 100, '');
+
+  // 同一棵**树对象**再 update 一次：所有节点引用都没变。
+  // 旧版这里会把 400 个节点全部重新 `lineOf()`（每一步都走分词）——
+  // 新版应当直接跳过，只走一遍循环。
+  const started = performance.now();
+  for (let i = 0; i < 50; i += 1) chunks.update(tree, 100, '');
+  const perFrame = (performance.now() - started) / 50;
+
+  // 真正的判据不是墙钟而是「不重算」：拿一次冷 update 比。
+  const cold = new TraceChunks();
+  const coldStarted = performance.now();
+  cold.update(tree, 100, '');
+  const coldMs = performance.now() - coldStarted;
+
+  // 热帧应该比冷帧便宜很多（冷帧要算 400 行）。留 5 倍余量。
+  assert.ok(
+    perFrame * 5 < Math.max(coldMs, 2),
+    `热帧 ${perFrame.toFixed(3)}ms 相对冷帧 ${coldMs.toFixed(2)}ms 没有明显变便宜：没跳过未变节点`,
+  );
+});
+
+test('TraceChunks：只改一个节点时，只有那一个块被重画', () => {
+  let tree = traceWithSiblingSteps(60);
+  const chunks = new TraceChunks();
+  chunks.update(tree, 80, '');
+  const before = stripTerminalSequences(chunks.render(80).join('\n')).split('\n');
+
+  // 闭合中间那个节点（造出一个新对象）。
+  const midId = tree.order[30] ?? '';
+  tree = patchNode(tree, midId, { status: 'ok', endedAt: 123 });
+  chunks.update(tree, 80, '');
+  const after = stripTerminalSequences(chunks.render(80).join('\n')).split('\n');
+
+  let changed = 0;
+  for (let i = 0; i < Math.min(before.length, after.length); i += 1) {
+    if (before[i] !== after[i]) changed += 1;
+  }
+  assert.equal(changed, 1, '只有一个节点的行变了');
+});
+
+// 增量的判据是「节点对象引用」。一旦树**变短再变长**，同一个下标可能换了一个节点 ——
+// 这时引用变了就该重算（否则会画上一个节点的行）。这条钉住那个回退路径。
+test('TraceChunks：树变短再变长时，同一位置的块会重算而不是留下旧节点的行', () => {
+  const chunks = new TraceChunks();
+
+  // 先 5 个节点。
+  let long = traceWithSiblingSteps(5);
+  chunks.update(long, 80, '');
+  assert.match(linesOf(chunks).join(' '), /第 5 步/, '先有 5 个节点');
+
+  // 换成只有 2 个节点的新树 —— 块数组该被截到 2。
+  let short = createTraceTree('s2');
+  const root = appendNode(short, null, 'turn.start', { status: 'pending', label: '新树', createdAt: 0 });
+  short = root.tree;
+  for (let i = 0; i < 2; i += 1) {
+    short = appendNode(short, root.node.id, 'step.start', { status: 'pending', label: `短 ${i}`, createdAt: i }).tree;
+  }
+  chunks.update(short, 80, '');
+  const shrunk = linesOf(chunks).join(' ');
+  assert.equal(/第 5 步/.test(shrunk), false, '旧节点不残留');
+  assert.match(shrunk, /短 1/);
+
+  // 再变长（新树里同一个下标是不同的节点对象）—— 应该把新节点画出来。
+  short = appendNode(short, root.node.id, 'step.start', { status: 'pending', label: '又长出来', createdAt: 9 }).tree;
+  chunks.update(short, 80, '');
+  assert.match(linesOf(chunks).join(' '), /又长出来/, '变长后新节点要画出来');
+  assert.equal(/短 9|第 5 步/.test(linesOf(chunks).join(' ')), false, '没有凭空多出的旧节点');
 });

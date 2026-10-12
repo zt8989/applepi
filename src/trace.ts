@@ -275,6 +275,43 @@ export function childrenOf(tree: TraceTree, id: string | null): TraceNode[] {
     .filter((node): node is TraceNode => node !== undefined && node.parentId === id);
 }
 
+/**
+ * 一次遍历建出 `parentId → 孩子` 的索引。
+ *
+ * ## 为什么要有它
+ *
+ * `childrenOf()` 每次调用都扫一遍 `tree.order`（O(N)）。而 `traceStats()` 里有一段
+ * 「对每个 `step.start` 问一次它的兄弟」的循环 —— 两者相乘就是 O(N²)。
+ * 这正是「长会话里每个流式 token 都卡一下」的元凶（实测 800 节点时单次 42ms，
+ * 节点翻倍耗时约 5 倍）。所以凡是要在**循环里**反复问兄弟的地方，都先用这个函数
+ * 建一次索引，再从索引里取。
+ *
+ * 语义与 `childrenOf()` **完全一致**（同样的插入顺序、同样把 `undefined` 节点滤掉），
+ * 只是把「每次重扫」换成「一次建好」。
+ */
+function childrenIndex(tree: TraceTree): Map<string | null, TraceNode[]> {
+  const index = new Map<string | null, TraceNode[]>();
+  for (const childId of tree.order) {
+    const node = tree.nodes[childId];
+    if (node === undefined) continue;
+    const bucket = index.get(node.parentId);
+    if (bucket === undefined) index.set(node.parentId, [node]);
+    else bucket.push(node);
+  }
+  return index;
+}
+
+/** 从索引里取某节点（或根）的孩子；索引里没有就是空数组（不是 undefined）。 */
+function childrenFrom(
+  index: Map<string | null, TraceNode[]>,
+  id: string | null,
+): readonly TraceNode[] {
+  return index.get(id) ?? EMPTY_CHILDREN;
+}
+
+/** 共享的空数组：避免为「没有孩子」这种常见情况每次新建一个 `[]`。 */
+const EMPTY_CHILDREN: readonly TraceNode[] = [];
+
 /** 从根到某节点的祖先链（含自己），用于展示「当前在哪条线上」。 */
 export function pathTo(tree: TraceTree, id: string): TraceNode[] {
   const chain: TraceNode[] = [];
@@ -334,22 +371,49 @@ export function traceStats(tree: TraceTree): TraceStats {
   // 只数 step.start，**不能把 tool.call 算进来**：模型一轮里并行发两个工具时，
   // 这两个 tool.call 是同一个 llm.result 下的兄弟节点，按「多兄弟即重试」的判据会被记成一次重试。
   // 之前把工具也算上，于是每轮并行调用都虚增一个「重试」（实测一轮 2 个 bash 就 +1）。
+  //
+  // ## 为什么一次遍历就把「重试数」算完
+  //
+  // 「它是同父下的第 2 个及以后的 step，且那组里有失败的」—— 两个条件都能在
+  // **一遍**扫描里就得到：
+  //
+  //   - 「同父下已经见过几个 step.start」用一个计数器（按 parentId 分桶）就够；
+  //   - 「那组里有失败」用一个标记（按 parentId 分桶）就够。
+  //
+  // 于是**不需要** `childrenOf()`（那个函数每次重扫 `tree.order`），也不需要
+  // 事后 `filter` + `indexOf`（那在「同一父下很多 step」时是 O(k²) —— 而这正是
+  // 重试链的形状，实测 800 个同父 step 要 6.4ms）。两边都不要之后是严格 O(N)。
+  //
+  // 判据的**口径**一个字没变（与渲染层 `isForkGroup` 同口径）：一个回合里正常地
+  // 模型→工具→模型→工具，那些 step 共享同一父但**都没失败**，所以不算重试；
+  // 只有「同父下后面那个 step，且这一组里出过错」才 +1。
+  //
+  // 计数器与失败标记都按 `parentId` 分桶。只在真有 step.start 时才用 —— 没有 step 的树
+  // （开场、只说过话还没跑模型）连 Map 都不建。
   let retries = 0;
-  for (const id of tree.order) {
-    const node = tree.nodes[id];
-    if (!node || node.parentId === null) continue;
-    if (node.kind !== 'step.start') continue;
-    const siblings = childrenOf(tree, node.parentId).filter((c) => c.kind === 'step.start');
-    // index > 0：它是同父下的第 2 个及以后的尝试。
-    //
-    // **而且那组里必须有失败的** —— 一个回合里模型本来就会跑好几个 step
-    // （模型→工具→模型→工具…），那是**同一个回合的正常推进**，不是重试。
-    // 早期版本写成「同父下有多个 step.start 就是重试」，于是每个正常回合都虚增一次
-    // —— 而顶栏恰恰显示这个数，用户会看到「重试 3」却一次超时都没发生。
-    //
-    // 判据用 isForkGroup 是为了与渲染层同一口径（那边也是「有失败才画分叉」）。
-    if (siblings.indexOf(node) > 0 && isForkGroup(siblings)) {
-      retries += 1;
+  if (steps > 0) {
+    /** parentId → 迄今见过的 step.start 个数。 */
+    const seenSteps = new Map<string, number>();
+    /** parentId → 那组里有没有失败过的 step。 */
+    const groupFailed = new Set<string>();
+    for (const id of tree.order) {
+      const node = tree.nodes[id];
+      if (!node || node.parentId === null) continue;
+      if (node.kind !== 'step.start') continue;
+      const parentId = node.parentId;
+      const seenBefore = seenSteps.get(parentId) ?? 0;
+      // index > 0：它是同父下的第 2 个及以后的尝试。
+      //
+      // **而且那组里必须有失败的** —— 一个回合里模型本来就会跑好几个 step
+      // （模型→工具→模型→工具…），那是**同一个回合的正常推进**，不是重试。
+      // 早期版本写成「同父下有多个 step.start 就是重试」，于是每个正常回合都虚增一次
+      // —— 而顶栏恰恰显示这个数，用户会看到「重试 3」却一次超时都没发生。
+      if (seenBefore > 0 && groupFailed.has(parentId)) retries += 1;
+      seenSteps.set(parentId, seenBefore + 1);
+      // 失败标记要在**本轮之后**才可能影响后面的兄弟 —— 同一个 step 自己失败了
+      // 不该把自己算成重试（它没有更早的兄弟）。而它失败要让**下一个** step 记上，
+      // 所以直接写在同一个循环里，顺序天然对。
+      if (node.status === 'error') groupFailed.add(parentId);
     }
   }
 
@@ -453,17 +517,66 @@ export function renderTree(tree: TraceTree, options: TreeRenderOptions = {}): st
   const marks = options.marks ?? {};
   const lines: string[] = [];
 
+  // 建一次索引给下面所有「问兄弟」的地方用。
+  //
+  // 早先这里直接调 `childrenOf()`：那个函数每次重扫 `tree.order`，而下面几处
+  // （分叉组预扫、每行的 `isLastOf`、折叠时的孩子数）都在**逐节点循环**里调它，
+  // 整段于是退化成 O(N²) —— 与 `traceStats()` 是同一个毛病。轨迹页每帧都画树，
+  // 长会话下这就直接变成卡顿。
+  const children = childrenIndex(tree);
+  /** 某节点（或根）的孩子。语义与 `childrenOf()` 一致，只是走索引。 */
+  const childrenOfIndexed = (id: string | null): readonly TraceNode[] => childrenFrom(children, id);
+
   // 哪些节点是需要画树枝的「分叉组」的孩子。预先算好，别在循环里反复 childrenOf。
+  //
+  // ## 为什么按**组**算而不是按**节点**算
+  //
+  // 之前的写法是「对每个节点，问一次它那组兄弟要不要分叉」—— 于是一个有 k 个孩子的
+  // 父节点被算 k 次，每次又要 `.some()` 扫 k 个（O(k²)）。而「同一父下大量孩子」
+  // 恰好是**重试链**与「一轮里并行工具」的形状，实测 1600 个同父节点要 19.7ms。
+  //
+  // 一组兄弟的分叉与否**只跟那一组有关**，与是哪个孩子在问无关。所以改成按 `parentId`
+  // 把结果算**一遍**（用父亲 id 做缓存），再来标记它的孩子。O(k) /组。
+  const forkGroupCache = new Map<string, boolean>();
+  const groupIsFork = (parentId: string): boolean => {
+    const hit = forkGroupCache.get(parentId);
+    if (hit !== undefined) return hit;
+    const siblings = childrenOfIndexed(parentId);
+    const fork = siblings.length > 1 && isForkGroup(siblings);
+    forkGroupCache.set(parentId, fork);
+    return fork;
+  };
   const isForkChild = new Set<string>();
   for (const id of tree.order) {
     const node = tree.nodes[id];
     if (!node || node.parentId === null) continue;
-    const siblings = childrenOf(tree, node.parentId);
-    if (siblings.length > 1 && isForkGroup(siblings)) isForkChild.add(id);
+    if (groupIsFork(node.parentId)) isForkChild.add(id);
   }
 
   /**
-   * 某个节点该有的行首缩进。
+   * 某个节点给**孩子**留下的缩进（即“祖先那几级竖线”）。
+   *
+   * 一个分叉组贡献一级：组内不是最后一个就画竖线（后面还有兄弟），否则画空白。
+   * 单链节点不贡献任何东西 —— 它们的缩进原样传下去。
+   *
+   * 这是「平铺」的关键：正常对话（全部单链）所有节点的缩进都是空串。
+   */
+  const childIndentMemo = new Map<string, string>();
+  const childIndentOf = (id: string): string => {
+    const hit = childIndentMemo.get(id);
+    if (hit !== undefined) return hit;
+    const parentId = tree.nodes[id]?.parentId ?? null;
+    const inherited = parentId === null ? '' : childIndentOf(parentId);
+    // 只有分叉组的孩子才给下面加一级；非分叉节点把继承到的原样传下去。
+    const result = isForkChild.has(id)
+      ? inherited + (isLastOf(id) ? ' '.repeat(branchWidth) : `│${' '.repeat(branchWidth - 1)}`)
+      : inherited;
+    childIndentMemo.set(id, result);
+    return result;
+  };
+
+  /**
+   * 某个节点该有的行首缩进（含自己那一级的 `├─ `/`└─ `）。
    *
    * 规则：沿父链往上走，只数**分叉组**。每经过一个分叉组加一级缩进，中间那些单链的
    * 祖先**不占缩进** —— 于是正常对话是平铺的列表，只有出错的那一处（以及它下游跟着走的
@@ -471,31 +584,42 @@ export function renderTree(tree: TraceTree, options: TreeRenderOptions = {}): st
    *
    * 注意这里数的是「祖先里的分叉组个数」，不是「祖先个数」：数后者会让一条纯单链
    * 照样一级一级往下缩 —— 那就等于没拉平。
+   *
+   * ## 为什么带记忆（`memo`）
+   *
+   * 纯递归地沿父链走是 O(深度) /每个节点，深链下整棵树就是 O(N·深度) —— 实测 3200
+   * 节点的链要 18ms。但其实缩进是**递推的**：子节点的缩进 = 父亲的「给孩子缩进」+ 自己那一级。
+   * 父亲算过一次就能复用，于是除根以外每个节点只算「自己新增那一段」，均摊 O(1)。
+   *
+   * 两个记忆表分开存（自己的行 vs 给孩子）—— 它们**不同**：分叉组的孩子自己的行是
+   * `├─ `/`└─ `，而留给孩子的是 `│  `/`   `（竖线继续往下走）。混成一个的话，
+   * 分叉下面的子节点会丢掉那一级竖线 —— 实测就是那个错。
    */
+  const indentMemo = new Map<string, string>();
   const prefixOf = (id: string): string => {
-    // 先沿父链收集「祖先里那些分叉组的孩子」（不含自己），从根到近排列。
-    const forks: { last: boolean }[] = [];
-    let cursor: string | null = tree.nodes[id]?.parentId ?? null;
-    while (cursor !== null) {
-      if (isForkChild.has(cursor)) forks.unshift({ last: isLastOf(cursor) });
-      cursor = tree.nodes[cursor]?.parentId ?? null;
-    }
-    // 每个分叉组贡献一级缩进：组内不是最后一个就画竖线（后面还有兄弟），否则画空白。
-    let prefix = '';
-    for (const fork of forks) {
-      prefix += fork.last ? ' '.repeat(branchWidth) : `│${' '.repeat(branchWidth - 1)}`;
-    }
+    const hit = indentMemo.get(id);
+    if (hit !== undefined) return hit;
+
+    const parentId = tree.nodes[id]?.parentId ?? null;
+    // 父亲留给我们的缩进（递归；根没有父亲，基例是空串）。
+    // 递归深度 = 树的深度，而树深由「轮/步」层数决定（几十级），不会接近节点数 ——
+    // 所以不会有调用栈风险。
+    const inherited = parentId === null ? '' : childIndentOf(parentId);
     // 自己那一级：只有自己也是分叉组的一员才画树枝。
-    if (isForkChild.has(id)) {
-      prefix += `${isLastOf(id) ? '└' : '├'}${'─'.repeat(branchWidth - 1)} `;
-    }
-    return prefix;
+    //
+    // 非分叉组的节点**不加任何东西** —— 这就是「单链祖先不占缩进」的实现：
+    // 它们把自己的前缀原样传给下面。
+    const line = isForkChild.has(id)
+      ? inherited + `${isLastOf(id) ? '└' : '├'}${'─'.repeat(branchWidth - 1)} `
+      : inherited;
+    indentMemo.set(id, line);
+    return line;
   };
 
   /** 它是不是自己那组兄弟里的最后一个（决定 ├─ 还是 └─）。 */
   const isLastOf = (id: string): boolean => {
     const parentId = tree.nodes[id]?.parentId ?? null;
-    const siblings = childrenOf(tree, parentId);
+    const siblings = childrenOfIndexed(parentId);
     return siblings.length > 0 && siblings[siblings.length - 1]?.id === id;
   };
 
@@ -519,7 +643,7 @@ export function renderTree(tree: TraceTree, options: TreeRenderOptions = {}): st
     lines.push(truncate(head, maxWidth));
 
     if (options.collapsed?.has(node.id)) {
-      const hidden = childrenOf(tree, node.id).length;
+      const hidden = childrenOfIndexed(node.id).length;
       if (hidden > 0) {
         lines.push(truncate(`${' '.repeat(branchWidth)}   … ${hidden} 个子节点（已折叠）`, maxWidth));
       }

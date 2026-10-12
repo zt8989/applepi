@@ -215,6 +215,19 @@ export class TraceChunks implements Component {
   private readonly blocks: Text[] = [];
   /** 每个块上次 `setText` 的内容 —— 「变没变」的判据。 */
   private readonly lastTexts: (string | undefined)[] = [];
+  /**
+   * 每个块上次渲染时那个**节点对象**。
+   *
+   * `TraceNode` 的字段全是 `readonly`，`patchNode()` 改一个节点时会
+   * `{ ...existing, ...patch }` 造一个**新对象** —— 所以「引用没变」就等于
+   * 「这个节点一个字都没动」：`lineOf()` 连算都不用算。
+   *
+   * 这正是旧版缺的那一步：旧版虽然也只在文本变了才 `setText`，但**每一帧都要
+   * 对全部节点重算 `lineOf()`**（而里面是 `truncateToWidth` → `Intl.Segmenter`，
+   * 实测 1600 节点/帧 ~15ms）。而 `refresh()` 是每个流式 token 一次的 ——
+   * 于是长会话下每个 token 都在为「几百个早就不动的节点」重新分词。
+   */
+  private readonly lastNodes: (TraceNode | undefined)[] = [];
   /** 宽度变了要清折行缓存（`Text` 按宽度分桶缓存）。 */
   private lastWidth = 0;
   /** HEAD 那一行（树的落点）单独一块：它不是节点，但每次 tip 变都要更新。 */
@@ -225,6 +238,9 @@ export class TraceChunks implements Component {
 
   /**
    * 同步到最新状态。**只算变化的那几个节点。**
+   *
+   * 「变了」的判据是**节点对象的引用**（见 `lastNodes`）：`patchNode()` 会造新对象，
+   * 所以引用没变就是内容没变，那一行的 `lineOf()`（含 `Intl.Segmenter` 分词）直接跳过。
    *
    * @param emptyText 树还是空的时候显示什么（开场那句「发送第一条消息后…」）
    */
@@ -239,13 +255,25 @@ export class TraceChunks implements Component {
     if (this.blocks.length > order.length) {
       this.blocks.length = order.length;
       this.lastTexts.length = order.length;
+      this.lastNodes.length = order.length;
     }
     for (let i = 0; i < order.length; i += 1) {
       const id = order[i];
       const node = id === undefined ? undefined : tree.nodes[id];
       if (node === undefined) continue;
-      const line = this.lineOf(node, tree, width);
       let block = this.blocks[i];
+      // ── 增量：这个节点一个字都没动，就别重算这一行 ──
+      //
+      // `lastNodes[i] === node`（引用相等）= 还是那个节点对象 = 内容没变。
+      // 这时只需处理「只是宽度变了」（块的折行缓存按宽度分桶）。
+      //
+      // 但**只在块已经存在时**才能跳过：第一次见到的节点必须走下面的完整路径
+      // （要建块、要算行）。
+      if (block !== undefined && this.lastNodes[i] === node) {
+        if (widthChanged) block.invalidate();
+        continue;
+      }
+      const line = this.lineOf(node, tree, width);
       if (block === undefined) {
         // **必须新建而不是复用**：pi-tui 的布局按「组件对象 + 宽度」缓存
         // （layout.js 的 renderCached），复用旧对象才能让历史块在后续帧里跳过重算。
@@ -262,6 +290,8 @@ export class TraceChunks implements Component {
         // 看起来「内容变了」，多一次无谓的重建。
         block.invalidate();
       }
+      // 记下这次用的是哪个对象：下一帧引用没变就直接跳过（见循环开头）。
+      this.lastNodes[i] = node;
     }
     // 空树时给一句说明，而不是留一个 0 高的块（0 高度会让整块在布局里消失，
     // 于是「按了切页键没反应」与「面板塌了」看起来一模一样）。
