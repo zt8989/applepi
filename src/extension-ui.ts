@@ -25,7 +25,7 @@
  * 让非交互运行卡在一个没人能回答的对话框上。
  */
 import type { Component, TUI, TuiInputListener, OverlayOptions } from '@earendil-works/pi-tui';
-import { getKeybindings, Text } from '@earendil-works/pi-tui';
+import { getKeybindings, isKeyRelease, Text } from '@earendil-works/pi-tui';
 // Theme 是 pi 自己的（挂在 globalThis 上的 Proxy + 一堆 `fg`/`bg`/`bold` 方法），
 // 不在 pi-tui 里 —— 与 `tui/app.ts` 里 `setupTheme()` 返回的是同一个类型。
 import type { Theme } from '@earendil-works/pi-coding-agent';
@@ -210,7 +210,19 @@ export function createHostUi(source: () => HostUiOptions): ExtensionHostUi {
       options.onNotice(`${noticePrefix(type)}${message}`);
     },
 
-    onTerminalInput: (handler) => live().addInputListener(handler),
+    onTerminalInput: (handler) =>
+      live().addInputListener((data) => {
+        /**
+         * 扔掉「松开」事件 —— Kitty 键盘协议 flag 2 下一次按键给 press + release 两条，
+         * 而 release 同样能匹配扩展的快捷键，于是每个绑定的键都触发两次。
+         *
+         * pi-tui 自己那层过滤只管聚焦组件，管不到 input listener（本项目的快捷键与
+         * 扩展的 `onTerminalInput` 都在这里）。口径与 `app.ts` 的 `shouldIgnoreKey()`
+         * 一致：只用 pi-tui 的 `isKeyRelease()`，粘贴内容它内部已排除。
+         */
+        if (isKeyRelease(data)) return undefined;
+        return handler(data);
+      }),
 
     setWidget: (
       key: string,

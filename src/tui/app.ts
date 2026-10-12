@@ -26,6 +26,7 @@ import {
   TuiAltScreen,
   VStack,
   matchesKey,
+  isKeyRelease,
   CombinedAutocompleteProvider,
   stripTerminalSequences,
   truncateToWidth,
@@ -536,6 +537,53 @@ export function isScrollUp(data: string): boolean {
 /** 这一串输入是不是「往下翻」（Alt+↓ 或 Ctrl+N）。 */
 export function isScrollDown(data: string): boolean {
   return SCROLL_DOWN_SEQUENCES.includes(data);
+}
+
+/**
+ * 这条按键要不要**忽略**。
+ *
+ * ## 为什么需要它（mac 上「快捷键触发两次」的根因）
+ *
+ * pi-tui 的 Kitty 键盘协议请求里带了 flag 2（`terminal.js` 的 `1|2|4`），
+ * flag 2 的语义是「报告事件类型」—— 于是**一次按键产生两个序列**：一个 press
+ * （`:1u`）和一个 release（`:3u`）。macOS 上的 iTerm2 / Ghostty / kitty /
+ * WezTerm 都支持这套协议，所以按一下 `Ctrl+T` 收到两条。
+ *
+ * 而 release 序列**也能匹配 `matchesKey()`**（`keys.js` 的 parseKey 读的是
+ * `<code>;<mod>`，事件类型那第三段不参与匹配）。于是 `Ctrl+T` 切换两次 ——
+ * 切到轨迹页再切回对话页，按键看起来「完全没反应」。`Ctrl+O` 展开两次、
+ * `Ctrl+Q` 换两次模式也是同样的症状。
+ *
+ * pi-tui 自己**有**这层过滤，但只对**聚焦组件**生效：
+ *
+ * ```js
+ * // tui.js —— inputListeners 在前，过滤在后，且只查 focusedComponent
+ * for (const listener of this.inputListeners) { … }        // ← 我们的快捷键在这里
+ * …
+ * if (isKeyRelease(data) && !this.focusedComponent.wantsKeyRelease) return;
+ * ```
+ *
+ * 本项目的 `Ctrl+T/O/Q/C/L` 与滚轮全部挂在 **input listener** 上（不是聚焦组件），
+ * 所以官方那层过滤管不到它们。扩展的 `ctx.ui.onTerminalInput()` 更是直接透传到
+ * `tui.addInputListener()`，同一个坑。
+ *
+ * ## 为什么不「关掉 flag 2」
+ *
+ * 那要在 `terminal.js` 里改（且它给的是 press/repeat/release 三态，repeat 是
+ * 长按的正确语义）。而我们在**自己这层**过滤掉 release 已经够了：release 本来
+ * 就不该有任何动作，重复也是因为没人过滤它。
+ *
+ * ## 与官方的口径一致
+ *
+ * 用的是同一个 `isKeyRelease()`（pi-tui 从 `index` 导出），所以两层判断不会漂移。
+ * 粘贴内容（`\x1b[200~…\x1b[201~`）在 `isKeyRelease()` 里被显式排除 ——
+ * 而我们的滚轮判断是**前缀**匹配（`data.startsWith(ESC + '[A')`），粘贴里只要
+ * 开头撞上就会误判成翻页，所以粘贴必须在更早的地方就放行。
+ */
+export function shouldIgnoreKey(data: string): boolean {
+  // 粘贴 / 输入框里的普通文本：不可能是快捷键，一律放行。
+  if (data.includes(`${ESC}[200~`)) return false;
+  return isKeyRelease(data);
 }
 
 export function renderQueuePanel(state: AgentState, width: number): string {
@@ -1306,6 +1354,19 @@ export async function runTui(options: TuiOptions): Promise<number> {
   /** 当前页的 ScrollView —— 滚轮只滚它（另一个不滚，免得「在轨迹页却滚动了对话区」）。 */
   const activeScroll = (): ScrollView => (page === 'trace' ? traceScroll : scroll);
   const onInput: TuiInputListener = (data: string) => {
+    /**
+     * **先扔掉「松开」事件。**
+     *
+     * Kitty 键盘协议 flag 2（pi 主动请求的）让一次按键产生 press + release 两个序列，
+     * 而 release 同样能匹配 `matchesKey()` —— 所以不扔的话 `Ctrl+T` 会切换两次，
+     * 等于没切。这是 macOS（iTerm2/Ghostty/kitty/WezTerm 支持那套协议）上
+     * 「快捷键触发两次」的根因。详见 `shouldIgnoreKey()` 的注释。
+     *
+     * pi-tui 自己有这层过滤，但**只对聚焦组件生效**（`tui.js` 里它在
+     * inputListeners 之后才跑，且只查 `focusedComponent`）—— 而本项目的快捷键全挂在
+     * input listener 上，官方那层管不到。粘贴不受影响（`shouldIgnoreKey` 显式放行）。
+     */
+    if (shouldIgnoreKey(data)) return undefined;
     /**
      * **有弹窗时，本监听器整个让路。**
      *

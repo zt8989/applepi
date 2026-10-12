@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { stripTerminalSequences, visibleWidth } from '@earendil-works/pi-tui';
+import { stripTerminalSequences, visibleWidth, isKeyRelease, matchesKey } from '@earendil-works/pi-tui';
 import { formatCwdForFooter } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js';
 import {
   cwdLine,
@@ -14,6 +14,7 @@ import {
   TraceChunks,
   isScrollDown,
   isScrollUp,
+  shouldIgnoreKey,
   renderQueuePanel,
   renderTranscript,
   statsLine,
@@ -87,7 +88,6 @@ test('cwdLine：家目录里的路径会缩成 ~（与 pi 截图同形）', () =
 });
 
 test('cwdLine：不在家目录里时保持绝对路径（~ 只会骗人）', () => {
-  // 路径必须是**本机真实**的：pi 的 `formatCwdForFooter()` 内部先 `resolve()`，
   // 而 `resolve('D:\\some\\proj')` 在 posix 上是把它当**相对路径**接到 cwd 之后 ——
   // 结果正好落在 home 之下，于是被缩成 `~…`。那是 resolve 的规则，不是显示的 bug，
   // 断言要验的是「home 之外不缩」，所以给一个真的在 home 之外的绝对路径。
@@ -95,6 +95,59 @@ test('cwdLine：不在家目录里时保持绝对路径（~ 只会骗人）', ()
   const out = cwdLine(outside, 'main');
   assert.ok(!out.startsWith('~'), `家目录之外不该缩成 ~：${out}`);
   assert.ok(out.includes('outside-home-proj'), out);
+});
+
+// ─── Kitty 键盘协议 flag 2（mac 上「快捷键触发两次」） ───
+//
+// pi-tui 的 `terminal.js` 启动时请求 Kitty 键盘协议 `1|2|4`，flag 2 = 报告事件类型。
+// macOS 上支持它的终端（iTerm2 / Ghostty / kitty / WezTerm）于是**一次按键给两条序列**：
+// press（`:1u`）与 release（`:3u`）。
+//
+// 而 `matchesKey()` 只读 `<code>;<mod>` 两段、第三段事件类型不参与匹配，所以 release
+// 也「匹配」上了 —— 按一下 `Ctrl+T` 切换两次，等于没切。
+//
+// 官方那层过滤（`tui.js` 的 `isKeyRelease(data) && !focusedComponent.wantsKeyRelease`）
+// 在 inputListeners **之后**跑且只查聚焦组件，而本项目的快捷键全挂在 input listener
+// 上，管不到 —— 所以要自己滤。
+
+test('Kitty flag 2：release 序列同样匹配 ctrl+t（这就是重复触发的机制）', () => {
+  // 先把前提钉住：这个 bug 的根因是 release 能匹配。哪天 pi-tui 改了 matchesKey
+  // 让事件类型参与匹配，这条会失败并提醒更新 `shouldIgnoreKey()` 的前提说明。
+  const press = `${String.fromCharCode(27)}[116;5:1u`; // t=116, ctrl=5
+  const release = `${String.fromCharCode(27)}[116;5:3u`;
+  assert.ok(matchesKey(press, 'ctrl+t'), 'press 应当匹配 ctrl+t');
+  assert.ok(matchesKey(release, 'ctrl+t'), 'release 也匹配 ctrl+t —— 所以要滤');
+});
+
+test('shouldIgnoreKey：只扔 release，press 与普通键都放行', () => {
+  const esc = String.fromCharCode(27);
+  const release = `${esc}[116;5:3u`; // ctrl+t 的 release
+  const repeat = `${esc}[116;5:2u`; // ctrl+t 的 auto-repeat：长按应该重复生效
+  const press = `${esc}[116;5:1u`;
+  assert.ok(shouldIgnoreKey(release), 'release 要扔');
+  assert.ok(!shouldIgnoreKey(press), 'press 要放行');
+  // repeat 不是 release：长按连发是**期望行为**（翻页要能按住一直翻）。
+  assert.ok(!shouldIgnoreKey(repeat), 'repeat 不该被当 release 扔掉');
+  // Kitty 协议没启用时的传统字节序列（macOS 终端没启用 flag 2 时就是这个）。
+  assert.ok(!shouldIgnoreKey(String.fromCharCode(20)), '传统 Ctrl+T 要放行');
+});
+
+test('shouldIgnoreKey：粘贴内容放行（isScrollUp 是前缀匹配，误判就会误翻页）', () => {
+  // 粘贴被 `\x1b[200~ … \x1b[201~` 包着。若粘贴的文本以 `ESC[A` 开头
+  // （比如一段方向键转义），`isScrollUp()` 的前缀判断会命中而误翻页，
+  // 所以放行必须在更早的地方发生，而不是在滚轮那一层。
+  const pasted = `${String.fromCharCode(27)}[200~${String.fromCharCode(27)}[A粘贴的正文${String.fromCharCode(27)}[201~`;
+  assert.ok(!shouldIgnoreKey(pasted), '粘贴整体不是 release');
+  assert.ok(!isKeyRelease(pasted), 'pi-tui 的 isKeyRelease 也已排除粘贴');
+});
+
+test('shouldIgnoreKey：release 也不能触发滚轮', () => {
+  // 方向键的 release（`ESC[1;5:3A`）如果放行，会被 `SCROLL_UP_SEQUENCES` 之外挡住 ——
+  // 但 kitty 的 release 形式是 `\x1b[1;5:3A`，不带 `[` 后紧跟 A 的原形，
+  // `includes()` 精确匹配不会误判。这条钉住「release 在更早的一层就被滤掉」。
+  const releaseArrow = `${String.fromCharCode(27)}[1;5:3A`;
+  assert.ok(!isScrollUp(releaseArrow), '精确匹配不该把 release 当翻页');
+  assert.ok(shouldIgnoreKey(releaseArrow), 'release 仍然要滤');
 });
 
 // ─── git 分支：.git 是目录还是文件 ───
