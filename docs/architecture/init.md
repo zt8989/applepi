@@ -222,7 +222,7 @@ dispatch(action)
 
 | 文件 | 内容 | 记录类型 |
 | --- | --- | --- |
-| `~/.pi/agent/traces/<id>.jsonl` | 装载 + 对话 + 轨迹 | `prompt.init`、`model.init`、`message`、`add`、`close` |
+| `~/.pi/agent/traces/<时间戳>_<id>.jsonl` | 装载 + 对话 + 轨迹 | `prompt.init`、`model.init`、`message`、`add`、`close` |
 
 `message` 记录是**零 token 回放**的关键：每条对话消息（user / assistant / toolResult /
 中途插的 system 段）都追加一行，回放时按顺序重放就重建出 `messages`。
@@ -244,7 +244,7 @@ dispatch(action)
 模型），但「留痕」不该早于「真的有对话」。进来看一眼就退出是常态，而那时：
 
 - 切到轨迹页一打开就是一屏提示词摘要、工具名、能力标记（四个节点）；
-- `traces/<id>.jsonl` 已经被建出来，里面只有两条 init 记录、零条对话。
+- `traces/<时间戳>_<id>.jsonl` 已经被建出来，里面只有两条 init 记录、零条对话。
 
 会话文件那边早就是同一个决定（`SessionWriter.start()` 记下 header 但不落盘，
 见 [sessions](sessions.md)「空会话不落盘」）—— 两边的「会话」起点现在一致了：

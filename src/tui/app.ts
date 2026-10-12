@@ -44,7 +44,7 @@ import type { AgentState, QueuedInput, QueueKind } from '../state';
 import type { AgentStore } from '../store';
 import type { AgentAction } from '../actions';
 import type { ToolCall } from '@earendil-works/pi-ai';
-import { cleanSessionsExcept, listSessions, sessionPath, type SessionSummary } from '../config-home';
+import { cleanSessionsExcept, listSessions, findSessionFile, resumeCommand, type SessionSummary } from '../config-home';
 import { deleteSessionTrace, loadSessionMessages, openSessionPicker } from './session-picker';
 import {
   openModelPicker,
@@ -1019,7 +1019,22 @@ export async function runTui(options: TuiOptions): Promise<number> {
    */
   const currentSessionFile = (): string | undefined => {
     const id = sessionId?.();
-    return id === undefined || id === '' ? undefined : sessionPath(id, cwd);
+    return id === undefined || id === '' ? undefined : findSessionFile(id, cwd);
+  };
+  /**
+   * 退出前打印一行「怎么恢复这次会话」。
+   *
+   * 形状与 pi 的退出提示一样（`To resume this session: <命令>`，前缀暗色），
+   * 只是命令是本项目的 `ela --session <id>`。
+   * 用 `process.stdout.write` 而不是界面里的 notify：这一刻 TUI 已经停了（`tui.stop()`），
+   * 往终端写一行才是用户看得到的地方 —— 也是 pi 的做法。
+   *
+   * 判断与文案都在 config-home 的 `resumeCommand()`（那儿才有「真落过盘没」的事实）。
+   */
+  const printResumeOnExit = (): void => {
+    const command = resumeCommand(sessionId?.(), cwd);
+    // 暗色与 pi 一致（chalk.dim）；这里手写 ANSI，避免为一行提示引依赖。
+    if (command) process.stdout.write(`\u001b[2mTo resume this session:\u001b[0m ${command}\n`);
   };
   // 主题**必须先于一切渲染**装上：pi 的 `theme` 是个 globalThis 上的 Proxy，
   // 没 initTheme() 时读它任何属性都抛 `Theme not initialized`。
@@ -1507,6 +1522,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
           abortRun();
           return true;
         }
+        printResumeOnExit();
         tui.stop();
         process.exit(0);
       }

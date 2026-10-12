@@ -1,5 +1,5 @@
 /**
- * 会话记录器 —— 把对话写成 `sessions/<cwd>/<id>.jsonl`，供「恢复历史」用。
+ * 会话记录器 —— 把对话写成 `sessions/<cwd>/<时间戳>_<id>.jsonl`，供「恢复历史」用。
  *
  * ## 与轨迹的分工
  *
@@ -23,7 +23,6 @@
  * （用已写条数做游标），否则流式更新会把同一条 message 写几十遍。
  */
 import { createSessionHeader, resetEntrySeq, entrySeqValue, SessionWriter } from './session-file';
-import { sessionPath } from './config-home';
 import type { Message } from '@earendil-works/pi-ai';
 import type { AgentState } from './state';
 import type { AgentAction } from './actions';
@@ -106,7 +105,7 @@ export function createSessionRecorder(
   flush();
 
   return {
-    file: sessionPath(options.sessionId, options.cwd),
+    file: writer.path,
     written: () => written,
     dispose(): void {
       unsubscribe();

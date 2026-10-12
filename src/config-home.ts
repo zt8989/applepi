@@ -29,7 +29,7 @@
  *       settings.json          默认 provider / model / thinkingLevel
  *       sessions/
  *         --<cwd 编码>--/       按工作目录分（编码规则与 pi 相同）
- *           <sessionId>.jsonl 会话：首行 header，其后每行一条 entry
+ *           <时间戳>_<id>.jsonl 会话：首行 header，其后每行一条 entry
  *
  * `traces/` 是我们**多出来的**一个目录（pi 没有）：轨迹树（一次尝试一节点）+ 装载段
  * （prompt / model）。它不能混进 sessions/ —— 轨迹是每次对话的产物、落盘频繁，
@@ -37,14 +37,17 @@
  *
  * ## 会话怎么与 pi 互通
  *
- * 目录名（`--<cwd>--` 编码）与 header 形状与 pi 一致，所以 pi 的 `/resume` 能看到我们的
- * 会话，我们的 `/sessions` 也能看到 pi 的。两个已知差异，都不影响读：
- *   - **文件名**：pi 写 `<ISO 时间戳>_<id>.jsonl`，我们写 `<id>.jsonl`。pi 按 header
- *     里的 `id` 识别会话（不是文件名），所以两边都能列出来；反之我们读 pi 的文件时
- *     取 header 的 id，同样不靠文件名（见 `listSessions()`）。
+ * 目录名（`--<cwd>--` 编码）、**文件名**（`<ISO 时间戳>_<id>.jsonl`）与 header 形状与 pi 一致，
+ * 所以 pi 的 `/resume` 能看到我们的会话，我们的 `/sessions` 也能看到 pi 的。
+ * session id 也是同一个形状（UUIDv7）—— 于是把我们的 id 粘给 pi 的 `--session <id>`
+ * 能直接恢复。一个已知差异，不影响读：
  *   - **version**：我们写 `1`，pi 当前是 `3`。pi 会把 v1 升到 v3（补 `id`/`parentId`
  *     树、把 `hookMessage` 改成 `custom`）并重写文件；那些字段我们写的时候本来就有，
  *     所以升完不会丢东西。
+ *
+ * 早先我们的文件名是 `<id>.jsonl`（且 id 形如 `s<base36>`）。改成与 pi 一致后，
+ * 按 id 找文件需要扫目录比对 `_<id>.jsonl` 后缀（见 `findFileById()`）；老的 `<id>.jsonl`
+ * 仍然认，作为最后一条回退。
  */
 import {
   closeSync,
@@ -160,6 +163,123 @@ export function sessionPath(sessionId: string, cwd: string): string {
 
 export function tracePathFor(sessionId: string): string {
   return path.join(tracesDir(), `${sessionId}.jsonl`);
+}
+
+// ─── 文件名：`<时间戳>_<id>.jsonl`（与 pi 一致） ───
+//
+// ## 为什么文件名里要有时间戳
+//
+// 照抄 pi（`session-manager.js`：`timestamp.replace(/[:.]/g, "-")` + `_` + id）。
+// 好处是目录一眼能看出先后（`ls` 按名字排就是时间序），而且**同一毫秒里两次开新会话**
+// 也不会因为文件名一样而互相覆盖 —— id 已经是 uuid 不会撞，时间戳只是给人看的。
+//
+// ## 为什么 id 仍然单独存在（不把 id 塞进时间戳）
+//
+// 两者是不同的东西：时间戳是**创建时刻**，id 是**身份**。会话被恢复/续写时身份不变，
+// 时间戳也不该变（文件名只在创建时定一次）。所以文件一旦建好就不再改名。
+
+/**
+ * 生成文件名里的时间戳部分（与 pi 同一规则）。
+ *
+ * `2026-10-12T05:44:28.468Z` → `2026-10-12T05-44-28-468Z`
+ *
+ * 把 `:` 与 `.` 换成 `-`：Windows 文件名不允许冒号，而点号会与扩展名混淆。
+ * 两种字符一起换、换成同一个字符 —— 这是 pi 的写法（不是我们发明的）。
+ */
+export function fileTimestamp(iso: string): string {
+  return iso.replace(/[:.]/g, '-');
+}
+
+/** 会话文件名：`<时间戳>_<id>.jsonl`。`timestamp` 建议传 `new Date().toISOString()`。 */
+export function sessionFileName(sessionId: string, timestamp: string = new Date().toISOString()): string {
+  return `${fileTimestamp(timestamp)}_${sessionId}.jsonl`;
+}
+
+/** 轨迹文件名：与会话同一个形状（同一次会话两份记录文件名只差目录）。 */
+export function traceFileName(sessionId: string, timestamp: string = new Date().toISOString()): string {
+  return `${fileTimestamp(timestamp)}_${sessionId}.jsonl`;
+}
+
+/** 从文件名里取出 id 部分（`<时间戳>_<id>.jsonl` → id；没有前缀时原样返回文件名主体）。 */
+export function sessionIdFromFileName(fileName: string): string {
+  const base = fileName.endsWith('.jsonl') ? fileName.slice(0, -'.jsonl'.length) : fileName;
+  const underscore = base.indexOf('_');
+  return underscore < 0 ? base : base.slice(underscore + 1);
+}
+
+/**
+ * 在目录里按下 id 找文件：`<任意时间戳>_<id>.jsonl` 或旧的 `<id>.jsonl`。
+ *
+ * ## 为什么要扫目录而不是拼路径
+ *
+ * 文件名带创建时刻的时间戳，而一个 id 之后被恢复/续写时我们**不知道**当初那个时刻 ——
+ * 只有扫目录、比对 `_<id>.jsonl` 后缀才找得到。目录里文件数与会话数同量级
+ * （几十上百），一次 `readdir` 远比「把时间戳也存进 header 再读出来」简单。
+ *
+ * ## 旧文件仍然认
+ *
+ * 改名之前建的会话文件名就是 `<id>.jsonl`（无时间戳前缀）。它们还在盘上、还要能读
+ * （恢复历史、删会话）。所以精确匹配 `<id>.jsonl` 也放行，作为最后一条回退。
+ *
+ * 找不到时返回 null（调用方决定是「没有这个文件」还是拼一个默认路径）。
+ */
+export function findFileById(dir: string, id: string): string | null {
+  if (id === '') return null;
+  // 旧形状先试：它是最廉价的一次 existsSync，且避免为老会话白白 readdir。
+  const legacy = path.join(dir, `${id}.jsonl`);
+  if (existsSync(legacy)) return legacy;
+  let files: string[];
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  const suffix = `_${id}.jsonl`;
+  // 多个候选（同一 id 在不同时刻被建过文件，理论上不该发生）取**文件名最大的** ——
+  // 时间戳是定长 ISO，字符串序就是时间序，于是拿到的是最新那个。
+  let best: string | null = null;
+  for (const file of files) {
+    if (!file.endsWith(suffix)) continue;
+    if (best === null || file > best) best = file;
+  }
+  return best === null ? null : path.join(dir, best);
+}
+
+/** 会话文件的实际路径：先按 id 扫目录（认新名与旧名），找不到就用旧形状拼一个。 */
+export function findSessionFile(sessionId: string, cwd: string): string {
+  return findFileById(sessionDirFor(cwd), sessionId) ?? sessionPath(sessionId, cwd);
+}
+
+/** 轨迹文件的实际路径：先按 id 扫目录，找不到就用旧形状拼一个。 */
+export function findTraceFile(sessionId: string): string {
+  return findFileById(tracesDir(), sessionId) ?? tracePathFor(sessionId);
+}
+
+/**
+ * 退出时提示的「怎么恢复这次会话」命令。
+ *
+ * 打的是 `ela --session <id>` —— **本项目自己的入口**。
+ *
+ * ## 为什么是 `ela` 而不是 `pi`
+ *
+ * 用户看到这行提示时正在用 `ela`，把它粘回去自然是回到 `ela`。两边会话文件完全互通
+ * （目录名、文件名、header、id 全一致），所以粘给 `pi --session <id>` 同样能恢复 ——
+ * 但那是用户的另一个选择，不是我们要提示的默认路径。
+ *
+ * ## 什么时候不打印
+ *
+ * 只有「**真的落过盘**」才打印（那条命令要能真的跑起来）：
+ *   - 非 TTY（管道/重定向）：那些转义序列没人看，与 pi 同一判断；
+ *   - 没接过话（空会话不建文件，见 `SessionWriter.start`）：那个 id 还没文件，
+ *     `ela --session <id>` 会找不到，打印出来是误导。
+ *
+ * @returns 要打印的那一行（含前缀缩进由调用方决定），或者 null（不该打印）。
+ */
+export function resumeCommand(sessionId: string | undefined, cwd: string): string | null {
+  if (!sessionId) return null;
+  if (!process.stdout.isTTY) return null;
+  if (!existsSync(findFileById(sessionDirFor(cwd), sessionId) ?? '')) return null;
+  return `ela --session ${sessionId}`;
 }
 
 // ─── 列会话 ───
@@ -337,7 +457,7 @@ export function listSessions(filter?: { cwd?: string }): SessionSummary[] {
       let cwd = '';
       let createdAt: string | undefined;
       let parentSession: string | undefined;
-      let id = file.replace(/\.jsonl$/, '');
+      let id = sessionIdFromFileName(file);
       if (line) {
         try {
           const header = JSON.parse(line) as {
@@ -440,9 +560,9 @@ export function ensureDir(dir: string): void {
  *
  * ## 为什么两个都要删
  *
- * 一个会话在盘上落两处：`sessions/<cwd 编码>/<id>.jsonl`（对话历史）与 `traces/<id>.jsonl`
- * （执行轨迹）。只删前者的话，`/api/sessions` 列表干净了，但 `traces/` 会一直攒着
- * 几万个小文件 —— 而且那才是真正占空间的一份。
+ * 一个会话在盘上落两处：`sessions/<cwd 编码>/<时间戳>_<id>.jsonl`（对话历史）与
+ * `traces/<时间戳>_<id>.jsonl`（执行轨迹）。只删前者的话，`/api/sessions` 列表干净了，但
+ * `traces/` 会一直攒着几万个小文件 —— 而且那才是真正占空间的一份。
  *
  * ## 为什么不做「物理删除」之外的软标记
  *
@@ -476,7 +596,7 @@ export function cleanSessions(ids: readonly string[]): CleanResult {
       result.failed.push({ id, reason: `找不到会话 ${id}` });
       continue;
     }
-    const targets = [file, tracePathFor(id)];
+    const targets = [file, findTraceFile(id)];
     let ok = true;
     for (const target of targets) {
       try {

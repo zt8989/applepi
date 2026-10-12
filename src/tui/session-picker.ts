@@ -54,7 +54,7 @@ import {
 } from '@earendil-works/pi-coding-agent';
 import type { SessionListProgress } from '@earendil-works/pi-coding-agent/dist/core/session-manager.js';
 import type { ViewportTUI } from '@earendil-works/pi-tui';
-import { listSessions, tracePathFor, type SessionSummary } from '../config-home';
+import { listSessions, findTraceFile, type SessionSummary } from '../config-home';
 import { installProjectKeybindings } from './keybindings';
 import { readJsonlHead, readSessionMessages } from '../session-file';
 
@@ -64,7 +64,7 @@ type Progress = SessionListProgress;
 export interface SessionPickerOptions {
   tui: ViewportTUI;
   /**
-   * 当前会话文件（`sessions/<cwd 编码>/<id>.jsonl`）。
+   * 当前会话文件（`sessions/<cwd 编码>/<时间戳>_<id>.jsonl`）。
    *
    * 官方用它做两件事：把「正在用的这条」染成 accent 色，以及**拒绝删它**
    * （`Cannot delete the currently active session`）。后一条正是我们要的 ——
@@ -352,9 +352,9 @@ export function openSessionPicker(options: SessionPickerOptions): () => void {
   );
 
   // 删完的收尾：官方**自己**按事件绑了 `onDeleteSession`（先 `trash` 再 `unlink` 会话文件），
-  // 我们在外面包一层，拿到「被删的是哪一条」之后补删 `traces/<id>.jsonl`。
+  // 我们在外面包一层，拿到「被删的是哪一条」之后补删 `traces/<时间戳>_<id>.jsonl`。
   //
-  // **为什么必须连带删轨迹**：一个会话在盘上落两处（`sessions/…` 与 `traces/<id>.jsonl`），
+  // **为什么必须连带删轨迹**：一个会话在盘上落两处（`sessions/…` 与 `traces/<时间戳>_<id>.jsonl`），
   // 而轨迹那份才是真正占空间的。只删前者的话 `traces/` 会一直攒着几万个小文件 ——
   // `test/clean-sessions.test.ts` 钉的就是这条不变量。
   //
@@ -395,9 +395,9 @@ export function openSessionPicker(options: SessionPickerOptions): () => void {
   return close;
 }
 
-/** 删掉一条会话的轨迹文件（`traces/<id>.jsonl`）。删不掉不算失败 —— 清理是尽力而为。 */
+/** 删掉一条会话的轨迹文件（`traces/<时间戳>_<id>.jsonl`）。删不掉不算失败 —— 清理是尽力而为。 */
 export function deleteSessionTrace(session: SessionSummary): boolean {
-  const file = tracePathFor(session.id);
+  const file = findTraceFile(session.id);
   if (!existsSync(file)) return true;
   try {
     rmSync(file, { force: true });

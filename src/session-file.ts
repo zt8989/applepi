@@ -1,5 +1,5 @@
 /**
- * 会话文件：`<sessionId>.jsonl`，首行 header，其后每行一条 entry。
+ * 会话文件：`<时间戳>_<id>.jsonl`，首行 header，其后每行一条 entry。
  *
  * ## 格式照抄 pi
  *
@@ -13,17 +13,24 @@
  *
  * 为什么照抄：本项目**不要求** pi 能读我们的会话（那是另一件事），但抄一份格式有两个
  * 实利 —— 目录结构与 pi 一致（将来若要互通不用改），以及这份 header 定义是经过实战
- * 的，不用自己发明。
+ * 的，不用自己发明。文件名与 id 也与 pi 一致（见下面）。
+ *
+ * ## 文件名：`<时间戳>_<id>.jsonl`
+ *
+ * 与 pi 同一条规则（时间戳是 ISO 串把 `:` `.` 换成 `-`，id 是 UUIDv7）。好处：目录一眼
+ * 能看出先后，而 id 不靠文件名也能读出来（header 里有）。改名之前的旧文件
+ * （`<id>.jsonl`）仍然读得到 —— 解析路径扫目录时两种形状都认（见 config-home 的
+ * `findFileById`）。
  *
  * ## 轨迹不写在这里
  *
- * 轨迹（一次尝试一节点）在 `traces/<id>.jsonl`，与本文件分开。理由：轨迹是**每次对话**
- * 的产物、落盘频繁；会话文件是给人读的历史。混在一起的话「读一个会话」要先跳过一堆
- * 与它无关的记录。
+ * 轨迹（一次尝试一节点）在 `traces/<时间戳>_<id>.jsonl`，与本文件分开。理由：轨迹是
+ * **每次对话**的产物、落盘频繁；会话文件是给人读的历史。混在一起的话「读一个会话」要
+ * 先跳过一堆与它无关的记录。
  */
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { ensureDir, sessionPath } from './config-home';
+import { ensureDir, findFileById, sessionDirFor, sessionFileName } from './config-home';
 import type { Message } from '@earendil-works/pi-ai';
 
 export const SESSION_VERSION = 1;
@@ -119,7 +126,14 @@ export class SessionWriter {
     readonly id: string,
     readonly cwd: string,
   ) {
-    this.file = sessionPath(id, cwd);
+    // 会话文件路径：
+    //   - **已有**这个 id 的文件（恢复旧会话）就用它 —— 不能改名，续写要写回原文件；
+    //   - 否则按 pi 的形状建新名 `<时间戳>_<id>.jsonl`（时间戳取现在）。
+    //
+    // 为什么不一律用新名：恢复一个历史会话时，用户期望的就是「接着写那个文件」。
+    // 另建一个新名的文件会让同一个会话在盘上分成两份，而旧那份从此不再更新。
+    this.file =
+      findFileById(sessionDirFor(cwd), id) ?? path.join(sessionDirFor(cwd), sessionFileName(id));
   }
 
   get path(): string {

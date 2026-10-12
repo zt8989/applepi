@@ -27,6 +27,7 @@
  * 必然产出同一棵树（id 由 reducer 单调自增，不含时间戳），因此树可以在
  * reducer 里算，也可以在测试里断言，还能在 TUI 侧从 JSONL 回放重建。
  */
+import { uuidv7 } from '@earendil-works/pi-ai';
 
 /** 节点类型。 */
 /**
@@ -135,9 +136,26 @@ export interface TraceTree {
   readonly sessionId: string;
 }
 
-/** 生成会话 id 的工具函数（调用方决定是否注入 Date.now，让测试可复现）。 */
-export function newSessionId(now: number = Date.now()): string {
-  return `s${now.toString(36)}`;
+/**
+ * 生成会话 id：**UUIDv7**，与 pi 完全同一形状。
+ *
+ * ## 为什么不用以前的 `s<base36 时间戳>`
+ *
+ * 以前的 id 是 `s` + `Date.now().toString(36)`（如 `smv4jubkv`）。它有两个毛病：
+ *
+ *   1. **同一毫秒内两次开新会话会撞 id** —— 于是两次会话指向同一个文件名，后一次把
+ *      前一次的历史续写进同一个文件。真实发生过。
+ *   2. 与 pi 的 id 形状不同，于是 pi 的 `--session <id>` / `/resume` 那套互动（把我们的
+ *      id 粘给 pi）不成立 —— 而我们要的正是「会话两边互通」。
+ *
+ * UUIDv7 是**时间有序**的 UUID（前 48 位是毫秒时间戳）：既不会撞，又像 pi 一样可按
+ * 创建顺序排。直接用 pi-ai 导出的 `uuidv7()` —— 自己实现一份只会与 pi 慢慢分家。
+ *
+ * 顺带：id 里不再有「时间」这个可读信息，时间在**文件名**里（见 config-home 的
+ * `sessionFileName()`），这也是 pi 的做法。
+ */
+export function newSessionId(): string {
+  return uuidv7();
 }
 
 export function createTraceTree(sessionId: string): TraceTree {

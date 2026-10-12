@@ -120,7 +120,7 @@ export interface Kernel {
   /** 当前会话 id。**会变**（开新会话 / 恢复历史），所以是只读取值。 */
   readonly sessionId: string;
   persistence: TracePersistence | null;
-  /** 当前会话记录器（写 `sessions/<cwd>/<id>.jsonl`，供「恢复历史」用）。 */
+  /** 当前会话记录器（写 `sessions/<cwd>/<时间戳>_<id>.jsonl`，供「恢复历史」用）。 */
   readonly session: SessionRecorder | null;
   /** 开一个新会话：换 id（于是换文件）、清空对话。**不会**把新消息写进旧文件。 */
   newSession(): { id: string };
@@ -399,7 +399,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   });
 
   //
-  // 会话记录器：把消息流写成 `sessions/<cwd>/<id>.jsonl`，供「恢复历史」用。
+  // 会话记录器：把消息流写成 `sessions/<cwd>/<时间戳>_<id>.jsonl`，供「恢复历史」用。
   // 它同样是 store 订阅器 —— 挂在 dispatch 链上，成功失败都记。
   //
   // 写成可替换的：`newSession()` 要换 id（于是换文件），而 store 不重建。
@@ -502,7 +502,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       previous.recorder?.dispose();
       current = openResources(id);
       // 轨迹树也要读回来。早先只读消息，于是恢复后对话区有内容（含粘贴的图片），
-      // 而轨迹面板**空的** —— 而 `traces/<id>.jsonl` 明明在盘上。
+      // 而轨迹面板**空的** —— 而 `traces/<时间戳>_<id>.jsonl` 明明在盘上。
       // 那个症状特别有欺骗性：图像看得见、消息都在，只有轨迹没了。
       //
       // 读不到（旧会话、或当时开了 --no-trace）不是错误：那就发不带树的那条 action，

@@ -13,7 +13,7 @@ import {
   SessionWriter,
   sessionTitle,
 } from '../src/session-file';
-import { configHome, encodeCwd, listSessions } from '../src/config-home';
+import { configHome, encodeCwd, listSessions, findFileById } from '../src/config-home';
 import type { AgentAction } from '../src/actions';
 import type { AssistantMessage, Message } from '@earendil-works/pi-ai';
 
@@ -476,8 +476,11 @@ test('开新会话后，两段对话落在**两个文件**里（旧的不被续�
       kernel.store.dispatch({ type: 'user.message', text: '第二段' });
       await new Promise((r) => setTimeout(r, 50));
 
-      const file1 = path.join(sessionPathIn('/proj'), 'para1.jsonl');
-      const file2 = path.join(sessionPathIn('/proj'), `${second.id}.jsonl`);
+      const dir = sessionPathIn('/proj');
+      const file1 = findFileById(dir, 'para1');
+      const file2 = findFileById(dir, second.id);
+      assert.ok(file1, '第一段的文件应该建出来了');
+      assert.ok(file2, '新会话的文件应该建出来了');
       const text1 = await readFile(file1, 'utf8');
       const text2 = await readFile(file2, 'utf8');
 

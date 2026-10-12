@@ -1,5 +1,5 @@
 /**
- * Node 端的轨迹落盘：追加写 `.trace/<sessionId>.jsonl`。
+ * Node 端的轨迹落盘：追加写 `traces/<时间戳>_<id>.jsonl`。
  *
  * 选 JSONL 而不是整树覆盖写，是因为它像 git 的 reflog：
  *   - 崩溃只丢最后没 flush 的一行，历史完好；
@@ -16,7 +16,7 @@ import {
   type TraceSink,
 } from './trace-store';
 import type { TraceTree } from './trace';
-import { tracesDir } from './config-home';
+import { tracesDir, findFileById, traceFileName, sessionIdFromFileName } from './config-home';
 
 /**
  * 轨迹目录。**默认落在配置家目录里**（`~/.redux-agent/traces/`），不再是项目下的
@@ -33,9 +33,16 @@ function resolveDir(dir?: TraceDir): string {
   return tracesDir();
 }
 
-/** 某个会话的轨迹 JSONL 路径。 */
+/**
+ * 某个会话的轨迹 JSONL 路径。
+ *
+ * **先按 id 扫目录**（新名 `<时间戳>_<id>.jsonl` 与旧名 `<id>.jsonl` 都认）；
+ * 找不到就按新形状拼一个（时间戳取现在）—— 调用方多是「准备写」，那时拼新名是对的。
+ * 真正需要「这个文件存在吗」的调用方自己 `existsSync`（它拿到的是盘上的真路径）。
+ */
 export function tracePath(sessionId: string, dir?: TraceDir): string {
-  return path.join(resolveDir(dir), `${sessionId}.jsonl`);
+  const target = resolveDir(dir);
+  return findFileById(target, sessionId) ?? path.join(target, traceFileName(sessionId));
 }
 
 /**
@@ -107,6 +114,6 @@ export async function listSessions(dir?: TraceDir): Promise<string[]> {
   const entries = await readdir(target);
   return entries
     .filter((name) => name.endsWith('.jsonl') && !name.endsWith('.init.jsonl'))
-    .map((name) => name.slice(0, -'.jsonl'.length))
+    .map((name) => sessionIdFromFileName(name))
     .sort();
 }

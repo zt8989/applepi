@@ -4,7 +4,7 @@
 
 内核同时写两份东西，位置不同、用途不同：
 
-| | `sessions/<cwd>/<id>.jsonl` | `traces/<id>.jsonl` |
+| | `sessions/<cwd>/<时间戳>_<id>.jsonl` | `traces/<时间戳>_<id>.jsonl` |
 | --- | --- | --- |
 | 记什么 | 消息流（user / assistant / toolResult） | 一次尝试一节点（含失败、超时、重试） |
 | 回答什么问题 | 「上次聊到哪了」 | 「为什么这次慢 / 错了」 |
@@ -26,8 +26,8 @@
   models.json                     provider / 模型目录
   auth.json                       凭证
   settings.json                   默认 provider / model / thinkingLevel
-  sessions/--<cwd 编码>--/<id>.jsonl
-  traces/<id>.jsonl               轨迹树 + 装载段（pi 没这个目录）
+  sessions/--<cwd 编码>--/<时间戳>_<id>.jsonl
+  traces/<时间戳>_<id>.jsonl      轨迹树 + 装载段（pi 没这个目录）
 ```
 
 **为什么同址**：provider 目录改一次两边都得知道，key 改一次两边都得用。分两个目录的代价
@@ -40,17 +40,22 @@
 ## 与 pi 的会话互通
 
 同址之后会话历史是**双向可见**的，pi 的 `/resume` 能看到我们的，我们的 `/sessions` 也能
-看到 pi 的。两个已知差异，都不影响读：
+看到 pi 的。会话文件那边已经**与 pi 同形**：
 
 | | 我们 | pi |
 | --- | --- | --- |
-| 文件名 | `<id>.jsonl` | `<时间戳>_<id>.jsonl` |
+| 文件名 | `<时间戳>_<id>.jsonl` | `<时间戳>_<id>.jsonl` |
+| id | UUIDv7 | UUIDv7 |
 | header `version` | `1` | `3` |
 
-两边都不靠文件名识别会话，而是读 header 里的 `id`（pi 的 `SessionManager.list()` 与
-`findById()` 都是这样），所以文件名不一样也照样列得出来。version 那边 pi 会自动把 v1 升到
-v3（`migrateV1ToV2` 补 `id`/`parentId` 树、`migrateV2ToV3` 把 `hookMessage` 改成 `custom`）
-并重写文件；那些字段我们写的时候本来就有，所以升级不丢东西。
+文件名里的时间戳是 ISO 串把 `:` `.` 都换成 `-`（`2026-10-12T05-44-28-468Z`），与 pi 同一
+规则；id 是 UUIDv7。于是把我们的 id 粘给 `pi --session <id>` 能直接恢复 —— 但我们退出时
+打的是**本项目自己的** `ela --session <id>`（见下面的「退出时的恢复提示」）。
+
+仍然会读**旧名**（`<id>.jsonl`，改名之前建的会话）—— 按 id 找文件时扫目录比对
+`_<id>.jsonl` 后缀，找不到再试精确的 `<id>.jsonl`（见 `config-home.ts` 的 `findFileById`）。
+version 那边 pi 会自动把 v1 升到 v3（`migrateV1ToV2` 补 `id`/`parentId` 树、`migrateV2ToV3`
+把 `hookMessage` 改成 `custom`）并重写文件；那些字段我们写的时候本来就有，所以升级不丢东西。
 
 ## 会话文件的形状
 
@@ -74,12 +79,30 @@ v3（`migrateV1ToV2` 补 `id`/`parentId` 树、`migrateV2ToV3` 把 `hookMessage`
 在 `sessions/` 留一个「一行 header、零条消息」的空壳，列表里全是噪声。
 
 轨迹那边是同一个决定：**发过第一句话才算一段会话**。内核一装配虽然已经把 prompt / model
-装满 state，但不开轨迹节点、不建 `traces/<id>.jsonl`；两者都推迟到第一条 `user.message`。
-详见 [init](init.md)「进入会话不建节点」。
+装满 state，但不开轨迹节点、不建 `traces/<时间戳>_<id>.jsonl`；两者都推迟到第一条
+`user.message`。详见 [init](init.md)「进入会话不建节点」。
 
 ### 崩溃截断
 
 读的时候 `JSON.parse` 失败的行直接跳过 —— 崩溃只会丢掉最后没写完的那半行，之前的历史完好。
+
+## 退出时的恢复提示
+
+交互模式退出（空闲时 `Ctrl-C`）会打一行：
+
+```text
+To resume this session: ela --session 01a12ea4-09d6-73ca-8dc5-8df8597cdb12
+```
+
+形状与 pi 自己退出时打的一样（同一构图、前缀暗色），只是命令是本项目的入口 `ela`。
+因为两边会话文件完全互通（目录名、文件名、header、id 全一致），把同一个 id 粘给
+`pi --session <id>` 也能打开 —— 但默认提示的是回到 `ela`。
+
+两个条件才打（都在 `config-home.ts` 的 `resumeCommand()` 里）：
+
+- **stdout 是 TTY**：管道/重定向没人看那一行，与 pi 同一判断；
+- **真的落过盘**（那个会话文件存在）：一句话没说时文件还没建（见「空会话不落盘」），
+  这时 `ela --session <id>` 会找不到，打出来是误导。
 
 ## 恢复：零 token
 
@@ -222,11 +245,11 @@ pi 的语义是「**倒着找最后一条** `session_info`，空串 = 显式清�
 ### 删会话要连带删 `traces/`
 
 官方只删会话文件（先 `trash` 再 `unlink`）。而一个会话在盘上落**两处** ——
-`sessions/<cwd 编码>/<id>.jsonl` 与 `traces/<id>.jsonl`。所以适配层在官方删完之后调
+`sessions/<cwd 编码>/<时间戳>_<id>.jsonl` 与 `traces/<时间戳>_<id>.jsonl`。所以适配层在官方删完之后调
 `deleteSessionTrace(session)` 补删轨迹那份（`clean-sessions.test.ts` 钉的就是这条不变量）。
 
-按会话 **id** 删（`tracePathFor(id)`），不是按名字 —— 所以摘缓存时要摘对，否则用户在同一次
-弹窗里删两次同一个会话时会对已删的文件再删一次轨迹。
+按会话 **id** 删（`findTraceFile(id)`，扫目录比对 `_<id>.jsonl`），不是按名字 —— 所以摘缓存时
+要摘对，否则用户在同一次弹窗里删两次同一个会话时会对已删的文件再删一次轨迹。
 
 ### 跨目录的会话
 

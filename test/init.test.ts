@@ -8,6 +8,7 @@ import { createInitialState, type AgentState } from '../src/state';
 import { createAgentReducer } from '../src/reducer';
 import { applyMiddleware, promptSegmentMiddleware, type ActionMiddleware } from '../src/middleware';
 import { loadSession } from '../src/trace-file';
+import { findFileById } from '../src/config-home';
 import { traceStats } from '../src/trace';
 import type { AgentAction, ModelCapabilities, PromptToolDefinition } from '../src/actions';
 
@@ -16,6 +17,18 @@ const CAPS: ModelCapabilities = {
   midConvoToolAdditions: false,
   developerRole: true,
 };
+
+/**
+ * 轨迹目录里某个会话**实际的**文件名。
+ *
+ * 轨迹文件名现在是 `<时间戳>_<id>.jsonl`（与 pi 的会话文件同名规则），
+ * 所以不能再手拼 `<id>.jsonl`。`findFileById` 也认旧名，所以两种形状都能找到。
+ */
+function findTraceName(dir: string, id: string): string {
+  const file = findFileById(dir, id);
+  assert.ok(file, `轨迹文件 ${id} 应该在 ${dir} 里`);
+  return path.basename(file);
+}
 
 function seed(): AgentState {
   return createInitialState({
@@ -437,7 +450,7 @@ test('init 记录只写一份（不会因为落盘器多冲几轮而重复）', 
     kernel.dispose();
     await new Promise((r) => setTimeout(r, 300));
 
-    const raw = await readFile(path.join(dir, 'once-1.jsonl'), 'utf8');
+    const raw = await readFile(path.join(dir, findTraceName(dir, 'once-1')), 'utf8');
     const lines = raw.trim().split('\n').map((l) => JSON.parse(l) as { op: string });
     assert.equal(
       lines.filter((l) => l.op === 'prompt.init').length,
@@ -470,7 +483,7 @@ test('恢复历史不补第二份 init 记录（那个会话的文件里已经�
     first.dispose();
     await new Promise((r) => setTimeout(r, 300));
 
-    const traceFile = path.join(dir, 'hist-1.jsonl');
+    const traceFile = path.join(dir, findTraceName(dir, 'hist-1'));
     const before = await readFile(traceFile, 'utf8');
 
     const second = await createKernel({
@@ -550,12 +563,12 @@ test('端到端：装载与对话都落盘，回放时零 token 复现', async (
     // 装载段不再单独一个文件 —— 它就在同一个轨迹文件里。
     // （以前每个会话占两个 jsonl，一半内容还是重复的。）
     const files = (await readdir(dir)).filter((f) => f.endsWith('.jsonl'));
-    assert.deepEqual(
-      files,
-      ['sess-init.jsonl'],
-      '一个会话只应该有一个 jsonl（不该再有 .init.jsonl）',
+    assert.equal(files.length, 1, '一个会话只应该有一个 jsonl（不该再有 .init.jsonl）');
+    assert.ok(
+      files[0]?.endsWith('_sess-init.jsonl') || files[0] === 'sess-init.jsonl',
+      `文件名应当是 <时间戳>_sess-init.jsonl（实际：${files[0]}）`,
     );
-    const raw = await readFile(path.join(dir, 'sess-init.jsonl'), 'utf8');
+    const raw = await readFile(path.join(dir, files[0] ?? ''), 'utf8');
     assert.ok(
       raw.includes('"op":"prompt.init"') && raw.includes('"op":"model.init"'),
       '装载记录就在这个文件里（位置无所谓：回放按 op 类型收集，与行序无关）',

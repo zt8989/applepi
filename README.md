@@ -80,10 +80,15 @@ install 然后失败**。
   auth.json              凭证
   settings.json          默认 provider / model
   sessions/
-    --<cwd 编码>--/<id>.jsonl   会话（可恢复；pi 的 /resume 也能看到）
+    --<cwd 编码>--/<时间戳>_<id>.jsonl   会话（可恢复；pi 的 /resume 也能看到）
   traces/                        ← 只有本项目写，pi 没这个目录
-    <id>.jsonl                  轨迹树 + 装载段（prompt / model）
+    <时间戳>_<id>.jsonl          轨迹树 + 装载段（prompt / model）
 ```
+
+文件名是 `<ISO 时间戳>_<UUIDv7>.jsonl`（如 `2026-10-12T05-44-28-468Z_01a12ea4-….jsonl`），
+与会话 id 都是 UUIDv7 —— **与 pi 同一形状**。退出时打的那行
+`To resume this session: ela --session <id>` 粘回去就能接着聊；因为两边完全互通，
+把同一个 id 交给 `pi --session <id>` 也能打开。
 
 **发过第一句话才算一段会话**：启动时 prompt / model 已经装进内存（开场就能报 skill 清单），
 但轨迹节点与这两个文件都**推迟到用户发出第一句话**才建 —— 「进来看一眼就退出」不该在盘上

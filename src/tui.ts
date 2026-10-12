@@ -5,12 +5,14 @@
  *   - 渲染交给 pi-tui 的差分引擎，流式 token 进来时不会整屏闪；
  *   - 界面里有一块**轨迹面板**（默认 Ctrl+R 切页，键位可改），画的是像 git log --graph 一样的一次尝试一节点的树，
  *     超时/失败是树上的节点而不是一行飘过去的红字；
- *   - 轨迹同时追加写进 `.trace/<sessionId>.jsonl`，进程崩了也不丢。
+ *   - 轨迹同时追加写进 `traces/<时间戳>_<id>.jsonl`，进程崩了也不丢。
  *
  * 环本身仍然只由本项目的 Redux Loop 驱动（`createPersistentStore`），这里只订阅状态、画界面。
  */
 import process from 'node:process';
 import path from 'node:path';
+import { existsSync } from 'node:fs';
+import { findSessionFile } from './config-home';
 import { defaultProviderSpec, providerNames } from './provider';
 import { createKernel, type Kernel } from './kernel';
 import { runTui } from './tui/app';
@@ -78,12 +80,12 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
       --attempts <n>     单轮内最多几次 LLM 尝试（含首次，默认 2；超时/网络错会自动重试）
       --api-key <key>    直接给 key（否则读 DEEPSEEK_API_KEY）
       --demo             不打网络：用 pi-ai 自带的 faux provider 跑一遍完整环
-      --no-trace         不把轨迹落盘到 .trace/
+      --no-trace         不把轨迹落盘到 traces/
       --no-extensions    不装 pi 扩展（settings.json 的 packages）
-      --session <id>     指定会话 id（决定 .trace/<id>.jsonl 的文件名）
+      --session <id>     指定会话 id（决定 sessions/ 与 traces/ 里的文件名；支持 pi 的 UUIDv7）
       --skill <path>     额外的 skill 文件或目录（可重复；默认扫 ~/.pi/agent/skills 与 <cwd>/.pi/skills）
       --cwd <dir>       工具的工作目录（文件操作边界，默认当前目录）
-      --trace-dir <dir> 轨迹目录（默认 .trace）
+      --trace-dir <dir> 轨迹目录（默认 ~/.pi/agent/traces）
   -h, --help             显示本帮助
 
 内置工具（默认 read / write / edit / bash；powershell / grep / find / ls 默认关，
@@ -288,6 +290,32 @@ async function main(): Promise<void> {
   }
 
   process.once('exit', () => kernel.dispose());
+
+  // `--session <id>` 不只是「用这个 id 建一个新的」—— 如果那个 id 已经有会话文件，
+  // 就**真的把它恢复**（读消息 + 轨迹树，零 token）。
+  //
+  // ## 为什么要有这一段
+  //
+  // 退出时我们打的那行是 `ela --session <id>`（见 config-home 的
+  // `resumeCommand()`）。既然提示的是「用这个 id 恢复」，那把它交回本项目自己时
+  // 就得真恢复 —— 否则那行提示就是谎话，而用户看不出区别（界面起来了、只是空空如也）。
+  //
+  // 用 `findSessionFile` 而不是拼路径：文件名带时间戳（与 pi 一致），只有扫目录才找得到；
+  // 它同时认旧名（`<id>.jsonl`）。找不到 = 新会话，什么都不做。
+  if (args.sessionId !== undefined) {
+    const file = findSessionFile(args.sessionId, args.cwd);
+    if (existsSync(file)) {
+      try {
+        await kernel.restoreSession(file);
+      } catch (error) {
+        // 恢复失败不该让整个界面起不来：那个 id 的文件坏了（半行、权限），
+        // 就退化成「新会话用这个 id」—— 比一个打不开的界面好，且后续写入会接着那个文件。
+        process.stderr.write(
+          `恢复 ${args.sessionId} 失败（当成新会话继续）：${String(error instanceof Error ? error.message : error)}\n`,
+        );
+      }
+    }
+  }
 
   const prompt = args.prompt ?? (args.demo ? '算一下 (3+4)*6' : undefined);
   process.exitCode = await runTui({

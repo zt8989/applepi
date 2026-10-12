@@ -33,7 +33,7 @@ import { createInitialState, type AgentState } from '../src/state';
 import { createAgentReducer } from '../src/reducer';
 import { createSessionRecorder } from '../src/session-recorder';
 import { SessionWriter, readSessionMessages, readJsonlHead, type MessageEntry } from '../src/session-file';
-import { listSessions, sessionPath } from '../src/config-home';
+import { listSessions, findSessionFile, sessionPath } from '../src/config-home';
 import { loadTrace } from '../src/trace-file';
 import { waitForIdle } from '../src/store';
 import type { AgentAction, ModelCapabilities } from '../src/actions';
@@ -128,13 +128,12 @@ function seed(sessionId: string): AgentState {
 
 /** 造一个指定条数的会话文件（每条带 2KB 文本，模拟真实会话里的 toolResult 体量）。 */
 function writeSessionFile(id: string, count: number): string {
-  const file = sessionPath(id, '/proj');
   const w = new SessionWriter(id, '/proj');
   w.start();
   for (let i = 0; i < count; i += 1) {
     w.appendMessage(userMessage(`第 ${i + 1} 轮 ${'x'.repeat(2000)}`));
   }
-  return file;
+  return w.path;
 }
 
 // ── 症状 1：慢 ──
@@ -345,7 +344,7 @@ test('内核 restoreSession：换 id + 灌回消息', async () => {
     await new Promise((r) => setTimeout(r, 80));
     first.dispose();
 
-    const historyFile = sessionPath('history', cwd);
+    const historyFile = findSessionFile('history', cwd);
     assert.ok(existsSync(historyFile), '旧会话文件在');
 
     const before = readSessionMessages(historyFile);
@@ -395,7 +394,7 @@ test('内核 restoreSession 之后发的新问题追加进**那个**会话，不
     await new Promise((r) => setTimeout(r, 80));
     first.dispose();
 
-    const historyFile = sessionPath('history', cwd);
+    const historyFile = findSessionFile('history', cwd);
     const before = readSessionMessages(historyFile);
 
     const second = await createKernel({
@@ -426,7 +425,7 @@ test('内核 restoreSession 之后发的新问题追加进**那个**会话，不
       '“恢复之后新问的”确实写进了被恢复的那个会话文件',
     );
     assert.ok(
-      !existsSync(sessionPath('current', cwd)),
+      !existsSync(findSessionFile('current', cwd)),
       '当前会话没有留下一个「当前会话文件」（以前恢复会把它写满历史）',
     );
   });
@@ -449,9 +448,11 @@ test('readJsonlHead：只读开头，且 stopAfter 命中就停', async () => {
 
 test('readJsonlHead：截断的半行被跳过，不会让整段读不出来', async () => {
   await withHome(async () => {
-    const file = sessionPath('trunc', '/proj');
     const w = new SessionWriter('trunc', '/proj');
     w.start();
+    // 写入用的真实路径是带时间戳的那个（`<时间戳>_trunc.jsonl`）；
+    // 手拼的 `sessionPath()` 是旧形状，文件不在那儿。
+    const file = w.path;
     w.appendMessage(userMessage('完整的一条'));
     await writeFile(file, `${(await readFile(file, 'utf8')).trimEnd()}\n{"type":"mes`, 'utf8');
 
@@ -568,7 +569,7 @@ test('恢复历史：轨迹树跟着回来（对话区有图、轨迹却是空�
       sessionId: 'other',
     });
     try {
-      await second.restoreSession(sessionPath('with-image', cwd));
+      await second.restoreSession(findSessionFile('with-image', cwd));
       const after = second.store.getState();
 
       // 对话区：图片还在（这部分本来就是好的）。
@@ -621,7 +622,7 @@ test('恢复没有轨迹文件的历史：行为与修复前一致（空树，�
     });
     try {
       // **不能抛** —— 老会话（早于轨迹功能）就属于这一类。
-      const result = await second.restoreSession(sessionPath('no-trace', cwd));
+      const result = await second.restoreSession(findSessionFile('no-trace', cwd));
       assert.equal(result.id, 'no-trace');
       assert.ok(result.restored > 0, '消息还是灌回来了');
       assert.equal(second.store.getState().trace.order.length, 0, '没有轨迹就是空树');
