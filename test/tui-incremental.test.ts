@@ -14,7 +14,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { stripTerminalSequences } from '@earendil-works/pi-tui';
-import { renderTranscript, TranscriptChunks, renderTail } from '../src/tui/app';
+import { renderTranscript, TranscriptChunks, renderTail, workingStatusText } from '../src/tui/app';
 import { setupTheme } from '../src/tui/theme';
 import type { AgentState } from '../src/state';
 import type { Message } from '@earendil-works/pi-ai';
@@ -216,6 +216,65 @@ test('renderTail 不含流式文字（它由独立的块负责，否则会画两
   assert.ok(
     stripTerminalSequences(renderTranscript(state, 0, 80, false)).includes('流式中的字'),
     '一次性模式那条路仍然要画出流式文字',
+  );
+});
+
+// ── 工作状态（画在 composer 上框线上，与 pi 同位置） ──
+//
+// `workingStatusText()` 是那个**从 state 现推**的纯函数：思考中 / 压缩中 / 重试 三个状态
+// 都比它一处算。早先是一串 if/else 加一个 `lastLoaderMessage` 变量手工收尾，漏一处的
+// 症状是「圈一直转」或「文案洇在那儿」—— 现推就不会有那种账。
+//
+// 为什么重试那句**不再**在 `renderTail` 里：它与另两个一样是工作状态，pi 把它们都放在
+// 上框线上。放两处就是同一件事报两遍。
+
+test('workingStatusText：三种状态各自映射到上框线那句', () => {
+  assert.equal(workingStatusText(stateOf(history(1))), undefined, '空闲 → 不画');
+  assert.equal(
+    workingStatusText(stateOf(history(1), { phase: 'thinking' })),
+    '思考中…',
+    '生成中 → 思考中…',
+  );
+  assert.equal(
+    workingStatusText(stateOf(history(1), { compacting: true } as Partial<AgentState>)),
+    '压缩中…',
+    '压缩中 → 压缩中…（压缩时 phase 是 idle，所以单看 phase 是看不到它的）',
+  );
+  assert.match(
+    workingStatusText(
+      stateOf(history(1), {
+        phase: 'thinking',
+        retrying: true,
+        llmAttempts: 2,
+        maxLlmAttempts: 3,
+      } as Partial<AgentState>),
+    ) ?? '',
+    /正在重试（第 2\/3 次尝试）/,
+    '重试 → 带第 N/M 次那句',
+  );
+});
+
+test('workingStatusText：重试 > 压缩 > 生成（重试时带的是信息量最大的那句）', () => {
+  const both = stateOf(history(1), {
+    phase: 'thinking',
+    compacting: true,
+    retrying: true,
+    llmAttempts: 1,
+    maxLlmAttempts: 2,
+  } as Partial<AgentState>);
+  assert.match(workingStatusText(both) ?? '', /正在重试/, '三个都真时优先说重试');
+});
+
+test('renderTail 里不再画重试那行（它搬到了 composer 的上框线）', () => {
+  const state = stateOf(history(1), {
+    phase: 'thinking',
+    retrying: true,
+    llmAttempts: 2,
+    maxLlmAttempts: 2,
+  } as Partial<AgentState>);
+  assert.ok(
+    !renderTail(state, 80).join('\n').includes('重试'),
+    '重试提示只该在 composer 上框线那一处（见 workingStatusText）',
   );
 });
 

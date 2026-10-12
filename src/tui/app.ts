@@ -18,8 +18,6 @@
 // TuiMainScreen = 让出回滚缓冲（内容永久留在终端历史里，能往上翻）。
 // 对话式 agent 用前者：输入框要钉在底部、对话区独立滚动，滚出去的内容不该污染终端回滚。
 import {
-  CancellableLoader,
-  Editor,
   ProcessTerminal,
   Text,
   ScrollView,
@@ -34,7 +32,6 @@ import {
   type Component,
   type SlashCommand,
   type ViewportTUI,
-  type EditorTheme,
   type TuiInputListener,
 } from '@earendil-works/pi-tui';
 import { abortRun } from '../run-control';
@@ -78,10 +75,18 @@ import {
   createReadToolDefinition,
   createWriteToolDefinition,
 } from '@earendil-works/pi-coding-agent';
-import { getMarkdownTheme } from '@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';// pi 底栏的官方实现（靠 pnpm patch 打开的子路径）。数字格式与算法都与 pi 一致 ——
+import { getMarkdownTheme, getEditorTheme } from '@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';// pi 底栏的官方实现（靠 pnpm patch 打开的子路径）。数字格式与算法都与 pi 一致 ——
 // 两边对不上会让人以为算错了。
 // 见 docs/architecture/provider.md「为什么要 pnpm patch」。
 import { formatCwdForFooter, formatTokens } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js';
+// composer 直接用官方那个会把工作状态画进**上框线**的编辑器（与 pi 同形）。
+// 为什么不是自己给 pi-tui 的 `Editor` 加个 setter：那段边框排版（状态 + 滚动指示
+// `↑ N more` 抢位置、窄终端退化成只画转圈）是 pi 踩过的，复刻必然漂移。
+import { CustomEditor } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/custom-editor.js';
+import {
+  WorkingStatusIndicator,
+  type StatusIndicator,
+} from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/status-indicator.js';
 import { addUsageToTotals, createUsageTotals } from '@earendil-works/pi-coding-agent/dist/core/usage-totals.js';
 import { setupTheme } from './theme';
 import { actionMatches, installProjectKeybindings, keyLabel } from './keybindings';
@@ -790,25 +795,6 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { name: 'help', description: '列出全部命令' },
 ];
 
-/**
- * 编辑器的配色。`selectList` 是 **`SelectListTheme`** —— 补全弹窗复用的就是它
- * （不是另一套 `selected` / `unselected` 形状）。
- *
- * 这里**不能**写 `as unknown as EditorTheme`：那个 cast 会把形状不匹配压成运行时崩溃
- * （`this.theme.selectedText is not a function`），而补全列表渲染失败在界面上只表现为
- * 「打 `/` 什么都没弹」—— tsconfig 早就想告诉我们，是 cast 捂住了它的嘴。
- */
-const EDITOR_THEME: EditorTheme = {
-  borderColor: (s: string) => dim(s),
-  selectList: {
-    selectedPrefix: (s: string) => cyan(s),
-    selectedText: (s: string) => bold(s),
-    description: (s: string) => dim(s),
-    scrollInfo: (s: string) => dim(s),
-    noMatch: (s: string) => dim(s),
-  },
-};
-
 export interface TuiOptions {
   store: AgentStore;
   /** 一次性提问：给完就退出（脚本/管道友好）。 */
@@ -1054,7 +1040,10 @@ export async function runTui(options: TuiOptions): Promise<number> {
   //
   // 这里装的是 **pi 的全套 + 本项目自己的几个**（`app.trace.toggle` 等），
   // 并读 `~/.pi/agent/keybindings.json` 里用户自己的覆盖。见 `keybindings.ts`。
-  installProjectKeybindings();
+  //
+  // **接住返回值**：下面 composer 的 `CustomEditor` 要的也是这一份（它内部会认
+  // `app.interrupt` 之类的动作）。再调一次会再读一遍那个文件，多一份不同步的机会。
+  const keybindings = installProjectKeybindings();
   const terminal = new ProcessTerminal();
   // AltScreen 是 viewport 实现，setLayoutRoot 在 ViewportTUI 上（TUI 接口没有）。
   const tui: ViewportTUI = new TuiAltScreen(terminal, true, undefined, {
@@ -1139,23 +1128,6 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 一共三五行的字符串，重算成本可以忽略，而增删子节点要处理很多状态。
    */
   const queuePanel = new Text('', 0, 0);
-  const loader = new CancellableLoader(tui, (s) => cyan(s), (s) => dim(s), '');
-  /**
-   * 空闲时**不显示**转圈。
-   *
-   * ## 坑：setIndicator() 自己会 start()
-   *
-   * pi-tui 的 `Loader.setIndicator()` 实现里最后一行是 `this.start()`（见它的
-   * `loader.js`），也就是**只要调一次 setIndicator，动画就开始转了**，与有没有消息无关。
-   * 之前那行 `loader.setIndicator({frames: [...]})` 于是让空闲界面一直有个圈在转 ——
-   * 看着像「正在处理」，其实什么都没在跑。
-   *
-   * `frames: []` 是官方给的「隐藏」方式（`LoaderIndicatorOptions.frames` 的注释：
-   * "Use an empty array to hide the indicator"）。空闲用空数组，生成中才给真 frames。
-   */
-  const IDLE_FRAMES: string[] = [];
-  const BUSY_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-  loader.setIndicator({ frames: IDLE_FRAMES });
 
   /**
    * 当前作用域（`Ctrl+P` 循环的候选集）——`/scoped-models` 改的就是它。
@@ -1175,7 +1147,66 @@ export async function runTui(options: TuiOptions): Promise<number> {
    */
   let currentScope: ModelScope = scopeFrom(readScopedModels(cwd), options.runtime);
 
-  const editor = new Editor(tui, EDITOR_THEME);
+  // 官方那个会把工作状态画进**上框线**的编辑器（`embedWorkingStatus: true`）——
+  // 与 pi 同一个类、同一个形状。
+  //
+  // ## 配色直接用 pi 那份（`getEditorTheme()`），不再手写
+  //
+  // 手写一份会有两个问题：
+  //
+  // 1. **横线颜色会分家**。pi 的 composer 横线是 `theme.getThinkingBorderColor(level)`
+  //    （默认级别 'off' → 主题 token `thinkingOff`），而不是凭感觉的 `dim`（那是**文本
+  //    属性** `\x1b[2m`，不是颜色 token）。手写那份在浅色终端上与 pi 不一致。
+  // 2. **补全列表的选中文也会分家**：pi 用 `accent`，手写的用 `cyan`。
+  //
+  // 它内部读的是 pi 主题，所以**必须**在 `setupTheme()` 之后调 —— 不能在模块顶层求值。
+  // 形状（`borderColor` 是函数、`selectList` 是一整块 `SelectListTheme`）交给 typecheck；
+  // 写错时不要用 `as unknown as EditorTheme` 压住 —— 那个 cast 会让
+  // `this.theme.selectedText is not a function` 在**渲染时**才爆，而补全列表渲染失败
+  // 在界面上只表现为「打 `/` 什么都没弹」，极难归因。
+  //
+  // ## 为什么 keybindings 也要传
+  //
+  // `CustomEditor` 的构造签名要它（它内部会认 `app.interrupt` / `app.exit` 等）。
+  // 传上面那份（= pi 全套 + 本项目自己的动作），与面板 / `keyLabel()` 用的是**同一份**
+  // —— 不然用户改过的键在这里不生效。
+  const editor = new CustomEditor(tui, getEditorTheme(), keybindings, {
+    // 把「思考中 / 压缩中 / 重试中」画在**上框线**里（而不是单独占一行）。
+    // 这正是 pi 的行为：状态与 composer 共用一个边框，不多吃一行。
+    embedWorkingStatus: true,
+  });
+
+  /**
+   * 当前挂在 composer 上框线上的工作状态（`undefined` = 空闲，不画）。
+   *
+   * 为什么要留着引用：它内部是个 `Loader`（自带 `setInterval` 转圈）。换状态时
+   * 不 `dispose()` 旧的，那个定时器会一直转下去 —— 重试时每轮换一次文案，几轮下来
+   * 屏上虽然只看得到最新那个，进程里却积了一堆永不停止的定时器。
+   * 这与 pi 的 `showStatusIndicator()`（先 `dispose()` 旧的）同一个道理。
+   */
+  let activeStatus: StatusIndicator | undefined;
+  /**
+   * 把状态设进 composer 的上框线。
+   *
+   * 颜色用**边框自己的颜色**（与 pi 嵌入时的做法一致：`(text) => editor.borderColor(text)`）。
+   * 为什么不是写死的 `accent` / `warning`：边框颜色跟着思考级别变，状态文字却是固定色
+   * 时会看起来像两套东西拼在一起。跟着边框走就天然一致。
+   */
+  const setWorkingStatus = (message: string | undefined): void => {
+    activeStatus?.dispose();
+    if (message === undefined) {
+      activeStatus = undefined;
+      editor.setWorkingStatusIndicator(undefined);
+      return;
+    }
+    const indicator = new WorkingStatusIndicator(tui, message, undefined, (text) =>
+      editor.borderColor(text),
+    );
+    activeStatus = indicator;
+    editor.setWorkingStatusIndicator(indicator);
+  };
+  /** 上一次设的状态文案 —— 只在**变色**时才重建那个 `Loader`。 */
+  let currentStatusText: string | undefined;
   // 补全：`/` 触发命令列表（带说明），路径位置触发文件补全。
   //
   // 没有它就只能盲打 —— 用户得先记住有哪些命令。装上之后打 `/` 会直接列出，
@@ -1253,8 +1284,6 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 看到完整结果**，而截断到看不见东西等于工具白跑。
    */
   let expanded = false;
-  let loading = false;
-  let lastLoaderMessage = '';
   /**
    * 入队模式：生成中提交的话，默认走哪一列。
    *
@@ -1312,6 +1341,18 @@ export async function runTui(options: TuiOptions): Promise<number> {
 
   const refresh = (): void => {
     const state = store.getState();
+    // composer 上/下框线的颜色跟**思考级别**走 —— 与 pi 的 `updateEditorBorderColor()`
+    // 同一套（`theme.getThinkingBorderColor(level)`，级别 'off' 时是 `thinkingOff`）。
+    // 放在 refresh 而不是构造时定死：切模型 / 切级别都会改 `state.thinkingLevel`，
+    // 写在这里下一帧就跟上。
+    editor.borderColor = theme.getThinkingBorderColor(state.thinkingLevel);
+    // 工作状态（思考中 / 压缩中 / 重试）画在**上框线**里（见 editor 构造处的注释）。
+    // 只在文案**真的变了**时才重建那个 `Loader`（重建 = 重启转圈动画）。
+    const nextStatus = workingStatusText(state);
+    if (nextStatus !== currentStatusText) {
+      currentStatusText = nextStatus;
+      setWorkingStatus(nextStatus);
+    }
     // 底栏：模型名 / 用量数会变，必须补齐到全宽，否则残影会叠出来。
     // 底箱两行（形状拄 pi 截图）：
     //   第一行：`~\Documents\workspace\event-loop-agent (main)`            —— 左边
@@ -1356,35 +1397,10 @@ export async function runTui(options: TuiOptions): Promise<number> {
 
   store.subscribe(() => {
     const state = store.getState();
-    // 压缩中：把 loader 换成「压缩中…」—— 摘要要打一次网络，可能好几秒，
-    // 而环的相位这段时间是 idle（压缩不是一轮对话），所以上面那个「环跑完收 loader」
-    // 的分支根本不会触发。不给它一个指示，用户会以为按了 /compact 没反应。
-    if (state.compacting && !loading) {
-      loading = true;
-      lastLoaderMessage = 'compact';
-      loader.setIndicator({ frames: BUSY_FRAMES });
-      loader.setMessage(yellow('压缩中…'));
-      loader.start();
-    } else if (!state.compacting && loading && lastLoaderMessage === 'compact') {
-      // 压完了（或失败了）：把 loader 收掉，剩下的提示交给下面的 lastCompaction 分支。
-      loading = false;
-      loader.stop();
-      loader.setMessage('');
-      loader.setIndicator({ frames: IDLE_FRAMES });
-      lastLoaderMessage = '';
-    }
-    // 环跑完时把 loader 收掉。
-    if (state.phase === 'idle' && loading && lastLoaderMessage !== 'compact') {
-      loading = false;
-      loader.stop();
-      // stop() 只停动画，**不清那一行文字** —— 不置空的话「思考中…」会一直留在屏幕上转，
-      // 看起来像还在跑（这是「TUI 不可用」最容易被误判的地方）。
-      loader.setMessage('');
-      // 还要把 frames 换回空：setIndicator() 自己会 start()，不换的话下一轮空闲时
-      // 那个圈又会自己转起来。
-      loader.setIndicator({ frames: IDLE_FRAMES });
-      lastLoaderMessage = '';
-    }
+    // 工作状态（思考中 / 压缩中 / 重试）**不在这里**维护 —— 它在 `refresh()` 里从
+    // state 现推（见 `workingStatusText()`）。早先这里是一串 if/else 加一个
+    // `lastLoaderMessage` 变量，三处各自记得收尾；漏一处的症状是「圈一直转」。
+    // 现推就没有这笔账。
     // 压缩跑完（或失败）：在对话区留一条**常驻**的说明。
     //
     // 为什么必须显眼：压缩是唯一会静默改写对话内容的操作——屏幕上那些用户消息
@@ -1958,12 +1974,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
   };
 
   const send = (text: string): void => {
-    loading = true;
-    lastLoaderMessage = '';
-    // 生成中才真的转：setIndicator 内部会 start()，所以这里换 frames 就等于「开动画」。
-    loader.setIndicator({ frames: BUSY_FRAMES });
-    loader.setMessage(yellow('思考中…'));
-    loader.start();
+    // 工作状态（上框线那个「思考中…」）不在这里手动开 —— `refresh()` 从 state 现推。
+    // `user.message` 会把 `phase` 拉到 `thinking`，下面那行 `dispatch` 之后紧接着的
+    // `refresh()` 就把状态画上了。（dispatch 是同步的，所以不存在「先渲染一帧空边框」的窗口。）
     // `before_agent_start` 在**发出去之前**调（与 pi 同序）：扩展看到的是「用户刚说了
     // 什么、即将开跑」这个时刻。
     //
@@ -2012,11 +2025,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // 不做分屏也就不用调两块的高度：中间那块永远 basis 0 + grow 1（唯一可伸缩的）。
     const bottom = new VStack([
       // 扩展的 widget（`pi-web-access` 的活动面板用它）。**不给 basis** ——
-      // 给了就把高度钉死，面板里的内容一变就错位（同下面那三个的理由）。
+      // 给了就把高度钉死，面板里的内容一变就错位（同下面队列面板的理由）。
       ...[...widgetSlots.values()].map((component) => ({ component, minSize: 1 })),
       // 队列面板在输入框**之上** —— 用户敲完字、回车之前就该看到刚才排了什么。
       { component: queuePanel, minSize: 1 },
-      { component: loader, minSize: 1 },
+      // **没有单独的 loader 那行**：工作状态（思考中 / 压缩中 / 重试）画在 editor 的
+      // 上框线里（`embedWorkingStatus`，与 pi 同形）。所以 editor 直接坐在队列面板与
+      // 底栏之间，不多吃一行。
       { component: editor, minSize: 3 },
       // 底栏行数 = `FOOTER_ROWS`，与 `/model`、`/sessions` 那些面板的
       // `margin.bottom` **同一个来源** —— 面板底边要落在 composer 的底边上，
@@ -3090,19 +3105,48 @@ export class TranscriptChunks {
 }
 
 /**
- * 对话区**尾部**那些不属于任何单条消息的行：正在流式生成的文字、重试提示、收工原因。
+ * composer **上框线**上该显示的工作状态（`undefined` = 空闲，什么都不画）。
+ *
+ * ## 为什么在这里现推，而不是维护一个 `lastMessage` 变量
+ *
+ * 三个状态（思考中 / 压缩中 / 重试）各自有进入与退出条件，而且**交错**：重试发生在
+ * 一轮之内、压缩发生在一轮之外（那段时间 `phase` 还是 idle）。早先是用一串 if/else
+ * 加一个 `lastLoaderMessage` 变量手工收尾，漏一处的症状是「圈一直转」或「文案洇在那儿」。
+ * 现推就没有这笔账 —— 同一份 state 永远推出同一个结果，幂等。
+ *
+ * ## 优先级
+ *
+ * 重试 > 压缩 > 生成。重试看着像「还在跑」，但它带的是「第 N/M 次」那个更有信息的
+ * 文案，而且它确实是当前最该知道的一件事。
+ *
+ * ## 为什么重试那句从 `renderTail` 搬到这里
+ *
+ * pi 把工作状态放在上框线上，而「重试中」就是一个工作状态。放两处（尾巴一行 +
+ * 上框线一行）会同一件事报两遍。所以 `renderTail` 里那条删了，只剩上框线这份。
+ */
+export function workingStatusText(state: AgentState): string | undefined {
+  if (state.retrying) {
+    return `↻ 正在重试（第 ${state.llmAttempts}/${state.maxLlmAttempts} 次尝试）`;
+  }
+  if (state.compacting) return '压缩中…';
+  if (state.phase !== 'idle') return '思考中…';
+  return undefined;
+}
+
+/**
+ * 对话区**尾部**那些不属于任何单条消息的行：正在流式生成的文字、收工原因。
  *
  * 从 `renderTranscript` 里原样搬出来的，所以两处画出来的东西一致。
  *
  * 注意**不含**正在流式生成的文字：那一段由 `TranscriptChunks` 单独一个块负责
  * （它每帧都变，必须独立才能只重画它）。`renderTranscript` 里仍然拼上它，
  * 因为那是一趟性渲染，形状必须与界面一致。
+ *
+ * 也**不含**重试那行：它与「思考中 / 压缩中」一样是工作状态，画在 composer 的
+ * 上框线里（见 `workingStatusText()`）—— 那是 pi 的位置。
  */
 export function renderTail(state: AgentState, width: number): string[] {
   const lines: string[] = [];
-  if (state.retrying) {
-    lines.push(dim(`  ↻ 上一次失败，正在重试（第 ${state.llmAttempts}/${state.maxLlmAttempts} 次尝试）`));
-  }
   // 收工原因。maxTurns 用「停」而不是「✗」：那是上限收工，不是出错，别吓唬人。
   if (state.phase === 'idle' && state.error) {
     const capped = state.stopReason === 'maxTurns';

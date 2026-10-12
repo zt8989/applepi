@@ -14,12 +14,36 @@
 | 顶行 | 页签 + 轨迹统计**合一行**（见下） |
 | 对话页 | `TranscriptChunks`：每条消息一个官方组件，内容没变就不重算（见下） |
 | 轨迹页 | `Ctrl+R`（`app.trace.toggle`）切换，展开是 `renderColoredTree()` |
-| 编辑器 | pi-tui 的 `Editor`（多行、slash 命令补全、文件路径补全） |
-| Loader | 生成中动画 |
+| 编辑器 | pi 的 `CustomEditor`（多行、slash 命令补全；**工作状态画在上框线里**，见下） |
 | 底栏 | 左边 cwd (+git 分支)，右边 `(provider) model` + token 用量 |
 
 按键（**键名都从键位表解析**，见下节）：`Ctrl+R` 切轨迹页，`Ctrl+O` 展开/收起工具输出，
 `Ctrl+C` 在环跑时中断这一轮、空闲时退出。完整的一份在 `/hotkeys` 里。
+
+### composer 与 pi 一致：横线颜色 + 状态画在上框线
+
+composer 是 pi 的 `CustomEditor`（`embedWorkingStatus: true`），配色是 pi 的
+`getEditorTheme()` —— 不是自己手写一份。两个具体后果：
+
+**1. 横线颜色跟主题/思考级别走。** pi 的 composer 横线是
+`theme.getThinkingBorderColor(level)`（默认级别 `off` → 主题 token `thinkingOff`），
+`refresh()` 每帧按 `state.thinkingLevel` 设一次。早先手写成 `(s) => dim(s)` ——
+那是**文本属性**（`\x1b[2m`，变淡）而不是颜色 token，在浅色终端上与 pi 不一致。
+
+**2. 工作状态画在**上框线**里**（不另占一行）：
+
+```
+── ⠋ 思考中… ─────────────────────────────────────────────
+── ⠋ ↻ 正在重试（第 2/2 次尝试） ─────────────────────────
+```
+
+三个状态（思考 / 压缩 / 重试）由纯函数 `workingStatusText(state)` **从 state 现推**，
+优先级 重试 > 压缩 > 生成。早先是一个单独的 loader 行加一个 `lastLoaderMessage` 变量
+手工收尾（三处各自记得停动画），漏一处的症状是「圈一直转」；现推就没有这笔账。
+重试那句也因此从 `renderTail`（对话区尾巴）搬到了这里 —— 放两处就是同一件事报两遍。
+
+状态文字的颜色跟**边框自己的颜色**走（`(text) => editor.borderColor(text)`）—— 与 pi
+嵌入时的做法一致；写死 `accent` 的话，边框随思考级别变色时会像两套东西拼在一起。
 
 ### 顶行是**两职合一**的（`tabLine`）
 

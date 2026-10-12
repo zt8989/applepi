@@ -52,6 +52,20 @@ function envWithoutTestHome(): NodeJS.ProcessEnv {
   return env;
 }
 
+/**
+ * 同上，但**开着颜色**（去掉 `NO_COLOR`，给一个真彩色 TERM）。
+ *
+ * 需要它的理由：主题色（如 composer 横线的 `thinkingOff`）只有在颜色没被禁掉时才渲染成
+ * `\x1b[38;2;…m`。默认那份把 `NO_COLOR=1` 是故意的 —— 其余断言只看文字，颜色序列只会
+ * 干扰 `visible()`。但「横线颜色是不是跟着主题走」这件事**只能开着颜色验**。
+ */
+function envWithColor(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, COLUMNS: '100', LINES: '30', TERM: 'xterm-256color' };
+  delete env['PI_CODING_AGENT_DIR'];
+  delete env['NO_COLOR'];
+  return env;
+}
+
 /** 剥掉所有 ANSI 序列与 OSC 控制串，只留可见文本。 */
 function visible(output: string): string {
   return output
@@ -234,9 +248,13 @@ function borderLines(screen: string[]): { row: number; dashes: number }[] {
 /**
  * 启动 TUI，等它画出首帧，然后杀掉。
  *
- * @param ms 存活多久（首帧很快，但 tsx 转译 + 启动有开销，给宽一点）
+ * @param ms  存活多久（首帧很快，但 tsx 转译 + 启动有开销，给宽一点）
+ * @param env 环境（默认禁用颜色；要验颜色时传 `envWithColor()`）
  */
-async function firstFrame(ms = 9000): Promise<{ text: string; raw: string }> {
+async function firstFrame(
+  ms = 9000,
+  env: NodeJS.ProcessEnv = envWithoutTestHome(),
+): Promise<{ text: string; raw: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn('node', ['--import', 'tsx', 'src/tui.ts'], {
       cwd: ROOT,
@@ -248,7 +266,7 @@ async function firstFrame(ms = 9000): Promise<{ text: string; raw: string }> {
       // `models.json` / `auth.json` / `settings.json`，于是报「未知 provider」——
       // 根本进不了界面。这个测试**故意**用真配置：它要验的正是「真实启动路径」，
       // 隔离掉配置就验不到 provider 解析这一段了。
-      env: envWithoutTestHome(),
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let out = '';
@@ -340,10 +358,14 @@ test('TUI 首帧：顶行与底栏都要有内容（空组件会量出 0 高度�
   );
 });
 
-test('TUI 首帧：空闲时 loader 不转圈', async () => {
-  // Loader.setIndicator() 内部会 start()，所以「设一次 frames」就等于「开动画」。
-  // 空闲界面有个一直转的圈，看着像正在处理，其实什么都没跑。
-  const { text: frame, raw } = await firstFrame();
+test('TUI 首帧：空闲时 composer 上框线不转圈', async () => {
+  // 工作状态（思考中 / 压缩中 / 重试）画在 composer 的**上框线**里（见 app.ts 的
+  // `embedWorkingStatus`）。空闲时那里应该就是一条干净的横线 —— 一个一直转的圈
+  // 看着像正在处理，其实什么都没跑。
+  //
+  // pi-tui 的 `Loader.setIndicator()` 内部会 `start()`，所以“设一次 frames”就等于“开动画”
+  // —— 这条盯的就是“别在空闲时把那个 indicator 建出来”。
+  const { text: frame } = await firstFrame();
   const spinner = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
   assert.ok(
     !spinner.test(frame),
@@ -603,4 +625,54 @@ test('TUI：面板盖住 composer —— 输入框的框线不再露在外面', 
   for (const b of borders) {
     assert.equal(b.dashes, TERM_COLS, `第 ${b.row} 行的框线该满宽（${TERM_COLS} 列），实际 ${b.dashes} 列`);
   }
+});
+
+// ── composer 的横线颜色（与 pi 一致：主题色，不是写死的 dim） ──
+
+/**
+ * 取**第一条满宽横线**前面最近的那个 SGR 序列（就是那条横线的颜色）。
+ *
+ * 怎么认「第一条满宽横线就是 composer 的上框线」：启动首帧里没有面板，整屏只有 composer
+ * 那两条边框是满宽的 `─`；而顶行/对话区用的是别的字符。所以按出现顺序，第一条就是它。
+ *
+ * 为什么要「前面最近的那个 SGR」而不是「行首的 SGR」：pi-tui 是差分重绘，写一行时先
+ * 定位光标（`ESC[r;cH`）、可能还带一个 `ESC[0m` 重置，然后才是颜色序列，最后才是 `─`。
+ * 取最近的就能拿到真正生效的那个。
+ */
+function firstBorderSgr(raw: string): string | undefined {
+  const dashRun = /─{40,}/.exec(raw);
+  if (!dashRun) return undefined;
+  const before = raw.slice(0, dashRun.index);
+  const seqs = [...before.matchAll(/\x1b\[([0-9;]*)m/g)];
+  return seqs.length > 0 ? seqs[seqs.length - 1]?.[1] : undefined;
+}
+
+test('TUI：composer 的横线用的是主题色（真彩色），不是写死的 dim', async () => {
+  // 这条钉的是「composer 和 pi 一致 包括横线颜色」。
+  //
+  // 早先 `EDITOR_THEME.borderColor` 手写成 `(s) => dim(s)` —— 那是一个**文本属性**
+  // （`\x1b[2m`，变淡），不是颜色 token。pi 的做法是 `theme.getThinkingBorderColor(level)`
+  // （默认级别 'off' → `thinkingOff`），跟着主题走、也跟思考级别走。
+  //
+  // 区分两者：主题色渲染出来是**真彩色** `\x1b[38;2;…m`（okhsl/hex 都解析成 RGB），
+  // 而手写的 `dim` 只会给 `\x1b[2m`。所以「横线的 SGR 里有 `38;2;`」就等于
+  // 「它走的是主题色」。
+  //
+  // 为什么必须单独起一个**开着颜色**的子进程：默认那套 `NO_COLOR=1` 会把颜色剥掉，
+  // 那种输出里根本看不到 `38;2;`，这条断言就失去意义。
+  const { raw } = await firstFrame(9000, envWithColor());
+  const sgr = firstBorderSgr(raw);
+
+  assert.ok(sgr !== undefined, `首帧里该能看到 composer 的横线。原始输出前 300 字：\n${raw.slice(0, 300)}`);
+  assert.match(
+    sgr,
+    /38;2;/,
+    `composer 横线该用主题的真彩色（形如 38;2;r;g;b），实际 SGR 是 ${JSON.stringify(sgr)}。\n` +
+      `写死的 dim（\\x1b[2m）会在这里现形 —— 它在浅色终端上与 pi 不一致。`,
+  );
+  assert.notEqual(
+    sgr,
+    '2',
+    'composer 横线不该只是 dim 那个文本属性（那正是要去掉的写法）',
+  );
 });
