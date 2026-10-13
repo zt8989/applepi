@@ -224,10 +224,32 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
           final = event.error;
         }
       }
-      // 流被 abort 后就断在这里（没有 done 事件）。必须主动把原因抛出来，
-      // 否则下面那句「流在 done 之前结束」会报一个跟真实原因无关的错误，超时也就不会重试。
+      //
+      // **超时闸的判定必须在看 `final` 之前**。
+      //
+      // 先前的写法是「先看 `!final`，再在里面问 timedOut」—— 那只有在流被 abort 之后
+      // 「安静收尾、什么都不给」时才成立。**真实 provider 不这样**：signal 一 abort，
+      // 它就补一份 `stopReason:'aborted'` 的部分消息，以 `error` 事件交回来
+      // （见 pi-ai `api/openai-completions.js`：catch 里 `output.stopReason = signal.aborted
+      // ? 'aborted' : 'error'`，然后 push 一个 error 事件）。于是 `final` 有值，
+      // 「是不是超时了」这一问永远走不到，那份**被我们自己掐断**的消息就被当成
+      // 模型正常说完，一路走到 `llm.succeeded`。
+      //
+      // 症状（2026-10-13 的会话 01a1330b，两次）：一个整整 120s 的 step 记成 `ok`、
+      // 树上一条**空的** llm.result、`step.end`/`turn.end` 写成「用户中断」，
+      // `error` 是 null —— 错误一个字都没留下，重试也不会发生（超时本来是可重试的）。
+      //
+      // 判据用消息自己的 `stopReason`，不用「收到的是 done 还是 error」：
+      // 前者对任何 provider 都成立，后者是 pi-ai 当前的实现细节。
+      // 唯一让超时**不**生效的情形是「真的收到了一次正常完成」—— 计时器与流收尾
+      // 赛跑到同一瞬间时，一份完整答案比一个可重试的超时错误更有价值。
+      const interrupted = final === undefined || final.stopReason === 'aborted';
+      if (timedOut && interrupted) {
+        throw new LlmTimeoutError(state.llmTimeoutMs);
+      }
+      // 流被 abort 后就断在这里（没有 done/error 事件）。必须主动把原因抛出来，
+      // 否则下面那句「流在 done/error 之前结束」会报一个跟真实原因无关的错误。
       if (!final) {
-        if (timedOut) throw new LlmTimeoutError(state.llmTimeoutMs);
         if (controller.signal.aborted) {
           const reason = abortReason(controller.signal);
           if (reason instanceof LlmTimeoutError) throw reason;

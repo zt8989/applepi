@@ -81,6 +81,52 @@ function abortableHangingStream(options: { signal?: AbortSignal | undefined }): 
   } as unknown as AssistantMessageEventStream;
 }
 
+/**
+ * 挂住，abort 来了就以**真 provider 的形状**收尾。
+ *
+ * 「真 provider 的形状」是这一组测试的重点：signal 一 abort，pi-ai 的 provider 不是
+ * 「安静结束迭代、什么都不给」，而是把累积的部分消息标成 `stopReason:'aborted'`，
+ * 以 **`error` 事件**交回来（见 pi-ai `api/openai-completions.js`：catch 里
+ * `output.stopReason = signal.aborted ? 'aborted' : 'error'`，然后 push 一个 error 事件）。
+ * 上面那个 `abortableHangingStream` 给的是「什么都不给」的形状 —— 两种都要测：
+ * 前者能过、后者过不了，就是一个只挂在假流上的假绿灯。
+ */
+function providerAbortStream(options: { signal?: AbortSignal | undefined }): AssistantMessageEventStream {
+  return {
+    async *[Symbol.asyncIterator]() {
+      await new Promise<void>((resolve) => {
+        const signal = options.signal;
+        if (!signal) {
+          setTimeout(resolve, 60_000);
+          return;
+        }
+        if (signal.aborted) {
+          resolve();
+          return;
+        }
+        const timer = setTimeout(resolve, 60_000);
+        signal.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer);
+            resolve();
+          },
+          { once: true },
+        );
+      });
+      yield {
+        type: 'error',
+        reason: 'aborted',
+        error: {
+          ...assistantMessage('我正在想'),
+          stopReason: 'aborted',
+          errorMessage: 'Request was aborted',
+        },
+      } as never;
+    },
+  } as unknown as AssistantMessageEventStream;
+}
+
 test('用户手动中断：stopCause=user（不是 timeout，也不是笼统的 aborted）', async () => {
   const faux = createFauxRuntime();
   const store = createAgentStore({
@@ -170,6 +216,66 @@ test('中止时不接手那条消息里的工具调用（用户都喊停了，�
   const state = await waitForIdle(store);
   assert.deepEqual(state.pendingToolCalls, [], '中止后不该有待跑的工具');
   assert.equal(state.phase, 'idle', '也不该进 calling-tools');
+});
+
+test('超时：provider 以 error 事件交回一份 aborted 消息时，仍要记成超时（不能伪装成用户中断）', async () => {
+  // 这是 2026-10-13 会话 01a1330b 的真实故障：默认超时 120s 到点，我们的闸 abort 了流，
+  // provider 随即以 `error` 事件交回一份 `stopReason:'aborted'` 的部分消息。
+  //
+  // 旧代码只看「有没有 final」：有 final 就当「模型说完了」，压根不再问 timedOut。
+  // 于是那次**真超时**被记成用户中断 —— 树上一条**空的** llm.result、step 状态是 ok、
+  // `error` 是 null，既不报错也不重试。用户在会话里看到的只是「回合结束：用户中断」，
+  // 而他从没按过停止。
+  const faux = createFauxRuntime();
+  let calls = 0;
+  const store = createAgentStore({
+    runtime: faux.runtime,
+    systemPrompt: 'test',
+    llmTimeoutMs: 50,
+    maxLlmAttempts: 2,
+    streamFn: (_m, _c, o) => {
+      calls += 1;
+      return providerAbortStream({ signal: o?.signal });
+    },
+  });
+
+  store.dispatch({ type: 'user.message', text: '慢慢想' });
+  const state = await waitForIdle(store);
+
+  assert.equal(calls, 2, '超时可重试：首次 + 一次重试');
+  assert.equal(state.stopCause, 'timeout', '必须记成超时，不能记成用户中断');
+  assert.notEqual(state.stopCause, 'user');
+  assert.match(state.error ?? '', /超时/, '错误要留在 state 里（旧代码这里是 null）');
+  // 树上两次超时各留一个 error 节点 —— 「错误一个字都没留下」正是这次的病。
+  const errorNodes = state.trace.order
+    .map((id) => state.trace.nodes[id])
+    .filter((node) => node?.kind === 'error');
+  assert.equal(errorNodes.length, 2, '两次超时都要在树上有 error 节点');
+  assert.equal(errorNodes[0]?.meta?.['cause'], 'timeout');
+  assert.equal(errorNodes[0]?.meta?.['kind'], 'timeout');
+});
+
+test('用户手动中断（同样是 provider 的 error 事件形状）：stopCause=user，不记成超时', async () => {
+  // 与上一条**同一个流形状**，只把 abort 的来源从「超时闸」换成「用户按停止」。
+  // 两条一起看才说明修复是按「谁喊的停」分流，而不是把 aborted 一律当超时。
+  const faux = createFauxRuntime();
+  const store = createAgentStore({
+    runtime: faux.runtime,
+    systemPrompt: 'test',
+    llmTimeoutMs: 60_000, // 足够长：这次停**只可能**是用户按的
+    maxLlmAttempts: 2,
+    streamFn: (_m, _c, o) => providerAbortStream({ signal: o?.signal }),
+  });
+
+  store.dispatch({ type: 'user.message', text: '慢慢想' });
+  await new Promise((r) => setTimeout(r, 30)); // 等流真的开起来再喊停
+  assert.equal(abortRun(), true, '有一次运行被打断');
+
+  const state = await waitForIdle(store);
+  assert.equal(state.stopReason, 'aborted', '粗分类仍是 aborted（UI 分红/灰的依据）');
+  assert.equal(state.stopCause, 'user');
+  assert.equal(state.error, null, '用户自己按的不是故障，不写 error');
+  assert.equal(state.retrying, false, '用户主动停的不该自动重试');
 });
 
 test('超时：stopCause=timeout，且**不**被记成用户中断', async () => {

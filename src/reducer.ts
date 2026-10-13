@@ -958,6 +958,12 @@ const transitions: TransitionHandlers = {
     //
     // **用户按了停止**（pi-ai 把那份部分消息以 `stopReason: 'aborted'` 交回来）。
     //
+    // ⚠️ **超时进来的不算这一支**：`callLlm` 在把消息交给这里之前就按 `timedOut` 把它
+    // 拦成了 `LlmTimeoutError`（超时要报错、要重试，不能伪装成用户的选择）。
+    // 所以「一份 aborted 消息走到这里」只能是手动中断（或内核关停）。
+    // 以前超时也会落到这里 —— 症状是 120s 的 step 记成 `ok` + 空的 llm.result
+    // + 「用户中断」，错误一个字都不留（见 effects.ts `callLlm` 里那段注释）。
+    //
     // 这一支必须在这里分：以前无论什么 stopReason 都写成 `completed`，于是界面显示
     // 「✗ 模型自己说完了：Request was aborted」+「按 Ctrl+R 看轨迹树」—— 用户自己按的
     // 停止，却像被程序报了个错，而那句「模型自己说完了」也是错的。
