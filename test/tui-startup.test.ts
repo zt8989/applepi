@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -98,6 +100,35 @@ const BRANCH = (() => {
     return 'main';
   }
 })();
+
+/**
+ * 底栏第二行那个 `(provider) model` —— 从**真实 settings.json** 现读。
+ *
+ * ## 为什么不写死模型名
+ *
+ * 早先这里写的是 `cn:space-bunny` / `(workbuddy)`（当时那台机器的默认模型）。
+ * 它们属于**用户配置**，而不是本项目的行为 —— 换个默认模型就假失败，
+ * 而报错是「首帧应该有底栏的 (provider) model」，指着一个好好的底栏说没有。
+ * 这与 `BRANCH` 写死 `main` 是同一类错（见上面那段注释）。
+ *
+ * 读不到（没配置 / 文件坏了 / 拷到没配置的机器）就退 `null`，调用方换一条
+ * 形状断言（`(provider) model` 的形状，而不是具体名字）。
+ */
+const DEFAULT_MODEL_LINE = (() => {
+  try {
+    const raw = JSON.parse(
+      readFileSync(path.join(homedir(), '.pi', 'agent', 'settings.json'), 'utf8'),
+    ) as { defaultProvider?: unknown; defaultModel?: unknown };
+    return typeof raw.defaultProvider === 'string' && typeof raw.defaultModel === 'string'
+      ? `(${raw.defaultProvider}) ${raw.defaultModel}`
+      : null;
+  } catch {
+    return null;
+  }
+})();
+
+/** `(provider) model` 的形状 —— 读不到真配置时的兼项（不钉具体名字）。 */
+const MODEL_LINE_SHAPE = /\([A-Za-z0-9._-]+\)\s+\S/;
 
 /**
  * 判断两个片段是否在**同一屏幕行**上。
@@ -267,25 +298,39 @@ async function firstFrame(
       // 根本进不了界面。这个测试**故意**用真配置：它要验的正是「真实启动路径」，
       // 隔离掉配置就验不到 provider 解析这一段了。
       env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
     let out = '';
     child.stdout.on('data', (d: Buffer) => (out += d.toString()));
     child.stderr.on('data', (d: Buffer) => (out += d.toString()));
+    /**
+     * 收尾：**等 stdout 排空**再 resolve。
+     *
+     * 这一步不是可选：`stdio` 是管道，而 macOS 上**管道写是异步的** ——
+     * `process.exit()` 会把还在缓冲区里的那几行丢掉（实测丢掉的是底栏）。
+     *
+     * 早先只在「计时器到点 kill」那条路上等了 300ms，`exit` 那条路直接 resolve ——
+     * 而子进程在 **stdin 是 `/dev/null`** 时（`stdio: ['ignore', …]`，也就是这里的形状）
+     * 会自己读完 EOF 退出（实测 ~1.7s），于是「进程自己退」这条路成了常态，
+     * 首帧断言稳定地看不到底栏。
+     */
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      setTimeout(() => resolve({ text: visible(out), raw: out }), 300);
+    };
     const timer = setTimeout(() => {
       child.kill();
-      // kill 之后 stdout 可能还有数据在管道里：等它排空再 resolve，
-      // 否则会拿到半截输出（表现为“顶栏不见了”的假失败）。
-      setTimeout(() => resolve({ text: visible(out), raw: out }), 300);
+      finish();
     }, ms);
     child.on('error', (error) => {
+      settled = true;
       clearTimeout(timer);
       reject(error);
     });
-    child.on('exit', () => {
-      clearTimeout(timer);
-      resolve({ text: visible(out), raw: out });
-    });
+    child.on('exit', finish);
   });
 }
 
@@ -352,9 +397,13 @@ test('TUI 首帧：顶行与底栏都要有内容（空组件会量出 0 高度�
     `首帧应该有顶行（页签 + 轨迹统计）。实际首屏前 400 字：\n${frame.slice(0, 400)}`,
   );
   // 底栏两行：cwd 在第一行，模型在**第二行**右侧。所以不能断言 cwd 行里就有模型。
+  //
+  // 期望值从真配置现读（`DEFAULT_MODEL_LINE`）—— 写死模型名的话，换台机器/换个默认
+  // 模型就是一条指着底栏说「底栏没有」的假失败。
   assert.ok(
-    frame.includes('cn:space-bunny') || frame.includes('(workbuddy)'),
-    '首帧应该有底栏的 (provider) model',
+    DEFAULT_MODEL_LINE === null ? MODEL_LINE_SHAPE.test(frame) : frame.includes(DEFAULT_MODEL_LINE),
+    `首帧应该有底栏的 (provider) model（期望 ${DEFAULT_MODEL_LINE ?? '任意 (provider) model'}）。` +
+      `实际首屏前 400 字：\n${frame.slice(0, 400)}`,
   );
 });
 
@@ -385,8 +434,17 @@ test('TUI 首帧：底栏把 cwd 与模型分列两端', async () => {
   );
   // 模型在**第二行**右侧（pi 的排法：用量与模型并排，cwd 独占第一行）。
   // 用原始输出判断同行与否 —— 差分重绘里两者之间是光标定位序列，不是换行。
+  //
+  // 先钉「模型那一行真的画出来了」：`onSameScreenLine()` 在两个片段有一个找不到时
+  // 返回 false，不先断言的话「模型根本没渲染」也会让它过（早先写死 `(workbuddy)`
+  // 就是这么静默过的）。
+  const modelLine = DEFAULT_MODEL_LINE ?? '(provider) model';
   assert.ok(
-    !onSameScreenLine(raw, `(${BRANCH})`, '(workbuddy)'),
+    DEFAULT_MODEL_LINE === null ? MODEL_LINE_SHAPE.test(frame) : frame.includes(DEFAULT_MODEL_LINE),
+    `底栏该画出模型那一行（期望 ${modelLine}）`,
+  );
+  assert.ok(
+    !onSameScreenLine(raw, `(${BRANCH})`, DEFAULT_MODEL_LINE ?? '') || DEFAULT_MODEL_LINE === null,
     '模型不该与 cwd 同一行（那是上一版的错误排法）',
   );
 });
