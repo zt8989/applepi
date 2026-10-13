@@ -482,8 +482,11 @@ test('扩展：pi-web-access 装上，5 个 web 工具进注册表', { skip: !ha
     for (const want of ['web_search', 'fetch_content', 'source_check']) {
       assert.ok(names.includes(want), `缺工具 ${want}：${names.join(',')}`);
     }
-    // 全部都要 promptSnippet —— 官方语义是「没有 snippet 就不进 prompt」，而
-    // extension-host.ts 会为那种情况报一条诊断（上面断言 errors 为空已经盖住了）。
+    // 这两个工具要有 promptSnippet。
+    //
+    // 注意：**没有 snippet 不是错误**（工具照样进 API 请求的 tools 数组，
+    // 见 `extension-host.ts` 那段注释）—— 所以这里断言的是「它进没进 prompt 的工具节」，
+    // 而不是「没进就有人报错」。
     for (const want of ['web_search', 'fetch_content']) {
       assert.ok(
         host.promptTools.some((t) => t.name === want),

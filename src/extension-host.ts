@@ -382,13 +382,20 @@ export async function loadExtensionHost(
         continue;
       }
       tools.push(adaptExtensionTool(name, d, { runner, store, cwd }));
-      // prompt 片段：官方语义是「有 snippet 才进 prompt 的工具清单」。没有就是
-      // 「不告诉模型它存在」，而那会与「工具在注册表里」矛盾 —— 所以那种情况报出来。
-      if (d.promptSnippet === undefined || d.promptSnippet === '') {
-        errors.push(
-          `扩展 ${shortPath(ext.path)}：工具 ${name} 没有 promptSnippet —— 不会出现在 system prompt 里，模型不知道它存在`,
-        );
-      } else {
+      // prompt 片段：官方语义是「**有 snippet 才进 prompt 的工具清单**」。
+      //
+      // 没有 snippet **不是错误** —— 工具照样在注册表里、照样进 API 请求的 tools 数组，
+      // 模型看得到它的 `description`，只是不在 system prompt 的「工具怎么用」那一节
+      // 被单独点名。pi 自己就是这个处理（它只把有 snippet 的收进 `_toolPromptSnippets`，
+      // 没有 snippet 的不吭声）。
+      //
+      // 早先这里报一条诊断，理由是「没 snippet = 不告诉模型它存在」—— 那句对项目自己的
+      // 四个工具成立（它们的用法全在 snippet 里），但对扩展不成立。实际的预警是
+      // `pi-subagents` 0.77 的 `bg_wait`：它只有 `description`，而且**故意**不宣传
+      // （它是 subagent 那条流里的补位工具，用法写在 `subagent` 的 snippet 里）。
+      // 报出来就变成启动横幅上一句永远修不掉的 “[Extension issues]”，那就不是预警、
+      // 是噪音了 —— 而噪音会让人把**真的**诊断一起忽略掉。
+      if (d.promptSnippet !== undefined && d.promptSnippet !== '') {
         promptTools.push({
           name,
           promptSnippet: d.promptSnippet,
