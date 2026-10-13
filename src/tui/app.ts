@@ -88,7 +88,7 @@ import {
   createReadToolDefinition,
   createWriteToolDefinition,
 } from '@earendil-works/pi-coding-agent';
-import { getMarkdownTheme, getEditorTheme } from '@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';// pi 底栏的官方实现（靠 pnpm patch 打开的子路径）。数字格式与算法都与 pi 一致 ——
+import { getMarkdownTheme, getEditorTheme, type Theme } from '@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';// pi 底栏的官方实现（靠 pnpm patch 打开的子路径）。数字格式与算法都与 pi 一致 ——
 // 两边对不上会让人以为算错了。
 // 见 docs/architecture/provider.md「为什么要 pnpm patch」。
 import { formatCwdForFooter, formatTokens } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js';
@@ -1099,6 +1099,40 @@ export function scopeFrom(
   return { enabledModelIds: [...enabledIds], models: items };
 }
 
+/**
+ * 视口往上翻之后那条「回到最新」的提示 —— pi 的 `scrollToEndIndicator` 画的内容。
+ *
+ * ## 为什么需要它
+ *
+ * 对话区（以及轨迹页）的 ScrollView 是 `follow: 'end'`：新内容往下追加、视口自动贴底。
+ * 但用户往上翻之后 `follow` 让位，**视口就停在历史里了** —— 这时新消息还在下面继续
+ * 长出来，屏幕上却没有任何东西说「下面还有」。pi 的做法是在视口最后一行居中压一条
+ * 可点的提示条（点它回到底部的鼠标处理在 pi-tui 里，这里只管文案）。
+ *
+ * 没有它时的症状不是「报错」，而是「等流式输出时以为卡住了」—— 而 `Ctrl+End` 这个键
+ * 本身也就只有这条提示会告诉用户。
+ *
+ * ## 文案与 pi 逐字同形
+ *
+ * `↓ Jump to latest message · Ctrl+End` —— 与 pi `createInteractiveTui()` 里那一句
+ * 完全相同。改成本项目自己的中文只会让同一个动作在两个应用里说得不一样
+ * （命令反馈卡的取舍相同，见 [surfaces](../../docs/architecture/surfaces.md)）。
+ *
+ * 键名**走键位表**（`keyLabel('tui.altScreen.bottom')`）而不是手写 `Ctrl+End`：用户在
+ * `~/.pi/agent/keybindings.json` 里把它改成别的键之后，这条提示跟着变 —— pi 走的是同一套
+ * （`keyDisplayText('tui.altScreen.bottom')`）。
+ *
+ * 首尾各留一个空格、配色用主题的 `selectedBg` + `text`：这条是被 `compositeTuiLine`
+ * **压进**视口最后一行已有内容的，不留空格会与那一行原来的字连成一片（pi 也一样）。
+ */
+export function jumpToLatestHint(theme: Theme): string {
+  // `keyLabel` 解析不出键时返回空串（动作 id 写错=编程错误，见 keybindings.ts）—— 那时
+  // **不带** `· `，而不是留一个悬空的点。pi 也是这么判的（`shortcut ? ... : ''`）。
+  const shortcut = keyLabel('tui.altScreen.bottom');
+  const label = ` ↓ Jump to latest message${shortcut ? ` · ${shortcut}` : ''} `;
+  return theme.bg('selectedBg', theme.fg('text', label));
+}
+
 export async function runTui(options: TuiOptions): Promise<number> {
   const { store, prompt, newSession, sessionId, restoreSession: restoreHook } = options;
   const beforeAgentStartHook = options.beforeAgentStart;
@@ -1165,6 +1199,11 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const tui: ViewportTUI = new TuiAltScreen(terminal, true, undefined, {
     mouse: true,
     copyOnSelect: true,
+    // 往上翻之后，视口最后一行压一条「回到最新」的提示（与 pi 同一条，见 jumpToLatestHint）。
+    // pi-tui 只在 **primary** 那个 ScrollView 离开末尾时画它 —— 本项目切页时会重建
+    // ScrollView 并让当前页当 primary（见 applyLayout），所以对话页与轨迹页各管各的，
+    // 不需要在这里判当前在哪一页。
+    scrollToEndIndicator: () => jumpToLatestHint(theme),
   });
 
   /**

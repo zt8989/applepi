@@ -21,6 +21,7 @@ import {
   TraceChunks,
   isScrollDown,
   isScrollUp,
+  jumpToLatestHint,
   shouldIgnoreKey,
   renderQueuePanel,
   renderTranscript,
@@ -724,6 +725,30 @@ test('tabLine：改键位（keybindings.json）之后顶行的提示跟着改', 
     // 用了 override 之后显示的就是 override 那个键（macOS 上 `alt` 显示成 `Option`）。
     assert.ok(out.includes(`(${formatKeyId('alt+r')})`), out);
     assert.equal(getKeybindings().getKeys('app.trace.toggle')[0], 'alt+r');
+  } finally {
+    installProjectKeybindings();
+  }
+});
+
+test('jumpToLatestHint：往上翻后那条「回到最新」提示与 pi 同句，键名走键位表', () => {
+  // 对话区与轨迹页的 ScrollView 都是 `follow: 'end'`：新内容往下长、视口自动贴底。
+  // 但用户往上翻之后 follow 让位，视口停在历史里 —— 屏幕上看不出「下面还有」
+  // （缺了它，流式生成时按什么键都不动，而 `Ctrl+End` 这个键也就只有这条提示会讲）。
+  const theme = setupTheme(undefined, 'dark');
+  const out = stripTerminalSequences(jumpToLatestHint(theme));
+  // 文案照 pi 的 `createInteractiveTui()` 那一句，不自己翻成中文。
+  assert.ok(out.includes('Jump to latest message'), out);
+  // 键名不写死：`tui.altScreen.bottom` 默认是 ctrl+end，但用户可以改 —— 与顶行
+  // `(Ctrl+R)` 同一个理由（手写键名的提示改键之后就开始骗人）。
+  assert.ok(out.includes(keyLabel('tui.altScreen.bottom')), out);
+
+  const patched = createProjectKeybindings();
+  patched.setUserBindings({ 'tui.altScreen.bottom': 'ctrl+shift+e' });
+  setKeybindings(patched);
+  try {
+    const overridden = stripTerminalSequences(jumpToLatestHint(theme));
+    assert.ok(!overridden.includes('Ctrl+End'), `不该还是默认键：${overridden}`);
+    assert.ok(overridden.includes(formatKeyId('ctrl+shift+e')), overridden);
   } finally {
     installProjectKeybindings();
   }

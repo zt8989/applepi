@@ -22,6 +22,34 @@
 `Ctrl+C` 清空编辑器（连按两次退出），**中断是 `Escape`**（pi 的 `app.interrupt`）。
 完整的一份在 `/hotkeys` 里。
 
+### 往上翻之后压一条「回到最新」的提示（与 pi 同句）
+
+对话区与轨迹页的 `ScrollView` 都是 `follow: 'end'`：新内容往下追加、视口自动贴底。
+但用户往上翻之后 `follow` 让位，**视口停在历史里** —— 新消息还在下面长出来，屏幕上却
+没有任何东西说「下面还有」。
+
+`TuiAltScreen` 的 `scrollToEndIndicator` 选项就是补这个：视口离开末尾时，在**最后一行**
+居中压一条可点的提示条（点它回到底部的鼠标处理在 pi-tui 里）。文案由
+`jumpToLatestHint()` 给：
+
+```
+↓ Jump to latest message · Ctrl+End
+```
+
+三个要点：
+
+- **与 pi 逐字同句**（`createInteractiveTui()` 里那一句），不翻成中文 —— 与命令反馈卡
+  同一个取舍：同一个动作在两个应用里说的得是同一句话。
+- **键名走 `keyLabel('tui.altScreen.bottom')`**，不手写 `Ctrl+End`。用户在
+  `~/.pi/agent/keybindings.json` 里改了这个键，提示跟着变（pi 走 `keyDisplayText()`，
+  同一套）。
+- **只在 primary 那个 ScrollView 上画**（pi-tui 的行为）。本项目切页时重建 ScrollView
+  并让当前页当 primary（见 `applyLayout`），所以两个页各自管各自的那条提示，不需要
+  在回调里判当前在哪一页。
+
+`test/tui-render.test.ts` 钉的是「同句 + 键名跟着改键走」这两条 —— 缺了它的症状不是抛错，
+而是「流式生成时按什么都不动」，而 `Ctrl+End` 这个键本身也就只有这条提示会讲。
+
 ### composer 与 pi 一致：横线颜色 + 状态画在上框线
 
 composer 是 pi 的 `CustomEditor`（`embedWorkingStatus: true`），配色是 pi 的
