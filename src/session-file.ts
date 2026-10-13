@@ -223,10 +223,8 @@ export function readSession(file: string): Session | null {
   return { header, entries };
 }
 
-/** 读会话并把其中的 message 条目按顺序取出（恢复历史用）。 */
-export function readSessionMessages(file: string): Message[] {
-  const session = readSession(file);
-  if (!session) return [];
+/** 把读出来的会话里的 message 条目按顺序取出（恢复历史用）。 */
+export function sessionMessages(session: Session): Message[] {
   const out: Message[] = [];
   for (const entry of session.entries) {
     if (entry.type === 'message') {
@@ -235,6 +233,73 @@ export function readSessionMessages(file: string): Message[] {
     }
   }
   return out;
+}
+
+/** 读会话并把其中的 message 条目按顺序取出（恢复历史用）。 */
+export function readSessionMessages(file: string): Message[] {
+  const session = readSession(file);
+  return session ? sessionMessages(session) : [];
+}
+
+/**
+ * 一个会话里与**思考级别**有关的事实。
+ *
+ * 三项一次给全，因为它们总是同一时刻被问的（启动解析级别 + 决定要不要回填一条记录），
+ * 而分开各扫一遍这个文件在长会话上是 18MB × N。
+ */
+export interface SessionThinkingInfo {
+  /**
+   * 文件里有几条消息。
+   *
+   * **0 = pi 眼里「这不算已有会话」** —— pi 的 `hasExistingSession` 是
+   * `existingSession.messages.length > 0`（`core/sdk.js:84`）。空壳文件（只有 header 或只有
+   * `model_change`）会走「新会话」那条分支，于是**不会**去读它的思考级别。
+   */
+  hasMessages: boolean;
+  /**
+   * 有没有 `thinking_level_change` 条目。
+   *
+   * 没有 = 这个会话没记过用哪一档（早于这个功能的会话、或手写的文件），按 pi 的
+   * `sdk.js:279-283` 应该**回填一条**，否则下次恢复又得靠默认值猜。
+   */
+  hasEntry: boolean;
+  /**
+   * 最后一条 `thinking_level_change` 的**原文**（没有就是 `undefined`）。
+   *
+   * 原文而不是校验过的档位：会话文件是用户可改的，而「读文件」这一层不该替调用方决定
+   * 坏值怎么处理（`thinking-level.ts` 的解析函数把非法值当「没给」）。
+   * 「最后一条生效」与 pi 的 `getSessionContextSettings()` 同一口径（它沿叶子路径走，
+   * 最后一条覆盖前面所有）。本项目还没有分支树，所以「文件里最后一条」等价。
+   */
+  level: string | undefined;
+}
+
+/** 从读出来的会话里取思考级别那几项事实。 */
+export function sessionThinking(session: Session): SessionThinkingInfo {
+  let messages = 0;
+  let hasEntry = false;
+  let level: string | undefined;
+  for (const entry of session.entries) {
+    if (entry.type === 'message') {
+      messages += 1;
+    } else if (entry.type === 'thinking_level_change') {
+      hasEntry = true;
+      const value = (entry as ThinkingChangeEntry).thinkingLevel;
+      if (typeof value === 'string') level = value;
+    }
+  }
+  return { hasMessages: messages > 0, hasEntry, level };
+}
+
+/**
+ * 读盘版：一次性拿「这个会话已经有什么」。文件不存在 → `undefined`。
+ *
+ * 启动（`--session <id>` 决定初始档位）与恢复（决定要不要把级别带回来、要不要回填一条
+ * 记录）都用它，所以「这个会话有没有那条记录」只有一个定义。
+ */
+export function readSessionThinking(file: string): SessionThinkingInfo | undefined {
+  const session = readSession(file);
+  return session ? sessionThinking(session) : undefined;
 }
 
 /**

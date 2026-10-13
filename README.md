@@ -160,6 +160,8 @@ pnpm start -p "今天几号？"                  # 跑一条就退出，顺带�
 pnpm start --demo                          # 不打网络：pi-ai 自带的 faux provider
 pnpm start --llm-timeout 30000 --attempts 3   # 短超时 + 三次尝试，好看到重试分叉
 pnpm start --cwd ../other                  # 工具的文件操作边界换到别的目录
+pnpm start --thinking high "帮我看看这个并发问题"   # 一次性的思考级别（按模型能力 clamp）
+pnpm start -m cn:deepseek-v4.1-flash:high   # 同一个意思：模型 pattern 的 :<级别> 后缀
 ```
 
 界面里：`Ctrl+R` **在「对话」与「轨迹」两页之间切换**（顶部有页签标出当前在哪页），
@@ -246,12 +248,16 @@ HEAD → n10
 
 | 命令 | 作用 |
 | --- | --- |
+| `/model` | 盖住输入框的模型选择面板（同 pi）；`/model <id>` 精确命中就直接切。面板里 `Ctrl+S` 存默认模型 |
+| `/thinking` | 思考级别选择面板（同 pi）；`/thinking <级别>` 直接切。面板里 **`Ctrl+S` 存默认级别**，`Shift+Tab` 循环（**不**存） |
+| `/scoped-models` | 挑哪些模型参与 `Ctrl+P` 循环（含每模型写死一档的 `p/id:high` 写法） |
 | `/sessions` | 盖住输入框的历史会话选择面板（满宽，同 pi）。**零 token** —— 不重跑模型，只把消息**和轨迹树**读回来 |
 | `/new` | 开**新会话**：换 id → 换文件。上一段完整留在 `sessions/` 里 |
 | `/clean`（或 `/wipe`） | **删除**除当前会话外的全部历史会话（连同轨迹文件）。不可逆 |
 | `/compact` | 把老对话换成一段结构化摘要（上下文快满了时用；与 pi 同名） |
 | `/skills` | 列出已装载的 skill（**已进 system prompt** 的那批） |
 | `/skill:<名字>` | 把某个 skill 的正文展开后，连同你写的问题一起发给模型 |
+| `/hotkeys` | 全部键位（键名实时解析，与 pi 的 `/hotkeys` 同形） |
 | `/help` | 命令列表 |
 
 命令**不发给模型** —— 那是给界面/内核的管理动作。**`/skill:` 是例外**：它展开成一段

@@ -49,9 +49,11 @@ import {
   openScopedModelsPicker,
   modelRuntimeFor,
 } from './model-picker';
+import { openThinkingPicker } from './thinking-picker';
+import { DEFAULT_THINKING_LEVEL, readDefaultThinkingLevel, writeDefaultThinkingLevel } from '../thinking-level';
 import { NO_SCOPE, readScopedModels, writeDefaultModel, readHideThinkingBlock, writeHideThinkingBlock, type ModelScope, type ScopedModelItem } from '../model-scope';
 import type { AgentRuntime } from '../provider';
-import type { Model } from '@earendil-works/pi-ai';
+import type { Model, ModelThinkingLevel } from '@earendil-works/pi-ai';
 import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
@@ -93,7 +95,7 @@ import { setupTheme } from './theme';
 import { actionMatches, installProjectKeybindings, keyLabel } from './keybindings';
 import { hotkeysMarkdown, renderHotkeys } from './hotkeys';
 // 「完全复用 pi」里那几条纯逻辑（循环模型 / 循环思考级别）—— 见 pi-actions.ts 的文件头。
-import { modelKey, nextCycleIndex, supportedThinkingLevels } from './pi-actions';
+import { modelKey, nextCycleIndex, nextThinkingLevel, supportedThinkingLevels } from './pi-actions';
 // pi 自己的外部编辑器与剪贴板实现 —— 复用它，不自己 spawn $EDITOR / 调 pbcopy。
 import { editInExternalEditor } from '@earendil-works/pi-coding-agent/dist/modes/interactive/external-editor.js';
 import { readClipboardFilePaths, readClipboardText, copyToClipboard } from '@earendil-works/pi-coding-agent/dist/utils/clipboard.js';
@@ -814,6 +816,11 @@ const SLASH_COMMANDS: SlashCommand[] = [
     description: '换模型（弹窗选择；`/model <id>` 精确命中时直接切；与 pi 同名）',
   },
   {
+    name: 'thinking',
+    description:
+      '思考级别（弹窗选择；`/thinking <级别>` 直接切；面板里 Ctrl+S 存默认；与 pi 同名）',
+  },
+  {
     name: 'scoped-models',
     description: '启用/禁用哪些模型参与 Ctrl+P 循环（Ctrl+S 存进 settings）',
   },
@@ -927,7 +934,7 @@ export interface TuiOptions {
    *
    * 不传 = `/model` 面板仍能开（能列、能搜），选完会**明说没接内核**而不是假装换了。
    */
-  setModel?: ((provider: string, modelId: string) => boolean) | undefined;
+  setModel?: ((provider: string, modelId: string, options?: { thinkingLevel?: string | undefined }) => boolean) | undefined;
   /**
    * 拿 provider 装配（模型目录的来源）。`/model` 面板要它列模型。
    *
@@ -1859,20 +1866,26 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 与 pi 的 `cycleThinkingLevel()` 同口径：级别集合来自**模型支持的那几档**
    * （`getSupportedThinkingLevels`），缺 `reasoning` 的模型返回空 -> 提示「不支持」。
    *
+   * **不落盘**：与 pi 一致 —— `cycleThinkingLevel()` 调 `setThinkingLevel(next)` 时没带
+   * `{ persist: true }`，只有 `/thinking` 面板里的 `Ctrl+S` 才存成默认，`/settings` 里改的是
+   * per-model 覆盖。（早先这份文档说 Shift+Tab 会写 settings，而代码从来没写过 ——
+   * 文档跟着实现走。）
+   *
    * 落点：`thinking.changed`（reducer 改 `state.thinkingLevel`），随后内核在下一轮
-   * LLM 请求里带上新级别（`effects.ts` 从 `state.model.thinkingLevel` 读）。
+   * LLM 请求里带上新级别（`effects.ts` 从 `state.model.thinkingLevel` 读），
+   * 会话记录器把这次变化写进会话文件（`session-recorder.ts`）。
    */
   const cycleThinking = (): void => {
     const before = store.getState().thinkingLevel;
     const model = currentModelObject();
-    const levels = supportedThinkingLevels(model);
-    if (levels.length === 0) {
+    const next = nextThinkingLevel(model, before);
+    if (next === undefined) {
+      // pi 的文案（`Current model does not support thinking`）——说的是「没得切」，
+      // 而不是「你敲错了键」。
       notify(yellow('当前模型不支持 thinking（没有可切的级别）'));
       return;
     }
-    const index = levels.indexOf(before);
-    const next = levels[nextCycleIndex(levels.length, index, 'forward') ?? 0] as typeof before;
-    store.dispatch({ type: 'thinking.changed', level: next });
+    store.dispatch({ type: 'thinking.changed', level: next as typeof before });
     refresh();
     notify(dim(`思考级别：${next}`));
   };
@@ -1900,7 +1913,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
     const available = [...modelRuntimeFor(options.runtime).getAvailableSnapshot()];
     // 作用域里有模型就只用它们；作用域空（全开）就用**当前 provider** 的全部模型 ——
     // 把全 provider 的 1500 条拿来循环没意义（Ctrl+P 会跨到别的厂商去）。
-    const scoped = currentScope.models.map((item) => item.model);
+    const scopedItems = currentScope.models;
+    const scoped = scopedItems.map((item) => item.model);
     const candidates =
       scoped.length > 0
         ? scoped.filter((model) => available.some((m) => m.provider === model.provider && m.id === model.id))
@@ -1919,7 +1933,11 @@ export async function runTui(options: TuiOptions): Promise<number> {
       notify(dim('只有这一个可切的模型'));
       return;
     }
-    if (!options.setModel(next.provider, next.id)) {
+    if (!options.setModel(next.provider, next.id, {
+      // 作用域条目写死的档位（`/scoped-models` 里的 `p/i:high`）跟着一起传 —— pi 的
+      // `_cycleScopedModel` 也把它当 `explicitLevel` 传给 `_getThinkingLevelForModelSwitch`。
+      thinkingLevel: scopedItems.find((item) => modelKey(item.model) === modelKey(next))?.thinkingLevel,
+    })) {
       notify(yellow(`换不了 ${next.provider}/${next.id}（配置里没它）`));
       return;
     }
@@ -2283,6 +2301,63 @@ export async function runTui(options: TuiOptions): Promise<number> {
           onSelectAsDefault: (model) => {
             apply(model, true);
           },
+        });
+        return;
+      }
+      case 'thinking': {
+        // 与 `/model` 同一句：环在跑时不能换 —— 那条流的请求已经按旧档位发出去了，
+        // 中途改会让这一轮与下一轮的档位不同，而对话里看不出这个断点。
+        if (store.getState().phase !== 'idle') {
+          notify(yellow(`上一回合还没结束，先按 ${keyLabel('app.interrupt')} 中断再改思考级别`));
+          return;
+        }
+        // 支持的档位由**模型**决定（`getSupportedThinkingLevels`）—— 与 Shift+Tab、
+        // 与内核启动时的 clamp 是同一个来源。
+        const levels = supportedThinkingLevels(currentModelObject());
+        if (levels.length === 0) {
+          notify(yellow('当前模型不支持 thinking（没有可切的级别）'));
+          return;
+        }
+        /** 真的换一档。`persist` = `Ctrl+S`（写 `settings.json` 的 `defaultThinkingLevel`）。 */
+        const applyThinking = (level: ModelThinkingLevel, persist: boolean): void => {
+          store.dispatch({ type: 'thinking.changed', level });
+          refresh();
+          if (!persist) {
+            notify(dim(`思考级别：${level}`));
+            return;
+          }
+          // 写盘是异步的（pi 的 `save()` 是入队写），所以提示放在 `.then` 里 ——
+          // 先报「已存」再报失败的话，用户看到的最后一行是矛盾的。
+          void writeDefaultThinkingLevel(level, cwd).then((ok) => {
+            notify(
+              ok
+                ? dim(`已存为默认思考级别：${level}`)
+                : yellow('没能写进 settings.json（写权限？），默认思考级别没变'),
+            );
+          });
+        };
+        // `/thinking <级别>`：与 pi 的 `handleThinkingCommand` 同一形状 —— 在**这个模型
+        // 支持的档位**里大小写不敏感地匹配，命中就直接切（不开面板）；不命中就报可选值
+        // （文案也照 pi：「Unknown thinking level …」，因为那是从 pi 那边搜过的人记得的）。
+        if (arg !== '') {
+          const wanted = arg.trim().toLowerCase();
+          const level = levels.find((candidate) => candidate.toLowerCase() === wanted);
+          if (!level) {
+            notify(yellow(`Unknown thinking level "${arg}". Available levels: ${levels.join(', ')}.`));
+            return;
+          }
+          applyThinking(level as ModelThinkingLevel, false);
+          return;
+        }
+        openThinkingPicker({
+          tui,
+          current: store.getState().thinkingLevel,
+          levels,
+          // `· default` 标的就是 settings 里的那一档（没有就到内置 medium —— 与 pi 的
+          // `getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL` 同一句）。
+          defaultLevel: readDefaultThinkingLevel(cwd) ?? DEFAULT_THINKING_LEVEL,
+          onSelect: (level) => applyThinking(level, false),
+          onSelectAsDefault: (level) => applyThinking(level, true),
         });
         return;
       }

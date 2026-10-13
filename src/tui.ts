@@ -14,6 +14,7 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { findSessionFile } from './config-home';
 import { defaultProviderSpec, providerNames } from './provider';
+import { THINKING_LEVELS, isThinkingLevel } from './thinking-level';
 import { createKernel, type Kernel } from './kernel';
 import { runTui } from './tui/app';
 import { setupTheme } from './tui/theme';
@@ -22,6 +23,7 @@ import type { Theme } from '@earendil-works/pi-coding-agent';
 // pi 的 theme 是 globalThis 上的一个 Proxy —— initTheme() 之后一直可读。
 // 直接 import（不缓存）是为了「initTheme 可能被再调」时读到的是当时那个。
 import { theme as piTheme } from '@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';
+import type { ModelThinkingLevel } from '@earendil-works/pi-ai';
 import type { HostUiOptions } from './extension-ui';
 
 /**
@@ -40,6 +42,22 @@ interface CliArgs {
   /** 命令行没给就留空 → 走 defaultProviderSpec()（settings.json → 兜底）。 */
   provider: string;
   model?: string | undefined;
+  /**
+   * `--thinking`（与 pi 同名同义）。不认的值**告警并忽略**，而不是报错退出 —— 与 pi 一致。
+   *
+   * 不给就按 pi 的顺序解析（会话文件 → settings 的 per-model → 全局默认 → `medium`，
+   * 再 clamp 到模型支持的那几档，见 `kernel.ts` 的注释）。
+   */
+  thinking?: ModelThinkingLevel | undefined;
+  /**
+   * `-m id:high` 那个后缀（pi 的「model pattern 的可选 `:<thinking>` 后缀」）。
+   *
+   * 单独一个字段而不是直接写进 `thinking`：pi 的规则是「`--thinking` **压过** `--model` 的
+   * 后缀」（`main.js`：后缀先定、`--thinking` 后应用），而这里参数是**按出现顺序**解析的 ——
+   * `-m x:low --thinking high` 与 `--thinking high -m x:low` 都该得 `high`。
+   * 两个字段分开存，最后 `thinking ?? modelThinking` 合一次就与顺序无关了。
+   */
+  modelThinking?: ModelThinkingLevel | undefined;
   /** 不给 → 走 pi 的 buildSystemPrompt（见上）。 */
   system?: string | undefined;
   /** 追加规则（进 <addendum>）；文件 `.pi/APPEND_SYSTEM.md` 优先。 */
@@ -73,6 +91,9 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
   -p, --print <text>     一次性提问
   -P, --provider <id>    LLM provider（默认 settings.json → models.json 里第一个；可用: ${providerNames().join(', ')})
   -m, --model <id>       模型 id（默认取该 provider 的第一个模型）
+                         可选后缀 :<级别>，如 -m cn:deepseek-v4.1-flash:high（--thinking 压过它）
+      --thinking <lvl>   思考级别：${THINKING_LEVELS.join('/')}
+                         （与 pi 同义；不给就按 pi 的顺序解析：会话 → settings → medium，再按模型支持的那几档夹）
   -s, --system <text>    覆盖 system prompt 的前言（工具规则 / AGENTS.md / cwd 仍照旧拼上）
       --append-system <t> 追加一条规则（进 <addendum>；.pi/APPEND_SYSTEM.md 优先）
       --max-turns <n>    单回合最多几轮 LLM 调用（默认不限制）
@@ -110,6 +131,7 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
   ${keyLabel('app.clear').padEnd(19)}清空编辑器（连按两次退出）；${keyLabel('app.exit')} 直接退出
   /hotkeys              列出全部键位（与 pi 的 /hotkeys 同形）
   /model [id]           换模型（不给 id 就弹面板；给了精确命中就直接切）
+  /thinking [级别]      思考级别（不给就弹面板，面板里 Ctrl+S 存默认；给了就直接切）
   /scoped-models        启用/禁用哪些模型参与 Ctrl+P 循环（Ctrl+S 存进 settings）
   /skills               列出已装载的 skill
   /skill:<名字> [问题]  把某个 skill 的正文展开后连同你的问题一起发给模型
@@ -159,9 +181,37 @@ function parseArgs(argv: string[]): CliArgs {
         args.provider = next();
         break;
       case '-m':
-      case '--model':
-        args.model = next();
+      case '--model': {
+        // pi 的「可选 `:<thinking>` 后缀」（`--model provider/id:high`）。
+        //
+        // 只把**最后**一个冒号后面那段当后缀，而且那段必须是一个合法档位 —— 所以
+        // `-m cn:deepseek-v4.1-flash` 不会把 `flash` 当成后缀（它不在档位表里），
+        // 只有 `-m cn:deepseek-v4.1-flash:high` 才会拆。与 pi 的 `parseModelPattern`
+        // 同一个判据（它也是先看 `isValidThinkingLevel`）。
+        const value = next();
+        const colon = value.lastIndexOf(':');
+        const suffix = colon < 0 ? '' : value.slice(colon + 1);
+        if (colon > 0 && isThinkingLevel(suffix)) {
+          args.model = value.slice(0, colon);
+          args.modelThinking = suffix;
+        } else {
+          args.model = value;
+        }
         break;
+      }
+      case '--thinking': {
+        // 与 pi 同一条：**不认的值告警并忽略**，而不是报错退出（`dist/cli/args.js:125-135`）。
+        // 忽略的后果只是「这一档没生效」，而报错退出会让整个界面起不来 —— 后者严重得多。
+        const value = next();
+        if (isThinkingLevel(value)) {
+          args.thinking = value;
+        } else {
+          process.stderr.write(
+            `Invalid thinking level "${value}". Valid values: ${THINKING_LEVELS.join(', ')}\n`,
+          );
+        }
+        break;
+      }
       case '-s':
       case '--system':
         // 覆盖 pi 的 preamble，其余段不变。
@@ -264,6 +314,14 @@ async function main(): Promise<void> {
       systemPrompt: args.system,
       appendSystemPrompt: args.appendSystem,
       cwd: args.cwd,
+      // 给了就最高优先（仍然会被 clamp 到模型支持的那几档）——
+      // 不给时**不传这个键**，让内核按 pi 的顺序解析（`?? 'off'` 那种兜底已经移进内核）。
+      // `-m id:high` 的后缀排在 `--thinking` 后面（pi：后缀先定、`--thinking` 后应用）。
+      ...(args.thinking !== undefined
+        ? { thinkingLevel: args.thinking }
+        : args.modelThinking !== undefined
+          ? { thinkingLevel: args.modelThinking }
+          : {}),
       ...(args.skillPaths.length > 0 ? { skillPaths: args.skillPaths } : {}),
       demo: args.demo,
       maxTurns: args.maxTurns,
@@ -330,7 +388,10 @@ async function main(): Promise<void> {
     restoreSession: (file: string) => kernel.restoreSession(file),
     // 换模型：dispatch `model.changed` + `model.init`（能力与窗口随模型变），
     // 且**先查模型存在**。界面自己 dispatch 也能让底栏变，但那样绕过了那道闸。
-    setModel: (provider: string, modelId: string) => kernel.setModel(provider, modelId),
+    // 第三个参数是作用域条目写死的档位（`/scoped-models` 的 `p/i:high`）——
+    // pi 的 `_cycleScopedModel` 也把它传下去（`setModel` 的第二个参数）。
+    setModel: (provider: string, modelId: string, modelOptions?: { thinkingLevel?: string | undefined }) =>
+      kernel.setModel(provider, modelId, modelOptions),
     // 面板要列模型，就要有 provider 装配。**给真的 runtime**（内核持有的那个 `AgentRuntime`）——
     // 它与 `createRuntime` 装的是同一个对象，面板看到的模型目录与实际发请求的目录同源。
     runtime: kernel.runtime,

@@ -25,7 +25,16 @@ import type { InitRecord, TracePersistence, TraceSink } from './trace-store';
 import type { Message, Model, ModelThinkingLevel } from '@earendil-works/pi-ai';
 import type { AgentAction, ModelCapabilities } from './actions';
 import { createSessionRecorder, type SessionRecorder } from './session-recorder';
-import { readSession, readSessionMessages } from './session-file';
+import { readSession, readSessionThinking, sessionMessages, sessionThinking } from './session-file';
+import { findSessionFile } from './config-home';
+import {
+  clampForModel,
+  isThinkingLevel,
+  readDefaultThinkingLevel,
+  readModelThinkingLevel,
+  resolveStartupThinkingLevel,
+  thinkingLevelForModelSwitch,
+} from './thinking-level';
 import path from 'node:path';
 import { getTools } from './tools';
 import { buildSystemPromptText, promptToolsFrom, type PromptToolLike } from './system-prompt';
@@ -84,7 +93,17 @@ export interface KernelOptions {
   cwd: string;
   /** 不打网络，用 pi-ai 的 faux provider。 */
   demo?: boolean | undefined;
-  /** 初始思考级别（reasoning effort）；`off` = 不带 reasoning。 */
+  /**
+   * 命令行请求的思考级别（`--thinking` / `-m id:high` 的那种）。
+   *
+   * **不给就按 pi 的顺序解析**（`core/sdk.js:120-142`）：会话文件里那条 → settings 的
+   * per-model 覆盖 → settings 的全局默认 → 内置 `medium`，最后 clamp 到当前模型支持的
+   * 那几档。命令行给了就最高优先（但仍然 clamp）—— 与 pi 的 `--thinking` 同一句
+   * 「clamps thinking to the model's capabilities」。
+   *
+   * 解析规则全在 `thinking-level.ts`（那里是唯一入口，所以启动那一档与 `/thinking`
+   * 面板上打勾的那一档一定是同一个）。
+   */
   thinkingLevel?: ModelThinkingLevel | undefined;
   llmTimeoutMs?: number | undefined;
   maxLlmAttempts?: number | undefined;
@@ -144,10 +163,18 @@ export interface Kernel {
    *
    * 思考级别**带着走**（从 state 读再传回去）：换模型不该顺手把 `high` 改成 `off`。
    *
+   * 准确说：按 pi 的 `_getThinkingLevelForModelSwitch` **重新解析**一遍（作用域条目 /
+   * per-model 覆盖 / 全局默认都排在「当前这一档」前面，最后 clamp 到新模型支持的那几档）——
+   * 没配过 settings 时结果与「带着走」相同，配过时才分得出来（见实现里的注释）。
+   *
    * @returns 换成功没有。找不���到那个模型就返回 `false` 并**不 dispatch** ——
    *   状态原封不动，比 dispatch 一次半换更安全。
    */
-  setModel(provider: string, modelId: string): boolean;
+  setModel(
+    provider: string,
+    modelId: string,
+    options?: { thinkingLevel?: string | undefined },
+  ): boolean;
   /**
    * 扩展宿主（`settings.json` 的 `packages` 里装了什么）。
    *
@@ -234,6 +261,35 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   let current: SessionResources = openResources(options.sessionId ?? newSessionId());
   const sessionId = current.sessionId;
   const cwd = path.resolve(options.cwd ?? process.cwd());
+
+  //
+  // ── 思考级别：与 pi 同一套解析顺序（`core/sdk.js:120-142`） ──
+  //
+  // 顺序要点：命令行 > 会话文件里那条 > per-model 覆盖 > 全局默认 > 内置 `medium`，
+  // 最后 clamp 到当前模型支持的那几档。三条来源各有一个坑：
+  //
+  // 1. **只在命令行真的给了 sessionId 时才去扫会话目录**。不给时 sessionId 是刚生成的
+  //    UUIDv7，盘上一定没有这个文件 —— 扫一遍是白扫，而扫目录是启动路径上唯一的
+  //    文件系统操作。pi 那边也一样：它只知道 `--continue` / `--session` 指的那个会话。
+  // 2. 「文件在那」不等于「这是一个已有的会话」：pi 的 `hasExistingSession` 是
+  //    `messages.length > 0`（空壳文件不算），而「不算」的后果是它会走「新会话」分支
+  //    （于是 per-model 覆盖**会**被看到）。差别只在那一个布尔值上，照抄。
+  // 3. clamp 在这里做（这个函数知道 model，pi 的 `createAgentSession` 也在这里做）——
+  //    早先这里没有 clamp，而 `medium` 在 deepseek-v4.1-flash 上不是合法档位，
+  //    症状是「底箱写着 medium，请求里发的是模型不认的 reasoning 值」。
+  const startupSession =
+    options.sessionId === undefined
+      ? undefined
+      : readSessionThinking(findSessionFile(options.sessionId, cwd));
+  const thinkingLevel = clampForModel(
+    runtime.model,
+    resolveStartupThinkingLevel({
+      cliLevel: options.thinkingLevel,
+      sessionLevel: startupSession?.hasMessages === true ? startupSession.level : undefined,
+      perModelLevel: readModelThinkingLevel(runtime.model.provider, runtime.model.id, cwd),
+      defaultLevel: readDefaultThinkingLevel(cwd),
+    }),
+  );
 
   const { store, persistence, autoCompact } = createPersistentStore({
     runtime,
@@ -330,7 +386,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     type: 'model.init',
     provider: runtime.spec.provider,
     modelId: runtime.model.id,
-    thinkingLevel: options.thinkingLevel ?? 'off',
+    thinkingLevel,
     // 底栏据此决定显不显示 `• <级别>`（reasoning 模型才有思考级别这回事）。
     reasoning: runtime.model.reasoning ?? false,
     capabilities: readCapabilities(runtime.model),
@@ -368,7 +424,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         op: 'model.init',
         provider: runtime.spec.provider,
         modelId: runtime.model.id,
-        thinkingLevel: options.thinkingLevel ?? 'off',
+        thinkingLevel,
         reasoning: runtime.model.reasoning ?? false,
         capabilities,
       },
@@ -406,17 +462,28 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   // 它同样是 store 订阅器 —— 挂在 dispatch 链上，成功失败都记。
   //
   // 写成可替换的：`newSession()` 要换 id（于是换文件），而 store 不重建。
-  const openRecorder = (id: string, resumeFrom?: number): SessionRecorder | null => {
+  const openRecorder = (
+    id: string,
+    resumeFrom?: number,
+    hasThinkingEntry?: boolean,
+  ): SessionRecorder | null => {
     const rec = createSessionRecorder(store, {
       sessionId: id,
       cwd,
       enabled: options.writeSession !== false,
       ...(resumeFrom !== undefined ? { resumeFrom } : {}),
+      ...(hasThinkingEntry !== undefined ? { hasThinkingEntry } : {}),
     });
     current = { ...current, sessionId: id, recorder: rec };
     return rec;
   };
-  openRecorder(sessionId, options.resumeFrom);
+  // 恢复场景的两件事合并成一处：**已有会话**（有消息）才谈「它记没记过档位」——
+  // 空壳文件不算已有会话，走新会话那条路（会补写一条初始记录）。
+  openRecorder(
+    sessionId,
+    options.resumeFrom,
+    startupSession?.hasMessages === true ? startupSession.hasEntry : undefined,
+  );
 
   return {
     store,
@@ -445,10 +512,31 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
      * 「把历史也改了」——`/new` 之后本该能回到命令行给的那个模型，而现在回不去了。
      * effect 表是每次请求现取的（`store.ts` 的 `resolveModel`），所以只换 state 就够。
      */
-    setModel(provider: string, modelId: string): boolean {
+    setModel(
+      provider: string,
+      modelId: string,
+      modelOptions?: { thinkingLevel?: string | undefined },
+    ): boolean {
       const model = runtime.models.getModel(provider, modelId);
       if (!model) return false;
-      const thinkingLevel = store.getState().model.thinkingLevel;
+      // 换模型之后用哪一档：逐条照抄 pi 的 `_getThinkingLevelForModelSwitch` +
+      // `setThinkingLevel` 里的 clamp ——
+      // 作用域条目写死的档位（`/scoped-models` 的 `p/i:high`）→ per-model 覆盖 →
+      // 全局默认 → **当前那一档**（pi 的 `?? this.thinkingLevel`）。
+      //
+      // 为什么不是「一律带着旧级别走」：那是本项目早先的行为，而它与 pi 在**配过**
+      // `defaultThinkingLevel` / `modelThinkingLevels` 的人那里不一致 —— 症状正是
+      // 「pi 换过去是 high、本项目换过去还是旧的 low」。没配过时两条规则结果相同
+      // （全局默认没有 → 退回当前值），所以这个改动对默认配置无感。
+      //
+      // clamp 在这里是必需的：换到一个只认 high/max 的模型而手上是 medium，
+      // 不夹就会发出模型不认的 reasoning 值。
+      const thinkingLevel = thinkingLevelForModelSwitch(model, {
+        scopedLevel: modelOptions?.thinkingLevel,
+        perModelLevel: readModelThinkingLevel(provider, modelId, cwd),
+        defaultLevel: readDefaultThinkingLevel(cwd),
+        current: store.getState().model.thinkingLevel,
+      });
       store.dispatch({ type: 'model.changed', provider, modelId } as AgentAction);
       store.dispatch({
         type: 'model.init',
@@ -499,7 +587,10 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
      */
     async restoreSession(file: string): Promise<{ id: string; restored: number }> {
       const session = readSession(file);
-      const messages = readSessionMessages(file);
+      const messages = session ? sessionMessages(session) : [];
+      // 这一段的思考级别也一并读：pi 恢复会话时会把那一档带回 agent state
+      // （`core/sdk.js:122-127`、`session-manager` 的 `getSessionContextSettings`）。
+      const thinking = session ? sessionThinking(session) : undefined;
       const id = session?.header.id ?? '';
       // 恢复也换 id：之后的消息要追加进**那个**会话的文件，而不是当前这个。
       const previous = current;
@@ -533,8 +624,27 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
             : { type: 'trace.restored', sessionId: id, messages, trace: tree }
         ) as AgentAction,
       );
+      // 思考级别跟着会话走（在**恢复之后**发：那两条 restored action 会把 model 块里
+      // 的级别按当前值带上，先发会被它们的值盖回去）。
+      //
+      // 没有那条记录（老会话）就不动 —— 保持启动解析出来的那一档，与 pi 的
+      // `hasThinkingEntry ? existingSession.thinkingLevel : <默认解析>` 同一行为。
+      // clamp 仍然要过：恢复的那个会话可能是用另一个模型聊的（本项目不在恢复时换模型），
+      // 而旧档位在新模型上未必合法。
+      if (thinking !== undefined && isThinkingLevel(thinking.level)) {
+        const state = store.getState();
+        const restoredLevel = clampForModel(
+          runtime.models.getModel(state.providerName, state.modelId),
+          thinking.level,
+        );
+        if (restoredLevel !== state.model.thinkingLevel) {
+          store.dispatch({ type: 'thinking.changed', level: restoredLevel } as AgentAction);
+        }
+      }
       // 恢复出来的消息已经在文件里，记录器游标要从这里接着算，别再写一遍。
-      openRecorder(id, messages.length);
+      // 第三个参数：这个文件里已经有 `thinking_level_change` 吗 —— 没有就由记录器回填一条
+      // （与 pi 的 `sdk.js:279-283` 同一件事）。
+      openRecorder(id, messages.length, thinking?.hasEntry === true);
       if (previous.sink?.close) void previous.sink.close();
 
       return { id, restored: messages.length };

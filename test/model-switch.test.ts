@@ -221,13 +221,17 @@ test('换了模型之后，能力与窗口跟着换（不是沿用旧模型的�
   assert.equal(store.getState().providerName, target.provider);
 });
 
-test('思考级别跨换模型保留（换模型不该顺手把 high 改成 off）', () => {
+test('思考级别跨换模型保留（没配过 settings 时与 pi 同结果：级别带着走）', () => {
   const { runtime } = twoModelRuntime();
   const store = createAgentStore({ runtime, systemPrompt: 'test' });
   store.dispatch({ type: 'thinking.changed', level: 'high' });
   const target = runtime.models.getModel(runtime.spec.provider, 'model-b');
   assert.ok(target);
-  // `kernel.setModel()` 正是这样从 state 读回级别的（见 kernel.ts 那个 setModel）。
+  // 这一条盯的是 store 那一层（两条 action 怎么搬 model 块）。
+  // `kernel.setModel()` 比这多一步：它先按 pi 的 `_getThinkingLevelForModelSwitch`
+  // 重新解析（作用域条目 / per-model 覆盖 / 全局默认都排在「当前这一档」前面），
+  // 而这三样都没配时就是这里的「从 state 读回级别」—— 那一层的行为在
+  // `test/thinking-level.test.ts` 里钉。
   const thinkingLevel = store.getState().model.thinkingLevel;
   store.dispatch({ type: 'model.changed', provider: target.provider, modelId: target.id });
   store.dispatch({

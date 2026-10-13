@@ -32,6 +32,24 @@ export interface SessionRecorderOptions {
   cwd: string;
   /** 传 null 就不写会话文件（只落轨迹）。 */
   enabled: boolean;
+  /**
+   * 恢复会话时：这个文件里**已经有** `thinking_level_change` 条目吗。
+   *
+   * 没给（新会话）或给 `false`（老会话没记过这一档）→ 写第一条消息时**回填一条**，
+   * 与 pi 的 `sdk.js:279-283` 是同一件事（「Restore missing settings metadata for older
+   * sessions」那段）。不给的话，恢复一个老会话之后它永远不知道自己用哪一档，
+   * 而「不知道」在 pi 那里会被当成「新会话」 —— 于是 per-model 覆盖被跳过（见
+   * `thinking-level.ts` 里 `resolveStartupThinkingLevel` 第 3 步）。
+   *
+   * ## 与 pi 的一处**时间差**（刻意）
+   *
+   * pi 在会话建立那一刻就把这行写下去（它的会话文件本来就一直存在）；本项目是
+   * 「空会话不落盘」，所以回填推迟到**真的要写文件时**（第一条消息 / 档位真的变了）。
+   * 后果只有一个：恢复一个老会话又直接退出，盘上不会多这一行 —— 而下次恢复仍然按
+   * 默认解析拿到同一档，行为上看不出差别。换来的是那条硬挣来的不变式：
+   * **恢复不写盘**（见 `test/restore-perf.test.ts`「会话文件一个字节都不该变」）。
+   */
+  hasThinkingEntry?: boolean | undefined;
 }
 
 export interface SessionRecorder {
@@ -79,8 +97,38 @@ export function createSessionRecorder(
   const modelKeyOf = (s: AgentState): string => `${s.model.provider}\0${s.model.modelId}`;
   let lastModelKey = modelKeyOf(store.getState());
 
+  /**
+   * 这个会话**开始时**用哪一档，以及「这条记录还没写进文件」。
+   *
+   * pi 在会话建立那一刻就把「这个会话用哪一档」写进文件（`core/sdk.js:279-290`），
+   * 而本项目**空会话不建文件**（见 `SessionWriter.start`：header 推迟到第一条消息）。
+   * 所以这里记着它、推迟到真的要写文件时再落 —— 文件内容与 pi 同形
+   * （header → `thinking_level_change` → 消息），而「进来看一眼就退出」仍然不留垃圾文件。
+   */
+  let lastThinkingLevel = store.getState().model.thinkingLevel;
+  const initialThinkingLevel = lastThinkingLevel;
+  let pendingInitialThinking = options.hasThinkingEntry !== true;
+
   const flush = (): void => {
     const state = store.getState();
+    const thinkingLevel = state.model.thinkingLevel;
+    const thinkingChanged = thinkingLevel !== lastThinkingLevel;
+    const pendingMessages = state.messages.length > written;
+    // 回填 / 初次落盘：只在「反正要写文件」的时机写 —— 马上要写消息、或档位真的变了。
+    // 都不是就不写：纯空会话不建文件（恢复一个老会话也不动它，见 `hasThinkingEntry`
+    // 里那条「恢复不写盘」）。
+    if (pendingInitialThinking && (pendingMessages || thinkingChanged)) {
+      writer.appendThinkingChange(initialThinkingLevel);
+      pendingInitialThinking = false;
+    }
+    // 级别变了要记一条（与 pi 同一个 entry type，pi 恢复时也认）。
+    // 为什么在**这里**而不在键盘处理里：`thinking.changed` 有四个入口（Shift+Tab、
+    // `/thinking` 面板、换模型时的重新解析、恢复会话），在各处各写一遍必然会漏一个 ——
+    // 而漏掉的那一个的症状是「换了档位、恢复时又变回去了」。
+    if (thinkingChanged) {
+      writer.appendThinkingChange(thinkingLevel);
+      lastThinkingLevel = thinkingLevel;
+    }
     // 模型换了要记一条（与 pi 同一个 entry type，pi 恢复时也认）。
     //
     // 为什么**在**这里而不在 `onModelChange` 回调里：那个回调字段早先是声明了但

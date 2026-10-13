@@ -31,7 +31,7 @@
 | id | 默认键 | 本项目要做的 |
 | --- | --- | --- |
 | `app.model.cycleForward` / `app.model.cycleBackward` | `Ctrl+P` / `Shift+Ctrl+P` | 在 `currentScope` 里循环换模型（内核已有 `setModel`） |
-| `app.thinking.cycle` | `Shift+Tab` | 循环 thinking 级别，发 `thinking.changed`，并把级别写进 settings |
+| `app.thinking.cycle` | `Shift+Tab` | 循环 thinking 级别，发 `thinking.changed`（**不**落盘 —— pi 的 `cycleThinkingLevel()` 没带 `persist`；存默认走 `/thinking` 面板里的 `Ctrl+S`）。见 [thinking](thinking.md) |
 | `app.message.followUp` | `Alt+Enter` | 流式时按 followUp 入队；空闲时等同回车 |
 | `app.message.dequeue` | `Alt+Up` | 把队列内容还回编辑器（需要新增 `queue.clear` action） |
 | `app.editor.external` | `Ctrl+G` | 复用 pi 的 `editInExternalEditor()` |

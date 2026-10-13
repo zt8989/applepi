@@ -15,7 +15,7 @@
  * - `nextCycleIndex` ↔ pi `agent-session.js` 的 `_cycleScopedModel` / `_cycleAvailableModel`
  *   （同一个取模、同一个「当前不在列表里就从 0 开始」）。
  * - `nextThinkingLevel` ↔ pi 的 `cycleThinkingLevel()`（同一个「只认支持的档位、
- *   到顶回卷」）。
+ *   到顶回卷」，连「当前档位不在列表里时从头一个开始」那个怪处也一样）。
  */
 import type { Model } from '@earendil-works/pi-ai';
 import { getSupportedThinkingLevels } from '@earendil-works/pi-ai';
@@ -62,7 +62,14 @@ export function supportedThinkingLevels(model: Model<any> | undefined): string[]
 /**
  * 下一个思考级别。不支持 thinking（或没有档位）→ `undefined`。
  *
- * `current` 不在支持列表里时，从头开始（与 `nextCycleIndex` 同一口径）。
+ * ## 为什么**不**用 `nextCycleIndex`（两者确实不一样）
+ *
+ * pi 的 `cycleThinkingLevel()` 是 `levels[(currentIndex + 1) % levels.length]`：当前档位不在
+ * 列表里时 `currentIndex` 是 -1，而 `(-1 + 1) % n === 0` —— **从头一个开始**。
+ * 而 `_cycleScopedModel` / `_cycleAvailableModel` 先把 -1 归 0 再 +1（于是从**第二个**开始）。
+ * 两个动作在 pi 里真的不同，所以这里各用一条式子；统一用 `nextCycleIndex` 的症状是
+ * 「当前档位不被这个模型支持时（比如刚从只认 medium 的模型换到只认 low/high/max 的），
+ * Shift+Tab 会跳过最便宜的那一档」。
  */
 export function nextThinkingLevel(
   model: Model<any> | undefined,
@@ -71,7 +78,7 @@ export function nextThinkingLevel(
   const levels = supportedThinkingLevels(model);
   if (levels.length === 0) return undefined;
   const index = levels.indexOf(current);
-  return levels[nextCycleIndex(levels.length, index, 'forward') ?? 0];
+  return levels[(index + 1) % levels.length];
 }
 
 /**

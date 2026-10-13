@@ -184,6 +184,10 @@ provider 拒；反过来「以为不支持但实际支持」只是少用了个�
 
 `effects.ts` 里读的是 `state.model.thinkingLevel`（不是扁平别名），因为那是 model 块的真相。
 
+它**从哪来**（五条来源 + clamp）与**写到哪去**（settings / 会话文件）不在这篇：见
+[thinking](thinking.md)。两处最常问的：「默认为什么是 high」（默认 medium + 模型只认
+low/high/max + 向上取整），以及「默认值怎么存」（`/thinking` 面板的 `Ctrl+S`）。
+
 ## Hooks = 洋葱式 middleware
 
 「Hooks」在本项目里**不是** system prompt 的附属品，而是一层横切所有 action 的拦截器

@@ -25,7 +25,7 @@
 ~/.pi/agent/
   models.json                     provider / 模型目录
   auth.json                       凭证
-  settings.json                   默认 provider / model / thinkingLevel
+  settings.json                   默认 provider / model / thinkingLevel（与 pi 同一份、同一批键）
   sessions/--<cwd 编码>--/<时间戳>_<id>.jsonl
   traces/<时间戳>_<id>.jsonl      轨迹树 + 装载段（pi 没这个目录）
 ```
@@ -68,7 +68,11 @@ version 那边 pi 会自动把 v1 升到 v3（`migrateV1ToV2` 补 `id`/`parentId
 ```
 
 `id` / `parentId` 串成链（pi 用这条链做 session tree）。另有两种 entry 现在也写：
-`model_change`、`thinking_level_change`。
+`model_change`（换模型）、`thinking_level_change`（换思考级别）—— 都是**变了才追加**，
+而不是每帧补一条（记录器是 store 订阅器，每帧都跑）。
+
+`thinking_level_change` 的读回在 [thinking](thinking.md#五会话往返)：恢复会话时用它决定这一档，
+老会话缺这一条时在**下一次真要写文件**时回填一条（为什么不在恢复的那一刻就写，见那节的「时间差」）。
 
 字段名与 pi 的 `SessionHeader` / `SessionEntryBase` 一致，所以同址之后两边能互相读到对方的
 会话（差异见上面的「与 pi 的会话互通」）。

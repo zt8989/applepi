@@ -80,8 +80,13 @@ test('nextThinkingLevel：当前级别是最后/第一档时双向都能走通',
   // 从最后一档出发回卷到第一档。
   const last = levels[levels.length - 1] as string;
   assert.equal(nextThinkingLevel(fakeModel(true), last), first);
-  // 当前级别不在列表里（例如换了个能力不同的模型）→ 从 0 起算。
-  assert.equal(nextThinkingLevel(fakeModel(true), '不存在的档位'), levels[1] ?? first);
+  // 当前级别不在列表里（例如换了个能力不同的模型）→ **第一档**。
+  //
+  // 注意这里与 nextCycleIndex 的 -1 行为**不一样**，而那是 pi 真的不一样：
+  // `cycleThinkingLevel()` 是 `levels[(index + 1) % len]`（-1 → 0），而
+  // `_cycleScopedModel` 先把 -1 归 0 再 +1（-1 → 1）。统一成一条式子的症状是
+  // 「Shift+Tab 跳过最便宜的那一档」（见 pi-actions.ts 的注释）。
+  assert.equal(nextThinkingLevel(fakeModel(true), '不存在的档位'), first);
 });
 
 test('modelKey：用 \\0 分隔 provider 与 id（id 里可以有 /）', () => {
