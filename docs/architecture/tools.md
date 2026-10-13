@@ -102,13 +102,13 @@ execute(toolCallId, params, signal?, onUpdate?) => Promise<AgentToolResult>
 
 ```ts
 const registries = new Map<string, readonly AgentTool[]>();   // 官方工具，按 cwd
-const extensionTools: AgentTool[] = [];                        // 扩展工具，不按 cwd
+const extensionEntries: NormalizedEntry[] = [];                // 扩展工具，不按 cwd
 
 export function getTools(cwd = process.cwd()) {
   const key = path.resolve(cwd);
   let tools = registries.get(key);
   if (!tools) { tools = build(cwd); registries.set(key, tools); }
-  return extensionTools.length === 0 ? tools : [...tools, ...extensionTools];
+  return extensionEntries.length === 0 ? tools : [...tools, ...getExtensionTools()];
 }
 ```
 
@@ -120,13 +120,26 @@ export function getTools(cwd = process.cwd()) {
 [extensions](extensions.md)），而且**不能**按 cwd 重建：重建等于把 jiti 已经装载好的
 模块重新适配一遍，白花开销。
 
-`registerExtraTools()` 有两个细节：
+`registerToolEntries()` / `registerExtraTools()` 有两个细节：
 
 - **同名时官方工具优先** —— 否则一个扩展能把 `bash` 顶掉。判据是**官方那一层**的名字
   （不能用 `getTools()`，那个已经合并了扩展工具，会变成循环依赖）。
 - **必须在 `prompt.init` 之前调**（内核保证）。反过来的话 `prompt.init` 已经把工具
   清单装进 state 了，扩展工具就只存在于注册表、模型看不见 —— 而症状是「工具调用永远
   回『未知工具』」，界面上那个工具块连参数都画不出来。
+
+### `getTools()` 不是「发给模型的工具表」
+
+接 MCP 与 codemode 之后这里多了两张视图（细节见 [mcp-codemode](mcp-codemode.md)）：
+
+| 函数 | 是什么 | 谁读 |
+| --- | --- | --- |
+| `getTools()` | 内置（按 `defaultTools` 开着的）+ 全部扩展工具（去 `hidden`） | 注册表视图、`getTool()`、初始 state |
+| `declaredToolset()` | 激活集 ∩ 注册表，跑过 `prepareLoadout` | `prompt.init`（**真的发给模型的那份**） |
+| `callableTools()` | `codemode` / `deferred` + 激活的 `direct` | codemode 脚本的 `tools`、`ctx.executeTool` |
+
+`getTools()` 里可能有模型看不见的工具（MCP 默认就是）—— 「注册了」与「模型看得到」
+是两件事，这就是 `exposure` 那一列要表达的东西。
 
 ## 执行路径
 

@@ -38,7 +38,7 @@ import {
 } from './thinking-level';
 import { readCompactionEnabled, writeCompactionEnabled } from './compact';
 import path from 'node:path';
-import { getTools } from './tools';
+import { declaredToolset, freezeActiveTools } from './tools';
 import { buildSystemPromptText, promptToolsFrom, type PromptToolLike } from './system-prompt';
 import { loadExtensionHost } from './extension-host';
 import type { HostUiOptions } from './extension-ui';
@@ -309,8 +309,16 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   //
   const budgets = readThinkingBudgets(cwd);
 
+  // 工具执行门的持有者：store 先建、extensionHost 后建，所以走一个先声明、后赋值的引用。
+  let extensionHostRef: ExtensionHost | undefined;
   const { store, persistence, autoCompact } = createPersistentStore({
     runtime,
+    // `tool_call` 门：MCP 靠它等「脚本/模型点名了但服务器还没连上」。
+    // `extensionHost` 在下面才建，所以走一个**闭包读当时值**的函数。
+    onToolCall: (toolCallId, name, input) =>
+      extensionHostRef === undefined
+        ? Promise.resolve({ input })
+        : extensionHostRef.beforeToolCall(toolCallId, name, input),
     // **不给** systemPrompt：真的那份由下面的 prompt.init 装（那时才需要 cwd、
     // 工具、skill）。这里给一个占位只会活到第一条 prompt.init。
     cwd,
@@ -358,7 +366,20 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     },
     canSend: () => store.getState().phase === 'idle',
   });
-  const toolList = getTools(cwd);
+  extensionHostRef = extensionHost;
+  // ── 发 `session_start`：MCP 靠它读 `mcp.json` 并开始连服务器 ──
+  //
+  // **必须在算工具表之前**：MCP 会发现「有 codemode 暴露的服务器」并激活 `codemode`
+  // （走 `setActiveTools`，而那条只在装载窗口内真的生效）；而 `direct` 服务器的工具是
+  // 在连接过程中动态注册的 —— 加载后必须再扫一遍。
+  await extensionHost.startSession();
+  // 收 `before_agent_start` 写的 prompt 段（MCP 的 `mcp_servers`）。
+  // 它里面还会等 `direct` 服务器最多 10 秒（与 pi 一致）—— 等完了，它们的工具才注册完。
+  const sections = await extensionHost.collectPromptSections();
+  // **声明给模型**的工具在这一刻定下：激活集 ∩ 注册表，再跑一遍 `prepareLoadout`
+  // （codemode 靠它把自己的描述换成「现在能调哪些工具」的清单）。
+  const declared = declaredToolset(cwd);
+  const declaredNames = new Set(declared.tools.map((tool) => tool.name));
   // Skill 清单：官方 `loadSkills()` + `loadSkillsFromDir()` 扫各个目录
   // （含跳工具约定的 `~/.agents/skills`），再由 reducer 拼进 system prompt
   // （走 prompt.init，所以会被落盘、被回放）。
@@ -382,11 +403,15 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   const promptTools: PromptToolLike[] = [
     ...promptToolsFrom(cwd),
     ...extensionHost.promptTools,
-  ];
+    // 只列**这一轮真的声明给模型**的（没声明的与隐藏的都不算）：
+    // MCP 的 codemode 工具没激活时不进工具表，而 codemode 的 `mode: "only"`
+    // 会把直调工具从声明里藏掉（它们仍可被脚本调）。
+  ].filter((tool) => declaredNames.has(tool.name) && !declared.hidden.has(tool.name));
   const systemPrompt = buildSystemPromptText({
     cwd,
     tools: promptTools,
     skills: skillRegistry.skills,
+    ...(Object.keys(sections).length > 0 ? { sections } : {}),
     ...(options.systemPrompt !== undefined ? { customPrompt: options.systemPrompt } : {}),
     ...(options.appendSystemPrompt !== undefined
       ? { appendPrompt: options.appendSystemPrompt }
@@ -395,7 +420,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   store.dispatch({
     type: 'prompt.init',
     systemPrompt,
-    tools: toolList.map((tool) => ({
+    tools: declared.tools.map((tool) => ({
       name: tool.name,
       description: tool.description,
       parameters: tool.parameters,
@@ -403,6 +428,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     skills: skillRegistry.skills,
     skillDiagnostics: skillRegistry.diagnostics,
   });
+  // 工具集从此定死（见 tools.ts 的 `freezeActiveTools`）：之后再有 `setActiveTools`
+  // 只会得到一条诊断，而不是一份与 prompt 对不上的声明。
+  freezeActiveTools();
   store.dispatch({
     type: 'model.init',
     provider: runtime.spec.provider,

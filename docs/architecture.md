@@ -6,7 +6,9 @@
 **快照：`80a8733`（2026-10-05）。** 那一提交是「README 只留简介与启动/测试，架构现状搬进
 `docs/architecture/`」—— 它给本目录建立了七篇的骨架。骨架之上的工作树改动（prompt / model
 两块状态、洋葱式 middleware、装载段落盘与零 token 回放）见 [init](architecture/init.md)；
-会话文件与「恢复历史」见 [sessions](architecture/sessions.md)。
+会话文件与「恢复历史」见 [sessions](architecture/sessions.md)。再接上来的是 MCP 与 codemode
+（见 [mcp-codemode](architecture/mcp-codemode.md)）：官方内置扩展、exposure 感知的注册表、
+装载窗口与 `tool_call` 门。
 
 再往前：`4f535fb`（内核搬到 Node，界面与内核共享同一份环；工具走真实文件系统）给了
 [kernel](architecture/kernel.md) 与 [surfaces](architecture/surfaces.md) 整篇；`2ea9113`（工具换成
@@ -48,3 +50,4 @@ pi-coding-agent 的官方实现，pi-ai 升到 1.0.2）给了 [tools](architectu
 | [thinking](architecture/thinking.md) | 思考级别：五条来源的优先级、clamp（为什么默认会变成 high）、四个写入口、会话往返、思考预算 |
 | [settings](architecture/settings.md) | 设置：`/settings` 面板里有什么、哪些键本项目真的会读、加一行的顺序 |
 | [extensions](architecture/extensions.md) | 装 pi 扩展：官方 loader + jiti 虚拟模块、overlay 宿主、工具集不中途变 |
+| [mcp-codemode](architecture/mcp-codemode.md) | 内置扩展 `mcp` + `codemode`：exposure 五种取值、装载顺序、`tool_call` 门、已知边界 |

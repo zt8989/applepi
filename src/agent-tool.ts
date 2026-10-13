@@ -21,6 +21,15 @@ export interface AgentTool {
   label: string;
   description: string;
   parameters: TSchema;
+  /**
+   * `structuredContent` 的 JSON Schema（只有 MCP 那类工具声明它）。
+   *
+   * **codemode 脚本靠它决定「这次调用的返回值是什么形状」**：有它 → 脚本拿到
+   * `structuredContent`（MCP 工具拿到完整 `CallToolResult`）；没有 → 拿到文本那一坨。
+   * 丢掉它的后果很具体：脚本里 `await tools.mcp__rea__read({...})` 返回一个字符串，
+   * 而文档写的是对象 —— 脚本按对象取字段就静默拿到 `undefined`。
+   */
+  outputSchema?: TSchema | undefined;
   execute(
     toolCallId: string,
     params: Record<string, unknown>,
