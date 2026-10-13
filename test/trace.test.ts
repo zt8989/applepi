@@ -246,17 +246,26 @@ test('需求核心：LLM 超时后重试，重试节点的父 id 指向**超时�
   assert.equal(state.trace.tipId, resultId, '成功后才推进 tip');
   assert.equal(state.retrying, false);
 
-  // 树渲染出来就是这个形状。
+  // 树渲染出来就是这个形状 —— 失败与重试是**同一个缩进下的两个 step 块**，
+  // 各自用小括号（`step.end` 的 `└─`）收口：
   //
-  // **多了一层 turn**（n2），所以分叉从它下面开始，而 tip 指向 n7（llm.result）
-  // —— n8 是 step.end，容器闭合不推进 tip。
+  //   │  ○  n3 step.start: 第 1 步
+  //   │  │  ○  n4 error: ...
+  //   │  └─ n5 step.end: 第 1 步结束
+  //   │  ○  n6 step.start: 第 2 步（重试）
+  //   │  │  ◎  n7 llm.result: 好了
+  //   │  └─ n8 step.end: 第 2 步结束
+  //
+  // 失败与成功现在靠**颜色**分（红加粗 / 绿），不再靠 `✗` / `✓` 字 ——
+  // 见 `trace-flat` 那组测试换成的 `trace-graph`。
   const rendered = renderTree(state.trace, { maxWidth: 0 });
   console.log(`\n${rendered}\n`);
-  assert.match(rendered, /├── ✗ n3 step\.start/);
-  assert.match(rendered, /└── ✓ n6 step\.start/);
-  assert.match(rendered, /HEAD → n7/);
-  // turn 容器不带失败标记，也不推进 tip。
-  assert.match(rendered, /^· n2 turn\.start/m);
+  assert.match(rendered, /^│  ○  n3 step\.start: 第 1 步/m);
+  assert.match(rendered, /^│  ○  n6 step\.start: 第 2 步（重试）/m);
+  assert.match(rendered, /^│  └─ n5 step\.end/m);
+  // turn 容器在最左列（它自己不开缩进），tip 画在树上是 `◎`（不再另起一行 `HEAD →`）。
+  assert.match(rendered, /^○  n2 turn\.start: 回合 1/m);
+  assert.match(rendered, /◎  n7 llm\.result/m);
 });
 
 test('鉴权失败不重试：错误在树上，但没有分叉，环收工', () => {

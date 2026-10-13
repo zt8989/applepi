@@ -35,7 +35,7 @@ import {
   type TuiInputListener,
 } from '@earendil-works/pi-tui';
 import { abortRun } from '../run-control';
-import { renderTree, traceStats, formatDuration, type TraceNode, type TraceTree } from '../trace';
+import { traceRows, traceStats, formatDuration, type TraceNode, type TraceTree } from '../trace';
 import { compactReasonText } from '../compact';
 import type { AgentState, QueuedInput, QueueKind } from '../state';
 import type { AgentStore } from '../store';
@@ -255,11 +255,31 @@ export class TraceChunks implements Component {
    * 于是长会话下每个 token 都在为「几百个早就不动的节点」重新分词。
    */
   private readonly lastNodes: (TraceNode | undefined)[] = [];
+  /**
+   * 每个节点这一行的**轨道前缀**（`│  │  ○  ` 那一段）。
+   *
+   * 由 `traceRows()` 算 —— 与命令行、`renderColoredTree()` 是同一个函数，
+   * 所以界面里看到的树与 `ela` 退出时打到 stdout 的树是同一份画法。
+   *
+   * ## 为什么缓存而不是每帧算
+   *
+   * 轨道前缀只跟**结构**有关（容器开没关、谁是 tip），与「标签写了什么」无关：
+   * 流式 token 一帧里节点只被 `patchNode()` 换了标签，轨道一个字没变。
+   * 所以按 `syncLayout()` 里那个 key（会话 + 节点数 + tip）缓存，一帧只查表。
+   */
+  private layout: Map<string, string> = new Map();
+  /** 上面那份缓存的 key（见 `syncLayout`）。 */
+  private layoutKey = '';
+  /** 上一条 tip —— 换人时那个旧节点的符号要从 `◎` 变回 `○`，得让它重算。 */
+  private lastTipId: string | null = null;
   /** 宽度变了要清折行缓存（`Text` 按宽度分桶缓存）。 */
   private lastWidth = 0;
-  /** HEAD 那一行（树的落点）单独一块：它不是节点，但每次 tip 变都要更新。 */
-  private readonly headBlock = new Text('', 0, 0);
-  private lastHead = '';
+  /** 空树时那句说明单独一块（它不是节点）。非空时这一块不出现，见 `update()`。 */
+  private readonly noticeBlock = new Text('', 0, 0);
+  /** 上一帧的说明文案（一样就不必 `setText`）。 */
+  private lastNotice = '';
+  /** 上一帧是不是空树（决定 `render()` 里要不要把说明那一块算进去）。 */
+  private showingNotice = false;
   /** 空树时显示的那句（开场就空着，得说清楚「不是坏了」）。 */
   private emptyText = '';
 
@@ -284,6 +304,7 @@ export class TraceChunks implements Component {
       this.lastTexts.length = order.length;
       this.lastNodes.length = order.length;
     }
+    this.syncLayout(tree);
     for (let i = 0; i < order.length; i += 1) {
       const id = order[i];
       const node = id === undefined ? undefined : tree.nodes[id];
@@ -322,19 +343,42 @@ export class TraceChunks implements Component {
     }
     // 空树时给一句说明，而不是留一个 0 高的块（0 高度会让整块在布局里消失，
     // 于是「按了切页键没反应」与「面板塌了」看起来一模一样）。
-    if (order.length === 0) {
-      if (this.lastHead !== emptyText) {
-        this.headBlock.setText(dim(emptyText));
-        this.lastHead = emptyText;
-      }
-    } else {
-      const tip = tree.tipId === null ? '' : `${bold('HEAD')} → ${tree.tipId}`;
-      if (this.lastHead !== tip) {
-        this.headBlock.setText(tip);
-        this.lastHead = tip;
-      }
+    //
+    // 非空时这一块**完全不出现** —— 以前它是 `HEAD → <tipId>`，现在 tip 就画在
+    // 树上（`◎` / 闭合点的 `└◎`），再写一行就是重复。
+    this.showingNotice = order.length === 0;
+    if (this.showingNotice && this.lastNotice !== emptyText) {
+      this.noticeBlock.setText(dim(emptyText));
+      this.lastNotice = emptyText;
     }
     this.lastWidth = width;
+  }
+
+  /**
+   * 同步轨道布局缓存（只在**结构**变了时重算）。
+   *
+   * ## key 为什么是这三样
+   *
+   * 轨道只取决于：哪棵树（会话 id）、有多少个节点（节点只增不减，所以个数就是结构版本）、
+   * 谁是 tip（`◎` 画在哪一行）。这三样没变，每一行的前缀就一模一样 ——
+   * 流式 token 那一帧也就什么都不用算。
+   *
+   * 反过来说，「闭合一个容器」也不需要重算：闭合点的出现本身就是**新节点**（`step.end`），
+   * 节点数变了，key 变了。而它只影响自己那一行（以及下一条 tip 的行）—— 老行一个字不改。
+   */
+  private syncLayout(tree: TraceTree): void {
+    const key = `${tree.sessionId}|${tree.order.length}|${tree.tipId ?? ''}`;
+    if (key === this.layoutKey) return;
+    this.layoutKey = key;
+    this.layout = new Map<string, string>();
+    for (const row of traceRows(tree, { maxWidth: 0 })) this.layout.set(row.node.id, row.prefix);
+    // tip 换人：上一条 tip 的符号要从 `◎` 变回 `○`，而它在 `lastNodes` 里引用没变
+    // （内容确实只差那一个字符），所以得**主动**让它重算。
+    if (this.lastTipId !== null && this.lastTipId !== tree.tipId) {
+      const at = tree.order.indexOf(this.lastTipId);
+      if (at >= 0) this.lastNodes[at] = undefined;
+    }
+    this.lastTipId = tree.tipId;
   }
 
   /**
@@ -350,44 +394,34 @@ export class TraceChunks implements Component {
     const at = this.lastWidth > 0 ? this.lastWidth : width;
     const lines: string[] = [];
     for (const block of this.blocks) lines.push(...block.render(at));
-    lines.push(...this.headBlock.render(at));
+    if (this.showingNotice) lines.push(...this.noticeBlock.render(at));
     return lines;
   }
 
   invalidate(): void {
     for (const block of this.blocks) block.invalidate();
-    this.headBlock.invalidate();
+    this.noticeBlock.invalidate();
   }
 
   /**
    * 一个节点那一行的**带色**文本。
    *
-   * 刻意**不**调 `renderTree`：那个函数是「整棵树一坨字符串」的形状（它要算全树的缩进），
-   * 而这里要的是「这一行自己什么样」。两者共用 `nodeColor` 与节点标签，
-   * 所以命令行里看到的树与界面里看到的仍然是同一份逻辑。
+   * 轨道前缀从 `syncLayout()` 的缓存里取（与 `renderTree` / `renderColoredTree`
+   * 出自同一个 `traceRows()`）；这里只负责把这一行**上色**。
+   *
+   * 刻意**不**调 `renderTree`：那个函数是「整棵树一坨字符串」的形状，而增量渲染
+   * 要的是「这一行自己什么样」。两边共用轨道与颜色，所以命令行里看到的树与界面里
+   * 看到的仍然是同一份画法。
    */
   private lineOf(node: TraceNode, tree: TraceTree, width: number): string {
-    const mark = statusMarkOf(node);
     const color = nodeColor(node);
+    const prefix = this.layout.get(node.id) ?? '';
     const elapsed = node.endedAt === null ? '' : ` ${formatDuration(node.endedAt - node.createdAt)}`;
     const meta = metaSuffixOf(node);
-    const text = `${mark} ${node.id} ${node.kind}: ${node.label}${elapsed}${meta}`;
+    const text = `${prefix}${node.id} ${node.kind}: ${node.label}${elapsed}${meta}`;
     const line = truncateToWidth(text, width);
     // 失败的节点加粗，视觉上更跳一点（与 renderColoredTree 同一口径）。
     return node.status === 'error' ? bold(color(line)) : color(line);
-  }
-}
-
-function statusMarkOf(node: TraceNode): string {
-  switch (node.status) {
-    case 'ok':
-      return '✓';
-    case 'error':
-      return '✗';
-    case 'aborted':
-      return '⊘';
-    case 'pending':
-      return '·';
   }
 }
 
@@ -399,34 +433,26 @@ function metaSuffixOf(node: TraceNode): string {
 }
 
 /**
- * 把轨迹树画成带颜色的 ASCII 树。
+ * 把轨迹树画成带颜色的轨道树。
  *
- * 直接复用 trace.ts 的 renderTree（纯函数，测试里也在用），再按节点 id 上色 ——
+ * 直接复用 trace.ts 的 `traceRows()`（纯函数，测试里也在用），再按节点上色 ——
  * 这样「命令行里看到的树」和「界面里看到的树」是同一份逻辑，不会各画各的。
+ *
+ * ## 为什么不再用正则从文本里抠节点 id
+ *
+ * 老版本是「先 `renderTree()` 拿一坨字符串，再逐行用正则找行首的 `<id> <kind>:`」，
+ * 而那个 kind 白名单**漏了 `turn.start` / `turn.end` / `step.start` / `step.end`
+ * 四个**（它们于是整族不上色，静默退化 —— 恰好是渲染层最难发现的一种 bug）。
+ * 现在 `traceRows()` 直接把节点对象一起给出来，上色不再需要认文本格式。
  */
 export function renderColoredTree(tree: TraceTree, maxWidth: number): string {
-  const plain = renderTree(tree, { maxWidth: 0 });
-  const colorOf = new Map<string, (t: string) => string>();
-  for (const id of tree.order) {
-    const node = tree.nodes[id];
-    if (node) colorOf.set(id, nodeColor(node));
-  }
-  // 逐行找出行首的节点 id（renderTree 的输出格式是固定的：`…<id> <kind>: <label>`）。
-  return plain
-    .split('\n')
-    .map((line) => {
-      // 节点 kind 的全集。**漏一个就等于那个 kind 整族不上色**（静默退化，最难发现的一种 bug）。
-      const match =
-        /^(.*?)(n\d+) (llm\.attempt|llm\.result|tool\.call|tool\.result|user|error|stop|compact|prompt\.base|prompt\.tools|prompt\.segment|prompt\.skills|model\.init):/.exec(
-          line,
-        );
-      if (!match) return line.startsWith('HEAD') ? bold(line) : line;
-      const [, prefix, id] = match;
-      const color = colorOf.get(id ?? '') ?? dim;
-      const rest = line.slice((prefix ?? '').length);
+  const rows = traceRows(tree, { maxWidth });
+  if (rows.length === 0) return '（轨迹为空）';
+  return rows
+    .map((row) => {
+      const color = nodeColor(row.node);
       // 失败的节点加粗，视觉上更跳一点。
-      const node = tree.nodes[id ?? ''];
-      return `${prefix ?? ''}${node?.status === 'error' ? bold(color(rest)) : color(rest)}`;
+      return row.node.status === 'error' ? bold(color(row.text)) : color(row.text);
     })
     .join('\n');
 }

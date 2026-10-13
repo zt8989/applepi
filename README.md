@@ -218,21 +218,27 @@ pnpm start -m cn:deepseek-v4.1-flash:high   # 同一个意思：模型 pattern �
 一步 = 一次 LLM 调用 **加上它触发的工具批次**。轨迹树于是是：
 
 ```text
-✓ n1 user: 今天几号？
-· n2 turn.start: 回合 1
-✓ n3 step.start: 第 1 步
-✓ n4 llm.result: 我来查
-✓ n5 tool.result: 42
-✓ n6 step.end: 第 1 步结束（1 个工具调用）
-✓ n7 step.start: 第 2 步
-✓ n8 llm.result: 今天是…
-✓ n9 step.end: 第 2 步结束（0 个工具调用）
-✓ n10 turn.end: 回合 1 结束：模型说完了 (reason=completed, steps=2)
-HEAD → n10
+○  n1 user: 今天几号？
+○  n2 turn.start: 回合 1
+│  ○  n3 step.start: 第 1 步
+│  │  ○  n4 llm.result: 我来查
+│  │  ○  n5 tool.result: 42
+│  └─ n6 step.end: 第 1 步结束（1 个工具调用）
+│  ○  n7 step.start: 第 2 步
+│  │  ○  n8 llm.result: 今天是…
+│  └─ n9 step.end: 第 2 步结束（0 个工具调用）
+└◎ n10 turn.end: 回合 1 结束：模型说完了 (reason=completed, steps=2)
 ```
 
 轨迹页是**分块增量 + 可滚动**的：一个节点一行（不是整棵树一坨），新节点往下追加、
 视口自动贴底，往上翻能看到任何历史节点 —— 节点再多也不会「只看得到最早那几行」。
+
+轨道是 lazygit 那种画法：**缩进只由「轮」与「步」给**（轮一层、步一层），容器的闭口点
+（`turn.end` / `step.end`）画回自己那一列（`└─`），当前 tip 是 `◎`（闭口点同时是 tip 时
+画 `└◎`）—— tip 就在树上，不再另起一行 `HEAD →`。成败靠**颜色**（绿 / 红加粗），
+不再有 `✓` / `✗` 字符。
+**缩进用完即还**：第 2 轮与第 1 轮同列，不会随回合数一格格往右跑
+（轨迹的链是一条直线，按父子关系缩进会长出一条阶梯 —— 见 [trace.md](docs/architecture/trace.md) 的渲染一节）。
 
 顶行把**回合数与步数合成 `x轮x步`**（连着读不歧义），工具/重试/错误非 0 才出现。节点数被删掉了：
 它是 `trace.order.length`，**开一轮就 +5**（user / turn.start / step.start / llm.attempt / …），

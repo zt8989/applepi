@@ -268,49 +268,19 @@ export function getNode(tree: TraceTree, id: string): TraceNode | undefined {
   return tree.nodes[id];
 }
 
-/** 某个节点的孩子（按插入顺序）。 */
+/**
+ * 某个节点的孩子（按插入顺序）。
+ *
+ * 扫一遍 `tree.order`，是 O(N)。**所以不要在循环里反复叫它** ——
+ * `traceStats()` 里那段「对每个 `step.start` 问一次它的兄弟」曾经就是这样，
+ * 两者相乘 O(N²)，实测 800 节点时单次 42ms（节点翻倍约 5 倍），
+ * 表现就是「长会话里每个流式 token 都卡一下」。那里现在按 `parentId` 分桶一次算完。
+ */
 export function childrenOf(tree: TraceTree, id: string | null): TraceNode[] {
   return tree.order
     .map((childId) => tree.nodes[childId])
     .filter((node): node is TraceNode => node !== undefined && node.parentId === id);
 }
-
-/**
- * 一次遍历建出 `parentId → 孩子` 的索引。
- *
- * ## 为什么要有它
- *
- * `childrenOf()` 每次调用都扫一遍 `tree.order`（O(N)）。而 `traceStats()` 里有一段
- * 「对每个 `step.start` 问一次它的兄弟」的循环 —— 两者相乘就是 O(N²)。
- * 这正是「长会话里每个流式 token 都卡一下」的元凶（实测 800 节点时单次 42ms，
- * 节点翻倍耗时约 5 倍）。所以凡是要在**循环里**反复问兄弟的地方，都先用这个函数
- * 建一次索引，再从索引里取。
- *
- * 语义与 `childrenOf()` **完全一致**（同样的插入顺序、同样把 `undefined` 节点滤掉），
- * 只是把「每次重扫」换成「一次建好」。
- */
-function childrenIndex(tree: TraceTree): Map<string | null, TraceNode[]> {
-  const index = new Map<string | null, TraceNode[]>();
-  for (const childId of tree.order) {
-    const node = tree.nodes[childId];
-    if (node === undefined) continue;
-    const bucket = index.get(node.parentId);
-    if (bucket === undefined) index.set(node.parentId, [node]);
-    else bucket.push(node);
-  }
-  return index;
-}
-
-/** 从索引里取某节点（或根）的孩子；索引里没有就是空数组（不是 undefined）。 */
-function childrenFrom(
-  index: Map<string | null, TraceNode[]>,
-  id: string | null,
-): readonly TraceNode[] {
-  return index.get(id) ?? EMPTY_CHILDREN;
-}
-
-/** 共享的空数组：避免为「没有孩子」这种常见情况每次新建一个 `[]`。 */
-const EMPTY_CHILDREN: readonly TraceNode[] = [];
 
 /** 从根到某节点的祖先链（含自己），用于展示「当前在哪条线上」。 */
 export function pathTo(tree: TraceTree, id: string): TraceNode[] {
@@ -420,36 +390,76 @@ export function traceStats(tree: TraceTree): TraceStats {
   return { turns, steps, toolCalls, errors, retries, durationMs };
 }
 
-// ─── 渲染：ASCII 树（--graph 风格） ───
+// ─── 渲染：lazygit 风格的轨道树 ───
+
+/**
+ * 一行轨迹的渲染结果。
+ *
+ * `prefix` 单独给出来，是因为界面（`TraceChunks`）要**按节点上色**：它只要知道
+ * 「这一行自己的轨道长什么样」，不必知道别人怎么画。而 `renderTree()` 要的是
+ * 整段字符串。两者共用同一个 `traceRows()`，所以命令行里看到的与界面里看到的
+ * 永远是同一份画法（不会各画各的）。
+ */
+export interface TraceRow {
+  readonly node: TraceNode;
+  /** 行首的轨道 + 节点符号（纯文本，不含颜色）。 */
+  readonly prefix: string;
+  /** 整行文本 = prefix + id + kind + label + 耗时 + meta，已按 maxWidth 截断。 */
+  readonly text: string;
+}
 
 export interface TreeRenderOptions {
-  /** 树枝缩进宽度，默认 3（`├─ ` 的宽度）；改成别的值竖线会错位。 */
-  readonly branchWidth?: number;
-  /** 某个节点是否展开（默认全部展开）。 */
-  readonly collapsed?: ReadonlySet<string> | undefined;
-  /** 标出 tip 节点与根节点。 */
-  readonly marks?: Readonly<Record<string, string>> | undefined;
   /** 宽度上限，超出截断。默认 100，0 表示不截。 */
   readonly maxWidth?: number;
 }
+
+/**
+ * 会**给子孙加一级缩进**的容器 kind —— 就是「轮」与「步」这两个。
+ *
+ * 为什么只有它俩（而不是「每个父节点都给自己的孩子加缩进」）见 `traceRows()` 的长注释：
+ * 轨迹树的链是一条直线，按父子关系缩进会随回合数一格格往右跑。
+ */
+const SCOPE_OPEN_KINDS: ReadonlySet<TraceNodeKind> = new Set<TraceNodeKind>([
+  'turn.start',
+  'step.start',
+]);
+
+/**
+ * 容器的**闭合点**（`turn.start` → `turn.end`，`step.start` → `step.end`）。
+ *
+ * 它们画在自己**容器那一列**（缩进不 +1），符号是 `└─` —— 于是括号是闭合的：
+ * ```
+ * │  ○  n3 step.start: 第 1 步
+ * │  │  ○  n4 llm.result: 我来查
+ * │  └─ n5 step.end: 第 1 步结束
+ * ```
+ */
+const SCOPE_CLOSE_KINDS: ReadonlySet<TraceNodeKind> = new Set<TraceNodeKind>([
+  'turn.end',
+  'step.end',
+]);
+
+/** 一级轨道的宽度（3）。下面几个符号必须同宽，否则竖线会错位。 */
+const RAIL = '│  ';
+/** 普通节点。 */
+const DOT = '○  ';
+/** 当前 tip（最后推进过的那个节点）。 */
+const DOT_TIP = '◎  ';
+/** 容器的闭合点（`turn.end` / `step.end`）。 */
+const CORNER = '└─ ';
+/**
+ * 闭合点**同时**是 tip —— 拐角里嵌上 tip 那个符号（同宽，所以不会错位）。
+ *
+ * 为什么需要它：一个回合正常说完时，tip 恰好就是 `turn.end`（`turn.end` 推进 tip）。
+ * 只画 `└─` 的话，会话闲置时界面上**一个 `◎` 都看不到** —— 而「我现在在这」
+ * 正是轨道图最该回答的那一个问题。
+ */
+const CORNER_TIP = '└◎ ';
 
 function truncate(text: string, width: number): string {
   if (width <= 0) return text;
   if (text.length <= width) return text;
   return `${text.slice(0, Math.max(0, width - 1))}…`;
-}
-
-function statusMark(node: TraceNode): string {
-  switch (node.status) {
-    case 'ok':
-      return '✓';
-    case 'error':
-      return '✗';
-    case 'aborted':
-      return '⊘';
-    case 'pending':
-      return '·';
-  }
 }
 
 function metaSuffix(node: TraceNode): string {
@@ -460,201 +470,155 @@ function metaSuffix(node: TraceNode): string {
 }
 
 /**
- * 把树渲染成多行字符串。最后一行是 tip 标记（类似 git log 显示 HEAD）。
+ * 把整棵树算成一行一行（含每行的轨道前缀）。
  *
- * ## 渲染策略：整棵树拉平，**只有错误才画出分叉**
+ * ## 形状从哪来：lazygit 的 `--graph`
  *
- * 一次**正常**对话在树里是一条长链：user → attempt → result → tool → result →
- * attempt → result …，有时还会并排几个工具（多个 tool.call 兄弟）。按 git 那样
- * 层层缩进，它是 5~7 层的阶梯，右半边全空着，而它**没有任何分支** —— 树形在这里是噪声。
- *
- * 所以规则是：**一组兄弟节点里没有失败，就整组不缩进**（就是一串平铺的行）。
- * 只有出现了失败，才切回树枝画法：
- *
- *   - 重试：同父下第 2 个及以后的 llm.attempt（前面那次失败）;
- *   - 并行工具：一个 llm.result 下多个 tool.call，**其中至少一个失败**；
- *   - 失败的工具调用：它和兄弟（哪怕成功的）一起挂成一小棵树。
- *
- * 单孩子永远不缩进 —— 没有分叉就没有要画的树枝。根节点（prompt.* / model.init / user
- * 那些「各自起头」的节点）也永远平铺：它们本来就是并列的一串，缩进会伪造出父子关系。
- *
- * 于是「正常 = 列表，出错 = 在出错的那里长出一小棵树」：
+ * 每个节点一个圆点（`○`，当前 tip 是 `◎`），左边是它所在各层容器的竖线：
  *
  * ```
- * ✓ n1 user: 今天几号？
- * ✓ n2 llm.attempt: 第 1 次尝试 407ms
- * ✗ n3 llm.attempt: 第 2 次尝试（重试） 414ms
- * │  ✗ n4 error: LLM 调用超时（400ms） (kind=timeout)
- * ...
+ * ○  n1 user: 查两个
+ * ○  n2 turn.start: 回合 1
+ * │  ○  n3 step.start: 第 1 步
+ * │  │  ○  n4 llm.result: 并行 [调用 bash] [调用 bash]
+ * │  │  ○  n5 tool.call: bash {"command":"echo one"}
+ * │  │  ○  n6 error: Command exited with code 1
+ * │  └─ n7 step.end: 第 1 步结束（2 个工具调用）
+ * └─ n8 turn.end: 回合 1 结束：模型说完了
  * ```
  *
- * 树本身一点没变（还是同一棵树、同一套父子关系），只是**画法**不同 ——
- * `tipId`、分叉语义、回放全都不受影响。
+ * 容器的闭合点画 `└─`；它恰好又是 tip 时画 `└◎`（见 `CORNER_TIP`）。
+ *
+ * ## 缩进只由容器给：轮一层、步一层
+ *
+ * 老版本是「整棵树拉平，只有出错才画树枝」。那个画法在正常对话里**看不到结构**
+ * —— 轮、步、事件全部左对齐，只能靠标签自己认；而它省下的宽度其实不多。
+ * 现在改成：**`turn.start` 与 `step.start` 无条件给子孙加一级缩进**，别的节点不加。
+ *
+ * ### 为什么不是「每个父节点都缩进自己的孩子」
+ *
+ * 因为轨迹树的链是一条**直线**：`… → step.end → 下一个 step → turn.end →
+ * 下一轮的 user → 下一个 turn.start …`（推进 tip 的节点挂出下一个节点，见本文件顶部）。
+ * 按父子关系缩进就成了「历史是深树」：第 10 轮的内容会在第 10 层，屏幕上长出一条
+ * 永远往右走的阶梯。按**容器**缩进则天然把括号收回来 —— `turn.end` / `step.end`
+ * 画在自己容器那一列（符号 `└─`），所以第一轮的缩进用完即还，第二轮与第一轮对齐。
+ * 「发了一句话 = 出去一层，说完 = 回来一层」，这正是要一眼看到的东西。
+ *
+ * ### 为什么工具与 LLM 那层不再分级
+ *
+ * `llm.result` → `tool.call` → `tool.result` 也是父子关系，但它们是**步里面的内容**，
+ * 都画在第 3 列。理由：那是同一件事的两半（调用与结果），分开缩进只让每一行多占几格，
+ * 而工具名与参数就在标签里 —— 要认清「哪个结果属于哪个调用」，看相邻两行的标签更快。
+ *
+ * ## 实现：按**发生顺序**走一遍，维护一个作用域栈
+ *
+ * 缩进 = 「这一行开着哪些容器」。容器在树上虽然有父子关系，但**关闭的时机**是事件性的
+ * （`turn.end` / `step.end` 落下来的那一刻），所以不能只看树：得按 `tree.order`
+ * （= 落盘顺序 = 发生顺序）扫，遇到 `turn.start` / `step.start` 压栈，
+ * 遇到闭合点把它弹掉。每行 O(1) 次出入栈，整棵树 O(N)。
+ *
+ * 老版本是递归 `childIndentOf` / `prefixOf` 沿父链算缩进（带记忆，均摊 O(1)）——
+ * 那时缩进只取决于「祖先里有几个分叉组」，沿父链走是对的；现在要看「这一刻它关了没」，
+ * 必须按发生顺序扫。
+ *
+ * ### 四条收口规则（都有真实场景，不是防御性代码）
+ *
+ * | 遇到 | 做什么 | 为什么 |
+ * | --- | --- | --- |
+ * | `turn.end` / `step.end` | 关掉 `parentId` 那个作用域（连它里面还开着的） | 闭合点自己画在容器那一列 |
+ * | `turn.start` | 清空（回合不嵌套；里面还开着的 step 一起收） | 上一个回合没等到 `turn.end` 时也要收 |
+ * | `step.start` | 先关掉已经开着的 step | 重试/下一步开新容器时，旧的那一格不该还挂着 |
+ * | `user`（`meta.queued !== 'steer'`） | **清空**整个栈 | 「用户又发了一句话」= 新回合从根层开始 |
+ *
+ * 前两条按理说够用（树上有 `turn.end`），但**「回合结束了而 `turn.end` 还没落下来」
+ * 是真实存在的中间态**：`turn.end` 是环转 idle 之后另发的一条 Cmd（见 reducer 的
+ * `turn.end` 迁移），用户看到答案后立刻接着说下一句，就会挤在它前面。那时新一句话
+ * 的 parent 取 tip，落点在上一个回合**里面** —— 只认树的话，第二轮会被缩进到
+ * 上一轮的括号里。所以第 4 条按「这是新的一句话」而不是按父节点收口。
+ *
+ * `meta.queued === 'steer'` 是唯一的例外：插话**属于**当前回合（它在当前 step 的工具
+ * 跑完后插进来），所以它来了不收 —— 这一条也正是 `queue.delivered` 那里给 user 节点
+ * 打 `queued` 标记的用处。
  */
+export function traceRows(tree: TraceTree, options: TreeRenderOptions = {}): TraceRow[] {
+  const maxWidth = options.maxWidth ?? 100;
+  const order = tree.order;
+  if (order.length === 0) return [];
 
-/** 这个节点算不算「出事了」。kind='error' 与 status='error' 都算（前者是错误节点，后者是失败的 attempt）。 */
-function nodeFailed(node: TraceNode): boolean {
-  return node.kind === 'error' || node.status === 'error';
+  const rows: TraceRow[] = [];
+  /** 当前开着的作用域（容器），栈顶是最内层。 */
+  const stack: { id: string; kind: TraceNodeKind }[] = [];
+
+  /** 关掉 `id` 这个容器：它自己和它里面还开着的都弹掉。没开着就什么也不做。 */
+  const closeScope = (id: string | null): void => {
+    if (id === null) return;
+    const at = stack.findIndex((scope) => scope.id === id);
+    if (at >= 0) stack.length = at;
+  };
+
+  for (const id of order) {
+    const node = tree.nodes[id];
+    if (node === undefined) continue;
+
+    // 先收口（见上面那张表），再画这一行。
+    switch (node.kind) {
+      // 闭合点：把自己那个容器关掉。**先弹栈再画** —— 于是 `step.end` 与 `step.start`
+      // 同列（`└─`），括号才是闭合的。这一步弄反就会得到「闭合线比容器深一级」的错位。
+      case 'turn.end':
+      case 'step.end':
+        closeScope(node.parentId);
+        break;
+      // 新回合：上一个回合的作用域收掉（回合不嵌套）。
+      case 'turn.start':
+        stack.length = 0;
+        break;
+      // 新的一步：上一个还没关的 step 收掉。
+      case 'step.start': {
+        const at = stack.findIndex((scope) => scope.kind === 'step.start');
+        if (at >= 0) stack.length = at;
+        break;
+      }
+      // 用户又发了一句话（不是插话）= 新回合，从根层重新开始缩进。
+      case 'user':
+        if (node.meta?.['queued'] !== 'steer') stack.length = 0;
+        break;
+      default:
+        break;
+    }
+
+    const marker = SCOPE_CLOSE_KINDS.has(node.kind)
+      ? node.id === tree.tipId
+        ? CORNER_TIP
+        : CORNER
+      : node.id === tree.tipId
+        ? DOT_TIP
+        : DOT;
+    const prefix = RAIL.repeat(stack.length) + marker;
+    const elapsed = node.endedAt === null ? '' : ` ${formatDuration(node.endedAt - node.createdAt)}`;
+    const head = `${prefix}${node.id} ${node.kind}: ${node.label}${elapsed}${metaSuffix(node)}`;
+    rows.push({ node, prefix, text: truncate(head, maxWidth) });
+
+    if (SCOPE_OPEN_KINDS.has(node.kind)) stack.push({ id: node.id, kind: node.kind });
+  }
+
+  return rows;
 }
 
 /**
- * 一组兄弟节点要不要画树枝（= 是不是一次值得展开的分叉）。
+ * 把树渲染成多行字符串。
  *
- * 判据是**「多于一个孩子，且其中至少一个失败」**，不是「多于一个孩子」：
- * 一轮里并行发三个工具、三个都成功，那只是「列表里有三行」，不是分叉；缩进它等于
- * 声称「第二、三个工具依赖第一个」，那是假的结构，用户会照着它推断因果。
+ * 画法（lazygit 式轨道、轮/步缩进）见 `traceRows()`；这里只负责把它拼成一段文本。
  *
- * 只有一个孩子也返回 false：没有兄弟就没有分叉可言。
+ * ## 为什么没有 `HEAD → <tipId>` 那一行
+ *
+ * 以前最后会补一行 tip 指向谁。现在 tip **就画在树上**（`◎`；它与容器闭合点重合时
+ * 是 `└◎`），再写一行说的是同一件事。少一行，也不再有「树里那行到底是节点还是尾巴」
+ * 这个歧义（按行数校验的测试曾经得记得给它加一）。
  */
-export function isForkGroup(children: readonly TraceNode[]): boolean {
-  if (children.length < 2) return false;
-  return children.some(nodeFailed);
-}
 export function renderTree(tree: TraceTree, options: TreeRenderOptions = {}): string {
-  // 树枝前缀恒为 3 字符（'├─ '），竖线也画在同一列，所以默认 3。
-  const branchWidth = options.branchWidth ?? 3;
-  const maxWidth = options.maxWidth ?? 100;
-  const marks = options.marks ?? {};
-  const lines: string[] = [];
-
-  // 建一次索引给下面所有「问兄弟」的地方用。
-  //
-  // 早先这里直接调 `childrenOf()`：那个函数每次重扫 `tree.order`，而下面几处
-  // （分叉组预扫、每行的 `isLastOf`、折叠时的孩子数）都在**逐节点循环**里调它，
-  // 整段于是退化成 O(N²) —— 与 `traceStats()` 是同一个毛病。轨迹页每帧都画树，
-  // 长会话下这就直接变成卡顿。
-  const children = childrenIndex(tree);
-  /** 某节点（或根）的孩子。语义与 `childrenOf()` 一致，只是走索引。 */
-  const childrenOfIndexed = (id: string | null): readonly TraceNode[] => childrenFrom(children, id);
-
-  // 哪些节点是需要画树枝的「分叉组」的孩子。预先算好，别在循环里反复 childrenOf。
-  //
-  // ## 为什么按**组**算而不是按**节点**算
-  //
-  // 之前的写法是「对每个节点，问一次它那组兄弟要不要分叉」—— 于是一个有 k 个孩子的
-  // 父节点被算 k 次，每次又要 `.some()` 扫 k 个（O(k²)）。而「同一父下大量孩子」
-  // 恰好是**重试链**与「一轮里并行工具」的形状，实测 1600 个同父节点要 19.7ms。
-  //
-  // 一组兄弟的分叉与否**只跟那一组有关**，与是哪个孩子在问无关。所以改成按 `parentId`
-  // 把结果算**一遍**（用父亲 id 做缓存），再来标记它的孩子。O(k) /组。
-  const forkGroupCache = new Map<string, boolean>();
-  const groupIsFork = (parentId: string): boolean => {
-    const hit = forkGroupCache.get(parentId);
-    if (hit !== undefined) return hit;
-    const siblings = childrenOfIndexed(parentId);
-    const fork = siblings.length > 1 && isForkGroup(siblings);
-    forkGroupCache.set(parentId, fork);
-    return fork;
-  };
-  const isForkChild = new Set<string>();
-  for (const id of tree.order) {
-    const node = tree.nodes[id];
-    if (!node || node.parentId === null) continue;
-    if (groupIsFork(node.parentId)) isForkChild.add(id);
-  }
-
-  /**
-   * 某个节点给**孩子**留下的缩进（即“祖先那几级竖线”）。
-   *
-   * 一个分叉组贡献一级：组内不是最后一个就画竖线（后面还有兄弟），否则画空白。
-   * 单链节点不贡献任何东西 —— 它们的缩进原样传下去。
-   *
-   * 这是「平铺」的关键：正常对话（全部单链）所有节点的缩进都是空串。
-   */
-  const childIndentMemo = new Map<string, string>();
-  const childIndentOf = (id: string): string => {
-    const hit = childIndentMemo.get(id);
-    if (hit !== undefined) return hit;
-    const parentId = tree.nodes[id]?.parentId ?? null;
-    const inherited = parentId === null ? '' : childIndentOf(parentId);
-    // 只有分叉组的孩子才给下面加一级；非分叉节点把继承到的原样传下去。
-    const result = isForkChild.has(id)
-      ? inherited + (isLastOf(id) ? ' '.repeat(branchWidth) : `│${' '.repeat(branchWidth - 1)}`)
-      : inherited;
-    childIndentMemo.set(id, result);
-    return result;
-  };
-
-  /**
-   * 某个节点该有的行首缩进（含自己那一级的 `├─ `/`└─ `）。
-   *
-   * 规则：沿父链往上走，只数**分叉组**。每经过一个分叉组加一级缩进，中间那些单链的
-   * 祖先**不占缩进** —— 于是正常对话是平铺的列表，只有出错的那一处（以及它下游跟着走的
-   * 那几条线）才长出树枝。
-   *
-   * 注意这里数的是「祖先里的分叉组个数」，不是「祖先个数」：数后者会让一条纯单链
-   * 照样一级一级往下缩 —— 那就等于没拉平。
-   *
-   * ## 为什么带记忆（`memo`）
-   *
-   * 纯递归地沿父链走是 O(深度) /每个节点，深链下整棵树就是 O(N·深度) —— 实测 3200
-   * 节点的链要 18ms。但其实缩进是**递推的**：子节点的缩进 = 父亲的「给孩子缩进」+ 自己那一级。
-   * 父亲算过一次就能复用，于是除根以外每个节点只算「自己新增那一段」，均摊 O(1)。
-   *
-   * 两个记忆表分开存（自己的行 vs 给孩子）—— 它们**不同**：分叉组的孩子自己的行是
-   * `├─ `/`└─ `，而留给孩子的是 `│  `/`   `（竖线继续往下走）。混成一个的话，
-   * 分叉下面的子节点会丢掉那一级竖线 —— 实测就是那个错。
-   */
-  const indentMemo = new Map<string, string>();
-  const prefixOf = (id: string): string => {
-    const hit = indentMemo.get(id);
-    if (hit !== undefined) return hit;
-
-    const parentId = tree.nodes[id]?.parentId ?? null;
-    // 父亲留给我们的缩进（递归；根没有父亲，基例是空串）。
-    // 递归深度 = 树的深度，而树深由「轮/步」层数决定（几十级），不会接近节点数 ——
-    // 所以不会有调用栈风险。
-    const inherited = parentId === null ? '' : childIndentOf(parentId);
-    // 自己那一级：只有自己也是分叉组的一员才画树枝。
-    //
-    // 非分叉组的节点**不加任何东西** —— 这就是「单链祖先不占缩进」的实现：
-    // 它们把自己的前缀原样传给下面。
-    const line = isForkChild.has(id)
-      ? inherited + `${isLastOf(id) ? '└' : '├'}${'─'.repeat(branchWidth - 1)} `
-      : inherited;
-    indentMemo.set(id, line);
-    return line;
-  };
-
-  /** 它是不是自己那组兄弟里的最后一个（决定 ├─ 还是 └─）。 */
-  const isLastOf = (id: string): boolean => {
-    const parentId = tree.nodes[id]?.parentId ?? null;
-    const siblings = childrenOfIndexed(parentId);
-    return siblings.length > 0 && siblings[siblings.length - 1]?.id === id;
-  };
-
-  // ── 按**发生顺序**（tree.order）逐行输出 ──
-  //
-  // 为什么不递归 walk：那会变成深度优先 —— 一个节点有两个孩子（并行工具）时，
-  // 第一个孩子的整条下游（→ 下一轮 LLM → 下一批工具 → … 一直到会话末尾）会全部先打印，
-  // 第二个孩子才轮得到。真实轨迹里这会让**最新的节点出现在中间**、最早的那个反而在底部，
-  // 而用户在界面上看到的是一份时间倒流的记录。
-  //
-  // tree.order 就是落盘顺序，也就是「事情发生的顺序」；节点 id 单调自增，与它一致。
-  // 缩进不改变顺序，只改变每行前面画什么 —— 两者互不干扰。
-  for (const id of tree.order) {
-    const node = tree.nodes[id];
-    if (!node) continue;
-    const mark = statusMark(node);
-    const elapsed = node.endedAt === null ? '' : ` ${formatDuration(node.endedAt - node.createdAt)}`;
-    const head =
-      `${prefixOf(id)}${mark} ${marks[node.id] ?? ''}${node.id} ${node.kind}: ${node.label}` +
-      `${elapsed}${metaSuffix(node)}`;
-    lines.push(truncate(head, maxWidth));
-
-    if (options.collapsed?.has(node.id)) {
-      const hidden = childrenOfIndexed(node.id).length;
-      if (hidden > 0) {
-        lines.push(truncate(`${' '.repeat(branchWidth)}   … ${hidden} 个子节点（已折叠）`, maxWidth));
-      }
-    }
-  }
-
-  if (lines.length === 0) return '（轨迹为空）';
-  if (tree.tipId !== null) {
-    lines.push(`HEAD → ${tree.tipId}`);
-  }
-  return lines.join('\n');
+  const rows = traceRows(tree, options);
+  if (rows.length === 0) return '（轨迹为空）';
+  return rows.map((row) => row.text).join('\n');
 }
 
 export function formatDuration(ms: number): string {

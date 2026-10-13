@@ -471,7 +471,10 @@ test('轨迹：节点数翻倍，renderTree 耗时不该翻两番（O(N²) 回�
   const timeFor = (steps: number): number => {
     const tree = traceWithSiblingSteps(steps);
     const started = performance.now();
-    for (let i = 0; i < 5; i += 1) renderTree(tree);
+    // 25 次而不是 5 次：换掉分叉缩进之后 `renderTree` 快了一截（800 节点单次 ~0.3ms），
+    // 5 次的总时长落到「毫秒级的噪声」里 —— 并行跑整个测试集时会被 GC 与调度淹没，
+    // 于是改成偶发失败的假警报。多跑几次把信号抬出噪声（阀值相对值不变）。
+    for (let i = 0; i < 25; i += 1) renderTree(tree);
     return performance.now() - started;
   };
 

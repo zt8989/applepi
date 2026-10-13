@@ -4,6 +4,7 @@ import type { AssistantMessage, ToolCall } from '@earendil-works/pi-ai';
 import { createAgentStore, waitForIdle } from '../src/store';
 import { createFauxRuntime } from '../src/provider';
 import { renderTree } from '../src/index';
+import { renderColoredTree } from '../src/tui/app';
 
 /**
  * 渲染顺序：**必须等于事情发生的顺序**。
@@ -40,11 +41,11 @@ const bashCall = (id: string, command: string): ToolCall => ({
   arguments: { command },
 });
 
-/** 从渲染结果里取出节点 id 的数字序列（跳过 HEAD 行）。 */
+/** 从渲染结果里取出节点 id 的数字序列。 */
 function renderedIds(rendered: string): number[] {
   return rendered
     .split('\n')
-    .filter((line) => line !== '' && !line.startsWith('HEAD'))
+    .filter((line) => line !== '')
     .map((line) => /^[^n]*n(\d+)/.exec(line)?.[1])
     .filter((x): x is string => x !== undefined)
     .map(Number);
@@ -121,9 +122,20 @@ test('工具失败：isError 真的被置上（pi 的 bash 失败不抛异常）
   const rendered = renderTree(state.trace, { maxWidth: 0 });
   console.log(`\n${rendered}\n`);
 
-  // 失败的工具在轨迹上必须是 ✗，且下面挂着 error 节点。
-  assert.match(rendered, /✗ n\d+ tool\.call: bash \{"command":"exit 1"\}/);
-  assert.match(rendered, /✗ n\d+ error: .*Command exited with code 1/);
-  // 成功那个仍然是 ✓ —— 不能把两个都判成失败。
-  assert.match(rendered, /✓ n\d+ tool\.call: bash \{"command":"echo one"\}/);
+  // 失败的工具在轨迹上是一个 `error` 子节点；成功那个是 `tool.result`。
+  //
+  // 成败现在画在**颜色**上（红加粗 / 绿），不再有 `✗` / `✓` 字符 ——
+  // 所以纯文本这一份只能断言「行在不在」，红绿另拿带色那份下来比。
+  assert.match(rendered, /○  n\d+ error: .*Command exited with code 1/);
+  assert.match(rendered, /n\d+ tool\.result: one/);
+  assert.match(rendered, /n\d+ tool\.call: bash \{"command":"exit 1"\}/);
+
+  // 带色那份：失败那一行是**红 + 加粗**，成功那个不是。
+  const colored = renderColoredTree(state.trace, 0);
+  const lineOf = (pattern: RegExp): string =>
+    colored.split('\n').find((line) => pattern.test(line)) ?? '';
+  const failedLine = lineOf(/Command exited with code 1/);
+  const okLine = lineOf(/tool\.result: one/);
+  assert.ok(failedLine.includes('\u001b[1;31m') || failedLine.includes('\u001b[31m'), `失败那行该是红的：${JSON.stringify(failedLine)}`);
+  assert.ok(!okLine.includes('\u001b[31m'), `成功那行不该是红的：${JSON.stringify(okLine)}`);
 });

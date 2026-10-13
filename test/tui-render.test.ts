@@ -1065,12 +1065,11 @@ test('TraceChunks：节点多了也能全部拿到（一块一行，不是整棵
   }
   chunks.update(tree, 80, '');
   const lines = linesOf(chunks);
-  // 120 个节点 + 一行 HEAD = 121 行 —— **一行都没丢**。
+  // 120 个节点 = 120 行 —— **一行都没丢**。
   // 旧形状（整棵树塞进一块 Text）在这里会被布局裁掉，用户只看到最早那几行。
-  assert.equal(lines.length, 121, '每个节点一行，外加 HEAD');
+  assert.equal(lines.length, 120, '每个节点一行');
   assert.match(lines[0] ?? '', /n1 llm.result: 节点 0/);
   assert.match(lines[119] ?? '', /n120 llm.result: 节点 119/);
-  assert.match(lines[120] ?? '', /HEAD → n120/);
 });
 
 test('TraceChunks：只重算变化的那个节点（追加，不是全量重画）', () => {
@@ -1096,7 +1095,8 @@ test('TraceChunks：只重算变化的那个节点（追加，不是全量重画
   }
   assert.equal(changed, 1, '只有一个节点的行变了');
   // 耗时是 endedAt - createdAt = 100 - 29 = 71ms（节点号从 1 起，所以是 n30）。
-  assert.match(after[29] ?? '', /✓ n30 tool\.call: 工具 29 71ms/, '最后那个节点闭合了');
+  // 行首是轨道符号（`○` / `◎`，见 trace.ts 的 `traceRows`），成败在颜色里。
+  assert.match(after[29] ?? '', /n30 tool\.call: 工具 29 71ms/, '最后那个节点闭合了');
 });
 
 test('TraceChunks：节点变少时旧块被丢掉（/new、恢复别的会话之后不残留）', () => {
@@ -1108,7 +1108,7 @@ test('TraceChunks：节点变少时旧块被丢掉（/new、恢复别的会话�
     }).tree;
   }
   chunks.update(tree, 80, '');
-  assert.equal(linesOf(chunks).length, 11);
+  assert.equal(linesOf(chunks).length, 10);
 
   // 换成只有 2 个节点的新树（/new 会这么干）。
   let fresh = createTraceTree('s2');
@@ -1119,7 +1119,7 @@ test('TraceChunks：节点变少时旧块被丢掉（/new、恢复别的会话�
   }
   chunks.update(fresh, 80, '');
   const lines = linesOf(chunks);
-  assert.equal(lines.length, 3, '只剩 2 个节点 + HEAD');
+  assert.equal(lines.length, 2, '只剩 2 个节点');
   assert.match(lines.join(' '), /新 1/);
   assert.equal(/节点 5/.test(lines.join(' ')), false, '旧节点没残留');
 });

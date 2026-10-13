@@ -63,18 +63,21 @@ function advancesTip(node) {
 ## 一次正常对话长这样
 
 ```
-✓ n1  user: 今天几号？
-· n2  turn.start: 回合 1
-✓ n3  step.start: 第 1 步
-✓ n4  llm.result: 我来查
-✓ n5  tool.result: 10 月 5 日
-✓ n6  step.end: 第 1 步结束（1 个工具调用）
-✓ n7  step.start: 第 2 步
-✓ n8  llm.result: 今天是 10 月 5 日
-✓ n9  step.end: 第 2 步结束（0 个工具调用）
-✓ n10 turn.end: 回合 1 结束：模型说完了 (reason=completed, steps=2)
-HEAD → n10
+○  n1 user: 今天几号？
+○  n2 turn.start: 回合 1
+│  ○  n3 step.start: 第 1 步
+│  │  ○  n4 llm.result: 我来查 [调用 bash]
+│  │  ○  n5 tool.call: bash {"command":"date +%m-%d"} (tool=bash)
+│  │  ○  n6 tool.result: 10 月 5 日 (tool=bash)
+│  └─ n7 step.end: 第 1 步结束（1 个工具调用） (tools=1)
+│  ○  n8 step.start: 第 2 步
+│  │  ○  n9 llm.result: 今天是 10 月 5 日
+│  └─ n10 step.end: 第 2 步结束（0 个工具调用） (tools=0)
+└◎ n11 turn.end: 回合 1 结束：模型说完了 (reason=completed, steps=2)
 ```
+
+（渲染时会带上每个节点的耗时与 `meta`；这里为了让形状好读，把它们省了。
+最后一行 `└◎` 是「容器的闭口点」与「它就是当前 tip」叠在一起，见下面渲染一节。）
 
 一个回合里模型可以跑很多步（模型→工具→模型→…），**那是同一个回合的正常推进，不是重试**
 —— `traceStats` 的 `retries` 因此要求那组兄弟里**有失败的**才算。
@@ -82,19 +85,18 @@ HEAD → n10
 ## 于是重试长这样（分叉在 step 这一层）
 
 ```
-✓ n1 user: 今天几号？
-· n2 turn.start: 回合 1
-├── ✗ n3 step.start: 第 1 步
-│  └── ✗ n4 error: LLM 调用超时（400ms） (kind=timeout)
-├── ✗ n5 step.start: 第 2 步（重试）
-│  └── ✗ n6 error: LLM 调用超时（410ms) (kind=timeout)
-└── ✓ n7 step.start: 第 3 步（重试）
-   └── ✓ n8 llm.result: 10 月 5 日
-HEAD → n8
+○  n1 user: 你好
+○  n2 turn.start: 回合 1
+│  ○  n3 step.start: 第 1 步
+│  │  ○  n4 error: LLM 调用超时（1s） (kind=timeout, cause=timeout)
+│  └─ n5 step.end: 第 1 步结束（0 个工具调用） (tools=0)
+│  ○  n6 step.start: 第 2 步（重试）
+│  │  ◎  n7 llm.result: 好了        ← tip
+│  └─ n8 step.end: 第 2 步结束（0 个工具调用） (tools=0)
 ```
 
-`n5` 与 `n7` 的父 id 是 `n2`（**那个 turn 容器**，它从没动过），不是 `n4`（失败节点）。
-失败与重试是**兄弟**。
+`n6` 的父 id 是 `n2`（**那个 turn 容器**，它从没动过），不是 `n4`（失败节点）。
+失败与重试是**兄弟** —— 所以在轨道上它们是**同一个缩进下的两个 step 块**。
 如果错误节点推进了 tip，重试就会被挂到「错误的子节点才是正史」下面，那就不是 git 了。
 
 ## 纯函数
@@ -104,10 +106,67 @@ HEAD → n8
 
 `appendNode` / `patchNode` 都是返回新树，不改原对象。
 
-## 渲染
+## 渲染：lazygit 那样的轨道 + 轮/步缩进
 
-`renderTree()` 输出一段 ASCII 树（`--graph` 风格），最后一行是 `HEAD → <tipId>`。
-`renderColoredTree()`（`src/tui/app.ts`）调它，再按节点状态上色（失败的加粗）。
+`traceRows()` 把树算成一行一行（`renderTree()` 只是把它拼起来）。
+每行是 `<轨道><符号> <id> <kind>: <label>`：
+
+- **符号**：当前 tip 是 `◎`，其余是 `○`；容器的闭口点（`turn.end` / `step.end`）是 `└─`，
+  而它**恰好又是 tip** 时画 `└◎`（同宽，所以不会错位 —— 不这样的话，回合说完、
+  会话闲置的那个状态，界面上一个 `◎` 都看不到）。
+- **轨道**：一行左边有几段 `│  `，就说明它在几层容器里。
+
+**缩进只由 `turn.start` 与 `step.start` 给**，别的节点不给 —— 包括
+`llm.result` → `tool.call` → `tool.result` 那串父子链，它们都画在步里面那一列。
+
+### 为什么不是「每个父节点都缩进自己的孩子」
+
+因为轨迹树的链是一条**直线**：推进 tip 的节点挂出下一个节点，而 `turn.end` 推进 tip
+—— 于是每一轮的 user / turn.start 都挂在上一个回合的 `turn.end` **底下**。
+按父子关系缩进，第 10 轮就在第 10 层，屏幕上长出一条永远往右走的阶梯。
+
+按容器缩进则天然把括号收回来：`turn.end` / `step.end` 画在自己**容器那一列**，
+所以缩进是「用完即还」的 —— 第 2 轮与第 1 轮对齐。「发了一句话 = 出去一层，
+说完 = 回来一层」，这正是要一眼看到的东西。
+
+### 收口靠事件，不靠树
+
+容器**关闭的时机**是事件性的（`turn.end` / `step.end` 落下来的那一刻），
+所以 `traceRows()` 按 `tree.order`（= 发生顺序）扫一遍，维护一个作用域栈：
+压栈开、弹栈关。四条收口规则：
+
+| 遇到 | 做什么 | 为什么 |
+| --- | --- | --- |
+| `turn.end` / `step.end` | 关掉 `parentId` 那个作用域 | 闭合点自己画在容器那一列（`└─`） |
+| `turn.start` | 先关掉已经开着的回合 | 回合不嵌套；上一个回合没等到 `turn.end` 时也要收 |
+| `step.start` | 先关掉已经开着的步 | 重试/下一步开新容器时，旧那一格不该还挂着 |
+| `user`（`meta.queued !== 'steer'`） | 清空整个栈 | 「用户又发了一句话」= 新回合从根层开始 |
+
+最后一条不是防御性代码：**「回合结束了而 `turn.end` 还没落下来」是真实存在的中间态**
+（`turn.end` 是环转 idle 之后另发的一条 Cmd，用户看到答案就接着说下一句时会挤在它前面）。
+那时新一句话的 parent 取 tip，落点在上一个回合**里面** —— 只认树的话，第二轮会被缩进到
+上一轮的括号里。而 `steer`（插话）是唯一的例外：它**属于**当前回合，所以它来了不收
+—— 这也正是 `queue.delivered` 给 user 节点打 `queued` 标记的用处之一。
+
+### 节点状态画在颜色上，不在字上
+
+`✓` / `✗` / `⊘` / `·` 那套状态字符已经删掉：成功绿、失败红**加粗**、进行中黄、
+上下文族（`prompt.*` / `model.init`）暗。理由：`✓ n7 llm.result` 里那个 `✓` 占了宽度，
+而它说的信息与颜色重复；轨道符号要能一眼区分的是「这是哪个节点」，不是「它成没成」。
+
+代价是**纯文本那一份（`renderTree()`）看不出成败** —— 落盘、回放、统计都不受影响
+（那是数据层的事），只有给人看的那份要靠颜色。
+
+### 界面与命令行是同一份画法
+
+`renderColoredTree()`（`src/tui/app.ts`）与轨迹页的 `TraceChunks` 都调 `traceRows()`：
+前者拿 `text` 逐行上色，后者拿 `prefix` 拼自己那一行（它是分块增量渲染的，一个节点一块，
+所以只需要知道自己那一段轨道）。早先 `renderColoredTree` 是「先渲染成字符串、再用正则
+逐行抠出节点 id」，那个正则的 kind 白名单**漏了 `turn.start` / `step.end` 四个 kind**
+（它们于是整族不上色，静默退化）—— 现在把节点对象一起给出来，不再认文本格式。
+
+`TraceChunks` 的轨道前缀按「会话 id + 节点数 + tip」缓存：流式 token 一帧里节点只被换了标签，
+轨道一个字没变。
 
 ## 落盘与回放
 
