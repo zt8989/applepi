@@ -1329,6 +1329,37 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const widgetSlots = new Map<string, Component>();
 
   /**
+   * 扩展的**输入区槽位**（pi 的 `editorContainer` 语义）：非空时，composer 那一格
+   * 显示的是它，而不是 `editor`。
+   *
+   * ## 为什么不复用 overlay
+   *
+   * 本项目自己的那几个面板（`/model`、`/sessions`）是用 overlay **复刻** composer
+   * 的矩形（见 `composer-overlay.ts`）—— 那是「我们没有 pi 的 `editorContainer`」
+   * 时代的写法。而扩展的 inline `custom()` 要的**不只是**一块矩形：它自己按
+   * `tui.terminal.rows` 算行预算、自己决定折叠，把对话区留在上面 —— 那只能由布局
+   * **真的把那一格换掉**才能得到（overlay 是盖上去的，高度也由 overlay 参数定）。
+   *
+   * ## 只存一个（与 pi 同）
+   *
+   * pi 的 `editorContainer` 只有一格：第二个 inline `custom()` 会 `clear()` 掉第一个。
+   * 界面这边同样「新的赢」，但顺手把旧的 `dispose()` 掉 —— pi 不 dispose，于是旧组件
+   * 里的定时器/监听器会一直活着。
+   *
+   * 并发不会真的发生：`ask_user_question` 自己是拿模块级变量守着的
+   * （`presentation.ts` 的 `claimInlineSlot()`，抢不到就降级成 overlay）。
+   */
+  let editorSlotComponent: (Component & { dispose?: () => void }) | undefined;
+  /**
+   * 进槽位之前 composer 里那一行字。
+   *
+   * 存/还都在界面这边做（pi 在自己的 `showExtensionCustom()` 里也是这么干的）：
+   * 出槽位时**还原** —— 扩展在槽位期间改了输入框（将来若接 `setEditorText`）也不会把
+   * 它的文字留在 composer 里。今天没人改它，所以这是照着 pi 留的一道防线。
+   */
+  let editorTextBeforeSlot: string | undefined;
+
+  /**
    * 当前在哪个**整页**。
    *
    * 「不分屏」是刻意的：早先轨迹面板与对话区上下排，结果是轨迹一多就把对话区挤没，
@@ -2620,10 +2651,15 @@ export async function runTui(options: TuiOptions): Promise<number> {
       ...[...widgetSlots.values()].map((component) => ({ component, minSize: 1 })),
       // 队列面板在输入框**之上** —— 用户敲完字、回车之前就该看到刚才排了什么。
       { component: queuePanel, minSize: 1 },
-      // **没有单独的 loader 那行**：工作状态（思考中 / 压缩中 / 重试）画在 editor 的
-      // 上框线里（`embedWorkingStatus`，与 pi 同形）。所以 editor 直接坐在队列面板与
-      // 底栏之间，不多吃一行。
-      { component: editor, minSize: 3 },
+      // **输入区那一格**：默认是 composer；扩展的 inline `custom()` 挂上来时换成它的
+      // 组件（pi 的 `editorContainer.clear(); addChild(component)`）。
+      //
+      // 只给 `minSize: 1` 而不给 basis：扩展的组件**自己**决定高度（问卷按
+      // `tui.terminal.rows` 算 inline 预算），钉一个 basis 就会把它截短或留白。
+      // composer 那边仍然是 3（上/下框线 + 一行输入）。
+      editorSlotComponent === undefined
+        ? { component: editor, minSize: 3 }
+        : { component: editorSlotComponent, minSize: 1 },
       // 底栏行数 = `FOOTER_ROWS`，与 `/model`、`/sessions` 那些面板的
       // `margin.bottom` **同一个来源** —— 面板底边要落在 composer 的底边上，
       // 而那个位置就是「底栏几行」决定的。两处各写一个数字就会漂移：
@@ -2693,6 +2729,43 @@ export async function runTui(options: TuiOptions): Promise<number> {
       else widgetSlots.set(key, component);
       void opts;
       // 布局的 children 变了 —— 必须重设，否则新 widget 不出现/旧的赖着不走。
+      applyLayout();
+      refresh();
+    },
+    /**
+     * 扩展的**输入区槽位** —— 非 overlay 的 `custom()` 落在这一格（见 `editorSlotComponent`
+     * 的注释）。
+     *
+     * 焦点与文本的存/还都在这里做（pi 在自己的 `showExtensionCustom()` 里也是这么做的）：
+     * 进槽位时把焦点交给扩展组件、记住 composer 里那行字；出槽位时把焦点**还回**
+     * composer，并把那行字还原。
+     *
+     * 为什么焦点必须在这里还：`tui.setFocus()` 是 pi-tui 的进程级状态，而扩展只会在
+     * 自己的 `done` 里 resolve —— 它不知道 composer 是谁。界面是**唯一**知道的那个。
+     */
+    mountEditorSlot: (component) => {
+      const previous = editorSlotComponent;
+      if (previous !== undefined && previous !== component) {
+        // pi 是直接 `clear()` 掉旧的（它那个 `custom()` 的 promise 就永远不 resolve）；
+        // 这里顺手 dispose，别把旧组件的定时器/监听器留在进程里。
+        try {
+          previous.dispose?.();
+        } catch {
+          // 旧组件的 dispose 失败不该挡住新的上场。
+        }
+      }
+      editorSlotComponent = component;
+      if (component === undefined) {
+        if (editorTextBeforeSlot !== undefined) {
+          editor.setText(editorTextBeforeSlot);
+          editorTextBeforeSlot = undefined;
+        }
+        tui.setFocus(editor);
+      } else {
+        editorTextBeforeSlot = editor.getText();
+        tui.setFocus(component);
+      }
+      // children 变了 —— 必须重设布局（同 setWidget：VStack 的 children 是建的时候定下的）。
       applyLayout();
       refresh();
     },

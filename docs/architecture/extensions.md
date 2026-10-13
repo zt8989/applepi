@@ -67,18 +67,35 @@ typebox                     => NOT RESOLVABLE
 
 | 扩展要什么 | 本项目给什么 | 在哪 |
 | --- | --- | --- |
-| `ctx.ui.custom()` | pi-tui 的 `showOverlay()` | `src/extension-ui.ts` |
+| `ctx.ui.custom()` | overlay → `showOverlay()`；inline → 换掉 composer 那一格 | `src/extension-ui.ts` |
 | 工具执行 | 自己的 `getTool()` 注册表 | `src/tools.ts` 的 `registerExtraTools` |
 | `setActiveTools()` | 一条 reducer action 的位置（**刻意空**） | `src/extension-tools.ts` |
 
-### `ctx.ui.custom()`：焦点是 pi-tui 管的
+### `ctx.ui.custom()`：两种形态，两种落点
 
-`showOverlay` 抢焦点、`hide()` 还焦点（它自己记了 `preFocus`）。所以 `custom()` **必须**
-在扩展给的 `done()` 里 `handle.hide()` —— 不 hide 的话浮层永远挂在 overlay 栈上、
-输入再也回不到编辑器，界面看着「答完了却还能打字」。
+pi 的 `custom()` 有**两种**（参数里给不给 `overlay: true`），本项目两种都实现：
+
+| | `{ overlay: true }` | 不给 / `{ overlay: false }` |
+| --- | --- | --- |
+| pi 的落点 | `ui.showOverlay()` | 换掉 `editorContainer` 里的 composer |
+| 本项目的落点 | 同一个 | 同一个（`mountEditorSlot`） |
+| 焦点 | `showOverlay` 抢、`hide()` 还（它自己记了 `preFocus`） | 宿主换格时给，还回来时交回 composer |
+
+overlay 那条：`custom()` **必须**在扩展给的 `done()` 里 `handle.hide()` —— 不 hide 的话
+浮层永远挂在 overlay 栈上、输入再也回不到编辑器，界面看着「答完了却还能打字」。
+
+inline 那条：宿主把**输入区那一格**（composer）换成扩展的组件，并负责三件事 ——
+换格重排、给焦点、进出时存/还 composer 里那行字（pi 在自己的
+`showExtensionCustom()` 里也是这么干的）。inline **不给 `onHandle`**（与 pi 一致）：
+没有浮层栈可弹，也就没有可复原的 `setHidden`，扩展据此把折叠退化成一行可见提示 ——
+见下面「折叠」一节。
+
+**宿主没有这一格时（`mountEditorSlot` 缺省）非 overlay 的 `custom()` 直接抛错**，
+而不是静默 no-op：能开这一格的只有真界面（`tui/app.ts`）与测试探针；
+`tui.ts` 的 `requireUi()` 在界面起来之前给的就是个没有槽位的占位宿主。
 
 没实现的是：`select` / `confirm` / `input`（RPC 宿主那套弹窗协议）、
-`setWidget` / `setFooter` / `setHeader`（要接 pi 的应用层布局，见
+`setFooter` / `setHeader`（要接 pi 的应用层布局，见
 [surfaces](surfaces.md)「为什么不用 pi 自己的 InteractiveMode」）。
 
 ## 三个接缝
@@ -220,8 +237,12 @@ $ pnpm start
 的话，扩展会把「用户没选」当成真的答复发回模型 —— `undefined` 在 pi 的契约里明确表示
 「用户取消了」，给假值等于撒谎。
 
-非 overlay 形式的 `custom()` 直接抛错并说明原因：它要顶掉底部输入区，而本项目的输入区
-由自己的布局管（`applyLayout`），换掉它要整套布局协议。
+非 overlay 形式的 `custom()` 现在**也实现了**（换掉 composer 那一格，见上）。
+宿主没有那一格时（`mountEditorSlot` 缺省）才抛错并说明原因。
+
+> 这一段此前写的是「直接抛错」—— 那是 `ask_user_question` 2.12 时代的事实
+> （它那时只发 overlay）。2.13 起它**默认**发 inline，于是那个显式报错从「明说不行」
+> 变成了「这个扩展在本项目里必挂」。
 
 ## 三个坑
 
@@ -299,13 +320,17 @@ ask_user_question
 
 诊断**刻意显眼**（黄字）：那不是「没装某个可选功能」，而是「你以为装上了」。
 
-还有一条诊断值得单说：**扩展工具没有 `promptSnippet` 就等于模型看不见它**
-（官方语义：`buildSystemPrompt` 会过滤掉没有 snippet 的工具）。那与「工具在注册表里」
-矛盾 —— 用户会以为能用，模型那边根本没这个工具。所以那时报出来。
+还有一条以前的诊断值得提：**扩展工具没有 `promptSnippet`** 曾被视为「模型看不见它」
+而报错 —— 那句对项目自己的四个工具成立，对扩展是**错的**。工具有没有 snippet 只
+决定它进不进 system prompt 的「工具怎么用」那一节；它一样在注册表里、一样进 API 请求
+的 `tools` 数组，模型看得到它的 `description`。pi 自己就不为那种情况报任何东西，
+而 `pi-subagents` 0.77 的 `bg_wait` 正好是故意不宣传的那种（用法写在 `subagent` 的
+snippet 里）—— 错报一条就变成永远修不掉的 `[Extension issues]`。所以现在只静默地
+「不进 prompt 工具节」，不报错。
 
 | 扩展 | 工具 | UI | 模型/凭证 | 命令/快捷键 | 会话 |
 | --- | --- | --- | --- | --- | --- |
-| `rpiv-ask-user-question` | ✅ | ✅ `ui.custom()` overlay | — | — | — |
+| `rpiv-ask-user-question` | ✅ | ✅ `ui.custom()`（inline + overlay） | — | — | — |
 | `pi-web-access` | ✅ | ✅ `setWidget` / `theme` | ✅ `modelRegistry` / `ctx.model` | ✅ 4 命令 / 2 键位 | ✅ 三个只读成员 |
 
 ## 斜杠命令与快捷键：接了
@@ -407,33 +432,31 @@ pi 那边是 `SessionManager` **类**，条目来自它自己的 `sessions/*.jso
   那些 text 块拼成一条用户消息。后果：扩展 `/curator` 那种「在转录里留一个可点开的
   卡片」会退化成**普通对话**。外观上的降级，结论照样回到对话里。
 
-## 折叠（`Ctrl+]`）：验过了，包括一个上游的怪事
+## 折叠（`Ctrl+]`）：两种形态，两种机制
 
-折叠是**唯一**一条要**原始终端输入**才能走通的路，所以它单独一个测试文件
-（`test/extension-collapse.test.ts`），形状与其他扩展测试不同：那边只发 promise，
-这边要能**模拟按键**。
+折叠单独一个测试文件（`test/extension-collapse.test.ts`），因为它要能**模拟按键** ——
+其他扩展测试只发 promise。
 
-### 两条路，缺一不可
+### 形态由扩展选的 presentation 决定（我们两档都得撑住）
 
-扩展的 `registerCollapseKeyListener()` 同时做两件事：
+`rpiv-ask-user-question` 2.13 起**默认 inline**：`presentation.ts` 的
+`resolvePresentation()` 优先占「输入区槽位」（Pi 的 editor slot），只有槽位已被另一份
+问卷占住时才用 overlay。两边的折叠机制完全不同：
 
-1. **raw listener**（`ctx.ui.onTerminalInput`）—— **唯一**能让折叠后**复原**的路：
-   pi-tui 不把输入发给一个 `setHidden(true)` 的 overlay 的 `handleInput`。
-2. **`handle.setHidden(true)`** —— 收成一行（`buildCollapsedRender`）而不是满屏浮层，
-   于是背后的对话看得见。
+| | inline（默认） | overlay（槽位被占时） |
+| --- | --- | --- |
+| 落点 | 换掉 composer 那一格 | 浮层 |
+| 折叠 | 收成**一行可见提示**（仍握着焦点） | `handle.setHidden(true)` 收成一行 |
+| 复原靠 | 组件自己的 `handleInput` | `ctx.ui.onTerminalInput()` 的 raw listener |
+| 收起后按 Esc | **放弃**（`routeCollapsed` 只认 cancel） | 到不了组件 |
 
-只做 1 不做 2：对话框还在挡。只做 2 不做 1：一旦收起**再也回不来**。
-测的是「收得起 → 提示里点名那个键 → 展得回」这个**来回**。
+「raw listener 才是唯一复原路」那句只对 **overlay** 成立：pi-tui 不把输入发给一个
+`setHidden(true)` 的 overlay 的 `handleInput`。
 
-### 按键用 `\x1d`（GS）
-
-`Ctrl+]` 就是 0x1d。验过 pi-tui 的 `matchesKey`：0x1d、CSI 27;5;93~、CSI 93;5u 都匹配；
-**裸 `]` 与 CSI 93（无修饰位）不匹配** —— 用错一个键就会静默地什么都不发生。
-
-### 一个上游的怪事：收起后按 Esc 什么也不发生
+### 一个上游的怪事：overlay 收起后按 Esc 什么也不发生
 
 扩展文档写「While collapsed, every keystroke other than cancel is ignored」——
-读起来是「Esc 能用」。**实测不是**（pi-tui 1.0.3）：
+读起来是「Esc 能用」。**实测不是**（pi-tui 1.0.3，且只在那条 overlay 路上）：
 
 1. `handle.setHidden(true)` 会**把焦点移走**（`setFocus(topVisible ?? preFocus)`）；
 2. 下一帧 `handleTerminalInput` 发现「焦点在一个**不可见**的 overlay 上」，**再改派一次**；
@@ -443,27 +466,44 @@ pi 那边是 `SessionManager` **类**，条目来自它自己的 `sessions/*.jso
 出路是**再按一次 `Ctrl+]` 展开**，然后 Esc 就能放弃。
 
 **这不是我们宿主的问题** —— pi 自己跑同一个扩展也是这个行为（同一个 pi-tui）。
-记在这里是因为「收起后按 Esc 没反应」是真实的用户困惑，而真因在 pi-tui 与扩展的交界处：
-只看现象会以为是自己的接线错了。`routeCollapsed` 只在「折叠但**仍可见**」的降级形态下
-可达（宿主没给 raw input → `canReopenWhileHidden === false` → 扩展退回可见的一行提示）。
+而且它在默认的 inline 形态下**不存在**：收起只是换个画法，组件与焦点都还在，
+所以「收起后 Esc = 放弃」是可达的（测试里钉住了）。
 
-### 写这个测试时踩的三个坑（都在注释里）
+### 按键用 `\x1d`（GS）
 
-1. **必须 `tui.start()`**，否则 `doRender()` 第一行就 return —— 于是 `hasOverlay()` 是
-   true、promise 也不 reject，而画面全空。**看起来一切正常。**
+`Ctrl+]` 就是 0x1d。验过 pi-tui 的 `matchesKey`：0x1d、CSI 27;5;93~、CSI 93;5u 都匹配；
+**裸 `]` 与 CSI 93（无修饰位）不匹配** —— 用错一个键就会静默地什么都不发生。
+
+### 写这个测试时踩的四个坑（都在注释里）
+
+1. **必须 `tui.start()`**，否则 `doRender()` 第一行就 return —— 于是组件挂上了、
+   promise 也不 reject，而画面全空。**看起来一切正常。**
 2. **重绘是异步的**（`requestRender` 走 nextTick + 16ms 节流），所以按键之后要显式
    `renderNow(true)` 强推一帧，否则断言在第一帧之前就跑。
 3. **不能覆盖 `addInputListener`** —— pi-tui 的 `handleTerminalInput` 直接读它**内部的
    Set**，不是调那个公开方法。覆盖它等于把 listener 存到别处，于是扩展的 raw
    listener 永远不被调。按键要喂 `handleTerminalInput`（它自己会做焦点改派），
    不要自己遍历 listener。
+4. **探针宿主的 `mountEditorSlot` 必须真的接到 `setLayoutRoot` 上** —— 只记一个引用
+   的话 inline 组件一帧都不会被画，而那种失败看起来像「扩展没渲染」，真因在宿主探针里。
+
+### inline 的宿主侧：把那一格真的换掉
+
+`src/tui/app.ts` 的 `mountEditorSlot` 与 pi 的
+`editorContainer.clear(); addChild(component)` 是同一件事：换格、重排布局、给焦点，
+还回来时把 composer 与它进槽位前那行字一起还回。
+
+**为什么不复用本项目自己的 overlay 面板**（`/model`、`/sessions` 那几个用 overlay
+复刻 composer 矩形）：inline 要的不只是「一块矩形」。扩展自己按 `tui.terminal.rows`
+算行预算、自己决定折叠、还要把对话区留在上面 —— 那只能由布局**真的把那一格换掉**
+才能得到。
 
 ## 八个文件
 
 | 文件 | 干什么 |
 | --- | --- |
 | `src/extension-host.ts` | 装扩展：解包路径、`loadExtensions`、runner 绑定、工具适配 |
-| `src/extension-ui.ts` | `ctx.ui`：`custom()` overlay、`setWidget`、`theme`、`notify`、raw input |
+| `src/extension-ui.ts` | `ctx.ui`：`custom()`（overlay / inline）、`setWidget`、`theme`、`notify`、raw input |
 | `src/extension-tools.ts` | pi `ToolDefinition` → 本项目 `AgentTool`；工具集读/写 |
 | `src/extension-models.ts` | `ctx.modelRegistry`：官方的 `ModelRegistry` 门面 |
 | `src/extension-sessions.ts` | `ctx.sessionManager`：三个只读成员，数据源是 `state.messages` |

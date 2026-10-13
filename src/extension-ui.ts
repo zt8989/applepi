@@ -3,10 +3,20 @@
  *
  * ## 只给 `custom()` 真的，其余给「能明说不行」的实现
  *
- * 第一个接的扩展（`ask_user_question`）要的是：把一块自己的组件铺成**底部浮层**、
- * 拿键盘焦点，用户答完或按 ESC 之后 resolve 一个结果。那正好是 pi-tui 的
- * `showOverlay()` —— 它自己抢焦点，并在 `hide()` 时把焦点还给原处
- * （`showOverlay` 记了 `preFocus`）。
+ * 第一个接的扩展（`ask_user_question`）要的是：把一块自己的组件铺进来、拿键盘焦点，
+ * 用户答完或按 ESC 之后 resolve 一个结果。它有**两种形态**，pi 两种都实现：
+ *
+ * | `custom()` 的参数 | pi 的落点 | 本项目的落点 |
+ * | --- | --- | --- |
+ * | `{ overlay: true }` | `ui.showOverlay()`（自己抢焦点，`hide()` 还焦点） | 同一个 |
+ * | 不给 / `{ overlay: false }` | **换掉 `editorContainer` 里的 composer** | 同一个槽位（见下） |
+ *
+ * inline 那条路以前是「明说不支持」的（`ask_user_question` 2.12 只要 overlay）。
+ * 2.13 起它**默认**走 inline（Pi 的 editor slot，`presentation.ts` 的
+ * `resolvePresentation()`），overlay 反而只在「已经有另一个浮层」时降级用 —— 于是
+ * 那个显式报错变成了「这个扩展在本项目里必挂」。现在补上：宿主提供一个
+ * `mountEditorSlot`，把组件放进输入区那一格（pi 的 `editorContainer.clear();
+ * addChild(component)`）。
  *
  * 它**不要**的：`select` / `confirm` / `input` 那套 RPC 弹窗协议（给 VS Code pendant、
  * Zed 那种宿主用的）、`setFooter` / `setHeader`（那要接 pi 的应用层布局，
@@ -83,6 +93,17 @@ export interface HostUiOptions {
     component: (Component & { dispose?: () => void }) | undefined,
     options?: { placement?: 'aboveEditor' | 'belowEditor' },
   ): void;
+  /**
+   * 「输入区槽位」—— pi 的 `editorContainer` 语义的落点：`custom({ overlay: false })`
+   * 把扩展组件**换掉 composer 那一格**（而不是盖在屏幕上）。
+   *
+   * `component === undefined` = 还回 composer 本身（焦点也跟着回去，见界面那边）。
+   *
+   * **可缺省**：没有布局的宿主（测试探针、界面还没起来时的占位）不提供它。
+   * 于是非 overlay 的 `custom()` 变成**明确报错**，而不是「假装挂上了」—— 后者
+   * 的症状是「扩展在等一个永远不会出现的界面」，最难查。
+   */
+  mountEditorSlot?(component: (Component & { dispose?: () => void }) | undefined): void;
 }
 
 function noticePrefix(type: string | undefined): string {
@@ -138,28 +159,35 @@ export function createHostUi(source: () => HostUiOptions): ExtensionHostUi {
     },
 
     custom: async <T>(factory: CustomFactory<T>, opts?: CustomOptions): Promise<T> => {
-      if (opts?.overlay !== true) {
-        // 非 overlay 的 custom 要**顶掉**底部输入区（pi 把 editor 换成那块组件）。
-        // 本项目的输入区由自己的布局管（`tui/app.ts` 的 `applyLayout`），换掉它要整套
-        // 布局协议 —— 而第一个扩展走的是 overlay。不实现，但要**明说**，否则症状是
-        // 「扩展在等一个永远不会出现的界面」。
-        throw new Error('本项目只支持 overlay 形式的扩展界面（custom({ overlay: true })）');
-      }
+      // 读界面：界面还没起来时**明说**（`live()` 抛），而不是拿 undefined 去用。
       const { tui, theme } = live();
+      const overlay = opts?.overlay === true;
+      // 非 overlay 要顶掉 composer 那一格 —— 宿主没有槽位就只能明说不行。
+      const mountEditorSlot = source().mountEditorSlot;
+      if (!overlay && mountEditorSlot === undefined) {
+        throw new Error(
+          '本宿主没有输入区槽位，只支持 overlay 形式的扩展界面（custom({ overlay: true })）',
+        );
+      }
       return new Promise<T>((resolve, reject) => {
         let handle: { hide: () => void } | undefined;
         let component: (Component & { dispose?: () => void }) | undefined;
         let settled = false;
+        /** 拆台：overlay 收浮层 / inline 还回 composer。与 pi 的 `close` 同一顺序。 */
+        const teardown = (): void => {
+          try {
+            if (overlay) handle?.hide();
+            else mountEditorSlot?.(undefined);
+          } catch {
+            // 收尾失败不该让用户的答复丢掉。
+          }
+        };
         const close = (result: T): void => {
           if (settled) return;
           settled = true;
-          // 先还焦点再 resolve：扩展的 `done` 之后通常立刻返回给模型，
+          // 先拆台再 resolve：扩展的 `done` 之后通常立刻返回给模型，
           // 那条路上还可能再开别的浮层 —— 焦点得先归位。
-          try {
-            handle?.hide();
-          } catch {
-            // hide 失败不该让用户的答复丢掉。
-          }
+          teardown();
           try {
             component?.dispose?.();
           } catch {
@@ -171,7 +199,7 @@ export function createHostUi(source: () => HostUiOptions): ExtensionHostUi {
           (c) => {
             if (settled) {
               // 扩展在 resolve 之后才交出组件（极少见）。那它永远不会被关掉，
-              // 于是这个浮层会一直占着输入 —— 立刻拆掉。
+              // 于是这个槽位会一直占着输入 —— 立刻拆掉。
               try {
                 c.dispose?.();
               } catch {
@@ -180,6 +208,13 @@ export function createHostUi(source: () => HostUiOptions): ExtensionHostUi {
               return;
             }
             component = c;
+            if (!overlay) {
+              // inline：换掉 composer 那一格。**不给 `onHandle`** —— 与 pi 一致
+              // （inline 没有浮层栈可弹，也就没有可复原的 `setHidden`；扩展据此
+              // 把折叠退化成一行可见的提示，见它的 `canReopenWhileHidden`）。
+              mountEditorSlot?.(c);
+              return;
+            }
             const resolveOptions = opts?.overlayOptions;
             handle = tui.showOverlay(
               c,
@@ -192,11 +227,9 @@ export function createHostUi(source: () => HostUiOptions): ExtensionHostUi {
           (error: unknown) => {
             if (settled) return;
             settled = true;
-            try {
-              handle?.hide();
-            } catch {
-              /* 忽略 */
-            }
+            // 工厂抛了 = 什么都没挂上；但 inline 那条路可能已经把 composer 换掉过
+            // （不会：换是在工厂 resolve 之后）。仍然照 pi 还一次，代价是一次重排。
+            teardown();
             reject(error);
           },
         );

@@ -247,7 +247,15 @@ pi 里这几个面板根本不是弹窗：`interactive-mode.js` 的 `showSelecto
 关掉时再换回 `editor`。于是面板天然是 composer 的宽度，它的底边**就是** composer 的
 底边。用户按 Ctrl+L 看到的是「输入框那块变成了列表」。
 
-本项目没有可换内容的 `editorContainer`，所以用覆盖层**复刻同一个矩形**：
+本项目那阵子没有可换内容的 `editorContainer`，所以用覆盖层**复刻同一个矩形**：
+
+> **补充（扩展的 inline `custom()` 之后）**：后来真给了「输入区槽位」
+> （`src/tui/app.ts` 的 `mountEditorSlot`，见 [extensions](extensions.md) 的「折叠」一节），
+> 这三个面板**没有**跟着搬过去 —— 不是做不到，是它们不需要：面板要的正是「盖住
+> composer 那个矩形」，而 overlay 参数已经把它钉死了（下面那些几何断言就是钉它的）；
+> 搬进槽位反而要自己多管一套焦点与「还回 composer」，而面板的键位与焦点现在由官方
+> 组件管着。什么时候值得搬：哪天要让对话区在面板打开时**继续可见、继续滚** ——
+> overlay 是全遮挡语义，槽位才不是。
 
 ```ts
 { anchor: 'bottom-center', width: '100%', margin: { bottom: COMPOSER_BOTTOM_MARGIN } }
