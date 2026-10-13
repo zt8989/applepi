@@ -14,7 +14,7 @@ import { createAgentReducer, loopWiring, type ReducerEffects } from './reducer';
 import { createInitialState, type AgentState } from './state';
 import type { AgentAction } from './actions';
 import type { ThinkingBudgets } from '@earendil-works/pi-ai';
-import { createPiAiEffectTable, type EffectTable } from './effects';
+import { createPiAiEffectTable, type EffectTable, type ToolCallGate } from './effects';
 import { getTools } from './tools';
 import { defaultStreamFn, type AgentRuntime, type StreamFn } from './provider';
 import { createTracePersistence, type TracePersistence, type TraceSink } from './trace-store';
@@ -163,6 +163,11 @@ export interface CreateAgentStoreOptions {
   onTraceError?: ((error: unknown) => void) | undefined;
   /** 自定义 effect 表（Web 用）；不给就用 pi-ai 表。 */
   effects?: EffectTable | undefined;
+  /**
+   * 工具执行前的门（`tool_call`）：MCP 等服务器、权限扩展阻止调用。
+   * 只在走 pi-ai 表（不给 `effects`）时生效。
+   */
+  onToolCall?: ToolCallGate | undefined;
   /** 完全自定义 reducer 接线（测试用）。 */
   reducerEffects?: Partial<ReducerEffects> | undefined;
 }
@@ -198,6 +203,7 @@ export function createAgentStoreWith(options: CreateAgentStoreOptions): AgentSto
       // 下一个回合必须真的发给新的那个。症状见 `effects.ts` 的 `resolveModel` 注释。
       resolveModel: (state) => runtime.models.getModel(state.model.provider, state.model.modelId),
       ...(options.thinkingBudgets !== undefined ? { thinkingBudgets: options.thinkingBudgets } : {}),
+      ...(options.onToolCall !== undefined ? { onToolCall: options.onToolCall } : {}),
     });
 
   const initialState = createInitialState({

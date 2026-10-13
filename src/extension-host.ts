@@ -44,18 +44,39 @@
  * 而本项目只有交互式一种模式（`hasUI` 恒为真）。这不是 bug，是上面那个决定的
  * 必然结果，测试里钉住了（`test/extension-host.test.ts`）。
  */
-import { loadExtensions } from '@earendil-works/pi-coding-agent/dist/core/extensions/loader.js';
+import {
+  loadExtensions,
+  createExtensionRuntime,
+  loadExtensionFromFactory,
+} from '@earendil-works/pi-coding-agent/dist/core/extensions/loader.js';
 import { ExtensionRunner } from '@earendil-works/pi-coding-agent/dist/core/extensions/runner.js';
 import { createEventBus } from '@earendil-works/pi-coding-agent/dist/core/event-bus.js';
 import { DefaultPackageManager } from '@earendil-works/pi-coding-agent/dist/core/package-manager.js';
 import { createSourceInfo } from '@earendil-works/pi-coding-agent/dist/core/source-info.js';
 import type { PathMetadata } from '@earendil-works/pi-coding-agent/dist/core/package-manager.js';
 import type { Extension } from '@earendil-works/pi-coding-agent/dist/core/extensions/types.js';
-import { SettingsManager } from '@earendil-works/pi-coding-agent';
+import { createCodemodeExtension, createMcpExtension, SettingsManager } from '@earendil-works/pi-coding-agent';
 import type { AgentStore } from './store';
 import type { AgentTool, AgentToolResult } from './agent-tool';
-import { getTool, getTools, registerExtraTools } from './tools';
-import { adaptExtensionTool, activeToolsFromState, applyActiveTools } from './extension-tools';
+import {
+  callableTools,
+  getCallableTool,
+  registeredToolInfos,
+  registerToolEntries,
+  type RegisteredToolEntry,
+  type ToolExposure,
+  type ToolLoadout,
+  type ToolLoadoutChanges,
+  type ToolNamespace,
+} from './tools';
+import {
+  adaptExtensionTool,
+  activeToolsFromState,
+  applyActiveTools,
+  type ExtensionToolDefinitionLike,
+} from './extension-tools';
+import { loadPiSettings } from './pi-config';
+import type { ExtensionFactory } from '@earendil-works/pi-coding-agent/dist/core/extensions/types.js';
 import { createHostUi, type ExtensionHostUi, type HostUiOptions } from './extension-ui';
 import { extensionModelRegistry } from './extension-models';
 import { extensionSessionManager } from './extension-sessions';
@@ -65,7 +86,6 @@ import { configHome } from './config-home';
 import type { ToolInfo } from '@earendil-works/pi-coding-agent';
 import type { AgentRuntime } from './provider';
 import type { PromptToolLike } from './system-prompt';
-
 /**
  * 装好的**一个**扩展（显示用，最少字段）。
  *
@@ -125,6 +145,37 @@ export interface ExtensionHost {
    * 已发出的消息与 prompt 对不上。改 prompt 要 `/new`。
    */
   beforeAgentStart(text?: string | undefined): Promise<void>;
+  /**
+   * 发 `session_start`（内核在装载 prompt **之前**调一次）。
+   *
+   * MCP 扩展靠它读 `mcp.json` 并开始连接服务器：工具是在连接过程中**动态注册**
+   * 进来的（`pi.registerTool` → 我们的 `refreshTools`），所以这个顺序不能反。
+   * 同样靠它，MCP 会在发现有 codemode 暴露的服务器时激活 `codemode` ——
+   * 那必须发生在 `prompt.init` 之前，否则模型看不到 codemode。
+   */
+  startSession(): Promise<void>;
+  /**
+   * 收集 `before_agent_start` 写进 `systemPromptOptions.sections` 的 prompt 段。
+   *
+   * MCP 就是靠这个把 `mcp_servers` 段（「有哪些服务器、工具怎么调」）塞进 prompt 的；
+   * 那段是它自己那个 handler 算的（服务器列表在扩展闭包里，外面拿不到）。
+   * 另外它还会用 `direct` 服务器最长 10 秒的等待 —— 所以**这一步必须在算声明工具之前调**。
+   */
+  collectPromptSections(): Promise<Record<string, string>>;
+  /**
+   * 工具执行前的 `tool_call` 事件（环在跑工具前调）。
+   *
+   * 两个用途：
+   * - **MCP**：codemode 脚本点名了一个还没连上的服务器时，在这里等它（官方行为）；
+   * - **权限类扩展**：可以 `block` 掉一次调用。
+   * `block` 为 true 时环不执行那个工具（把 `reason` 当错误结果发回模型）。
+   */
+  beforeToolCall(
+    toolCallId: string,
+    name: string,
+    input: Record<string, unknown>,
+    options?: { parentToolCallId?: string | undefined; signal?: AbortSignal | undefined },
+  ): Promise<{ block?: boolean; reason?: string | undefined; input: Record<string, unknown> }>;
   dispose(): void;
 }
 
@@ -160,6 +211,14 @@ export interface LoadExtensionHostOptions {
   /** ���试注入：跳过整个装载流程。 */
   disabled?: boolean | undefined;
   /**
+   * 要不要装 pi 的**内置扩展**（`codemode` 与 `mcp`）。默认 true。
+   *
+   * 关掉它的只有两类调用方：只测「用户装的扩展」的测试（`test/extension-host.test.ts`
+   * 故意用真配置家目录，那里的 `mcp.json` 会让 MCP 真去连服务器），以及不想接 MCP 的嵌入方。
+   * 内核**不关**（装了才有 MCP + codemode）。
+   */
+  builtins?: boolean | undefined;
+  /**
    * 当前会话 id 的**取值函数**。
    *
    * 为什么是函数：它会变（`/new`、恢复历史）。扩展的 `getSessionId()` 问的时候得报
@@ -187,6 +246,9 @@ function emptyHost(errors: readonly string[] = []): ExtensionHost {
     entries: [],
     loaded: 0,
     beforeAgentStart: async () => {},
+    startSession: async () => {},
+    collectPromptSections: async () => ({}),
+    beforeToolCall: async (_id, _name, input) => ({ input }),
     dispose: () => {},
   };
 }
@@ -330,20 +392,56 @@ export async function loadExtensionHost(
   };
   if (disabled === true) return emptyHost();
 
-  const errors: string[] = [];
+const errors: string[] = [];
+  const onExtensionError = (where: string, message: string): void => {
+    errors.push(`扩展 ${where}：${message}`);
+  };
   const entries = await resolveExtensionEntries(cwd, errors);
-  if (entries.length === 0) return emptyHost(errors);
+  const withBuiltins = options.builtins !== false;
+  // 一个都没有（也没内置）就不必建 runner 了 —— 与之前同一个早退。
+  if (entries.length === 0 && !withBuiltins) return emptyHost(errors);
 
   const eventBus = createEventBus();
+  // **共享一个 runtime**：内置扩展与文件扩展必须挂在同一个 runtime 上，否则
+  // `pi.registerMcpServer()` 写进的注册表、runner 绑定的 refreshTools 会是两份。
+  const runtimeHandle = createExtensionRuntime();
   const loaded = await loadExtensions(
     entries.map((e) => e.path),
     cwd,
     eventBus,
+    runtimeHandle,
   );
   // `loadExtensions` 只知道「一个文件」，包信息在这一步补上（理由见
   // `resolveExtensionEntries` 与 `applyExtensionSourceInfo` 的注释）。
   applyExtensionSourceInfo(loaded.extensions, entries);
   for (const e of loaded.errors) errors.push(`扩展 ${shortPath(e.path)}：${e.error}`);
+
+  // ── pi 的内置扩展（MCP + codemode）───
+  //
+  // 与 pi 的 CLI 同一个做法：`codemode` 与 `mcp` 都是**内置扩展**（`createCodemodeExtension()`
+  // / `createMcpExtension()`），不是内核里的特殊代码。本项目不重写它们：MCP 客户端、
+  // OAuth、工具命名、资源工具、`/mcp` 面板都是官方那几十个文件。
+  //
+  // **放在文件扩展之后**：本项目的工具收集是同名先注册者优先，而 pi 对
+  // codemode / mcp 这两个是 `replaceable`（第三方同名扩展顶掉内置）—— 同样效果。
+  //
+  // 不装 `tool_search`：它把 `deferred` 工具「装载」成 declared，而那个动作要中途改
+  // 工具声明（本项目的工具集装载时定死）。`deferred` 归入 codemode，理由见 tools.ts。
+  if (withBuiltins) {
+    const builtins: ReadonlyArray<{ factory: ExtensionFactory; path: string }> = [
+      { factory: createMcpExtension(), path: 'builtin:mcp' },
+      { factory: createCodemodeExtension(), path: 'builtin:codemode' },
+    ];
+    for (const builtin of builtins) {
+      try {
+        loaded.extensions.push(
+          await loadExtensionFromFactory(builtin.factory, cwd, eventBus, runtimeHandle, builtin.path),
+        );
+      } catch (error) {
+        errors.push(`内置扩展 ${builtin.path}：${msg(error)}`);
+      }
+    }
+  }
   if (loaded.extensions.length === 0) return emptyHost(errors);
 
   // runner 要 sessionManager 与 modelRegistry。本项目**不接** pi 的会话层（那是 pi 的
@@ -366,22 +464,48 @@ export async function loadExtensionHost(
     extensionModelRegistry(effectiveRuntime) as never,
   );
 
-  bindCore(runner, store, uiOptions, effectiveRuntime, onSendMessage);
-
-  // 工具：同名的先注册者优先（与官方 `getAllRegisteredTools` 一个口径）。
-  const seen = new Set<string>();
+  // ── 工具：从 runner 的注册表扫（而不是只扫装载那一刻）───
+  //
+  // MCP 的工具是在**服务器连上之后**才 `pi.registerTool()` 进来的，所以扫描只能包成
+  // 一个函数，由 `refreshTools` 再调：否则一个连得慢的服务器，它的工具就永远不在本
+  // 项目的表里，症状是「脚本报未知工具，而 `/mcp` 里明明有」。
   const tools: AgentTool[] = [];
   const promptTools: PromptToolLike[] = [];
-  for (const ext of loaded.extensions) {
-    for (const [name, entry] of ext.tools) {
+  const syncExtensionTools = (): void => {
+    const seen = new Set<string>();
+    const registrations: RegisteredToolEntry[] = [];
+    const snaps: PromptToolLike[] = [];
+    // 同名的先注册者优先（与官方 `getAllRegisteredTools` 一个口径）。
+    for (const reg of runner.getAllRegisteredTools()) {
+      // 官方 `RegisteredTool` 只有 `definition` / `sourceInfo`，名字在 `definition.name` 上；
+      // `as unknown as` 是因为官方的 `ToolDefinition` 字段比我们这层适配用到的多（annotations
+      // 的形状也不完全一致）—— 只看我们真的要读的那几个。
+      const d = reg.definition as unknown as ExtensionToolDefinitionLike & {
+        name: string;
+        exposure?: ToolExposure;
+        namespace?: ToolNamespace;
+        annotations?: Record<string, unknown>;
+        defaultActive?: boolean;
+        prepareLoadout?: (loadout: ToolLoadout) => ToolLoadoutChanges | undefined;
+      };
+      const name = d.name;
       if (seen.has(name)) continue;
       seen.add(name);
-      const d = entry.definition as ExtensionToolDefinition;
       if (typeof d.execute !== 'function') {
-        errors.push(`扩展 ${shortPath(ext.path)}：工具 ${name} 没有 execute`);
+        errors.push(`扩展 ${shortPath(reg.sourceInfo?.path ?? name)}：工具 ${name} 没有 execute`);
         continue;
       }
-      tools.push(adaptExtensionTool(name, d, { runner, store, cwd }));
+      registrations.push({
+        tool: adaptExtensionTool(name, d, { runner, store, cwd }),
+        ...(d.exposure !== undefined ? { exposure: d.exposure } : {}),
+        ...(d.namespace !== undefined ? { namespace: d.namespace } : {}),
+        ...(d.annotations !== undefined ? { annotations: d.annotations } : {}),
+        ...(d.defaultActive !== undefined ? { defaultActive: d.defaultActive } : {}),
+        ...(d.promptSnippet !== undefined ? { promptSnippet: d.promptSnippet } : {}),
+        ...(d.promptGuidelines !== undefined ? { promptGuidelines: d.promptGuidelines } : {}),
+        ...(d.prepareLoadout !== undefined ? { prepareLoadout: d.prepareLoadout } : {}),
+        ...(reg.sourceInfo !== undefined ? { sourceInfo: reg.sourceInfo } : {}),
+      });
       // prompt 片段：官方语义是「**有 snippet 才进 prompt 的工具清单**」。
       //
       // 没有 snippet **不是错误** —— 工具照样在注册表里、照样进 API 请求的 tools 数组，
@@ -396,7 +520,7 @@ export async function loadExtensionHost(
       // 报出来就变成启动横幅上一句永远修不掉的 “[Extension issues]”，那就不是预警、
       // 是噪音了 —— 而噪音会让人把**真的**诊断一起忽略掉。
       if (d.promptSnippet !== undefined && d.promptSnippet !== '') {
-        promptTools.push({
+        snaps.push({
           name,
           promptSnippet: d.promptSnippet,
           ...(d.promptGuidelines !== undefined && d.promptGuidelines.length > 0
@@ -405,8 +529,25 @@ export async function loadExtensionHost(
         });
       }
     }
-  }
-  registerExtraTools(tools);
+    registerToolEntries(registrations);
+    tools.length = 0;
+    tools.push(...registrations.map((r) => r.tool));
+    promptTools.length = 0;
+    promptTools.push(...snaps);
+  };
+
+  // 先绑 core（它把 `runtime.refreshTools` 接上），再扫一次。
+  bindCore({
+    runner,
+    store,
+    uiOptions,
+    runtime: effectiveRuntime,
+    onSendMessage,
+    cwd,
+    onError: onExtensionError,
+    syncTools: syncExtensionTools,
+  });
+  syncExtensionTools();
 
   // `before_agent_start` 的 handler 按注册顺序抄一份（官方 emitBeforeAgentStart 会
   // 重建 system prompt，本项目没那份可重拼的 options，所以自己调 —— 理由见
@@ -417,9 +558,6 @@ export async function loadExtensionHost(
       beforeAgentStart.push(h as BeforeAgentStartHandler);
     }
   }
-  const onExtensionError = (where: string, message: string): void => {
-    errors.push(`扩展 ${where}：${message}`);
-  };
 
   // 斜杠命令与快捷键。handler 抛错收成诊断（与官方 `runner.onError` 同一口径）——
   // 扩展坏了不该把用户的对话带崩。
@@ -443,12 +581,15 @@ export async function loadExtensionHost(
     promptTools,
     commands,
     errors,
-    entries: loaded.extensions.map((ext) => ({
-      path: ext.path,
-      source: ext.sourceInfo?.source ?? 'local',
-      ...(ext.sourceInfo?.baseDir !== undefined ? { baseDir: ext.sourceInfo.baseDir } : {}),
-      hidden: ext.hidden === true,
-    })),
+    // **只报用户装的扩展**（内置的 mcp / codemode 不算「你装了扩展」），与 pi 的开场口径一致。
+    entries: loaded.extensions
+      .filter((ext) => !ext.path.startsWith('builtin:'))
+      .map((ext) => ({
+        path: ext.path,
+        source: ext.sourceInfo?.source ?? 'local',
+        ...(ext.sourceInfo?.baseDir !== undefined ? { baseDir: ext.sourceInfo.baseDir } : {}),
+        hidden: ext.hidden === true,
+      })),
     loaded: loaded.extensions.length,
     beforeAgentStart: async (text?: string) => {
       await notifyBeforeAgentStart({
@@ -460,46 +601,136 @@ export async function loadExtensionHost(
         onError: onExtensionError,
       });
     },
+    startSession: async () => {
+      // 官方 `session_start`：MCP 靠它读 mcp.json 并开始连接服务器。
+      await runner.emit({ type: 'session_start', reason: 'startup' });
+    },
+    collectPromptSections: async () => {
+      // MCP 把自己的 `mcp_servers` 段写进 `event.systemPromptOptions.sections`；
+      // 那个 handler 还会等 `direct` 服务器最多 10 秒。两个效果都是我们要的。
+      const sections: Record<string, string> = {};
+      const event = {
+        type: 'before_agent_start' as const,
+        prompt: '',
+        images: [],
+        systemPromptOptions: { cwd, sections },
+      };
+      const ctx = runner.createContext();
+      for (const handler of beforeAgentStart) {
+        try {
+          await handler(event as never, ctx as never);
+        } catch (error) {
+          onExtensionError('before_agent_start', msg(error));
+        }
+      }
+      return sections;
+    },
+    beforeToolCall: (toolCallId, name, input, callOptions) =>
+      emitToolCallGate(runner, onExtensionError, toolCallId, name, input, callOptions?.parentToolCallId),
     dispose: () => {
-      runner.invalidate();
+      // 先把 `session_shutdown` 发出去（MCP 关服务器），再作废 runner —— 反过来
+      // handler 里的 ctx 就是 stale 的了。
+      void (async () => {
+        try {
+          await runner.emit({ type: 'session_shutdown', reason: 'quit' });
+        } catch {
+          // 关不干净不该让退出卡住。
+        } finally {
+          runner.invalidate();
+        }
+      })();
     },
   };
 }
+/** `bindCore` 的入参（比之前那串位置参数好读，而且新加的两个都是必需的）。 */
+interface BindCoreOptions {
+  runner: ExtensionRunner;
+  store: AgentStore;
+  uiOptions: (() => HostUiOptions) | undefined;
+  runtime: AgentRuntime;
+  onSendMessage: ((text: string) => void) | undefined;
+  cwd: string;
+  onError: (where: string, message: string) => void;
+  /** 重扫 runner 的注册表（`refreshTools` 与装载后的第一次扫描都走它）。 */
+  syncTools: () => void;
+}
 
-/** pi 的 `ExtensionToolContext` 里本项目**真的**实现了的那几个成员。 */
-interface ExtensionToolDefinition {
-  description: string;
-  parameters: unknown;
-  promptSnippet?: string;
-  promptGuidelines?: readonly string[];
-  execute(
-    toolCallId: string,
-    params: unknown,
-    signal: AbortSignal | undefined,
-    onUpdate: ((u: { content: unknown[]; details?: unknown }) => void) | undefined,
-    ctx: unknown,
-  ): Promise<{ content?: unknown[]; details?: unknown } | AgentToolResult>;
+/**
+ * 发一次 `tool_call` 事件（顶层调用与 codemode 的嵌套调用**都**走它）。
+ *
+ * 为什么嵌套调用也要发：官方契约里嵌套调用的 id 是 `<父 id>/<n>` 且带
+ * `parentToolCallId`，MCP 的 `tool_call` handler 就是靠它「脚本点名了还没连上的服务器时
+ * 等它」。不发的话，脚本第一句调 `tools.mcp__rea__xxx` 就会报未知工具 —— 而服务器
+ * 其实几秒后就绪。
+ *
+ * 不炸环：handler 抛错收成诊断（与官方 `runner.onError` 同一口径）。
+ */
+async function emitToolCallGate(
+  runner: ExtensionRunner,
+  onError: (where: string, message: string) => void,
+  toolCallId: string,
+  name: string,
+  input: Record<string, unknown>,
+  parentToolCallId?: string,
+): Promise<{ block?: boolean; reason?: string | undefined; input: Record<string, unknown> }> {
+  const event: {
+    type: 'tool_call';
+    toolCallId: string;
+    toolName: string;
+    input: Record<string, unknown>;
+    parentToolCallId?: string;
+  } = {
+    type: 'tool_call',
+    toolCallId,
+    toolName: name,
+    input,
+    ...(parentToolCallId !== undefined ? { parentToolCallId } : {}),
+  };
+  try {
+    const result = await runner.emitToolCall(event as never);
+    // 官方的 `tool_call` 允许 handler **就地改** `event.input`（权限类扩展靠它改写参数）。
+    const finalInput = (event.input ?? input) as Record<string, unknown>;
+    if (result?.block === true) {
+      return {
+        block: true,
+        ...(result.reason !== undefined ? { reason: result.reason } : {}),
+        input: finalInput,
+      };
+    }
+    return { input: finalInput };
+  } catch (error) {
+    onError('tool_call', msg(error));
+    return { input };
+  }
+}
+
+/** 嵌套调用的编号：官方用 `<父 id>/<n>`，n 按父 id 各自累加。 */
+const nestedCounters = new Map<string, number>();
+function nextNestedId(callerId: string): string {
+  // 只在长会话里防一手内存：每个 codemode 调用的 id 都不同，计数用一次就不再需要。
+  if (nestedCounters.size > 1000) nestedCounters.clear();
+  const next = (nestedCounters.get(callerId) ?? 0) + 1;
+  nestedCounters.set(callerId, next);
+  return `${callerId}/${next}`;
 }
 
 /**
  * 把官方 runtime 接到本项目的 store / overlay 上。
  *
  * `ExtensionActions` 里有二十几个成员，其中大半是 pi 应用层的能力（换模型、改设置、
- * 换会话、树导航、MCP…）。本项目**不实现**它们 —— 下面给的是「不做事」的形状，不是
+ * 换会话、树导航…）。本项目**不实现**它们 —— 下面给的是「不做事」的形状，不是
  * 「假做事」的形状：
  *
- * - 有意义的（`getActiveTools` / `setActiveTools` / `sendUserMessage` / `isIdle` /
- *   `getSystemPrompt`）接真的；
+ * - 有意义的接真的：`getActiveTools` / `setActiveTools` / `getAllTools` /
+ *   `getSettings` / `refreshTools` / `sendUserMessage` / `isIdle` / `getSystemPrompt`，
+ *   以及 `contextActions` 里的 `executeTool` / `getCallableTools`（codemode 的命脉）；
  * - 换了模型 / 换思考级别返回 rejected Promise 而不是 resolve 成 no-op：调用方
  *   （扩展）会看到失败并**告诉用户**，而静默成功会让模型名与实际不符却无人察觉。
  */
-function bindCore(
-  runner: ExtensionRunner,
-  store: AgentStore,
-  uiOptions: (() => HostUiOptions) | undefined,
-  runtime: AgentRuntime,
-  onSendMessage: ((text: string) => void) | undefined,
-): void {
+function bindCore(options: BindCoreOptions): void {
+  const { runner, store, uiOptions, runtime, onSendMessage, cwd, onError, syncTools } = options;
+  /** 「装载窗口已关」的诊断只记一次（见下面 `setActiveTools`）。 */
+  let warnedActiveTools = false;
   const noUi = (what: string) => Promise.reject(new Error(`本项目不支持扩展的「${what}」`));
   runner.bindCore(
     {
@@ -548,19 +779,29 @@ function bindCore(
       setSessionName: () => {},
       getSessionName: () => undefined,
       setLabel: () => {},
-      getActiveTools: () => activeToolsFromState(store.getState()),
+      getActiveTools: () => activeToolsFromState(store.getState(), cwd),
       // **真的有**，不是 `[]`。`pi-web-access` 的 `web_enable`（动态启用 web 工具的
       // loader 工具）就靠它判断「这些工具到底在不在」：`[]` 会让它以为一个都没有，
       // 于是回一句「Cannot enable unavailable tools: web_search, ...」——
       // 而那些工具明明就在注册表里。症状是「模型永远调不了 web_search」。
-      getAllTools: () => allToolsInfo(),
-      getSettings: () => ({}) as never,
+      getAllTools: () => allToolsInfo(cwd),
+      // 真的 settings（`codemode.mode` / `inlineBudget` / `defaultTools` 都从这里读）。
+      getSettings: () => loadPiSettings() as never,
       setActiveTools: (names: string[]) => {
-        applyActiveTools(store, names);
+        // 装载窗口内（`prompt.init` 之前）真的改；窗口一关就只记**一条**诊断。
+        // 只记一条是因为扩展可能在每次工具调用里都试一次（`pi-web-access` 的
+        // `web_enable` 就是）—— 每试一次记一行会把真正的诊断淹没掉（项目里那条
+        // 「噪音会让人把真的诊断一起忽略掉」的教训）。
+        if (!applyActiveTools(store, names) && !warnedActiveTools) {
+          warnedActiveTools = true;
+          onError('setActiveTools', `装载窗口已关，忽略工具集变更（${names.length} 个名字）`);
+        }
       },
-      // 工具集是**装载时**定下的（见文件头「一处刻制的偏差」），所以「刷新」无事可做。
-      // 扩展若指望它生效会拿到一个静默 no-op —— 与 pi 的语义不同，这里是刻意的。
-      refreshTools: () => {},
+      // **真的**刷新：MCP 服务器连上后 `pi.registerTool()` 会走到这里，我们重扫 runner
+      // 的注册表并更新本项目的工具表（新工具从脚本 / `getAllTools()` 立刻可见）。
+      // 注意：**声明给模型**的那份在 `prompt.init` 时就定死了，这里不改它 ——
+      // 中途往模型工具表里加东西会让已发出的消息与 prompt 对不上（见 extension-tools.ts）。
+      refreshTools: () => syncTools(),
       getCommands: () => [],
       setModel: () => noUi('换模型'),
       getThinkingLevel: () => store.getState().thinkingLevel,
@@ -580,6 +821,67 @@ function bindCore(
       getContextUsage: () => undefined,
       compact: () => {},
       getSystemPrompt: () => store.getState().systemPrompt,
+      /** 嵌套调用（codemode 脚本里的 `tools.<name>()`）能调哪些 —— 本项目的可调表。 */
+      getCallableTools: () => callableTools(cwd),
+      /**
+       * `ctx.executeTool()`：codemode 脚本调另一个工具。
+       *
+       * 与顶层调用走**同一个门**（`tool_call` 事件）—— MCP 靠它等「脚本点名了但还没连上」
+       * 的服务器。结果形状是官方的 `AgentToolCallOutcome`；**失败不抛**，回 `isError: true`
+       * （那是 codemode 脚本能 `Promise.allSettled()` 兜住的前提）。
+       */
+      executeTool: async (
+        callerId: string,
+        name: string,
+        args: unknown,
+        execOptions: { signal?: AbortSignal | undefined } | undefined,
+      ) => {
+        const nestedId = nextNestedId(callerId);
+        const gate = await emitToolCallGate(
+          runner,
+          onError,
+          nestedId,
+          name,
+          (args ?? {}) as Record<string, unknown>,
+          callerId,
+        );
+        const toolCall = { type: 'toolCall', id: nestedId, name, arguments: gate.input };
+        if (gate.block === true) {
+          return {
+            toolCall,
+            result: {
+              content: [{ type: 'text', text: gate.reason ?? `工具 ${name} 被阻止执行` }],
+              details: {},
+            },
+            isError: true,
+          };
+        }
+        const tool = getCallableTool(name, cwd);
+        if (!tool) {
+          return {
+            toolCall,
+            result: { content: [{ type: 'text', text: `未知工具：${name}` }], details: {} },
+            isError: true,
+          };
+        }
+        try {
+          const result = await tool.execute(nestedId, gate.input, execOptions?.signal, undefined);
+          return {
+            toolCall,
+            result: { content: result.content, details: result.details },
+            isError: false,
+          };
+        } catch (error) {
+          return {
+            toolCall,
+            result: {
+              content: [{ type: 'text', text: `工具 ${name} 执行失败：${msg(error)}` }],
+              details: {},
+            },
+            isError: true,
+          };
+        }
+      },
     } as never,
   );
   // UI 在**界面层**造（它要活着的 `tui` 实例，而内核不知道界面的存在）。
@@ -596,23 +898,33 @@ function bindCore(
 }
 
 /**
- * 官方的 `getAllTools()` 该看到什么 —— 就是**本项目的工具注册表**。
+ * 官方的 `getAllTools()` 该看到什么 —— **本项目的工具注册表**，带真的元数据。
  *
- * 官方那份 `ToolInfo` 还带 `exposure` / `namespace` / `annotations` / `sourceInfo`。
- * 本项目只给 `exposure` 真的有意义的那个值（`direct`），其余给中性值：
+ * 早先这里只给 `exposure: 'direct'`（「本项目不接 codemode 那套动态暴露」）。接了 MCP
+ * 之后它就**必须**是真的：
  *
- * - `namespace` / `annotations`：MCP 与 codemode 那些机制的输入，本项目不接。
- * - `sourceInfo`：只用于显示（「这个工具来自哪个扩展」）。给一个合法形状就行 ——
- *   给 undefined 会让扩展在 `getAllTools().find(...)` 之后去读 `.sourceInfo.…`
- *   时炸在一个假字段上，而那个堆栈与真因隔了三层。
+ * - `exposure`：MCP 扩展自己在 `ensureDiscoveryActive()` 里读它判断「有没有 codemode 工具
+ *   需要被激活」。恒给 `direct` 会让它以为一个 codemode 工具都没有 —— 于是 codemode 不会
+ *   被激活，MCP 工具全部不可达（而警告说的是「neither is active」，指向错的地方）。
+ * - `namespace` / `annotations`：codemode 按 namespace 分组、权限扩展读 annotations 决定
+ *   要不要确认。丢了两者都会静默退化。
+ * - `sourceInfo`：给一个合法形状（`{ source: 'local' }`）而不是 undefined —— 扩展会在
+ *   `getAllTools().find(...)` 之后去读它，给 undefined 会炸在一个假字段上，
+ *   而那个堆栈与真因隔了三层。
  */
-function allToolsInfo(): ToolInfo[] {
-  return getTools().map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.parameters as ToolInfo['parameters'],
-    exposure: 'direct' as const,
-    sourceInfo: { source: 'local' } as ToolInfo['sourceInfo'],
+function allToolsInfo(cwd: string): ToolInfo[] {
+  return registeredToolInfos(cwd).map((info) => ({
+    name: info.name,
+    description: info.description,
+    parameters: info.parameters as ToolInfo['parameters'],
+    exposure: info.exposure as ToolInfo['exposure'],
+    ...(info.namespace !== undefined
+      ? { namespace: info.namespace as NonNullable<ToolInfo['namespace']> }
+      : {}),
+    ...(info.annotations !== undefined
+      ? { annotations: info.annotations as NonNullable<ToolInfo['annotations']> }
+      : {}),
+    sourceInfo: info.sourceInfo as ToolInfo['sourceInfo'],
   }));
 }
 
@@ -621,5 +933,3 @@ function shortPath(p: string): string {
   const parts = p.split(/[\\/]/);
   return parts.length <= 2 ? p : parts.slice(-2).join('/');
 }
-
-export { getTool };

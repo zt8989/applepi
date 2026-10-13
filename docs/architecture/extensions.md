@@ -174,12 +174,16 @@ pi.setActiveTools([...new Set([...pi.getActiveTools(), ...names])]);
 **而那些工具明明就在注册表里。** 症状是「模型永远调不了 web_search」而**看不出**
 哪里不对 —— `web_enable` 只是一句「unavailable」，模型会转而去用别的办法或者放弃。
 
-`allToolsInfo()` 现在报真实的 `getTools()`。官方那份 `ToolInfo` 还有
+`allToolsInfo()` 现在报真实的注册表（`tools.ts` 的 `registeredToolInfos()`），包括
 `exposure` / `namespace` / `annotations` / `sourceInfo`：
 
-- `exposure` 给 `direct` —— 那是唯一有意义的（本项目不接 codemode 那套动态暴露）。
-- `namespace` / `annotations` 不接：它们是 MCP 与 codemode 的输入。
-- `sourceInfo` 给**一个合法形状**（`{ source: 'local' }`）而不是 `undefined` ——
+- `exposure`：**真的**。接了 MCP 之后它就不是「恒为 `direct`」了 —— MCP 扩展自己在
+  `ensureDiscoveryActive()` 里读它判断「有没有 codemode 工具需要被激活」。恒给 `direct`
+  会让它以为一个 codemode 工具都没有，于是 codemode 不会激活、MCP 工具全部不可达。
+  五种取值的含义见 [mcp-codemode](mcp-codemode.md)。
+- `namespace` / `annotations`：真的（MCP 服务器与工具注解）。codemode 按 namespace 分组，
+  权限扩展读 annotations 决定要不要确认。
+- `sourceInfo`：给**一个合法形状**（`{ source: 'local' }`）而不是 `undefined` ——
   扩展会在 `getAllTools().find(...)` 之后去读它，给 undefined 会炸在一个假字段上，
   而那个堆栈与真因隔了三层。
 
@@ -190,6 +194,10 @@ pi.setActiveTools([...new Set([...pi.getActiveTools(), ...names])]);
 `toolSchemas()` 原样读它）。早先在探针里读到空数组，于是误报「still inactive」。
 
 这不是巧合而是设计：扩展问「现在有哪些工具」，答案必须是「模型看得见哪些」。
+
+装载窗口内（`prompt.init` 之前）它是空的，所以这个 getter 在那种时候读**注册表的激活集**
+（`activeToolNames()`）—— MCP 扩展在 `session_start` 里就要问它（那时还没有 prompt）。
+判据是 `state.prompt.tools.length === 0`，见 `extension-tools.ts`。
 
 ### ③ `ctx.sessionManager`：仍然不接
 

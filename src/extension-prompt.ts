@@ -36,7 +36,20 @@ import type { AgentStore } from './store';
 
 /** 一个 `before_agent_start` handler（参数形状只用到这两个）。 */
 export type BeforeAgentStartHandler = (
-  event: { type: 'before_agent_start'; prompt: string; images: unknown[] },
+  event: {
+    type: 'before_agent_start';
+    prompt: string;
+    images: unknown[];
+    /**
+     * 官方的 `BuildSystemPromptOptions`。本项目只给 `cwd` 与一个可写的 `sections`：
+     *
+     * - MCP 的 handler **必须**能读 `sections` 并往里写 `mcp_servers` —— 少了这个字段
+     *   它会抛 `Cannot read properties of undefined`（每轮一条诊断）。
+     * - 其余字段（`selectedTools` / `skills`…）故意不给：本项目不采信 handler 对 prompt
+     *   的修改（prompt 是装载时拼好的），给一份假的 options 只会让扩展以为它能重拼。
+     */
+    systemPromptOptions: { cwd: string; sections: Record<string, string> };
+  },
   ctx: { hasUI: boolean; mode: 'tui'; cwd: string },
 ) => unknown | Promise<unknown>;
 
@@ -59,7 +72,14 @@ export async function notifyBeforeAgentStart(options: BeforeAgentStartOptions): 
   if (store.getState().phase !== 'idle') return;
 
   const ctx = Object.freeze({ hasUI, mode: 'tui' as const, cwd });
-  const event = Object.freeze({ type: 'before_agent_start' as const, prompt: text ?? '', images: [] });
+  const event = Object.freeze({
+    type: 'before_agent_start' as const,
+    prompt: text ?? '',
+    images: [],
+    // 一次性的 `sections`：这一轮不收集它（prompt 已经装载好了），但字段必须在 ——
+    // MCP 的 handler 会直接读它（见 BeforeAgentStartHandler）。
+    systemPromptOptions: { cwd, sections: {} as Record<string, string> },
+  });
   for (const handler of handlers) {
     try {
       await handler(event, ctx);

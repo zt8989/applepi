@@ -196,7 +196,7 @@ async function startDialogue(params: unknown): Promise<Dialogue> {
   faux.setResponses(demoResponses());
   const { store } = createAgentStoreWith({ runtime: faux.runtime, cwd: process.cwd() });
   const notices: string[] = [];
-  await loadExtensionHost({
+  await loadExtensionHost({ builtins: false,
     store,
     cwd: process.cwd(),
     uiOptions: () => ({

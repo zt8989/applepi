@@ -86,6 +86,13 @@ export interface PromptInputs {
    * 却发现某条还在 —— 排查时根本想不到去看代码。
    */
   appendPrompt?: string | undefined;
+  /**
+   * 额外的 XML 段（`<tag>` 包住），键是 tag 名。
+   *
+   * MCP 的 `mcp_servers` 段就是这么进来的（扩展自己算好、写进
+   * `before_agent_start` 的 `systemPromptOptions.sections`）。空对象 = 没有额外段。
+   */
+  sections?: Record<string, string> | undefined;
 }
 
 /** 只需要工具定义上的两个字段，不依赖官方的完整 ToolDefinition 类型。 */
@@ -262,6 +269,9 @@ export function buildPromptOptions(inputs: PromptInputs): BuildSystemPromptOptio
     // AGENTS.md：pi 的项目上下文。家目录（~）+ 项目 + 祖先目录，是官方那套扫描规则。
     contextFiles: loadProjectContextFiles({ cwd: inputs.cwd, agentDir: configHome() }),
     skills: toPiSkills(inputs.skills ?? []),
+    ...(inputs.sections !== undefined && Object.keys(inputs.sections).length > 0
+      ? { sections: inputs.sections }
+      : {}),
     ...((systemFile ?? inputs.customPrompt) !== undefined &&
     (systemFile ?? inputs.customPrompt) !== ''
       ? { customPrompt: (systemFile ?? inputs.customPrompt) as string }

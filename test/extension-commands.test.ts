@@ -74,7 +74,7 @@ async function load(options: { onSendMessage?: (t: string) => void; canSend?: ()
   faux.setResponses(demoResponses());
   const { store } = createAgentStoreWith({ runtime: faux.runtime, cwd: process.cwd() });
   const sent: string[] = [];
-  const host = await loadExtensionHost({
+  const host = await loadExtensionHost({ builtins: false,
     store,
     cwd: process.cwd(),
     sessionId: () => store.getState().trace.sessionId,
@@ -319,7 +319,7 @@ test('界面：uiRef 还空时读 ctx.ui.theme 不抛（真扩展读得到 theme
     // 拖回「theme 走 live()」的话，下面按快捷键时就会抛
     // 「tui is not a function」而挂在这里。
     const uiRef: { current: HostUiOptions | undefined } = { current: undefined };
-    const host = await loadExtensionHost({
+    const host = await loadExtensionHost({ builtins: false,
       store,
       cwd: process.cwd(),
       sessionId: () => 's',

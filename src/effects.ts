@@ -126,7 +126,22 @@ export interface PiAiEffectsOptions {
    * （有界面入口），预算没有。
    */
   thinkingBudgets?: ThinkingBudgets | undefined;
+  /**
+   * 工具执行前的门（官方叫 `tool_call` 事件）。
+   *
+   * 本项目不接全套权限体系，但这个门必须有：MCP 的 `tool_call` handler 靠它「脚本点名了
+   * 但还没连上」的服务器。返回 `block: true` 时环不执行那个工具，把 `reason` 当错误结果
+   * 发回模型；否则用返回的 `input`（handler 可以就地改参数）。
+   */
+  onToolCall?: ToolCallGate | undefined;
 }
+
+/** `tool_call` 门的形状（`extension-host.ts` 的 `beforeToolCall` 就是它）。 */
+export type ToolCallGate = (
+  toolCallId: string,
+  name: string,
+  input: Record<string, unknown>,
+) => Promise<{ block?: boolean; reason?: string | undefined; input: Record<string, unknown> }>;
 
 export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable {
   const { streamFn, model: initialModel } = options;
@@ -408,6 +423,26 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
     signal: AbortSignal,
     dispatch: Cmd.Dispatch,
   ): Promise<ToolResultMessage> {
+    // `tool_call` 门：MCP 在这里等服务器，权限类扩展在这里阻止调用。
+    // 门抛错由调用方（`extension-host.ts` 的 beforeToolCall）自己吞成诊断，所以这里不 catch。
+    const gate =
+      options.onToolCall === undefined
+        ? { input: (call.arguments ?? {}) as Record<string, unknown> }
+        : await options.onToolCall(call.id, call.name, (call.arguments ?? {}) as Record<string, unknown>);
+    if (gate.block === true) {
+      return toToolResult(
+        call,
+        [
+          {
+            type: 'text',
+            text: gate.reason ?? `工具 ${call.name} 被阻止执行`,
+          },
+        ],
+        null,
+        true,
+      );
+    }
+    const args = gate.input;
     const tool = getTool(call.name);
     if (!tool) {
       return toToolResult(
@@ -418,7 +453,7 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
       );
     }
     try {
-      const result = await tool.execute(call.id, call.arguments ?? {}, signal, (partial) => {
+      const result = await tool.execute(call.id, args, signal, (partial) => {
         // 流式增量 → `tool.progress` → reducer 存进 state.toolProgress。
         //
         // **为什么每一块都 dispatch**：界面就是靠这个动作重画的（diff 渲染只重画变化的行）。

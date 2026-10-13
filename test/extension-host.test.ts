@@ -157,7 +157,7 @@ test('扩展：没装任何包时是空宿主（不是崩）', async () => {
   const saved = process.env['PI_CODING_AGENT_DIR'];
   process.env['PI_CODING_AGENT_DIR'] = empty;
   try {
-    const host = await loadExtensionHost({ store, cwd: process.cwd() });
+    const host = await loadExtensionHost({ builtins: false, store, cwd: process.cwd() });
     assert.equal(host.loaded, 0);
     assert.deepEqual([...host.tools], []);
     assert.deepEqual([...host.errors], [], '没装东西不该有诊断');
@@ -171,7 +171,7 @@ test('扩展：--no-extensions（disabled）直接跳过装载', async () => {
   useRealHome();
   try {
     const { store } = freshStore();
-    const host = await loadExtensionHost({ store, cwd: process.cwd(), disabled: true });
+    const host = await loadExtensionHost({ builtins: false, store, cwd: process.cwd(), disabled: true });
     assert.equal(host.loaded, 0);
   } finally {
     restoreHome();
@@ -243,7 +243,7 @@ test('扩展：ask_user_question 真的装上了、进了 prompt 片段', { skip
   useRealHome();
   try {
     const { store } = freshStore();
-    const host = await loadExtensionHost({ store, cwd: process.cwd() });
+    const host = await loadExtensionHost({ builtins: false, store, cwd: process.cwd() });
     registerExtraTools([]); // 别让这次的注册表状态漏到别的测试
 
     // 装的**不止**一个时用 includes 而不是等���；两个扩展都装着是正常配置。
@@ -273,7 +273,7 @@ test('扩展：无 UI 时 ask_user_question 自己降级（而不是崩）', { s
   useRealHome();
   try {
     const { store } = freshStore();
-    await loadExtensionHost({ store, cwd: process.cwd() }); // **不给 uiOptions**
+    await loadExtensionHost({ builtins: false, store, cwd: process.cwd() }); // **不给 uiOptions**
     const tool = getTool('ask_user_question');
     assert.ok(tool, '工具应该在注册表里（它是无条件注册的）');
     registerExtraTools([]);
@@ -317,7 +317,7 @@ test('扩展：给真 UI 时 custom() 把问卷挂进输入区槽位（inline �
     const slot: FakeEditorSlot = { current: undefined };
     initTheme('dark', false);
 
-    await loadExtensionHost({
+    await loadExtensionHost({ builtins: false,
       store,
       cwd: process.cwd(),
       uiOptions: () => hostUiOptions(tui, [], slot),
@@ -502,7 +502,7 @@ test('扩展：ask_user_question 的 before_agent_start 协调器在本项目是
     // 先装扩展（它会把 `ask_user_question` 注册进表），**再**装 prompt ——
     // 顺序与内核一致（见 kernel.ts：扩展先装，`prompt.init` 后 dispatch）。
     // 反过来的话 `prompt.init` 快照到的工具表里没有它，断言就成了另一个问题。
-    await loadExtensionHost({ store, cwd: process.cwd(), uiOptions: () => hostUiOptions(fakeTui([])) });
+    await loadExtensionHost({ builtins: false, store, cwd: process.cwd(), uiOptions: () => hostUiOptions(fakeTui([])) });
     installPrompt(store);
     const names = store.getState().prompt.tools.map((t) => t.name);
     assert.ok(
@@ -510,7 +510,7 @@ test('扩展：ask_user_question 的 before_agent_start 协调器在本项目是
       `装载后 prompt 里该有它：${names.join(',')}`,
     );
 
-    const host = await loadExtensionHost({
+    const host = await loadExtensionHost({ builtins: false,
       store,
       cwd: process.cwd(),
       uiOptions: () => hostUiOptions(fakeTui([])),
@@ -547,7 +547,7 @@ test('扩展：pi-web-access 装上，5 个 web 工具进注册表', { skip: !ha
   useRealHome();
   try {
     const { store } = freshStore();
-    const host = await loadExtensionHost({ store, cwd: process.cwd() });
+    const host = await loadExtensionHost({ builtins: false, store, cwd: process.cwd() });
     registerExtraTools([]);
 
     assert.ok(host.loaded >= 1, `应装上扩展：${JSON.stringify(host.errors)}`);
@@ -577,7 +577,7 @@ test('扩展：pi-web-access 的参数校验走我们这条执行路径（不报
   useRealHome();
   try {
     const { store } = freshStore();
-    await loadExtensionHost({ store, cwd: process.cwd() });
+    await loadExtensionHost({ builtins: false, store, cwd: process.cwd() });
     installPrompt(store);
 
     // 少参数时扩展自己报错（**不是**宿主抛的）—— 这是「参数校验这条路通着」的意思。
@@ -599,7 +599,7 @@ test('扩展：getAllTools 真的返回注册表（web_enable 的前提）', { s
   useRealHome();
   try {
     const { store } = freshStore();
-    await loadExtensionHost({ store, cwd: process.cwd() });
+    await loadExtensionHost({ builtins: false, store, cwd: process.cwd() });
     installPrompt(store);
 
     // 走 `web_enable` 这条真实路径：它内部 `getAllTools()` → `setActiveTools()` →
@@ -636,7 +636,7 @@ test('扩展：pi-web-access 的命令与快捷键不接（明说，不假装能
   try {
     const { store } = freshStore();
     const before = getCommands();
-    await loadExtensionHost({ store, cwd: process.cwd() });
+    await loadExtensionHost({ builtins: false, store, cwd: process.cwd() });
     assert.deepEqual(getCommands(), before, '扩展命令不该悄悄进补全表');
     registerExtraTools([]);
   } finally {

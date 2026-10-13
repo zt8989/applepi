@@ -145,6 +145,44 @@ API key，比如 exa / tavily / brave。）
 消息与 prompt 对不上，而 prompt-cache 的前缀整个作废）。改工具集要 `/new` 换会话。
 详见 [`docs/architecture/extensions.md`](docs/architecture/extensions.md)。
 
+## MCP 与 codemode
+
+两样一起接进来（都是 pi 的**内置扩展**，本项目只提供自己那一半）：
+
+- **MCP**：读 `~/.pi/agent/mcp.json`（与项目级 `<cwd>/.pi/mcp.json`，与 pi 同一份文件），
+  把服务器的工具接进来；`/mcp` 可以看连接状态、登录 OAuth、重连、改暴露方式。
+- **codemode**：模型写一段 JS（QuickJS 沙箱）把多个工具调用批量跑、并行跑、先过滤再回
+  —— 只有脚本的输出回到模型眼前。
+
+```json
+{
+  "mcpServers": {
+    "filesystem": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] },
+    "docs": { "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" } },
+    "internal-tools": { "exposure": "direct", "command": "uvx", "args": ["tools-mcp"] }
+  }
+}
+```
+
+默认（不写 `exposure`）是 **`codemode`**：MCP 工具**不进模型的工具表**，模型先看到
+prompt 里的 `mcp_servers` 段（「有这个服务器、工具从 codemode 脚本调」），要用时写脚本
+调（`searchTools()` / `describeNamespace()` 找）。想让它直接出现在模型的工具表里就写
+`"exposure": "direct"`。
+
+**codemode 怎么开**（它默认不激活）：
+
+```json
+// ~/.pi/agent/settings.json
+{ "defaultTools": ["read", "bash", "edit", "write", "+codemode"] }
+```
+
+配了 `codemode` 暴露的 MCP 服务器时它**会自己开**（`mcp.json` 顶层的
+`"autoEnableCodemode": false` 可以关掉）。
+
+**已知边界**（都写在 [`docs/architecture/mcp-codemode.md`](docs/architecture/mcp-codemode.md)）：
+不装 `tool_search`（它要中途改工具声明，与本项目冲突），`deferred` 归入 codemode；
+装载后才连上的 `direct` 服务器，其工具要 `/new` 才进模型工具表；`/new` 不重连 MCP。
+
 ## 运行
 
 ```bash
@@ -263,6 +301,7 @@ pnpm start -m cn:deepseek-v4.1-flash:high   # 同一个意思：模型 pattern �
 | `/clean`（或 `/wipe`） | **删除**除当前会话外的全部历史会话（连同轨迹文件）。不可逆 |
 | `/compact` | 把老对话换成一段结构化摘要（上下文快满了时用；与 pi 同名） |
 | `/skills` | 列出已装载的 skill（**已进 system prompt** 的那批） |
+| `/mcp` | MCP 服务器管理面板（内置扩展提供）：连接状态、登录、重连、改暴露方式 |
 | `/skill:<名字>` | 把某个 skill 的正文展开后，连同你写的问题一起发给模型 |
 | `/hotkeys` | 全部键位（键名实时解析，与 pi 的 `/hotkeys` 同形） |
 | `/help` | 命令列表 |
