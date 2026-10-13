@@ -3101,6 +3101,9 @@ function usableWidth(width: number): number {
  * （见 `createEditToolDefinition` 的 `label: "edit"`），pi 界面显示的就是它。
  * 我们另起了一套中文 label（`读文件`/`执行命令`），那是**二次翻译**：既多一层维护，
  * 也让界面与 pi 对不上。现在直接显示工具名。
+ *
+ * 表里没有的工具（扩展工具，如 `ask_user_question`）交给 `toolDefinitionFor()` 兜底 ——
+ * 那里解释了「为什么不能传 `undefined`」（那会让 Ctrl+O 那个折叠开关失效）。
  */
 const TOOL_RENDERERS: Record<string, unknown> = Object.fromEntries(
   [
@@ -3110,6 +3113,37 @@ const TOOL_RENDERERS: Record<string, unknown> = Object.fromEntries(
     ['bash', createBashToolDefinition(process.cwd())],
   ].map(([name, definition]) => [name, definition]),
 );
+
+/**
+ * 一个工具的**渲染定义** —— 表里有就用它，没有就给一个只有 `label` 的兜底。
+ *
+ * ## 为什么不能对扩展工具传 `undefined`
+ *
+ * `ToolExecutionComponent` 拿 `undefined` 时走的是它自己那条 `formatToolExecution()`：
+ * 工具名 + `JSON.stringify(args, null, 2)` + **整段**输出（见 `tool-execution.js`）。
+ * 而那条路**完全不看 `expanded`** —— 于是 Ctrl+O 折叠了，扩展工具的块还是把参数与结果
+ * 全铺开，内置工具却跟着折叠。症状就是「折叠开关对 `ask_user_question` 不生效」。
+ *
+ * pi 那边扩展工具**是有定义的**：`session.getToolDefinition(name)` 返回注册时那份
+ * `{ label, description, parameters }`（扩展不提供 `renderCall` / `renderResult`），
+ * 于是组件走 `createCallFallback()` / `createResultFallback()` —— 那两个都认 `expanded`：
+ *
+ * - 折叠：参数挤在标题那一行（`key=value`，超 100 字截断）；结果只留前 10 行，
+ *   多的接一行 `... (N more lines, Ctrl+O to expand)`；
+ * - 展开：每个参数一行 `key: value`（字符串原样、续行缩进）；结果给全文。
+ *
+ * 本项目只维护内置那四个的渲染器表，扩展工具不在里面 —— 所以这里给它们一个
+ * **没有 `renderCall` / `renderResult` 的定义**，复刻 pi 的同一条路。
+ *
+ * ## 为什么是「有定义」而不是「有渲染器」
+ *
+ * 分岔点是 `hasRendererDefinition()`（`toolDefinition !== undefined`），不是渲染器是否存在。
+ * 所以 `{ label: name }` 就够 —— `label` 本身在那个分支里不被读（fallback 用工具名），
+ * 写上是为了让这个对象是诚实的（它确实是个工具定义，只是不带渲染器）。
+ */
+function toolDefinitionFor(name: string): unknown {
+  return TOOL_RENDERERS[name] ?? { label: name };
+}
 
 /**
  * 官方 `ToolExecutionComponent` 只需要一个能收下 `requestRender()` 的对象。
@@ -3346,7 +3380,7 @@ function renderTool(
     message.toolCallId,
     args,
     { showImages: false, imageWidthCells: usableWidth(width) },
-    TOOL_RENDERERS[message.toolName] as never,
+    toolDefinitionFor(message.toolName) as never,
     TOOL_UI as never,
     process.cwd(),
   );
@@ -3518,7 +3552,7 @@ function liveToolComponent(call: ToolCall, width: number): ToolExecutionComponen
     call.id,
     (call.arguments ?? {}) as Record<string, unknown>,
     { showImages: false, imageWidthCells: usableWidth(width) },
-    TOOL_RENDERERS[call.name] as never,
+    toolDefinitionFor(call.name) as never,
     TOOL_UI as never,
     process.cwd(),
   );

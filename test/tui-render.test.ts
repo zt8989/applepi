@@ -414,6 +414,42 @@ test('工具块：Ctrl+O 展开后给全文', () => {
   assert.ok(out.includes('line 39'), '展开后要看到最后一行');
 });
 
+test('工具块：扩展工具（没有渲染器）也听 Ctrl+O 折叠 —— 与 pi 同一条 fallback', () => {
+  // `ask_user_question` 这类扩展工具不在 `TOOL_RENDERERS` 表里。早先这一格传的是
+  // `undefined`，官方组件于是走它自己那条 `formatToolExecution()`：工具名 +
+  // `JSON.stringify(args, null, 2)` + **整段**输出 —— 那条路完全不看 `expanded`，
+  // 症状就是「Ctrl+O 折叠了、内置工具跟着折，扩展工具还是全铺开」。
+  //
+  // pi 那边扩展工具**是有定义的**（注册时那份 `{ label, description, parameters }`），
+  // 所以它走 `createCallFallback()` / `createResultFallback()` —— 两个都认 `expanded`。
+  // 这里给扩展工具一个只有 label 的定义，复刻同一条路。
+  const state = toolState({
+    toolName: 'ask_user_question',
+    args: {
+      questions: [
+        {
+          question: 'Which approach should we take?',
+          header: 'Approach',
+          options: [{ label: 'Minimal' }, { label: 'Thorough' }],
+        },
+      ],
+    },
+    resultText: 'User has answered your questions: {"Approach":"Minimal"}.',
+  });
+
+  const collapsed = stripTerminalSequences(renderTranscript(state, 0, 100, false));
+  // 折叠：参数挤在标题那一行（`key=value`），不是逐行的 pretty-print。
+  assert.match(collapsed, /ask_user_question questions=/, `折叠时该是 key=value 摘要：${collapsed}`);
+  assert.ok(!/^\s+questions: /m.test(collapsed), `折叠时不该铺开参数：${collapsed}`);
+  // 结果仍然看得到（短的本来就一行）。
+  assert.ok(collapsed.includes('User has answered your questions'), collapsed);
+
+  const expanded = stripTerminalSequences(renderTranscript(state, 0, 100, true));
+  // 展开：每个参数一行 `key: value`，全文。
+  assert.match(expanded, /^\s+questions: /m, `展开时该是逐行的 key: value：${expanded}`);
+  assert.ok(expanded.includes('Thorough'), `展开时参数要完整：${expanded}`);
+});
+
 test('工具块：bash 显示 Took x.xs（耗时来自 reducer 记的 toolTimings）', () => {
   const state = toolState({ toolName: 'bash', args: { command: 'x' }, resultText: 'out', timings: { 'call-1': 520 } });
   const out = stripTerminalSequences(renderTranscript(state, 0, 80, false));

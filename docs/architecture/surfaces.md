@@ -223,6 +223,19 @@ pi 判定的是「`chatContainer` 末尾两项还是不是自己那对 spacer+te
   但浅色/高对比主题下边界会错位。
 - **工具标题用英文工具名**（`read` / `$ git status`），不显示中文 label。官方
   `label` 字段本身就是 `"edit"`/`"read"`，我们另起的中文 label 是二次翻译。
+- **扩展工具给一个只有 `label` 的兑底定义**（`toolDefinitionFor()`），而不是 `undefined`。
+  `ToolExecutionComponent` 拿 `undefined` 时走它自己那条 `formatToolExecution()`：
+  工具名 + pretty-print 的 `JSON.stringify(args, null, 2)` + 整段输出 —— 而那条路
+  **完全不看 `expanded`**。症状：Ctrl+O 折叠了，内置工具跟着折，`ask_user_question`
+  这种扩展工具还是把参数与结果全铺开。
+
+  pi 那边扩展工具**是有定义的**（注册时那份 `{ label, description, parameters }`，不带
+  `renderCall`/`renderResult`），于是走 `createCallFallback()` / `createResultFallback()` ——
+  两个都认 `expanded`：折叠时参数是标题行上的 `key=value`（超 100 字截断）、结果只留前
+  10 行 + `... (N more lines, Ctrl+O to expand)`；展开时参数逐行 `key: value`、结果给全文。
+  分岔点是 `hasRendererDefinition()`（定义存不存在），不是渲染器存不存在 ——
+  所以给个 `{ label: name }` 就回到了与 pi 同一条路。
+  （`test/tui-render.test.ts` 钉着这一条。）
 
 
 ### 为什么不用 pi 自己的 InteractiveMode
