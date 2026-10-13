@@ -40,8 +40,12 @@ agent** —— 循环不是写出来的，是 reducer 与副作用互相 dispatc
 
 ```bash
 pnpm install
-npm link ./packages/tui   # 把 `ela` 装成全局命令（软链 tui 包）
+npm link          # 把 `ela` 装成全局命令（软链本仓库）
 ```
+
+根包的 `bin` 指向 `packages/tui/bin/ela.mjs`（安装壳在最外层，启动器在 tui 包里）。
+也可以只链 tui 包：`npm link ./packages/tui` —— 它会以 `@ela/tui` 的名义装全局，`ela`
+同样指向同一个启动器。
 
 全局入口是 `packages/tui/bin/ela.mjs`：**一个只做装载的启动器**，一行逻辑也不放它里面 ——
 `packages/tui/src/main.ts` 是 TypeScript 且用 `moduleResolution: "Bundler"` + 无扩展名相对导入，

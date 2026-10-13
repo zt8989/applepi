@@ -4,6 +4,9 @@
   "private": true,
   "description": "Redux Loop 驱动的 Agent Loop：reducer 纯函数返回 loop(state, Cmd)，LLM 流式调用与工具执行都是 Cmd；Provider 走 Pi（@earendil-works/pi-ai，DeepSeek）。分 @ela/core（内核）与 @ela/tui（终端界面）两个包。",
   "type": "module",
+  "bin": {
+    "ela": "./packages/tui/bin/ela.mjs"
+  },
   "engines": {
     "node": ">=20"
   },
