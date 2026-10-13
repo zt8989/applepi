@@ -40,15 +40,15 @@ agent** —— 循环不是写出来的，是 reducer 与副作用互相 dispatc
 
 ```bash
 pnpm install
-npm link          # 把 `ela` 装成全局命令（软链本仓库）
+npm link ./packages/tui   # 把 `ela` 装成全局命令（软链 tui 包）
 ```
 
-全局入口是 `bin/ela.mjs`：**一个只做装载的启动器**，一行逻辑也不放它里面 ——
-`src/tui.ts` 是 TypeScript 且用 `moduleResolution: "Bundler"` + 无扩展名相对导入，
+全局入口是 `packages/tui/bin/ela.mjs`：**一个只做装载的启动器**，一行逻辑也不放它里面 ——
+`packages/tui/src/main.ts` 是 TypeScript 且用 `moduleResolution: "Bundler"` + 无扩展名相对导入，
 tsc 不 emit（`noEmit`），产物也没法被 node 原生 ESM 解析，所以必须经 tsx 装载
 （`tsx/esm/api` 的 `tsImport()`，不用改 tsx 的 exports，不用 patch）。
 npm 只拷 `bin/`（`files` 之外的仓库文件不会跟着走），入口全部靠 `import.meta.url`
-推仓库根 —— 与调用时的 cwd 无关，因此**任何目录里都能跑**：
+推 **tui 包根** —— 与调用时的 cwd 无关，因此**任何目录里都能跑**：
 
 ```bash
 ela                              # 交互式
@@ -57,7 +57,7 @@ ela --demo                       # 不打网络
 ela --cwd ~/some/project         # 工具的文件边界换到别处
 ```
 
-改 `src/*.ts` 后**直接生效**，不用重新 link。代价是仓库的 `node_modules` 得在
+改 `packages/*/src/*.ts` 后**直接生效**，不用重新 link。代价是仓库的 `node_modules` 得在
 （`rm -rf node_modules` 之后全局命令会报模块找不到 —— 这是软链方案的固有性质）。
 
 > **不读 `.env`**。key 来自 `~/.pi/agent/auth.json`、shell 环境变量、或 models.json
@@ -112,7 +112,7 @@ pi-coding-agent 的 `exports` 只开放 4 个入口，其余模块（包括 `dis
 （`./dist/*` 与 `./dist/*.js`），**12 行 diff，只动 `package.json`**。
 
 patch 丢了或 pnpm 升级后没重新应用，这些 import 会全部变成
-`ERR_PACKAGE_PATH_NOT_EXPORTED` —— `test/pi-subpath-patch.test.ts` 盯着这件事。
+`ERR_PACKAGE_PATH_NOT_EXPORTED` —— `packages/core/test/pi-subpath-patch.test.ts` 盯着这件事。
 
 三个 json 手写或从别处拷进来。`models.json` 放 provider 的 baseUrl / api / 模型目录，
 `auth.json` 只放凭证；也可以用 `<ID>_API_KEY` 环境变量（**不读 `.env`**）。
@@ -290,7 +290,7 @@ tip 就在树上，不再另起一行 `HEAD →`。成败靠**颜色**（绿 / �
 所以兄弟都挂在同一个 turn 下面，与原先 `llm.attempt` 的 git 语义一致）。
 
 > **pnpm 与参数**：`pnpm start -p "问题"`，**中间没有 `--`**。写了的话 pnpm 会把它
-> 一起透传给脚本，于是 `src/tui.ts` 收到一个孤零零的 `--` 并报「未知选项」。
+> 一起透传给脚本，于是 `packages/tui/src/main.ts` 收到一个孤零零的 `--` 并报「未知选项」。
 
 界面支持斜杠命令，在输入框里打 `/` 弹补全：
 
@@ -331,7 +331,7 @@ pnpm start --skill ./docs/my-skill.md    # 额外指定，可重复
 
 目录扫描、frontmatter 解析、prompt 里的 XML 格式**全部复用 pi 官方**
 （`loadSkills` / `formatSkillsForPrompt`），本项目不维护副本。详见
-[`docs/architecture/tools.md`](docs/architecture/tools.md#skill--也在-pi-那一侧-srctskills)。
+[`docs/architecture/tools.md`](docs/architecture/tools.md#skill--也在-pi-那一侧packagescoresrcskillsts)。
 
 > 清单是会话**装载时**定下的。事后新增 skill 要 `/new` 换个会话才生效。
 
@@ -346,8 +346,11 @@ auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 prov
 ## 测试
 
 ```bash
-pnpm test           # 330 个离线测试，不打网络
-pnpm run typecheck  # tsc --noEmit（src + test + scripts）
+pnpm test           # 全部离线测试（core + tui），不打网络
+pnpm typecheck      # 两个包各跑一次 tsc --noEmit
+
+pnpm core:test      # 只跑 core 包
+pnpm tui:test       # 只跑 tui 包
 ```
 
 全程离线（pi-ai 的 faux provider），不消耗 token。覆盖：环闭合、轮数上限、错误路径、
@@ -357,11 +360,13 @@ reducer 纯性、轨迹树的不变量（**超时后重试的父 id 指向超时
 ## 目录
 
 ```
-src/                    内核 + pi-tui 界面（见 docs/architecture.md）
-bin/ela.mjs              全局 CLI 启动器（只做 tsx 装载，逻辑都在 src/）
-test/                   离线测试
-docs/architecture/      架构现状
-patches/                pnpm patch（打开 pi-coding-agent 的内部子路径）
-~/.pi/agent/       运行时状态：配置 / 会话 / 轨迹（与 pi 共用，不在仓库里）
-scripts/           配置迁移（migrate-config-dir / migrate-models）
+packages/core/src/        内核：环 / store / reducer / effects / trace / compact / kernel / 扩展宿主
+packages/core/scripts/    配置迁移（migrate-config-dir / migrate-models）
+packages/tui/src/         pi-tui 终端界面（main.ts 是入口）
+packages/tui/bin/ela.mjs  全局 CLI 启动器（只做 tsx 装载，逻辑都在 src/）
+packages/*/test/          离线测试（按包分）
+test-support/             测试共享脚手架（配置家目录隔离 + 守卫）
+docs/architecture/        架构现状
+patches/                  pnpm patch（打开 pi-coding-agent 的内部子路径）
+~/.pi/agent/              运行时状态：配置 / 会话 / 轨迹（与 pi 共用，不在仓库里）
 ```

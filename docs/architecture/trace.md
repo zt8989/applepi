@@ -2,7 +2,7 @@
 
 ## 为什么是树
 
-Agent 的执行历史不是一条流水。`src/trace.ts` 把它做成**一棵树**，概念直接照搬 git：
+Agent 的执行历史不是一条流水。`packages/core/src/trace.ts` 把它做成**一棵树**，概念直接照搬 git：
 
 | git | 这里 |
 | --- | --- |
@@ -120,7 +120,7 @@ function advancesTip(node) {
 ### tip 在哪里体现
 
 `traceRows()` 是**纯文本**层（没有 ANSI），所以它给出的行里看不出 tip。加粗是渲染层
-给的，判据只有一处 —— `emphasizedTraceLine()`（`src/tui/app.ts`）：
+给的，判据只有一处 —— `emphasizedTraceLine()`（`packages/tui/src/app.ts`）：
 
 - 节点 `status === 'error'`，或
 - 它就是 `tree.tipId`。
@@ -178,7 +178,7 @@ function advancesTip(node) {
 
 ### 界面与命令行是同一份画法
 
-`renderColoredTree()`（`src/tui/app.ts`）与轨迹页的 `TraceChunks` 都调 `traceRows()`：
+`renderColoredTree()`（`packages/tui/src/app.ts`）与轨迹页的 `TraceChunks` 都调 `traceRows()`：
 前者拿 `text` 逐行上色，后者拿 `prefix` 拼自己那一行（它是分块增量渲染的，一个节点一块，
 所以只需要知道自己那一段轨道）。早先 `renderColoredTree` 是「先渲染成字符串、再用正则
 逐行抠出节点 id」，那个正则的 kind 白名单**漏了 `turn.start` / `step.end` 四个 kind**
@@ -190,7 +190,7 @@ function advancesTip(node) {
 
 ## 落盘与回放
 
-`createTracePersistence()`（`src/trace-store.ts`）是个 **store 订阅器**，不是 effect 表里的一行。
+`createTracePersistence()`（`packages/core/src/trace-store.ts`）是个 **store 订阅器**，不是 effect 表里的一行。
 
 为什么不用 Cmd：它几乎每次 dispatch 都要跑（token 增量也会触发），走 Cmd 会把环搅乱；
 而且「错误也要持久化」这个要求恰恰需要它**不能**因为出错路径而不执行 —— 一个订阅器对成功与

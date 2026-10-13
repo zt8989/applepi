@@ -10,6 +10,18 @@ patchedDependencies:
 importers:
 
   .:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.19.1
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.15
+      typescript:
+        specifier: ^5.7.2
+        version: 5.7.2
+
+  packages/core:
     dependencies:
       '@earendil-works/pi-agent-core':
         specifier: ^1.0.2
@@ -29,6 +41,31 @@ importers:
       redux-loop:
         specifier: ^6.2.0
         version: 6.2.0(redux@4.2.1)
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.19.1
+      tsx:
+        specifier: ^4.19.2
+        version: 4.23.15
+      typescript:
+        specifier: ^5.7.2
+        version: 5.7.2
+
+  packages/tui:
+    dependencies:
+      '@earendil-works/pi-ai':
+        specifier: ^1.0.2
+        version: 1.0.3(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(undici@8.10.2)(ws@8.22.0)
+      '@earendil-works/pi-coding-agent':
+        specifier: ^1.0.2
+        version: 1.0.3(patch_hash=b26762fc59574e3c2c7c5527715027f0686b39a46ca4e84ca0f5d7020274b59e)(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)
+      '@earendil-works/pi-tui':
+        specifier: ^1.0.2
+        version: 1.0.3
+      '@ela/core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       '@types/node':
         specifier: ^24.0.0

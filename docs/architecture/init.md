@@ -38,7 +38,7 @@
 
 ## System prompt：拼装全部交给 pi
 
-`src/system-prompt.ts`。我们**不拼** prompt，只收集输入然后调 pi 的 `buildSystemPrompt`：
+`packages/core/src/system-prompt.ts`。我们**不拼** prompt，只收集输入然后调 pi 的 `buildSystemPrompt`：
 
 ```
 promptToolsFrom(cwd)                  → 每个工具的 promptSnippet / promptGuidelines
@@ -197,7 +197,7 @@ low/high/max + 向上取整），以及「默认值怎么存」（`/thinking` �
 ## Hooks = 洋葱式 middleware
 
 「Hooks」在本项目里**不是** system prompt 的附属品，而是一层横切所有 action 的拦截器
-（`src/middleware.ts`）：
+（`packages/core/src/middleware.ts`）：
 
 ```
 dispatch(action)

@@ -6,7 +6,7 @@
 
 把 pi 的**整套**键位表在 ela 里变成真的能按的：
 
-- 键位定义表已经是 `{ ...PI_KEYBINDINGS, ...PROJECT_KEYBINDINGS }`（`src/tui/keybindings.ts`），
+- 键位定义表已经是 `{ ...PI_KEYBINDINGS, ...PROJECT_KEYBINDINGS }`（`packages/tui/src/keybindings.ts`），
   所以「表里有」这件事早就是真的。**缺的是行为** —— 表里列着 `app.model.cycleForward`
   这些 id，但按下 `Ctrl+P` 什么都不会发生。
 - 「完全复用 pi」= 每个 pi 动作 id 都有对应的处理者，且语义与 pi 一致。
@@ -45,7 +45,7 @@
 
 ## 测试要跟着改
 
-`test/keybindings.test.ts` 里有一条 `不列本项目没实现的键位` 把 `app.suspend` /
+`packages/tui/test/keybindings.test.ts` 里有一条 `不列本项目没实现的键位` 把 `app.suspend` /
 `app.editor.external` / `app.message.dequeue` 列成「不该出现」。这些现在**实现了**，
 断言已经反过来：它们**应当**出现在 `/hotkeys` 里。
 

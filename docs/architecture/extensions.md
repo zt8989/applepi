@@ -67,9 +67,9 @@ typebox                     => NOT RESOLVABLE
 
 | 扩展要什么 | 本项目给什么 | 在哪 |
 | --- | --- | --- |
-| `ctx.ui.custom()` | overlay → `showOverlay()`；inline → 换掉 composer 那一格 | `src/extension-ui.ts` |
-| 工具执行 | 自己的 `getTool()` 注册表 | `src/tools.ts` 的 `registerExtraTools` |
-| `setActiveTools()` | 一条 reducer action 的位置（**刻意空**） | `src/extension-tools.ts` |
+| `ctx.ui.custom()` | overlay → `showOverlay()`；inline → 换掉 composer 那一格 | `packages/core/src/extension-ui.ts` |
+| 工具执行 | 自己的 `getTool()` 注册表 | `packages/core/src/tools.ts` 的 `registerExtraTools` |
+| `setActiveTools()` | 一条 reducer action 的位置（**刻意空**） | `packages/core/src/extension-tools.ts` |
 
 ### `ctx.ui.custom()`：两种形态，两种落点
 
@@ -221,7 +221,7 @@ pi 的会话**层**（`addEntry` / `fork` / `navigateTree`…）本项目刻意�
   「静默退化」里最难查的一种。
 
 所以工具接、命令不接。测试里钉住「装它不会往 `SLASH_COMMANDS` 里塞东西」
-（`test/extension-host.test.ts` 的「命令与快捷键不接」）。
+（`packages/core/test/extension-host.test.ts` 的「命令与快捷键不接」）。
 
 ## `pi-web-access` 的 key 依赖
 
@@ -317,7 +317,7 @@ TypeError: Cannot read properties of undefined (reading 'requestRender')
 
 为什么非要「按段 + 追加」而不是「重发整段」：**前缀缓存**。请求里靠前的那部分
 （head 与已有消息）一个字节都不能动，否则整段 token 的缓存作废。head 的形状见
-`src/prompt-head.ts`：
+`packages/core/src/prompt-head.ts`：
 
 - head 是 `messages[0]` 的一条 system 消息（装着全量 `sections` 与 `toolsAdded`），
   **不是** `Context.systemPrompt` / `Context.tools` —— 那两个字段会被 pi-ai
@@ -488,7 +488,7 @@ pi 那边是 `SessionManager` **类**，条目来自它自己的 `sessions/*.jso
 
 ## 折叠（`Ctrl+]`）：两种形态，两种机制
 
-折叠单独一个测试文件（`test/extension-collapse.test.ts`），因为它要能**模拟按键** ——
+折叠单独一个测试文件（`packages/core/test/extension-collapse.test.ts`），因为它要能**模拟按键** ——
 其他扩展测试只发 promise。
 
 ### 形态由扩展选的 presentation 决定（我们两档都得撑住）
@@ -543,7 +543,7 @@ pi 那边是 `SessionManager` **类**，条目来自它自己的 `sessions/*.jso
 
 ### inline 的宿主侧：把那一格真的换掉
 
-`src/tui/app.ts` 的 `mountEditorSlot` 与 pi 的
+`packages/tui/src/app.ts` 的 `mountEditorSlot` 与 pi 的
 `editorContainer.clear(); addChild(component)` 是同一件事：换格、重排布局、给焦点，
 还回来时把 composer 与它进槽位前那行字一起还回。
 
@@ -556,14 +556,14 @@ pi 那边是 `SessionManager` **类**，条目来自它自己的 `sessions/*.jso
 
 | 文件 | 干什么 |
 | --- | --- |
-| `src/extension-host.ts` | 装扩展：解包路径、`loadExtensions`、runner 绑定、工具适配 |
-| `src/extension-ui.ts` | `ctx.ui`：`custom()`（overlay / inline）、`setWidget`、`theme`、`notify`、raw input |
-| `src/extension-tools.ts` | pi `ToolDefinition` → 本项目 `AgentTool`；工具集读/写 |
-| `src/extension-models.ts` | `ctx.modelRegistry`：官方的 `ModelRegistry` 门面 |
-| `src/extension-sessions.ts` | `ctx.sessionManager`：四个只读成员，数据源是 `state.messages`（`getSessionFile` 读落盘器） |
-| `src/extension-commands.ts` | 斜杠命令与快捷键（内置键优先） |
-| `src/extension-prompt.ts` | `before_agent_start` 的接线、**段补丁**与两条守卫 |
-| `src/prompt-head.ts` | 请求 head（prompt + 初始工具声明）与「当前生效 sections」的回放 |
+| `packages/core/src/extension-host.ts` | 装扩展：解包路径、`loadExtensions`、runner 绑定、工具适配 |
+| `packages/core/src/extension-ui.ts` | `ctx.ui`：`custom()`（overlay / inline）、`setWidget`、`theme`、`notify`、raw input |
+| `packages/core/src/extension-tools.ts` | pi `ToolDefinition` → 本项目 `AgentTool`；工具集读/写 |
+| `packages/core/src/extension-models.ts` | `ctx.modelRegistry`：官方的 `ModelRegistry` 门面 |
+| `packages/core/src/extension-sessions.ts` | `ctx.sessionManager`：四个只读成员，数据源是 `state.messages`（`getSessionFile` 读落盘器） |
+| `packages/core/src/extension-commands.ts` | 斜杠命令与快捷键（内置键优先） |
+| `packages/core/src/extension-prompt.ts` | `before_agent_start` 的接线、**段补丁**与两条守卫 |
+| `packages/core/src/prompt-head.ts` | 请求 head（prompt + 初始工具声明）与「当前生效 sections」的回放 |
 | `test/extension-*.test.ts` | 真扩展 + 探针 + 模拟按键（三个文件） |
 
 ## 测试为什么用真扩展
@@ -583,7 +583,7 @@ pi 那边是 `SessionManager` **类**，条目来自它自己的 `sessions/*.jso
 所以用真的。装不上就 skip 并说清为什么（离线机器上这个测试没法跑，硬失败只会让人
 以为代码坏了）。
 
-这个测试**故意用真配置家目录**（`test/isolated-home.ts` 平时把 `PI_CODING_AGENT_DIR`
+这个测试**故意用真配置家目录**（`test-support/isolated-home.ts` 平时把 `PI_CODING_AGENT_DIR`
 指到临时目录，那里没有 `settings.json` 的 `packages`）—— 那正是本项目与 pi **共用**
 配置的体现（见 [sessions](sessions.md)）。
 

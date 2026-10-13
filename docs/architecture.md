@@ -26,6 +26,25 @@ pi-coding-agent 的官方实现，pi-ai 升到 1.0.2）给了 [tools](architectu
 边界是刻意的：**现状只有一个地方。** 改行为时要看是否动到了本目录（那是现状），
 其余细节去代码里看（那是为什么）。
 
+## workspace 布局
+
+仓库是一个 pnpm workspace：私有的根包（只有脚本与 devDependencies）+ 两个包。
+
+| 包 | 目录 | 是什么 |
+| --- | --- | --- |
+| `@ela/core` | `packages/core/src/` | 内核：环 / store / reducer / effects / trace / compact / kernel / provider / 扩展宿主（`extension-*`） |
+| `@ela/tui` | `packages/tui/src/` | pi-tui 终端界面（`main.ts` 是入口，`packages/tui/bin/ela.mjs` 是全局启动器） |
+
+- **依赖方向只有一条：`tui → core`**（`workspace:*`）。core 不认识 tui。
+- **跨包导入走包名子路径**（`@ela/core/provider`）：core 的 `exports` 直接把 `./src/*.ts` 暴露出去，
+  没有构建步骤 —— tsx 与 `tsc`（`moduleResolution: Bundler`）都直接读源码。
+- **界面的每个跨包触碰点都经过内核装配**（见 [kernel](architecture/kernel.md)）：tui 拿到的是
+  `createKernel()` 产出的 store 与几个回调，自己不 new 第二份环。
+- **扩展宿主留在 core**（它随内核装配，且要用 pi-tui 的 `showOverlay()`）—— 这是刻意的：
+  core 因此仍依赖 `pi-tui`，但**不依赖 tui 包**。要彻底拆开需要在 kernel 上加一个注入点，
+  那是另一件事。
+- 测试也按包分（`packages/*/test/`）；共享的配置家目录隔离脚手架在根 `test-support/`。
+
 ## 边界与已知不对齐
 
 - **工具没有沙箱。** `--cwd` 只限制**路径边界**（官方工具自带的检查），不阻止 `bash` 跑任意命令。

@@ -1,3 +1,6 @@
+packages:
+  - 'packages/*'
+
 # pnpm 的构建脚本白名单。
 #
 # pnpm 10+ 默认**拦截所有依赖的 postinstall**（供应链安全）。不放行的话每次 pnpm 命令

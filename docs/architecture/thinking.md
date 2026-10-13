@@ -3,7 +3,7 @@
 `state.model.thinkingLevel` 是**请求参数**（reasoning effort），不是输出格式 ——
 设了 `high` 不代表模型一定回馈 thinking，很多模型直接不给（见 [init](init.md) 的 thinking 一节）。
 
-它的规则**逐条照抄 pi**：唯一入口是 `src/thinking-level.ts`，启动解析在 `src/kernel.ts`
+它的规则**逐条照抄 pi**：唯一入口是 `packages/core/src/thinking-level.ts`，启动解析在 `packages/core/src/kernel.ts`
 的装配段，落盘走 `settings.json` 里 pi 的同名键，会话里走 `thinking_level_change` 条目。
 「本地那份表」和「pi 那份表」一旦分家，症状是同一个会话在两边恢复出来的档位不一样 ——
 所以下面每条都标了 pi 的出处。
@@ -69,7 +69,7 @@ clamp 用的是 pi-ai 导出的 `clampThinkingLevel`（`clampForModel` 只是它
 | `-m id:<级别>`（模型 pattern 的 `:<thinking>` 后缀） | ✅（**低于** `--thinking`，与参数顺序无关） | ❌ | — |
 | 换模型（`/model`、`Ctrl+P`、恢复会话） | ✅ 重新解析 | ❌ | ✅ |
 
-写会话文件的**唯一**地方是会话记录器（`src/session-recorder.ts`）：它是 store 的订阅器，
+写会话文件的**唯一**地方是会话记录器（`packages/core/src/session-recorder.ts`）：它是 store 的订阅器，
 `state.model.thinkingLevel` 一变就追加一条 `thinking_level_change`。四个入口都走同一条路 ——
 在各处各写一遍必然会漏一个，而漏掉的那个的症状是「换了档位、恢复时又变回去了」。
 
@@ -96,7 +96,7 @@ clamp 用的是 pi-ai 导出的 `clampThinkingLevel`（`clampForModel` 只是它
 **与 pi 有一处刻意的时间差**：pi 的会话文件从建立那一刻就存在，所以它的回填是「恢复时立刻
 写」；本项目是「空会话不落盘」（见 [sessions](sessions.md)），回填推迟到**真的要写文件时**。
 后果只有一个：恢复一个老会话又直接退出，盘上不会多这一行。换来的是那条硬挣来的不变式：
-**恢复不写盘**（`test/restore-perf.test.ts`「会话文件一个字节都不该变」）。
+**恢复不写盘**（`packages/core/test/restore-perf.test.ts`「会话文件一个字节都不该变」）。
 
 ## 六、思考预算（`thinkingBudgets`）
 
@@ -124,13 +124,13 @@ clamp 用的是 pi-ai 导出的 `clampThinkingLevel`（`clampForModel` 只是它
 
 | 做什么 | 在哪 |
 | --- | --- |
-| 解析 / clamp / 换模型 / settings 读写 | `src/thinking-level.ts`（唯一入口） |
-| 启动时装配那一档 | `src/kernel.ts` 的 `createKernel`（注释里逐步对着 pi 的 `sdk.js`） |
-| 恢复会话时带回来 | `src/kernel.ts` 的 `restoreSession` |
-| 落盘 + 回填 | `src/session-recorder.ts` |
-| 读会话里那条 | `src/session-file.ts` 的 `sessionThinking` / `readSessionThinking` |
+| 解析 / clamp / 换模型 / settings 读写 | `packages/core/src/thinking-level.ts`（唯一入口） |
+| 启动时装配那一档 | `packages/core/src/kernel.ts` 的 `createKernel`（注释里逐步对着 pi 的 `sdk.js`） |
+| 恢复会话时带回来 | `packages/core/src/kernel.ts` 的 `restoreSession` |
+| 落盘 + 回填 | `packages/core/src/session-recorder.ts` |
+| 读会话里那条 | `packages/core/src/session-file.ts` 的 `sessionThinking` / `readSessionThinking` |
 | 思考预算 | `readThinkingBudgets`（`thinking-level.ts`）→ `createKernel` → `store.ts` → `effects.ts` 的 `streamOptions.thinkingBudgets` |
-| 循环（`Shift+Tab`） | `src/tui/pi-actions.ts` 的 `nextThinkingLevel`（`-1 → 第 1 个`，与 pi 的 `cycleThinkingLevel` 同式子；**与模型循环的 `-1 → 第 2 个`不同**） |
-| 面板 | `src/tui/thinking-picker.ts`（pi 官方的 `ThinkingSelectorComponent`） |
-| 设置面板（per-model 覆盖） | `src/tui/settings-picker.ts`（pi 的 `SettingsList` + `SteppedSubmenu`）；见 [settings](settings.md) |
-| 命令接线 | `src/tui/app.ts` 的 `case 'thinking'` |
+| 循环（`Shift+Tab`） | `packages/tui/src/pi-actions.ts` 的 `nextThinkingLevel`（`-1 → 第 1 个`，与 pi 的 `cycleThinkingLevel` 同式子；**与模型循环的 `-1 → 第 2 个`不同**） |
+| 面板 | `packages/tui/src/thinking-picker.ts`（pi 官方的 `ThinkingSelectorComponent`） |
+| 设置面板（per-model 覆盖） | `packages/tui/src/settings-picker.ts`（pi 的 `SettingsList` + `SteppedSubmenu`）；见 [settings](settings.md) |
+| 命令接线 | `packages/tui/src/app.ts` 的 `case 'thinking'` |

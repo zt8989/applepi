@@ -4,7 +4,7 @@
 
 ## 主路径：pi-coding-agent 的 `ModelRuntime`
 
-`src/pi-config.ts` 导出的 `createPiModelRuntime()` 是主装配路径。它就是 pi 自己用的那套：
+`packages/core/src/pi-config.ts` 导出的 `createPiModelRuntime()` 是主装配路径。它就是 pi 自己用的那套：
 
 ```ts
 const runtime = await ModelRuntime.create();   // 读 ~/.pi/agent/{models,auth}.json
@@ -45,7 +45,7 @@ runtime.streamSimple(model, context);          // api 名 → 协议映射也是
    手写装配，至少还能用 models.json 里的自定义 provider，而不是整个起不来。降级信息
    写 stderr。
 
-`createRuntime()`（`src/provider.ts`）就是这两个之间的选择点。
+`createRuntime()`（`packages/core/src/provider.ts`）就是这两个之间的选择点。
 
 ## models.json 的两种形状
 

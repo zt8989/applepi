@@ -1,0 +1,30 @@
+{
+  "name": "@ela/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "event-loop-agent 的内核：Redux Loop 驱动的 Agent Loop（reducer 纯函数返回 loop(state, Cmd)），不含终端界面。",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --import ../../test-support/isolated-home.ts --test test/*.test.ts",
+    "config:migrate": "node --import tsx scripts/migrate-config-dir.ts",
+    "models:migrate": "node --import tsx scripts/migrate-models.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^1.0.2",
+    "@earendil-works/pi-ai": "^1.0.2",
+    "@earendil-works/pi-coding-agent": "^1.0.2",
+    "@earendil-works/pi-tui": "^1.0.2",
+    "redux": "^4.2.1",
+    "redux-loop": "^6.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

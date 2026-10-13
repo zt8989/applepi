@@ -1,0 +1,26 @@
+{
+  "name": "@ela/tui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "event-loop-agent 的 pi-tui 终端界面：订阅内核 store，画对话与轨迹两页。",
+  "type": "module",
+  "bin": {
+    "ela": "./bin/ela.mjs"
+  },
+  "scripts": {
+    "start": "node --import tsx src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --import ../../test-support/isolated-home.ts --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@ela/core": "workspace:*",
+    "@earendil-works/pi-ai": "^1.0.2",
+    "@earendil-works/pi-coding-agent": "^1.0.2",
+    "@earendil-works/pi-tui": "^1.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

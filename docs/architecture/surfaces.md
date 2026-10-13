@@ -5,7 +5,7 @@
 
 ## TUI（pi-tui）
 
-`src/tui.ts`（入口）+ `src/tui/app.ts`（界面）。
+`packages/tui/src/main.ts`（入口）+ `packages/tui/src/app.ts`（界面）。
 
 直接订阅 `kernel.store`，没有中间层。
 
@@ -47,7 +47,7 @@
   并让当前页当 primary（见 `applyLayout`），所以两个页各自管各自的那条提示，不需要
   在回调里判当前在哪一页。
 
-`test/tui-render.test.ts` 钉的是「同句 + 键名跟着改键走」这两条 —— 缺了它的症状不是抛错，
+`packages/tui/test/tui-render.test.ts` 钉的是「同句 + 键名跟着改键走」这两条 —— 缺了它的症状不是抛错，
 而是「流式生成时按什么都不动」，而 `Ctrl+End` 这个键本身也就只有这条提示会讲。
 
 ### composer 与 pi 一致：横线颜色 + 状态画在上框线
@@ -184,7 +184,7 @@ pi 判定的是「`chatContainer` 末尾两项还是不是自己那对 spacer+te
 「锚点是否还等于当前消息条数」等价表达同一件事。
 
 `renderTranscript()` 保留着 —— 一次性模式（管道输出）与测试走它，仍然是逐行一致的
-（`test/tui-incremental.test.ts` 钉住这一点）。
+（`packages/tui/test/tui-incremental.test.ts` 钉住这一点）。
 
 ### 为什么不自己画这四种样式
 
@@ -200,7 +200,7 @@ pi 判定的是「`chatContainer` 末尾两项还是不是自己那对 spacer+te
 
 ### 主题：必须显式选 dark/light
 
-`src/tui/theme.ts`。pi 的 `theme` 是个 globalThis 上的 Proxy，**没 `initTheme()` 时读它任何
+`packages/tui/src/theme.ts`。pi 的 `theme` 是个 globalThis 上的 Proxy，**没 `initTheme()` 时读它任何
 属性都抛**。而光 `initTheme()`（不带名字）拿到的是 `system` 主题 —— 它在终端没上报颜色时
 渲染成灰度：实测 `toolSuccessBg` 解析成 `rgb(0,0,0)`，于是「工具块有底色」**静默失效**。
 
@@ -210,7 +210,7 @@ pi 判定的是「`chatContainer` 末尾两项还是不是自己那对 spacer+te
 
 底色与文字颜色走 pi-tui 的 `foregroundAnsi`/`backgroundAnsi`（按终端能力降级真彩 → 256 → 16），
 但**斜体走 chalk** —— chalk 看 `chalk.level`，非 TTY 下是 0，`theme.italic()` 会直接返回
-原文。这在测试里尤其误导（真终端明明是斜的），所以 `test/isolated-home.ts` 在 chalk 加载前
+原文。这在测试里尤其误导（真终端明明是斜的），所以 `test-support/isolated-home.ts` 在 chalk 加载前
 设了 `FORCE_COLOR=3`。
 
 ### 三处具体做法
@@ -235,7 +235,7 @@ pi 判定的是「`chatContainer` 末尾两项还是不是自己那对 spacer+te
   10 行 + `... (N more lines, Ctrl+O to expand)`；展开时参数逐行 `key: value`、结果给全文。
   分岔点是 `hasRendererDefinition()`（定义存不存在），不是渲染器存不存在 ——
   所以给个 `{ label: name }` 就回到了与 pi 同一条路。
-  （`test/tui-render.test.ts` 钉着这一条。）
+  （`packages/tui/test/tui-render.test.ts` 钉着这一条。）
 
 
 ### 为什么不用 pi 自己的 InteractiveMode
@@ -277,7 +277,7 @@ OSC 133 区域标记也被一并剥掉。
 
 `/sessions` 用 `SessionSelectorComponent`（见 [sessions](sessions.md)），`/model` 与
 `/scoped-models` 用 `ModelSelectorComponent` / `ScopedModelsSelectorComponent`
-（`src/tui/model-picker.ts`）。三个都是同一个理由：
+（`packages/tui/src/model-picker.ts`）。三个都是同一个理由：
 
 | 面板 | 官方组件 | 那一屏要处理的东西 |
 | --- | --- | --- |
@@ -289,7 +289,7 @@ OSC 133 区域标记也被一并剥掉。
 `session-picker.ts` 是**适配层**：喂给官方的形状（`ModelInfo` / `SessionInfo`），
 接回调（换模型 / 存默认 / 删会话）。
 
-### 这三个面板**盖住 composer**，不是居中的弹窗（`src/tui/composer-overlay.ts`）
+### 这三个面板**盖住 composer**，不是居中的弹窗（`packages/tui/src/composer-overlay.ts`）
 
 pi 里这几个面板根本不是弹窗：`interactive-mode.js` 的 `showSelector()` 把 composer
 那一格（`editorContainer`）的**内容整个换掉** —— `clear()` 之后 `addChild(selector)`，
@@ -299,7 +299,7 @@ pi 里这几个面板根本不是弹窗：`interactive-mode.js` 的 `showSelecto
 本项目那阵子没有可换内容的 `editorContainer`，所以用覆盖层**复刻同一个矩形**：
 
 > **补充（扩展的 inline `custom()` 之后）**：后来真给了「输入区槽位」
-> （`src/tui/app.ts` 的 `mountEditorSlot`，见 [extensions](extensions.md) 的「折叠」一节），
+> （`packages/tui/src/app.ts` 的 `mountEditorSlot`，见 [extensions](extensions.md) 的「折叠」一节），
 > 这三个面板**没有**跟着搬过去 —— 不是做不到，是它们不需要：面板要的正是「盖住
 > composer 那个矩形」，而 overlay 参数已经把它钉死了（下面那些几何断言就是钉它的）；
 > 搬进槽位反而要自己多管一套焦点与「还回 composer」，而面板的键位与焦点现在由官方
@@ -321,8 +321,8 @@ pi 里这几个面板根本不是弹窗：`interactive-mode.js` 的 `showSelecto
 
 面板的框线与配色**全部来自 pi 的主题**（官方 `DynamicBorder` 走
 `theme.fg('accent', …)`），本项目一行颜色都不写 —— 写死的色值在浅色终端上会变成
-黑底黑字（见 [theme.ts](../../src/tui/theme.ts) 文件头）。
-`test/tui-startup.test.ts` 里那三条几何断言（底边对齐 / 顶框满宽 / composer 框线
+黑底黑字（见 [theme.ts](../../../packages/tui/src/theme.ts) 文件头）。
+`packages/tui/test/tui-startup.test.ts` 里那三条几何断言（底边对齐 / 顶框满宽 / composer 框线
 不残留）就是钉这件事的：它们**先把差分重绘重放成屏幕网格**再断言绝对行列 ——
 「词在不在」那类断言对「飘在中间的弹窗」同样会通过。
 
@@ -336,7 +336,7 @@ pi 里这几个面板根本不是弹窗：`interactive-mode.js` 的 `showSelecto
 当成「这个版本没有这个功能」。`tui-startup.test.ts` 里那三条断言盯的就是这个：
 提示行**在**，就等于 `Ctrl+S` / `Ctrl+A` / `Ctrl+E` 认得。
 
-### 键位表只有一处（`src/tui/keybindings.ts`）
+### 键位表只有一处（`packages/tui/src/keybindings.ts`）
 
     defs = { ...pi 的 KEYBINDINGS, ...本项目的 PROJECT_KEYBINDINGS }
 
@@ -374,7 +374,7 @@ pi 里这几个面板根本不是弹窗：`interactive-mode.js` 的 `showSelecto
 没有它时 effect 表捕获的是建表那一个，于是「底栏换了、轨迹树也换了、实际请求仍发给
 旧模型」—— 三个可见证据都说换了。`callLlm` 与 `compactContext` **两条路都要改**，
 只改前者的话压缩会静默地用旧模型（那条路平时看不见，效果要到窗口快满才显形）。
-`test/model-switch.test.ts` 两条测试各盯一个。
+`packages/tui/test/model-switch.test.ts` 两条测试各盯一个。
 
 ### 降级路径：手写一个最小 `ModelRuntime` 门面
 

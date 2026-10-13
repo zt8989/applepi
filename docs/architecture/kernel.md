@@ -2,7 +2,7 @@
 
 ## 一个装配点
 
-`createKernel()`（`src/kernel.ts`）是整个应用**唯一**跑环的地方。
+`createKernel()`（`packages/core/src/kernel.ts`）是整个应用**唯一**跑环的地方。
 
 ```ts
 export function createKernel(options: KernelOptions): Kernel {
@@ -15,7 +15,7 @@ export function createKernel(options: KernelOptions): Kernel {
 ```
 
 它返回的就是 `createPersistentStore` 的结果加上 `runtime` / `sessionId` / `dispose`，
-没有额外的包装层。界面（`src/tui/`）调它，没有第二处装配。
+没有额外的包装层。界面（`packages/tui/src/`）调它，没有第二处装配。
 
 ## 为什么不能有两个环
 
@@ -47,7 +47,7 @@ createKernel
 
 `KernelOptions.cwd` 决定工具的路径边界，一路传到 `getTools(cwd)`。
 
-官方工具（`createReadTool(cwd)` 等）在**构造时**就把 cwd 烤进闭包，所以 `src/tools.ts` 的注册表
+官方工具（`createReadTool(cwd)` 等）在**构造时**就把 cwd 烤进闭包，所以 `packages/core/src/tools.ts` 的注册表
 **按 cwd 缓存**（key 是 `path.resolve(cwd)`）：同一个 cwd 复用同一批实例，换 cwd 必须重建，
 否则边界还是旧的。
 
@@ -56,7 +56,7 @@ createKernel
 ## 界面启动
 
 ```
-npm start              →  src/tui.ts     → createKernel() → runTui({store})
+npm start              →  packages/tui/src/main.ts     → createKernel() → runTui({store})
 ```
 
 ## 换模型

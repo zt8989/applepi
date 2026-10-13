@@ -78,7 +78,7 @@ execute(toolCallId, params, signal?, onUpdate?) => Promise<AgentToolResult>
 ```
 
 本项目用前四个（第五个 `ctx` 由对方运行时注入，不在公开契约里）。
-`src/tools.ts` 的 `adapt()` 做两件事：
+`packages/core/src/tools.ts` 的 `adapt()` 做两件事：
 
 1. **签名收窄** —— 丢掉 `ctx`，并把 `onUpdate` **转成本项目的 `AgentToolUpdate`**，
    成本项目的 `AgentTool` 形状
@@ -87,7 +87,7 @@ execute(toolCallId, params, signal?, onUpdate?) => Promise<AgentToolResult>
 
 逻辑一行不改。于是 `effects.ts` 完全不知道 pi-coding-agent 存在，环的逻辑一行都不用改。
 
-> 界面渲染用的是 `create*ToolDefinition()`（`src/tui/app.ts`），不是这里的 `AgentTool` ——
+> 界面渲染用的是 `create*ToolDefinition()`（`packages/tui/src/app.ts`），不是这里的 `AgentTool` ——
 > 前者带 `renderShell`（`edit` 是 `"self"`），后者不带。两者形状不同，别混用。
 
 ## 五个参数不是公开契约
@@ -194,7 +194,7 @@ messages 里留下一个**没有结果的 toolCall**（协议非法，provider �
 
 ## 加自己的工具
 
-本项目 `AgentTool` 形状很简单（`src/agent-tool.ts`），照着写再 push 进 `build()`：
+本项目 `AgentTool` 形状很简单（`packages/core/src/agent-tool.ts`），照着写再 push 进 `build()`：
 
 ```ts
 const myTool: AgentTool = {
@@ -213,7 +213,7 @@ const myTool: AgentTool = {
 **扩展提供的工具走另一条路**（`registerExtraTools()`，不是 `build()`）：它们由 pi 的
 扩展运行时装载、拿第五个 `ctx` 参数，详见 [extensions](extensions.md)。
 
-## Skill —— 也在 pi 那一侧（`src/skills.ts`）
+## Skill —— 也在 pi 那一侧（`packages/core/src/skills.ts`）
 
 skill **不是工具**，是给模型看的「遇到这类任务怎么做」的说明书：一个带 frontmatter
 （`name` + `description`）的 `SKILL.md`，正文是说明书。
@@ -295,7 +295,7 @@ pi 改了标准的细节，我们这边不会跟着动。
 ### 与 prompt 的关系
 
 清单进 system prompt 的 **`<skills>` 段**，由 pi 的 `buildSystemPrompt` 拼
-（`src/system-prompt.ts`）—— 不再由 reducer 接在尾巴上。
+（`packages/core/src/system-prompt.ts`）—— 不再由 reducer 接在尾巴上。
 
 差别不只是“谁拼的”：接在尾巴上时那是一段**没有标签的裸文本**，模型不知道那是系统给的
 规则还是用户说的话；`<skills>` 是有边界的段。更要紧的是**只有一处**会拼 ——

@@ -6,7 +6,7 @@
 
 ### 1. 环只有一份，跑在 Node 里
 
-`createKernel()`（`src/kernel.ts`）是**唯一**的装配点。界面（`src/tui/`）调它，没有第二处。
+`createKernel()`（`packages/core/src/kernel.ts`）是**唯一**的装配点。界面（`packages/tui/src/`）调它，没有第二处。
 
 这不是为了好看。环有副作用：真的调模型、真的读写文件、真的起子进程。如果另有一处也跑一份
 store、也跑环，就会出现两处都发起 LLM 调用、消息流不一致、文件被写两次。

@@ -40,7 +40,7 @@ pi 的内置扩展一共四个（还有 `llama.cpp`）。本项目装三个：`m
 | `pi.setActiveTools()` | 真的改（`tools.changed` → `agent.run` 的声明增量） |
 
 注册是 `defaultActive: false`（pi 也一样）：要用得在 `settings.json` 的 `defaultTools` 里
-写 `+tool_search`。测试里钉住了整条路（`test/mcp-codemode.test.ts` 的
+写 `+tool_search`。测试里钉住了整条路（`packages/core/test/mcp-codemode.test.ts` 的
 「`+tool_search` 能把 deferred 工具搜出来」）。
 
 于是 `deferred` 归入 codemode（官方文档原话：codemode 或 deferred 的工具都能从两种
@@ -192,16 +192,16 @@ MCP 的 `tool_call` handler 做一件很具体的事：**codemode 脚本点名�
 
 | 文件 | 干什么 |
 | --- | --- |
-| `src/tools.ts` | 注册表：exposure、激活集、`declaredToolset`、`callableTools`、`prepareLoadout` |
-| `src/extension-host.ts` | 装内置扩展；`session_start`、`executeTool`、`refreshTools`、`beforeToolCall`、`collectPromptSections` |
-| `src/extension-tools.ts` | 工具适配（带上 `outputSchema`）、`activeToolsFromState` / `applyActiveTools` |
-| `src/effects.ts` / `src/store.ts` | 环在每次工具执行前发 `tool_call` 的钩子 |
-| `src/system-prompt.ts` | `sections`（`mcp_servers` 段进 prompt） |
-| `src/extension-prompt.ts` | `before_agent_start` 事件的 `systemPromptOptions.sections` |
-| `src/kernel.ts` | 装载顺序：`startSession` → `collectPromptSections` → 声明 → 冻结 |
+| `packages/core/src/tools.ts` | 注册表：exposure、激活集、`declaredToolset`、`callableTools`、`prepareLoadout` |
+| `packages/core/src/extension-host.ts` | 装内置扩展；`session_start`、`executeTool`、`refreshTools`、`beforeToolCall`、`collectPromptSections` |
+| `packages/core/src/extension-tools.ts` | 工具适配（带上 `outputSchema`）、`activeToolsFromState` / `applyActiveTools` |
+| `packages/core/src/effects.ts` / `packages/core/src/store.ts` | 环在每次工具执行前发 `tool_call` 的钩子 |
+| `packages/core/src/system-prompt.ts` | `sections`（`mcp_servers` 段进 prompt） |
+| `packages/core/src/extension-prompt.ts` | `before_agent_start` 事件的 `systemPromptOptions.sections` |
+| `packages/core/src/kernel.ts` | 装载顺序：`startSession` → `collectPromptSections` → 声明 → 冻结 |
 
-测试：`test/mcp-codemode.test.ts`。前半是注册表（纯内存），后半**真的**起一个 MCP stdio
-服务器（`test/fixtures/fake-mcp-server.mjs`，离线）走完整条链路 —— 真的 MCP 客户端、
+测试：`packages/core/test/mcp-codemode.test.ts`。前半是注册表（纯内存），后半**真的**起一个 MCP stdio
+服务器（`packages/core/test/fixtures/fake-mcp-server.mjs`，离线）走完整条链路 —— 真的 MCP 客户端、
 真的 QuickJS 沙箱，只有服务器那一端是假的。
 
 ## 相关

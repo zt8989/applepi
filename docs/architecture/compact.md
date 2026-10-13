@@ -4,7 +4,7 @@
 
 ## 为什么复用 pi 的算法，一行都不重写
 
-`src/compact.ts` 只做两件事：**决定要不要压**、**把结果落到我们的状态里**。
+`packages/core/src/compact.ts` 只做两件事：**决定要不要压**、**把结果落到我们的状态里**。
 中间最要紧的两步都直接调 pi-coding-agent 的 `core/compaction/`：
 
 | 环节 | 用 pi 的 | 为什么不能自己写 |

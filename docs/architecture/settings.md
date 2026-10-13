@@ -48,8 +48,8 @@ telemetry、project trust……），本项目没那些功能 —— 硬摆上�
 
 | 做什么 | 在哪 |
 | --- | --- |
-| 面板（pi 的零件：`SettingsList` + `SteppedSubmenu` + `DynamicBorder`） | `src/tui/settings-picker.ts` |
-| 命令接线与三个回调 | `src/tui/app.ts` 的 `case 'settings'` |
-| 自动压缩开关 | `readCompactionEnabled` / `writeCompactionEnabled`（`src/compact.ts`）+ `AutoCompact.setEnabled`（`src/store.ts`）+ `Kernel.setAutoCompactEnabled` |
+| 面板（pi 的零件：`SettingsList` + `SteppedSubmenu` + `DynamicBorder`） | `packages/tui/src/settings-picker.ts` |
+| 命令接线与三个回调 | `packages/tui/src/app.ts` 的 `case 'settings'` |
+| 自动压缩开关 | `readCompactionEnabled` / `writeCompactionEnabled`（`packages/core/src/compact.ts`）+ `AutoCompact.setEnabled`（`packages/core/src/store.ts`）+ `Kernel.setAutoCompactEnabled` |
 | 折叠思考块 | `model-scope.ts` 的 `readHideThinkingBlock` / `writeHideThinkingBlock` |
 | per-model 档位 | `thinking-level.ts` 的 `readAllModelThinkingLevels` / `writeModelThinkingLevel` / `removeModelThinkingLevel` |
