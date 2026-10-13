@@ -45,5 +45,6 @@ pi-coding-agent 的官方实现，pi-ai 升到 1.0.2）给了 [tools](architectu
 | [init](architecture/init.md) | 装载：system prompt（拼装交给 pi）、prompt / model 两块、模型能力、中途插 prompt、洋葱式 middleware、零 token 回放 |
 | [sessions](architecture/sessions.md) | 配置家目录、会话文件格式、恢复历史（零 token） |
 | [compact](architecture/compact.md) | 上下文压缩：pi 的切点与摘要、三条触发路径、小窗口夹紧 |
-| [thinking](architecture/thinking.md) | 思考级别：五条来源的优先级、clamp（为什么默认会变成 high）、四个写入口、会话往返 |
+| [thinking](architecture/thinking.md) | 思考级别：五条来源的优先级、clamp（为什么默认会变成 high）、四个写入口、会话往返、思考预算 |
+| [settings](architecture/settings.md) | 设置：`/settings` 面板里有什么、哪些键本项目真的会读、加一行的顺序 |
 | [extensions](architecture/extensions.md) | 装 pi 扩展：官方 loader + jiti 虚拟模块、overlay 宿主、工具集不中途变 |

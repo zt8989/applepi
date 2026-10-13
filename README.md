@@ -78,7 +78,7 @@ install 然后失败**。
 ~/.pi/agent/
   models.json            provider / 模型目录（pi 当前要求 models 是数组）
   auth.json              凭证
-  settings.json          默认 provider / model
+  settings.json          默认 provider / model / thinkingLevel / thinkingBudgets / compaction.enabled…（与 pi 同一批键）
   sessions/
     --<cwd 编码>--/<时间戳>_<id>.jsonl   会话（可恢复；pi 的 /resume 也能看到）
   traces/                        ← 只有本项目写，pi 没这个目录
@@ -250,6 +250,7 @@ HEAD → n10
 | --- | --- |
 | `/model` | 盖住输入框的模型选择面板（同 pi）；`/model <id>` 精确命中就直接切。面板里 `Ctrl+S` 存默认模型 |
 | `/thinking` | 思考级别选择面板（同 pi）；`/thinking <级别>` 直接切。面板里 **`Ctrl+S` 存默认级别**，`Shift+Tab` 循环（**不**存） |
+| `/settings` | 设置面板（同 pi 的形状）：自动压缩、隐藏思考块、**每个模型的默认思考级别**（per-model 覆盖，之前只能手改 settings.json） |
 | `/scoped-models` | 挑哪些模型参与 `Ctrl+P` 循环（含每模型写死一档的 `p/id:high` 写法） |
 | `/sessions` | 盖住输入框的历史会话选择面板（满宽，同 pi）。**零 token** —— 不重跑模型，只把消息**和轨迹树**读回来 |
 | `/new` | 开**新会话**：换 id → 换文件。上一段完整留在 `sessions/` 里 |

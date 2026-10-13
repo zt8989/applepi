@@ -50,7 +50,17 @@ import {
   modelRuntimeFor,
 } from './model-picker';
 import { openThinkingPicker } from './thinking-picker';
-import { DEFAULT_THINKING_LEVEL, readDefaultThinkingLevel, writeDefaultThinkingLevel } from '../thinking-level';
+import { openSettingsPicker } from './settings-picker';
+import {
+  DEFAULT_THINKING_LEVEL,
+  clampForModel,
+  isThinkingLevel,
+  readAllModelThinkingLevels,
+  readDefaultThinkingLevel,
+  removeModelThinkingLevel,
+  writeDefaultThinkingLevel,
+  writeModelThinkingLevel,
+} from '../thinking-level';
 import { NO_SCOPE, readScopedModels, writeDefaultModel, readHideThinkingBlock, writeHideThinkingBlock, type ModelScope, type ScopedModelItem } from '../model-scope';
 import type { AgentRuntime } from '../provider';
 import type { Model, ModelThinkingLevel } from '@earendil-works/pi-ai';
@@ -821,6 +831,10 @@ const SLASH_COMMANDS: SlashCommand[] = [
       '思考级别（弹窗选择；`/thinking <级别>` 直接切；面板里 Ctrl+S 存默认；与 pi 同名）',
   },
   {
+    name: 'settings',
+    description: '设置面板（自动压缩 / 隐藏思考块 / 每个模型的默认思考级别；与 pi 同名）',
+  },
+  {
     name: 'scoped-models',
     description: '启用/禁用哪些模型参与 Ctrl+P 循环（Ctrl+S 存进 settings）',
   },
@@ -935,6 +949,14 @@ export interface TuiOptions {
    * 不传 = `/model` 面板仍能开（能列、能搜），选完会**明说没接内核**而不是假装换了。
    */
   setModel?: ((provider: string, modelId: string, options?: { thinkingLevel?: string | undefined }) => boolean) | undefined;
+  /**
+   * 自动压缩现在开着吗；`null` = 这个装配不支持压缩（`/settings` 那一行不显示）。
+   *
+   * 不给就是 `null`：不编一个「支持但关着」（那样面板上会出现一个永远压不了的开关）。
+   */
+  autoCompactEnabled?: (() => boolean | null) | undefined;
+  /** 开/关自动压缩（写 `compaction.enabled` 并当场生效）。 */
+  setAutoCompactEnabled?: ((enabled: boolean) => void) | undefined;
   /**
    * 拿 provider 装配（模型目录的来源）。`/model` 面板要它列模型。
    *
@@ -2358,6 +2380,75 @@ export async function runTui(options: TuiOptions): Promise<number> {
           defaultLevel: readDefaultThinkingLevel(cwd) ?? DEFAULT_THINKING_LEVEL,
           onSelect: (level) => applyThinking(level, false),
           onSelectAsDefault: (level) => applyThinking(level, true),
+        });
+        return;
+      }
+      case 'settings': {
+        // 与 `/model` / `/thinking` 同一句：环在跑时不能改 —— 面板里那几行都会立刻作用到
+        // 正在跑的这一轮（自动压缩开关、当前模型的档位）。
+        if (store.getState().phase !== 'idle') {
+          notify(yellow(`上一回合还没结束，先按 ${keyLabel('app.interrupt')} 中断再改设置`));
+          return;
+        }
+        if (!options.runtime) {
+          notify(yellow('未接内核（没有 provider 装配），改不了设置'));
+          return;
+        }
+        /** 当前模型的档位就地同步（pi 的 `onModelThinkingLevelChange` 也这么做）。 */
+        const syncCurrentModel = (provider: string, modelId: string, level: string): void => {
+          const state = store.getState();
+          if (state.providerName !== provider || state.modelId !== modelId) return;
+          store.dispatch({
+            type: 'thinking.changed',
+            level: clampForModel(currentModelObject(), isThinkingLevel(level) ? level : DEFAULT_THINKING_LEVEL),
+          });
+          refresh();
+        };
+        openSettingsPicker({
+          tui,
+          currentModel: currentModelObject(),
+          models: [...modelRuntimeFor(options.runtime).getAvailableSnapshot()],
+          defaultThinkingLevel: readDefaultThinkingLevel(cwd) ?? DEFAULT_THINKING_LEVEL,
+          modelThinkingLevels: readAllModelThinkingLevels(cwd),
+          onModelThinkingLevelChange: (provider, modelId, level) => {
+            if (!isThinkingLevel(level)) return;
+            void writeModelThinkingLevel(provider, modelId, level, cwd).then((ok) => {
+              if (!ok) {
+                notify(yellow('没能写进 settings.json（写权限？），这个模型的覆盖没存住'));
+              }
+            });
+            syncCurrentModel(provider, modelId, level);
+          },
+          onModelThinkingLevelRemove: (provider, modelId) => {
+            void removeModelThinkingLevel(provider, modelId, cwd).then((ok) => {
+              if (!ok) notify(yellow('没能写进 settings.json（写权限？），覆盖没清掉'));
+            });
+            // 清掉 = 回到**全局默认**（pi：`setThinkingLevel(getDefaultThinkingLevel() ?? DEFAULT)`）。
+            const global = readDefaultThinkingLevel(cwd);
+            syncCurrentModel(provider, modelId, isThinkingLevel(global) ? global : DEFAULT_THINKING_LEVEL);
+          },
+          hideThinkingBlock: hideThinking,
+          onHideThinkingBlockChange: (hidden) => {
+            // 与 `Ctrl+T` 同一条路：就地改 + 写盘 + 重画（两处各写一份必然会漂移，
+            // 而漂移的症状是「面板里改了、按 Ctrl+T 又回到旧值」）。
+            hideThinking = hidden;
+            refresh();
+            void writeHideThinkingBlock(hidden, cwd).then((ok) => {
+              if (!ok) notify(yellow('没能写进 settings.json（写权限？），下次启动还是旧的'));
+            });
+          },
+          autoCompact: options.autoCompactEnabled?.() ?? null,
+          onAutoCompactChange: (enabled) => {
+            options.setAutoCompactEnabled?.(enabled);
+            notify(
+              dim(
+                enabled
+                  ? '自动压缩：开'
+                  : '自动压缩：关（/compact 仍然能手动压一次）',
+              ),
+            );
+            refresh();
+          },
         });
         return;
       }

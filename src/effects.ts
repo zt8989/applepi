@@ -17,6 +17,7 @@ import type {
   JsonValue,
   Model,
   SimpleStreamOptions,
+  ThinkingBudgets,
   Tool,
   ToolCall,
   ToolResultMessage,
@@ -111,6 +112,20 @@ export interface PiAiEffectsOptions {
    * 「本该打网络」的位置上。
    */
   resolveModel?: ((state: AgentState) => Model<any> | undefined) | undefined;
+  /**
+   * 各档思考级别的 token 预算（`settings.json` 的 `thinkingBudgets`）。
+   *
+   * ## 为什么是「建表时给一次」而不是每请求现读
+   *
+   * 与 pi 同一步：它的 Agent 在构造时收下这个字段（`core/sdk.js:275`，之后每请求原样带上，
+   * `pi-agent-core` 的 `agent.js:313`）。所以「聊到一半手改 settings.json」在两边都不生效，
+   * 要重启 —— 这也是把 `thinkingBudgets` 放在这里（而不是每请求读盘）的理由：
+   * 行为与 pi 一致，而且每请求读一次盘没有任何好处。
+   *
+   * 与 `resolveModel` 的「每请求现取」不矛盾：模型会通过 `/model` 在**会话内**被改
+   * （有界面入口），预算没有。
+   */
+  thinkingBudgets?: ThinkingBudgets | undefined;
 }
 
 export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable {
@@ -184,6 +199,18 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
       // 和正文 text 块分开 —— 所以「思考输出是文本」但**不是** assistant 正文。
       const thinkingLevel = state.model.thinkingLevel;
       if (thinkingLevel !== 'off') streamOptions.reasoning = thinkingLevel;
+      //
+      // 各档的 token 预算（`settings.json` 的 `thinkingBudgets`）—— 与 pi 同一步：读一次、
+      // 每个请求原样带上（pi 的 Agent 也是这么做的）。pi-ai 的 provider 自己决定要不要用：
+      // Anthropic / Bedrock 拿它当 `thinking.budget_tokens`，而 OpenAI 兼容端点要靠模型目录里
+      // 的 `compat.thinkingTokenBudgetField` 才发（`thinking_token_budget` / `thinking_budget` /
+      // `thinking_budget_tokens` 分别对应 vLLM / Qwen / llama.cpp）。
+      //
+      // 不设时不传这个键：pi-ai 会在内部用它的内置预算（minimal 1k … high 16k），
+      // 传一个空对象反而是「显式要求空预算」。
+      if (options.thinkingBudgets !== undefined) {
+        streamOptions.thinkingBudgets = options.thinkingBudgets;
+      }
       const stream = streamFn(model, context, streamOptions);
       let final: AssistantMessage | undefined;
       for await (const event of stream) {

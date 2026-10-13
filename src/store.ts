@@ -13,6 +13,7 @@ import { install } from 'redux-loop';
 import { createAgentReducer, loopWiring, type ReducerEffects } from './reducer';
 import { createInitialState, type AgentState } from './state';
 import type { AgentAction } from './actions';
+import type { ThinkingBudgets } from '@earendil-works/pi-ai';
 import { createPiAiEffectTable, type EffectTable } from './effects';
 import { getTools } from './tools';
 import { defaultStreamFn, type AgentRuntime, type StreamFn } from './provider';
@@ -51,15 +52,32 @@ export interface AgentStoreHandle {
  */
 export interface AutoCompact {
   dispose(): void;
+  /** 现在开着吗（`/settings` 面板那一行读它）。 */
+  enabled(): boolean;
+  /** 开/关，**立即生效**（关掉之后不再自动压，手动 `/compact` 仍然能用）。 */
+  setEnabled(enabled: boolean): void;
 }
 
+/**
+ * 盯住「环刚停下来」那一刻判要不要压。
+ *
+ * @param supported 表里有没有 `runCompact` —— 没有就是不支持压缩（Web 侧自带表时可能是这样），
+ *                  那时**连开关都不该给**（一个什么都压不了的开关就是谎），所以返回 `null`。
+ * @param enabled   初始开关（`settings.json` 的 `compaction.enabled`，pi 的默认是 `true`）。
+ */
 export function createAutoCompact(options: {
   store: AgentStore;
-  /** 能不能压（表里没有 runCompact 就是不支持）。 */
-  enabled: boolean;
+  supported: boolean;
+  enabled?: boolean | undefined;
 }): AutoCompact | null {
-  if (!options.enabled) return null;
+  if (!options.supported) return null;
   const { store } = options;
+  //
+  // 可变（而不再是构造时定死）：`/settings` 面板里的 Auto-compact 那一行能当场开关它。
+  // 开关只影响**自动**压缩 —— `compact.request` 是手动路径，不该被一个「关掉自动」的
+  // 开关拦住（那正是「关掉自动压缩」而不是「禁用压缩」）。
+  //
+  let enabled = options.enabled ?? true;
 
   /**
    * 上一次看到的状态是不是「在跑」。
@@ -83,6 +101,8 @@ export function createAutoCompact(options: {
     wasRunning = running;
     // 只在「刚刚停下来」的那一下判：否则每一条 delta、每一次 store 变化都会重算一遍。
     if (!justStopped) return;
+    // 关掉时不做任何判定 —— `/settings` 里刚关掉的那一轮不该还压一次。
+    if (!enabled) return;
     if (state.compacting) return;
 
     const decision = decideCompaction({ state, settings: state.compactionSettings });
@@ -95,7 +115,13 @@ export function createAutoCompact(options: {
   };
 
   const unsubscribe = store.subscribe(check);
-  return { dispose: unsubscribe };
+  return {
+    dispose: unsubscribe,
+    enabled: () => enabled,
+    setEnabled: (next: boolean) => {
+      enabled = next;
+    },
+  };
 }
 
 export interface CreateAgentStoreOptions {
@@ -117,6 +143,16 @@ export interface CreateAgentStoreOptions {
   cwd?: string | undefined;
   /** 单轮内最多几次 LLM 尝试（含首次），2 = 失败后重试一次。 */
   maxLlmAttempts?: number | undefined;
+  /**
+   * 各档思考级别的 token 预算（`settings.json` 的 `thinkingBudgets`）。
+   * 开局给一次，之后每个请求原样带上（与 pi 的 Agent 同一步）—— 见 `effects.ts` 的注释。
+   */
+  thinkingBudgets?: ThinkingBudgets | undefined;
+  /**
+   * 自动压缩开局开着吗（`settings.json` 的 `compaction.enabled`，pi 的默认是 `true`）。
+   * 不给就是 `true`；给 `false` 时压缩器仍然装好（`/settings` 里能再打开）。
+   */
+  autoCompactEnabled?: boolean | undefined;
   /** 注入会话 id（决定持久化文件名；默认按时间生成）。 */
   sessionId?: string | undefined;
   /** 测试注入假 streamFn 用；默认走 pi-ai。 */
@@ -161,6 +197,7 @@ export function createAgentStoreWith(options: CreateAgentStoreOptions): AgentSto
       // **每次请求现取**模型（而不是捕获建表那一个）—— /model 换了模型之后
       // 下一个回合必须真的发给新的那个。症状见 `effects.ts` 的 `resolveModel` 注释。
       resolveModel: (state) => runtime.models.getModel(state.model.provider, state.model.modelId),
+      ...(options.thinkingBudgets !== undefined ? { thinkingBudgets: options.thinkingBudgets } : {}),
     });
 
   const initialState = createInitialState({
@@ -193,7 +230,11 @@ export function createAgentStoreWith(options: CreateAgentStoreOptions): AgentSto
   ) as unknown as AgentStore;
   // 自动压缩：只在**能**压的时候装（表里没有 runCompact 就是不支持压缩，
   // 那时装上去只会发一条没人接的 request）。
-  const autoCompact = createAutoCompact({ store, enabled: table.runCompact !== undefined });
+  const autoCompact = createAutoCompact({
+    store,
+    supported: table.runCompact !== undefined,
+    ...(options.autoCompactEnabled !== undefined ? { enabled: options.autoCompactEnabled } : {}),
+  });
   return { store, persistence: null, autoCompact };
 }
 

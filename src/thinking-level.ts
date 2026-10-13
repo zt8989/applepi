@@ -26,6 +26,7 @@ import {
   clampThinkingLevel,
   type Model,
   type ModelThinkingLevel,
+  type ThinkingBudgets,
 } from '@earendil-works/pi-ai';
 import { SettingsManager } from '@earendil-works/pi-coding-agent/dist/core/settings-manager.js';
 import { piAgentDir } from './pi-config';
@@ -186,6 +187,54 @@ export function readModelThinkingLevel(
 }
 
 /**
+ * 读**全部** per-model 覆盖（`/settings` 面板那一行要报「配了几个」）。
+ *
+ * 读不到（没配过 / 文件坏了 / 没权限）返回 `{}`：空对象与「没配过」在面板上是同一句
+ * `none`，而返回 `undefined` 会让调用方多一个分支。
+ */
+export function readAllModelThinkingLevels(cwd: string = process.cwd()): Record<string, string> {
+  try {
+    return { ...SettingsManager.create(cwd, piAgentDir()).getAllModelThinkingLevels() };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * 读 `settings.json` 的 `thinkingBudgets`（各档 token 预算）。
+ *
+ * ## 只有四档，而且只在「按 token 算预算」的 provider 上有用
+ *
+ * `minimal` / `low` / `medium` / `high` 就是 pi 的全部键（`xhigh` / `max` 在取预算时会被
+ * 归成 `high`，见 pi-ai 的 `clampReasoning`）。它影响的是**思考占多少 token**：
+ * 思考与正文共一个 `max_tokens`，没有预算时一轮重度思考能把整个回复吃光、一句话都
+ * 不出来（pi-ai 的 `thinkingTokenBudgetField` 注释里就是这个场景）。
+ *
+ * 非法值（手改过：字符串、负数、NaN）**逐项丢掉**，而不是整个字段作废 —— 丢掉一项
+ * 只少一个预算，而整个作废会让另外三项也失效。
+ *
+ * 与 pi 同一步：它也是**开局读一次**（`core/sdk.js:275` 递给 Agent 的那个字段），
+ * 所以这轮聊到一半手改 settings.json 不会生效 —— 跟 pi 一样。
+ */
+export function readThinkingBudgets(cwd: string = process.cwd()): ThinkingBudgets | undefined {
+  let raw: unknown;
+  try {
+    raw = SettingsManager.create(cwd, piAgentDir()).getThinkingBudgets();
+  } catch {
+    return undefined;
+  }
+  if (raw === null || typeof raw !== 'object') return undefined;
+  const budgets: ThinkingBudgets = {};
+  for (const level of ['minimal', 'low', 'medium', 'high'] as const) {
+    const value = (raw as Record<string, unknown>)[level];
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      budgets[level] = Math.floor(value);
+    }
+  }
+  return Object.keys(budgets).length > 0 ? budgets : undefined;
+}
+
+/**
  * 写 `defaultThinkingLevel`（`/thinking` 面板里的 `Ctrl+S`）。
  *
  * 落的是**用户请求的那一档，不是 clamp 之后的那一档** —— 与 pi 的
@@ -212,6 +261,21 @@ export async function writeModelThinkingLevel(
   cwd: string = process.cwd(),
 ): Promise<boolean> {
   return writeSetting(cwd, (settings) => settings.setModelThinkingLevel(provider, modelId, level));
+}
+
+/**
+ * 删掉某个模型的覆盖（`/settings` 面板里的 `(clear override)`）。
+ *
+ * 与 pi 的 `removeModelThinkingLevel` 同义：删到空了就把整个 `modelThinkingLevels` 键
+ * 也去掉（pi 也是这么干的），否则盘上会留一个空对象 —— 那是「配过又清光」的痕迹，
+ * 下次有人读它时得先判空。
+ */
+export async function removeModelThinkingLevel(
+  provider: string,
+  modelId: string,
+  cwd: string = process.cwd(),
+): Promise<boolean> {
+  return writeSetting(cwd, (settings) => settings.removeModelThinkingLevel(provider, modelId));
 }
 
 /** 写一份 settings 并等它真的落盘。失败（没权限 / 坏文件）返回 `false`，不抛。 */

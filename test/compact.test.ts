@@ -6,6 +6,9 @@ import type {
   Message,
 } from '@earendil-works/pi-ai';
 import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import {
   compactionSettings,
   compactReasonText,
@@ -14,7 +17,9 @@ import {
   isCompactionSummary,
   lastContextTokens,
   planCut,
+  readCompactionEnabled,
   runCompaction,
+  writeCompactionEnabled,
 } from '../src/compact';
 import { createAgentReducer, loopWiring } from '../src/reducer';
 import { createAgentStore, createAutoCompact, waitForIdle } from '../src/store';
@@ -505,6 +510,46 @@ test('自动压缩：回合结束后超阈值就真的压（这条曾经是坏�
   assert.equal(state.trace.tipId, compactNode?.id, '压缩推进 tip（之后的事从压缩点长出来）');
 });
 
+test('自动压缩：关着的时候真的不压（`/settings` 里关掉不是只把开关画上）', async () => {
+  const faux = createFauxRuntime();
+  let calls = 0;
+  const store = createAgentStore({
+    runtime: faux.runtime,
+    systemPrompt: 'test',
+    // `autoCompactEnabled: false` = `settings.json` 里 `compaction.enabled: false`。
+    autoCompactEnabled: false,
+    streamFn: () => {
+      calls += 1;
+      // 与上面那条「超阈值就真的压」同一种历史与窗口：**如果**订阅器还在判，它会压。
+      return streamOf('好', 55_000);
+    },
+  });
+  for (let i = 0; i < 30; i += 1) {
+    store.dispatch({ type: 'session.restored', message: user(`问题${i}`, 6000) } as AgentAction);
+  }
+  store.dispatch({ type: 'prompt.init', systemPrompt: 'test', tools: [] } as AgentAction);
+  store.dispatch({
+    type: 'model.init',
+    provider: 'faux',
+    modelId: 'fake',
+    thinkingLevel: 'off',
+    capabilities: {
+      midConvoSystemMessages: false,
+      midConvoToolAdditions: false,
+      developerRole: false,
+    },
+    contextWindow: 60_000,
+  } as AgentAction);
+  store.dispatch({ type: 'user.message', text: '第一句' } as AgentAction);
+  await waitForIdle(store);
+  await new Promise((r) => setTimeout(r, 50));
+
+  assert.equal(store.getState().lastCompaction, null, '关掉了就不该自动压');
+  assert.equal(calls, 1, '一次摘要调用都没有（只有那一轮普通回答）');
+  // 30 条历史 + 这一句 + 模型那一句回答 = 32；历史一条都没被摘掉。
+  assert.equal(store.getState().messages.length, 32, '历史原样，没有被摘要替换');
+});
+
 test('自动压缩：占用不高就不压（阈值没到不要白花钱）', async () => {
   const faux = createFauxRuntime();
   let calls = 0;
@@ -536,8 +581,24 @@ test('自动压缩：占用不高就不压（阈值没到不要白花钱）', as
   assert.equal(calls, 1, '只调了一次模型（没有被摘要调用）');
 });
 
-test('自动压缩：不支持时不装订阅器（`enabled: false` 就是「不装」）', () => {
-  assert.equal(createAutoCompact({ store: {} as never, enabled: false }), null);
+test('自动压缩：不支持时不装订阅器（`supported: false` 就是「不装」）', () => {
+  // 「不支持」= 这张 effect 表里没有 `runCompact`（Web 侧自带表时可能是这样）。
+  // 那时连开关都不给：一个什么都压不了的开关就是谎。
+  assert.equal(createAutoCompact({ store: {} as never, supported: false }), null);
+});
+
+test('自动压缩：关掉之后可以当场再打开（`/settings` 里那一行）', () => {
+  // 一个最小的 store：`createAutoCompact` 要 subscribe（它是个订阅器）与 getState。
+  const stub = {
+    getState: (): never => ({}) as never,
+    subscribe: (): (() => void) => () => {},
+  };
+  const auto = createAutoCompact({ store: stub as never, supported: true, enabled: false });
+  assert.ok(auto, '不支持才不装 —— 「关着」仍然要装，否则面板里打不开');
+  assert.equal(auto.enabled(), false);
+  auto.setEnabled(true);
+  assert.equal(auto.enabled(), true);
+  auto.dispose();
 });
 
 test('compact.request 的接线：先记理由、再发 runCompact（failActionCreator 拿不到 action）', () => {
@@ -580,4 +641,28 @@ test('isCompactionSummary 认结构标记，不认「内容长得像」', () => 
     false,
     '用户手打一段一模一样的文本，不该被当成压缩点（否则回放会丢真历史）',
   );
+});
+test('compaction.enabled：读的是 pi 那个键，写下去 pi 也认', async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'ela-compact-home-'));
+  const previous = process.env['PI_CODING_AGENT_DIR'];
+  process.env['PI_CODING_AGENT_DIR'] = home;
+  try {
+    await writeFile(
+      path.join(home, 'settings.json'),
+      `${JSON.stringify({ compaction: { enabled: false } })}\n`,
+      'utf8',
+    );
+    assert.equal(readCompactionEnabled(home), false, '盘上关着就是关着');
+    assert.equal(await writeCompactionEnabled(true, home), true);
+    assert.equal(readCompactionEnabled(home), true);
+    // 键名与 pi 一致（`compaction.enabled`）—— 写错键的症状是「本项目关了、pi 还在压」。
+    const onDisk = JSON.parse(await readFile(path.join(home, 'settings.json'), 'utf8')) as {
+      compaction?: { enabled?: boolean };
+    };
+    assert.equal(onDisk.compaction?.enabled, true);
+  } finally {
+    if (previous === undefined) delete process.env['PI_CODING_AGENT_DIR'];
+    else process.env['PI_CODING_AGENT_DIR'] = previous;
+    await rm(home, { recursive: true, force: true });
+  }
 });

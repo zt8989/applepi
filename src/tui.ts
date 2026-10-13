@@ -132,6 +132,7 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
   /hotkeys              列出全部键位（与 pi 的 /hotkeys 同形）
   /model [id]           换模型（不给 id 就弹面板；给了精确命中就直接切）
   /thinking [级别]      思考级别（不给就弹面板，面板里 Ctrl+S 存默认；给了就直接切）
+  /settings             设置面板（自动压缩 / 隐藏思考块 / 每个模型的默认思考级别）
   /scoped-models        启用/禁用哪些模型参与 Ctrl+P 循环（Ctrl+S 存进 settings）
   /skills               列出已装载的 skill
   /skill:<名字> [问题]  把某个 skill 的正文展开后连同你的问题一起发给模型
@@ -392,6 +393,10 @@ async function main(): Promise<void> {
     // pi 的 `_cycleScopedModel` 也把它传下去（`setModel` 的第二个参数）。
     setModel: (provider: string, modelId: string, modelOptions?: { thinkingLevel?: string | undefined }) =>
       kernel.setModel(provider, modelId, modelOptions),
+    // 自动压缩的开关（`/settings` 面板里那一行）：内核负责写盘 + 当场生效，
+    // 因为那个订阅器是内核装的（`store.ts` 的 `AutoCompact`）。
+    autoCompactEnabled: () => kernel.autoCompactEnabled(),
+    setAutoCompactEnabled: (enabled: boolean) => kernel.setAutoCompactEnabled(enabled),
     // 面板要列模型，就要有 provider 装配。**给真的 runtime**（内核持有的那个 `AgentRuntime`）——
     // 它与 `createRuntime` 装的是同一个对象，面板看到的模型目录与实际发请求的目录同源。
     runtime: kernel.runtime,

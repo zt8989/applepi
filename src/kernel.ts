@@ -32,9 +32,11 @@ import {
   isThinkingLevel,
   readDefaultThinkingLevel,
   readModelThinkingLevel,
+  readThinkingBudgets,
   resolveStartupThinkingLevel,
   thinkingLevelForModelSwitch,
 } from './thinking-level';
+import { readCompactionEnabled, writeCompactionEnabled } from './compact';
 import path from 'node:path';
 import { getTools } from './tools';
 import { buildSystemPromptText, promptToolsFrom, type PromptToolLike } from './system-prompt';
@@ -143,6 +145,17 @@ export interface Kernel {
   readonly session: SessionRecorder | null;
   /** 开一个新会话：换 id（于是换文件）、清空对话。**不会**把新消息写进旧文件。 */
   newSession(): { id: string };
+  /**
+   * 自动压缩现在开着吗。`null` = 这个装配不支持压缩（没有 `runCompact`），
+   * 那时 `/settings` 那一行**不显示** —— 一个什么都压不了的开关就是谎。
+   */
+  autoCompactEnabled(): boolean | null;
+  /**
+   * 开/关自动压缩：立即生效（不再自动压）并写 `settings.json` 的 `compaction.enabled`。
+   *
+   * 关的只是**自动**那条路 —— 手动 `/compact` 仍然能用（那才是「关掉自动压缩」的意思）。
+   */
+  setAutoCompactEnabled(enabled: boolean): void;
   /**
    * 恢复一个历史会话（读文件 + 灌回 state）。**零 token**，不重跑模型。
    * @returns 恢复的会话 id 与灌进去的消息条数。
@@ -290,6 +303,11 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       defaultLevel: readDefaultThinkingLevel(cwd),
     }),
   );
+  //
+  // 思考预算（`settings.json` 的 `thinkingBudgets`）：与 pi 同一步，**开局读一次**
+  // （`core/sdk.js:275`），之后每个请求原样带上（`effects.ts`）。
+  //
+  const budgets = readThinkingBudgets(cwd);
 
   const { store, persistence, autoCompact } = createPersistentStore({
     runtime,
@@ -300,6 +318,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
     ...(options.llmTimeoutMs !== undefined ? { llmTimeoutMs: options.llmTimeoutMs } : {}),
     ...(options.maxLlmAttempts !== undefined ? { maxLlmAttempts: options.maxLlmAttempts } : {}),
+    // 思考预算与压缩开关都是**开局读一次**（与 pi 同一步，见各自的注释）。
+    ...(budgets !== undefined ? { thinkingBudgets: budgets } : {}),
+    autoCompactEnabled: readCompactionEnabled(cwd),
     ...(options.traceDir === null ? {} : { traceSink: activeSink }),
     ...(options.onTraceError ? { onTraceError: options.onTraceError } : {}),
   });
@@ -576,6 +597,24 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       if (previous.sink?.close) void previous.sink.close();
 
       return { id };
+    },
+    /**
+     * 自动压缩的开关。
+     *
+     * 读的是**活着的那个对象**（而不是重读 settings）：`/settings` 里刚关掉之后
+     * 那一行得显示 `false`，而盘上的值要等异步写落盘 —— 读盘会读到一个旧值，
+     * 症状是「关了两下才关掉」。
+     */
+    autoCompactEnabled(): boolean | null {
+      return autoCompact === null ? null : autoCompact.enabled();
+    },
+    /**
+     * 写盘失败**不报错也不回滚**：与 pi 的 `setCompactionEnabled()` 同一处理，
+     * 而「关不掉」比「关掉了但没存住」严重得多（前者当场就看得见）。
+     */
+    setAutoCompactEnabled(enabled: boolean): void {
+      autoCompact?.setEnabled(enabled);
+      void writeCompactionEnabled(enabled, cwd);
     },
     /**
      * 恢复一个历史会话：读文件、清空当前对话、把消息**一次**灌回去，

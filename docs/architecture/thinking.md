@@ -64,6 +64,7 @@ clamp 用的是 pi-ai 导出的 `clampThinkingLevel`（`clampForModel` 只是它
 | `/thinking` 面板回车 | ✅ | ❌ | ✅ |
 | `/thinking` 面板 **`Ctrl+S`** | ✅ | ✅ `defaultThinkingLevel`（落的是**请求值**，不 clamp） | ✅ |
 | `/thinking <级别>` | ✅（大小写不敏感；不命中就报可选值，与 pi 同文案） | ❌ | ✅ |
+| `/settings` 里的 **Default thinking level per model** | ✅（per-model 覆盖；改的正好是当前模型时当场生效） | ✅ `modelThinkingLevels` | ✅ |
 | `--thinking <级别>` | ✅（不认的值**告警并忽略**，不退出） | ❌ | — |
 | `-m id:<级别>`（模型 pattern 的 `:<thinking>` 后缀） | ✅（**低于** `--thinking`，与参数顺序无关） | ❌ | — |
 | 换模型（`/model`、`Ctrl+P`、恢复会话） | ✅ 重新解析 | ❌ | ✅ |
@@ -97,7 +98,29 @@ clamp 用的是 pi-ai 导出的 `clampThinkingLevel`（`clampForModel` 只是它
 后果只有一个：恢复一个老会话又直接退出，盘上不会多这一行。换来的是那条硬挣来的不变式：
 **恢复不写盘**（`test/restore-perf.test.ts`「会话文件一个字节都不该变」）。
 
-## 六、代码位置
+## 六、思考预算（`thinkingBudgets`）
+
+思考与正文共用同一个 `max_tokens`，所以一轮重度思考可能把整个回复吃光、正文一个字都不出。
+`settings.json` 的 `thinkingBudgets` 就是给每一档定一个 token 上限：
+
+```json
+{ "thinkingBudgets": { "low": 512, "high": 4096 } }
+```
+
+四个键（`minimal` / `low` / `medium` / `high`）就是 pi 的全部 —— `xhigh` / `max` 在取预算时
+会被归成 `high`（pi-ai 的 `clampReasoning`），所以没有它们的位置。与 pi 同一步：**开局读一次**
+（`core/sdk.js:275` 递给 Agent 的那个字段），之后每个请求原样带上；聊到一半手改 settings.json
+不生效（要重启），两边一样。
+
+它只在**按 token 算预算**的端点上真的发出去：Anthropic / Bedrock 拿它当
+`thinking.budget_tokens`，而 OpenAI 兼容端点要看模型目录里的 `compat.thinkingTokenBudgetField`
+（`thinking_token_budget` = vLLM、`thinking_budget` = Qwen/DashScope/SGLang、
+`thinking_budget_tokens` = llama.cpp；默认不开，也不在生成的目录里）。不配时 pi-ai 用它的
+内置预算（minimal 1k … high 16k）。
+
+**没有对应的设置行**（pi 也没有）：它属于「手改 settings.json」的那类旋钮。
+
+## 七、代码位置
 
 | 做什么 | 在哪 |
 | --- | --- |
@@ -106,6 +129,8 @@ clamp 用的是 pi-ai 导出的 `clampThinkingLevel`（`clampForModel` 只是它
 | 恢复会话时带回来 | `src/kernel.ts` 的 `restoreSession` |
 | 落盘 + 回填 | `src/session-recorder.ts` |
 | 读会话里那条 | `src/session-file.ts` 的 `sessionThinking` / `readSessionThinking` |
+| 思考预算 | `readThinkingBudgets`（`thinking-level.ts`）→ `createKernel` → `store.ts` → `effects.ts` 的 `streamOptions.thinkingBudgets` |
 | 循环（`Shift+Tab`） | `src/tui/pi-actions.ts` 的 `nextThinkingLevel`（`-1 → 第 1 个`，与 pi 的 `cycleThinkingLevel` 同式子；**与模型循环的 `-1 → 第 2 个`不同**） |
 | 面板 | `src/tui/thinking-picker.ts`（pi 官方的 `ThinkingSelectorComponent`） |
+| 设置面板（per-model 覆盖） | `src/tui/settings-picker.ts`（pi 的 `SettingsList` + `SteppedSubmenu`）；见 [settings](settings.md) |
 | 命令接线 | `src/tui/app.ts` 的 `case 'thinking'` |

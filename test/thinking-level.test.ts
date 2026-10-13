@@ -31,8 +31,11 @@ import {
   DEFAULT_THINKING_LEVEL,
   clampForModel,
   isThinkingLevel,
+  readAllModelThinkingLevels,
   readDefaultThinkingLevel,
   readModelThinkingLevel,
+  readThinkingBudgets,
+  removeModelThinkingLevel,
   resolveStartupThinkingLevel,
   thinkingLevelForModelSwitch,
   writeDefaultThinkingLevel,
@@ -549,6 +552,173 @@ test('内核 restoreSession：老会话（没有那条记录）保持启动解�
       // 恢复本身不写盘（那条不变式在 `test/restore-perf.test.ts` 里守得很紧）；
       // 回填推迟到下一次真的要写文件时（见 `hasThinkingEntry` 的注释）。
       assert.deepEqual(await readFile(file), before, '恢复不该改会话文件');
+    } finally {
+      kernel.dispose();
+    }
+  });
+});
+// ─── 思考预算（`thinkingBudgets`） ───
+
+test('readThinkingBudgets：读 pi 的四档键，坏值逐项丢掉（不是整个字段作废）', async () => {
+  await withAgentHome({ settings: { thinkingBudgets: { low: 512, high: 4096 } } }, async (home) => {
+    assert.deepEqual(readThinkingBudgets(home), { low: 512, high: 4096 });
+  });
+  await withAgentHome(
+    // 手改坏的形态：字符串、负数、NaN、以及一个 pi 不认的档位（`xhigh` 不在预算表里 ——
+    // 取预算时它会被归成 high，见 pi-ai 的 `clampReasoning`）。
+    { settings: { thinkingBudgets: { low: '512', medium: -1, high: 4096, xhigh: 99999 } } },
+    async (home) => {
+      assert.deepEqual(readThinkingBudgets(home), { high: 4096 }, '只留合法的那一项');
+    },
+  );
+  await withAgentHome({ settings: { thinkingBudgets: { low: 512 } } }, async (home) => {
+    assert.deepEqual(readThinkingBudgets(home), { low: 512 });
+  });
+  await withAgentHome({}, async (home) => {
+    assert.equal(readThinkingBudgets(home), undefined, '没配过就是 undefined（pi-ai 会用内置预算）');
+  });
+});
+
+test('readAllModelThinkingLevels / removeModelThinkingLevel：面板那一行读的与清的是同一份', async () => {
+  await withAgentHome({}, async (home) => {
+    assert.deepEqual(readAllModelThinkingLevels(home), {}, '没配过就是空表');
+    assert.equal(await writeModelThinkingLevel('p', 'm1', 'low', home), true);
+    assert.equal(await writeModelThinkingLevel('p', 'm2', 'high', home), true);
+    assert.deepEqual(readAllModelThinkingLevels(home), { 'p/m1': 'low', 'p/m2': 'high' });
+
+    assert.equal(await removeModelThinkingLevel('p', 'm1', home), true);
+    assert.deepEqual(readAllModelThinkingLevels(home), { 'p/m2': 'high' });
+
+    // 清到空时整个 `modelThinkingLevels` 键都该消失（与 pi 的 `removeModelThinkingLevel` 一致）——
+    // 否则盘上留一个空对象，下次读的人得多判一次空。
+    await removeModelThinkingLevel('p', 'm2', home);
+    const onDisk = JSON.parse(await readFile(path.join(home, 'settings.json'), 'utf8')) as Record<string, unknown>;
+    assert.equal('modelThinkingLevels' in onDisk, false);
+  });
+});
+
+test('内核：把 settings 的 thinkingBudgets 真的发进了请求体（本地假网关录下来的）', async () => {
+  const { createServer } = await import('node:http');
+  const requests: Array<Record<string, unknown>> = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk: Buffer) => (body += chunk.toString()));
+    req.on('end', () => {
+      try {
+        requests.push(JSON.parse(body) as Record<string, unknown>);
+      } catch {
+        requests.push({ raw: body });
+      }
+      // 一段最小的 OpenAI 兼容 SSE 流（pi-ai 的 openai-completions 认这个形状）。
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const chunk = (delta: unknown, finish: string | null): string =>
+        `data: ${JSON.stringify({
+          id: 'c1',
+          object: 'chat.completion.chunk',
+          created: 0,
+          model: 'm1',
+          choices: [{ index: 0, delta, finish_reason: finish }],
+        })}\n\n`;
+      res.write(chunk({ role: 'assistant', content: '你好' }, null));
+      res.write(chunk({}, 'stop'));
+      res.write(
+        `data: ${JSON.stringify({
+          id: 'c1',
+          object: 'chat.completion.chunk',
+          created: 0,
+          model: 'm1',
+          choices: [],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        })}\n\n`,
+      );
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const address = server.address();
+  const port = typeof address === 'object' && address !== null ? address.port : 0;
+
+  const models = {
+    providers: {
+      testprov: {
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        api: 'openai-completions',
+        models: [
+          {
+            id: 'm1',
+            api: 'openai-completions',
+            reasoning: true,
+            thinkingLevelMap: DEEPSEEK_MAP,
+            contextWindow: 100_000,
+            maxTokens: 20_000,
+            // 这一项才是预算真正上线的开关：pi-ai 只在这类端点上发那个顶层字段
+            // （`thinking_budget` 是 Qwen / DashScope / SGLang 的字段名）。
+            compat: { thinkingFormat: 'qwen', supportsReasoningEffort: true, thinkingTokenBudgetField: 'thinking_budget' },
+          },
+        ],
+      },
+    },
+  };
+
+  const previousKey = process.env['TESTPROV_API_KEY'];
+  process.env['TESTPROV_API_KEY'] = 'test';
+  try {
+    await withAgentHome(
+      { models, settings: { thinkingBudgets: { low: 512, high: 4096 } } },
+      async (home) => {
+        const { waitForIdle } = await import('../src/store');
+        const kernel = await createKernel({
+          provider: 'testprov',
+          model: 'm1',
+          cwd: home,
+          // 显式 low：于是请求体里的预算应该是 settings 里 low 那一项（512），
+          // 而不是内置的 2048。
+          thinkingLevel: 'low',
+          noExtensions: true,
+          writeSession: false,
+          // 这条只盯请求体：轨迹不落盘（默认目录不存在时刷盘会在 dispose 里报 ENOENT）。
+          traceDir: null,
+        });
+        try {
+          kernel.store.dispatch({ type: 'user.message', text: '你好' } as AgentAction);
+          await waitForIdle(kernel.store);
+        } finally {
+          kernel.dispose();
+        }
+        assert.equal(requests.length, 1, `该只打一次请求，实际 ${requests.length}`);
+        assert.equal(requests[0]?.['thinking_budget'], 512, 'settings 的 thinkingBudgets.low 该进请求体');
+        assert.equal(requests[0]?.['model'], 'm1');
+      },
+    );
+  } finally {
+    server.close();
+    if (previousKey === undefined) delete process.env['TESTPROV_API_KEY'];
+    else process.env['TESTPROV_API_KEY'] = previousKey;
+  }
+});
+
+// ─── 自动压缩的开关（`/settings` 里那一行） ───
+
+test('内核：autoCompactEnabled 读的是活着的开关，set 之后当场变并写进 settings', async () => {
+  await withAgentHome({}, async (home) => {
+    const kernel = await createKernel({
+      provider: 'faux',
+      cwd: home,
+      demo: true,
+      noExtensions: true,
+      writeSession: false,
+    });
+    try {
+      assert.equal(kernel.autoCompactEnabled(), true, '没配过就是开（pi 的默认）');
+      kernel.setAutoCompactEnabled(false);
+      assert.equal(kernel.autoCompactEnabled(), false, '当场生效（不等写盘）');
+      // 写盘是异步的：等它一下再读盘上的值。
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const onDisk = JSON.parse(
+        await readFile(path.join(home, 'settings.json'), 'utf8'),
+      ) as { compaction?: { enabled?: boolean } };
+      assert.equal(onDisk.compaction?.enabled, false, 'pi 的同一个键');
     } finally {
       kernel.dispose();
     }

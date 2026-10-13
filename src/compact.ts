@@ -52,8 +52,10 @@ import type {
   Usage,
   UserMessage,
 } from '@earendil-works/pi-ai';
+import { SettingsManager } from '@earendil-works/pi-coding-agent/dist/core/settings-manager.js';
 import type { StreamFn } from './provider';
 import type { AgentState } from './state';
+import { piAgentDir } from './pi-config';
 
 export { DEFAULT_COMPACTION_SETTINGS, shouldCompact, isContextOverflow };
 export type { CompactionSettings };
@@ -416,4 +418,46 @@ function lastSummaryOf(messages: readonly Message[]): string | undefined {
       : text;
   }
   return undefined;
+}
+// ─── 这个域的 settings（`compaction.enabled`） ───
+
+/**
+ * 读 `settings.json` 的 `compaction.enabled`（默认 `true`，与 pi 同一个键）。
+ *
+ * ## 为什么放在这个文件
+ *
+ * settings 的读写按**域**分：模型作用域在 `model-scope.ts`、思考级别在
+ * `thinking-level.ts`、压缩就在这里。理由与那两处一样 —— 同一个键在两处各读一遍，
+ * 迟早有一处忘了校验/忘了默认值，而「读了但值是错的」不会报错，只会表现成
+ * 「我明明关了自动压缩，它还是压了」。
+ *
+ * 读不到（没配过 / 文件坏了 / 没权限）→ `true`：那是 pi 的默认值，也是这个项目的
+ * 老行为（以前无条件开）。
+ */
+export function readCompactionEnabled(cwd: string = process.cwd()): boolean {
+  try {
+    return SettingsManager.create(cwd, piAgentDir()).getCompactionEnabled();
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * 写 `compaction.enabled`（`/settings` 面板里那一行）。
+ *
+ * async + `flush()` 的理由与 `writeHideThinkingBlock` 同一句：pi 的 `save()` 是入队异步写，
+ * 不等它落盘，调用方紧接着读会读到旧值，而写失败也拿不到。
+ */
+export async function writeCompactionEnabled(
+  enabled: boolean,
+  cwd: string = process.cwd(),
+): Promise<boolean> {
+  try {
+    const settings = SettingsManager.create(cwd, piAgentDir());
+    settings.setCompactionEnabled(enabled);
+    await settings.flush();
+    return settings.drainErrors().length === 0;
+  } catch {
+    return false;
+  }
 }
