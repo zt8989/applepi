@@ -24,7 +24,24 @@
 import type { Api, AssistantMessage, Message, Model } from '@earendil-works/pi-ai';
 
 /** 协议版本。对不上就拒绝连接 —— 比半懂不懂地解析强。 */
-export const WEB_PROTOCOL_VERSION = 1;
+export const WEB_PROTOCOL_VERSION = 2;
+
+/**
+ * 列表里的一条模型（**紧凑投影**，不是整份 `Model`）。
+ *
+ * ## 为什么不在线协议里传整份 Model
+ *
+ * 目录里有四百多条（本机是 436），整份序列化 ~250KB；而选择器真正用到的只有
+ * 「provider / id / 名字 / 能不能思考」。当前模型仍是**整份**（在 `state.model`）——
+ * 那是要显示在输入框底下、要打得开模型详情的那一个。
+ */
+export interface WebModelRef {
+  provider: string;
+  id: string;
+  name: string;
+  /** 支持思考（理论上限不是 `off`）—— 与 TUI 面板上的标记同一个口径。 */
+  reasoning: boolean;
+}
 
 /**
  * 浏览器侧 `session.state` 的形状（pi-web-ui 真的会读的字段）。
@@ -76,6 +93,20 @@ export type WebServerMessage =
       type: 'hello';
       version: number;
       state: WebAgentState;
+      /**
+       * 可选的模型目录 —— **与 TUI 的 `/model` 面板同一份**（内核的
+       * `ModelRuntime.getAvailableSnapshot()`，即「已配置的 provider 里那些」）。
+       *
+       * 不用 pi-web-ui 自带那份：那是它打包进去的一代 pi-ai 的内置目录（1500+，
+       * 含大量本机根本没配的 provider），与内核能真发出去的模型对不上。
+       */
+      models: WebModelRef[];
+      /**
+       * 作用域（`settings.json` 的 `enabledModels`）。`null` = 全开。
+       *
+       * 与 TUI 同一个口径：**有作用域时面板默认只看作用域内**。
+       */
+      scopedModelIds: string[] | null;
       /** 开场诊断（装了哪些扩展、装载失败等）—— 直接显示在对话区上方。 */
       notices: string[];
     }

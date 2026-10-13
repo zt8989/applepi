@@ -234,7 +234,8 @@ pnpm start --no-web              # 只要终端
 pnpm start --web-port 8080       # 换端口（被占就往后试，真地址会报出来）
 ```
 
-两边是**同一个环**：在浏览器里发的话，终端那边也会看到（反之亦然）。
+两边是**同一个环**：在浏览器里发的话，终端那边也会看到（反之亦然）。模型列表与 TUI 的
+`/model` 面板**同一份**（已配置 provider 里那些），作用域也照它来。
 实现与边界见 [`docs/architecture/webui.md`](docs/architecture/webui.md)。
 
 界面里：`Ctrl+R` **在「对话」与「轨迹」两页之间切换**（顶部有页签标出当前在哪页），

@@ -22,6 +22,7 @@ import {
   setAppStorage,
 } from '@earendil-works/pi-web-ui';
 import { RemoteAgent } from './remote-agent';
+import { openModelPicker } from './model-picker';
 import './app.css';
 
 /** pi-web-ui 的若干组件会读全局 storage；铺一份最小可用的（sessions 我们不真的用）。 */
@@ -103,6 +104,14 @@ function wsUrl(): string {
   return `${protocol}//${window.location.host}/ws`;
 }
 
+/** 当前模型的 provider/id（选择器用它置顶 + 打勾）。拿不到就给 `null`。 */
+function currentModelRef(agent: RemoteAgent): { provider: string; id: string } | null {
+  const model = agent.state.model as { provider?: unknown; id?: unknown } | null;
+  const provider = model?.provider;
+  const id = model?.id;
+  return typeof provider === 'string' && typeof id === 'string' ? { provider, id } : null;
+}
+
 async function main(): Promise<void> {
   installStorage();
   buildShell();
@@ -126,6 +135,20 @@ async function main(): Promise<void> {
   await chatPanel.setAgent(agent as never, {
     // 密钥在服务端。这里返回 true 只是让 pi-web-ui 的「没 key 就不发」那道闸放行。
     onApiKeyRequired: async () => true,
+    // 换模型：**接管**掉 pi-web-ui 自带的 selector（它列的是它打包那一代 pi-ai 的内置
+    // 目录），改成服务端给的那份 —— 与 TUI 的 `/model` 面板同一份。
+    onModelSelect: () => {
+      openModelPicker({
+        models: agent.models,
+        current: currentModelRef(agent),
+        scopedModelIds: agent.scopedModelIds,
+        onSelect: (model) => {
+          // 写 `state.model` → RemoteAgentState 的 setter 把 provider/id 发给服务端，
+          // 由内核的 `setModel()` 真换（浏览器自己不换）。
+          agent.state.model = model;
+        },
+      });
+    },
   });
 
   const chat = document.getElementById('ela-chat');

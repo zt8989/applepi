@@ -6,9 +6,10 @@ import path from 'node:path';
 import { createAgentStore } from '@ela/core/store';
 import { createFauxRuntime, demoResponses } from '@ela/core/provider';
 import type { Api, Model } from '@earendil-works/pi-ai';
-import { WebBridge } from '../src/web/bridge';
+import { WebBridge, modelRefs } from '../src/web/bridge';
 import { startWebServer, type WebServerHandle } from '../src/web/server';
 import type { WebServerMessage } from '@ela/core/web-protocol';
+import { WEB_PROTOCOL_VERSION } from '@ela/core/web-protocol';
 
 /**
  * web server + 桥的集成测试（**不打网络**）。
@@ -105,6 +106,12 @@ async function start(): Promise<{
       setModel: () => true,
       newSession: () => {},
       resolveModel: (provider) => (provider === 'faux' ? model : null),
+      // 模型目录与服务端同一条路：调用方喂的是 `modelRefs(getAvailableSnapshot())`。
+      modelCatalog: [
+        { provider: 'faux', id: 'fake', name: 'Faux', reasoning: true },
+        { provider: 'faux', id: 'fake-2', name: 'Faux 2', reasoning: false },
+      ],
+      scopedModelIds: () => ['faux/fake'],
     },
     ['测试诊断一行'],
   );
@@ -161,12 +168,20 @@ test('bridge：hello 带版本与诊断，浏览器 → 服务端 → 浏览器 
     const hello = await client.waitFor('hello', (m) => m.type === 'hello');
     assert.equal(hello.type, 'hello');
     if (hello.type !== 'hello') throw new Error('unreachable');
-    assert.equal(hello.version, 1);
+    assert.equal(hello.version, WEB_PROTOCOL_VERSION);
     assert.deepEqual(hello.notices, ['测试诊断一行']);
     assert.equal(hello.state.sessionId, 'web-test-session');
     assert.equal(hello.state.isStreaming, false);
     assert.equal(hello.state.model?.provider, 'faux');
     assert.deepEqual(hello.state.messages, []);
+    // 模型目录与作用域随 hello 一起来（浏览器侧选择器就吃它）。
+    assert.deepEqual(
+      hello.models.map((m) => `${m.provider}/${m.id}`),
+      ['faux/fake', 'faux/fake-2'],
+    );
+    assert.equal(hello.models[0]?.name, 'Faux');
+    assert.equal(hello.models[0]?.reasoning, true);
+    assert.deepEqual(hello.scopedModelIds, ['faux/fake']);
 
     // 浏览器写状态：服务端要真的收下并回推一份新状态。
     client.send({ type: 'setThinking', level: 'high' });
@@ -255,5 +270,41 @@ test('bridge：提问后能看见流式事件与最终助手消息（走完整�
   } finally {
     client.close();
     await ctx.dispose();
+  }
+});
+test('modelRefs：投影成紧凑条目（id / 名字 / 能不能思考）', () => {
+  const models = [
+    { provider: 'workbuddy', id: 'cn:deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', reasoning: true },
+    { provider: 'deepseek', id: 'deepseek-flash', name: '', reasoning: false },
+  ] as unknown as Parameters<typeof modelRefs>[0];
+  assert.deepEqual(modelRefs(models), [
+    { provider: 'workbuddy', id: 'cn:deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', reasoning: true },
+    // 名字空 → 退回 id（选择器上不至于空着）。
+    { provider: 'deepseek', id: 'deepseek-flash', name: 'deepseek-flash', reasoning: false },
+  ]);
+});
+
+test('bridge：没给目录时 hello 给空列表；空作用域归一成 null（= 全开）', () => {
+  const faux = createFauxRuntime();
+  faux.setResponses(demoResponses());
+  const store = createAgentStore({ runtime: faux.runtime, systemPrompt: 'test' });
+  const bridge = new WebBridge({
+    store,
+    cwd: '/tmp/ela-web-test',
+    getSessionId: () => 's',
+    setModel: () => true,
+    newSession: () => {},
+    resolveModel: () => null,
+    scopedModelIds: () => [],
+  });
+  try {
+    const hello = bridge.hello();
+    assert.equal(hello.type, 'hello');
+    if (hello.type !== 'hello') throw new Error('unreachable');
+    assert.deepEqual(hello.models, []);
+    // `[]` 与「没配过」是同一件事（与 TUI 的 `normalizeEnabled()` 同一个口径）。
+    assert.equal(hello.scopedModelIds, null);
+  } finally {
+    bridge.dispose();
   }
 });

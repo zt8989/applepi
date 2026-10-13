@@ -33,6 +33,7 @@ import {
   type WebAgentEvent,
   type WebAgentState,
   type WebClientMessage,
+  type WebModelRef,
   type WebServerMessage,
 } from '@ela/core/web-protocol';
 import type {
@@ -59,6 +60,16 @@ export interface WebBridgeOptions {
   setModel: (provider: string, id: string) => boolean;
   /** 开新会话（换 id → 换文件）。 */
   newSession: () => void;
+  /**
+   * 可选的模型目录 —— **与 TUI 的 `/model` 面板同一份**。
+   *
+   * 调用方传的是 `modelRefs(...getAvailableSnapshot())`（见 `modelRefs`）；不传就
+   * 空列表（选择器里只有当前模型那一条）。
+   */
+  modelCatalog?: readonly WebModelRef[] | undefined;
+  /** 当前作用域（`settings.json` 的 `enabledModels`）。每次握手现读 —— 用户可能在
+   * TUI 里刚改过。`null` = 全开。 */
+  scopedModelIds?: (() => readonly string[] | null) | undefined;
 }
 
 /** 零用量：流式中的部分消息还没账可算。 */
@@ -99,8 +110,22 @@ export function partialAssistantMessage(
   };
 }
 
-/** 只发对话三类消息 —— `system` 是 prompt 的载体，界面不渲染它。 */
-function conversational(messages: readonly Message[]): Message[] {
+/**
+ * 把内核的模型目录投影成线协议里的紧凑条目。
+ *
+ * 调用方直接喂 `modelRuntimeFor(runtime).getAvailableSnapshot()` —— 那是 TUI 的
+ * `/model` 面板用的同一份（已配置 provider 内那些），所以两边列表天然一致。
+ */
+export function modelRefs(models: readonly Model<Api>[]): WebModelRef[] {
+  return models.map((model) => ({
+    provider: String(model.provider),
+    id: model.id,
+    name: model.name === undefined || model.name === '' ? model.id : model.name,
+    reasoning: model.reasoning === true,
+  }));
+}
+
+/** 只发对话三类消息 —— `system` 是 prompt 的载体，界面不渲染它。 */function conversational(messages: readonly Message[]): Message[] {
   return messages.filter((message) => message.role !== 'system');
 }
 
@@ -137,9 +162,29 @@ export class WebBridge {
     this.unsubscribe = options.store.subscribe(() => this.onStoreChange());
   }
 
-  /** 新连接进来时的开场：整份状态 + 诊断。 */
+  /** 新连接进来时的开场：整份状态 + 模型目录 + 诊断。 */
   hello(): WebServerMessage {
-    return { type: 'hello', version: this.version, state: this.snapshot(), notices: this.notices };
+    return {
+      type: 'hello',
+      version: this.version,
+      state: this.snapshot(),
+      models: [...(this.options.modelCatalog ?? [])],
+      scopedModelIds: this.scopeIds(),
+      notices: this.notices,
+    };
+  }
+
+  /**
+   * 作用域：`null` = 全开。
+   *
+   * 空数组也归一化成 `null` —— 与 TUI 那边同一个口径
+   * （`model-picker.ts` 的 `configured === null || length === 0 ? null : …`）。
+   * 两处若不同，界面会显示「只看已启用（0 个）」而实际是全开。
+   */
+  private scopeIds(): string[] | null {
+    if (this.options.scopedModelIds === undefined) return null;
+    const ids = this.options.scopedModelIds();
+    return ids === null || ids.length === 0 ? null : [...ids];
   }
 
   /** 订阅广播。返回退订函数。 */

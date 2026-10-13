@@ -19,8 +19,10 @@ import { createKernel, type Kernel } from '@ela/core/kernel';
 import { runTui } from './app';
 import { setupTheme } from './theme';
 import { keyLabel } from './keybindings';
-import { WebBridge } from './web/bridge';
+import { WebBridge, modelRefs } from './web/bridge';
 import { startWebServer, type WebServerHandle } from './web/server';
+import { modelRuntimeFor } from './model-picker';
+import { readScopedModels } from '@ela/core/model-scope';
 import { extensionLabels } from './resource-labels';
 import type { Theme } from '@earendil-works/pi-coding-agent';
 // pi 的 theme 是 globalThis 上的一个 Proxy —— initTheme() 之后一直可读。
@@ -424,6 +426,11 @@ async function main(): Promise<void> {
             return null;
           }
         },
+        // 模型目录**与 TUI 的 `/model` 面板同一份**（同一个 `ModelRuntime`），
+        // 否则浏览器里会列出 pi-web-ui 自带那份 1500+ 的内置目录（本机根本没配）。
+        modelCatalog: modelRefs([...modelRuntimeFor(kernel.runtime).getAvailableSnapshot()]),
+        // 作用域每次握手现读 —— 用户可能刚在 TUI 里改过 `/scoped-models`。
+        scopedModelIds: () => readScopedModels(args.cwd),
       },
       // 开场诊断与终端那边同一个口径：装了哪些扩展 + 装载失败。
       [
