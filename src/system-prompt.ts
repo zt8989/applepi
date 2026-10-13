@@ -38,7 +38,7 @@
  * 这个取舍是安全的：我们跑在用户自己的机器上、工具的路径边界也只圈在 `--cwd` 里，
  * 而读一份项目内的 `.pi/SYSTEM.md` 与读同目录的 `AGENTS.md` 风险相同（后者无条件生效）。
  */
-import { buildSystemPrompt, type BuildSystemPromptOptions } from '@earendil-works/pi-coding-agent/dist/core/system-prompt.js';
+import { buildSystemPrompt, buildSystemPromptSections, type BuildSystemPromptOptions } from '@earendil-works/pi-coding-agent/dist/core/system-prompt.js';
 import { loadProjectContextFiles } from '@earendil-works/pi-coding-agent/dist/core/resource-loader.js';
 import {
   createBashToolDefinition,
@@ -280,13 +280,44 @@ export function buildPromptOptions(inputs: PromptInputs): BuildSystemPromptOptio
 }
 
 /**
- * 拼出完整的 system prompt 文本（发给模型的那一整段）。
+ * prompt 的两份形态：渲染好的整段文本 + 它的分段。
+ *
+ * 两份都从**同一份 options** 出来，所以「分段渲染出来」与 `text` 逐字节相同。
+ */
+export interface PromptParts {
+  /** 渲染好的整段文本 —— 就是今天发给模型的那段（`buildSystemPrompt` 的输出）。 */
+  text: string;
+  /**
+   * 分段（段名 → 渲染后的文本；`preamble` 是唯一不带 tag 的段）。
+   *
+   * ## 为什么要单独留一份
+   *
+   * pi 的 transcript 是**增量**的：后来的 system 消息按**段名** patch（`sections: {
+   * preamble: …, skills: null }`），而不是重发整段。只有拿得到「当初那几段」，
+   * 中途的 prompt 变更才可能做到「只把变了的段追加成新消息、已有消息一个字节不动」
+   * ——而那正是前缀缓存能活下来的原因（见 `prompt-head.ts`）。
+   *
+   * 只存渲染后的整段的话，中途任何一个字节的变更都得整段重发，缓存必断。
+   */
+  sections: Record<string, string>;
+}
+
+/**
+ * 装配 prompt 的两份形态。
  *
  * @param loadSkills 是否顺带扫 skill 目录。回放 / 测试里传 false ——
  *   目录内容可能已经变了，重扫得到的是**另一个** prompt（那时应该用落盘的那份）。
  */
-export function buildSystemPromptText(inputs: PromptInputs & { loadSkills?: boolean }): string {
+export function buildPromptParts(inputs: PromptInputs & { loadSkills?: boolean }): PromptParts {
   const skills =
     inputs.skills ?? (inputs.loadSkills === true ? loadSkillRegistry({ cwd: inputs.cwd }).skills : []);
-  return buildSystemPrompt(buildPromptOptions({ ...inputs, skills }));
+  const options = buildPromptOptions({ ...inputs, skills });
+  return { text: buildSystemPrompt(options), sections: buildSystemPromptSections(options) };
+}
+
+/**
+ * 拼出完整的 system prompt 文本（发给模型的那一整段）。
+ */
+export function buildSystemPromptText(inputs: PromptInputs & { loadSkills?: boolean }): string {
+  return buildPromptParts(inputs).text;
 }

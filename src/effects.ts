@@ -25,6 +25,7 @@ import type {
 import type { AgentAction } from './actions';
 import { classifyLlmError, type AgentState, type LlmErrorKind, type StopCause } from './state';
 import { getTool, getTools } from './tools';
+import { buildRequestContext, declaredToolSchemas } from './prompt-head';
 import { beginRun, endRun, lastAbortCause, RunAbortedError } from './run-control';
 import { resolveApiKey, type StreamFn } from './provider';
 import {
@@ -83,11 +84,7 @@ export interface EffectTable {
  * `execute` 在 `runToolCall` 里按名字从注册表取 —— 执行用的和发给模型的不是一回事。
  */
 function toolSchemas(state: AgentState): Tool[] {
-  return state.prompt.tools.map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.parameters as Tool['parameters'],
-  }));
+  return declaredToolSchemas(state.prompt.tools);
 }
 /**
  * pi-ai 版 effect 表：LLM 与工具都自己跑（CLI 用）。
@@ -182,15 +179,16 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
     const state = getState<AgentState>();
     // 记住这次尝试的轨迹节点 id：失败时带着它回来，reducer 才能把 error 挂对地方。
     const nodeId = state.openLlmNodeId;
-    // Context 三样全部**从 state 读**（都由 init 装好了）：
-    //   systemPrompt ← prompt.init
-    //   tools        ← prompt.init（完整定义）
-    //   messages     ← 对话本身（含中途追加的 system/developer 片段）
-    const context: Context = {
+    // 请求上下文 = head（prompt 与初始工具声明的容器） + 对话消息 —— 只此一份，
+    // 理由（为什么不用 `Context.systemPrompt` / `tools`）见 `prompt-head.ts`。
+    const context: Context = buildRequestContext({
       systemPrompt: state.prompt.systemPrompt,
+      ...(state.prompt.sections !== undefined ? { sections: state.prompt.sections } : {}),
+      // head 用**装载时**那批：工具集中途变了也绝不改 head（前缀缓存靠它不动），
+      // 变化由 `agent.run` 声明成新的 system 消息。
+      tools: declaredToolSchemas(state.prompt.headTools ?? state.prompt.tools),
       messages: state.messages,
-      tools: toolSchemas(state),
-    };
+    });
     const controller = beginRun();
     // 超时闸：到点就 abort 掉这次流。分类是 timeout → 可重试，于是环自己会再试一次。
     // 手动中断（Ctrl-C）也走 abort，但它不是超时 —— 用 source 区分开。

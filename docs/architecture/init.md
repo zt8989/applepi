@@ -8,7 +8,7 @@
 
 | 块 | 装它的 action | 装了什么 |
 | --- | --- | --- |
-| `state.prompt` | `prompt.init` | **拼好的整段 system prompt**（pi 的 `buildSystemPrompt`，见 [prompt](#system-prompt-拼装全部交给-pi)）+ 工具的**完整定义** + `seeded` |
+| `state.prompt` | `prompt.init` | **拼好的整段 system prompt**（pi 的 `buildSystemPrompt`）＋它的**分段**（`sections`：后来按段 patch 的原料）＋工具的**完整定义** + `seeded` |
 | `state.model` | `model.init` | provider / model / thinkingLevel / **能力** + `seeded` |
 
 为什么分开：prompt 是「跟模型说什么」，model 是「用哪个模型说」。两者独立变
@@ -160,11 +160,17 @@ provider 拒；反过来「以为不支持但实际支持」只是少用了个�
 它落进 **`state.messages`**，不是 `state.prompt`：
 
 - 它是 Conversation 的一部分，所以会被一起落盘、一起回放
-- 它是**追加**不是替换 —— `state.prompt.systemPrompt` 不受影响
+- 它是**追加**不是替换 —— `state.prompt`（head 的原料）不受影响
+
+带 `sections` 时就是**按段 patch**（`null` = 删段）——`before_agent_start` 的扩展改了
+prompt 段就走这里（见 [extensions](extensions.md#before_agent_start发段改动真的采信)）。
+形状的要点是「已有消息一个字节不动」：head 在 `state.prompt` 里、patch 在后面追加，
+前缀缓存才活得下来（`prompt-head.ts`）。
 
 模型支不支持是**模型**的事（`state.model.capabilities.midConvoSystemMessages`），
-我们不自己折：pi-ai 会在模型不支持时把后来的 system 消息折进开头那条
-（见 pi-ai 的 `normalizeContext`）。所以 `prompt.segment.added` 的迁移只管把消息放进去。
+我们不自己折：provider 侧 pi-ai 的 `resolveTranscript(context, 支持吗)` 在不支持时走
+`collapseSystemMessages()` —— 把整条流里的 system 消息**回放合并**成开头一条。
+所以 `prompt.segment.added` 的迁移只管把消息放进去。
 
 ## thinking（reasoning）
 

@@ -305,14 +305,14 @@ export function selectedBuiltinToolNames(cwd: string = process.cwd()): ReadonlyS
 // | `direct` | 开（激活时） | 开 | 内置工具、普通扩展工具、MCP 配了 direct 的 |
 // | `model-only` | 开 | **否** | codemode 自己（脚本不能再起脚本） |
 // | `codemode` | 否（除非显式激活） | 开 | **MCP 工具的默认值** |
-// | `deferred` | 否 | 开 | pi 靠 tool_search 装载；本项目归入 codemode（见下） |
+// | `deferred` | 否 | 开 | `tool_search` 装载（搜到才声明），或 codemode 脚本直接调 |
 // | `hidden` | 否 | 否 | 服务器已撤下的工具 |
 //
-// **`deferred` 为什么归入 codemode**：pi 用 `tool_search` 把 deferred 工具「装载」成
-// declared，而那个动作要**中途改工具声明** —— 与本项目「工具集装载时定死」（见
-// `extension-tools.ts`）直接冲突。而 deferred 的工具**本来就能从 codemode 脚本调**
-// （pi 文档原话：either indirect mechanism），所以本项目不装 `tool_search`，
-// deferred 工具走 codemode（只是不出现在 codemode 的描述清单里，靠 searchTools() 找）。
+// **`deferred` 与 `codemode` 的差别只在「谁来装载」**：`tool_search` 把两者都能搜出来并
+// 装进声明（`isSearchable(exposure)` 就是这两个值）。早先本项目不装 `tool_search`
+// （理由是「工具集装载时定死」，那条已经换成「变了要声明」，见 `extension-tools.ts`），
+// 于是 deferred 只能从 codemode 脚本调（pi 文档原话：either indirect mechanism）。
+// 现在两条路都通：搜得到的进声明，搜不到/不想搜的照样能从脚本调。
 export type ToolExposure = 'direct' | 'model-only' | 'codemode' | 'deferred' | 'hidden';
 
 /** 一组相关工具（比如一个 MCP 服务器的全部工具）。codemode 按它分组展示。 */
@@ -415,13 +415,15 @@ export function getExtensionTools(): readonly AgentTool[] {
 // 发现有 codemode 工具时自己激活）。
 //
 // `activeOverride` 一旦被 `setActiveToolNames()` 设过就**以它为准**：那正是 pi 的
-// `setActiveTools()` 语义，MCP 扩展在 `session_start` 里就是这么加 codemode 的。
+// `setActiveTools()` 语义（MCP 在 `session_start` 里加 codemode、`pi-web-access` 的
+// `web_enable` 在会话中途加 web 工具，走的都是它）。
 //
-// `frozen` 是**装载窗口**的终点：本项目的工具集在 `prompt.init` 那一刻定死
-// （见 `extension-tools.ts`）。窗口内（装载时）允许 MCP 激活 codemode；窗口外再改
-// 就只记诊断、不改状态 —— 否则模型手里的工具表与 state 里的 prompt 会对不上。
+// **会话中途真的能改**（早先这里有个 `frozen` 把窗口外一律拒绝）。能改的前提不是
+// 「改这里」，而是「改了要被声明出去」：工具集变了，模型得被告知。
+// 那一步在 `reducer.ts` 的 `agent.run`（发起请求前 diff 出 `toolsAdded` / `toolsRemoved`
+// 追加成一条 system 消息，与 pi-agent-core 的 `declareToolChanges` 同一步），
+// 于是**已有的消息一个字节不动**（前缀缓存），而 `state.prompt.tools` 更新成新声明。
 let activeOverride: ReadonlySet<string> | undefined;
-let frozen = false;
 
 /** 当前激活（= 声明给模型）的工具名。 */
 export function activeToolNames(cwd: string = process.cwd()): ReadonlySet<string> {
@@ -436,24 +438,17 @@ export function activeToolNames(cwd: string = process.cwd()): ReadonlySet<string
 }
 
 /**
- * 设激活集。返回 false = **装载窗口已关**，没有生效（调用方该记一条诊断，而不是假装改了）。
+ * 设激活集（点名的工具名集合）。**总是生效** —— 改名之后要由调用方去
+ * `declaredToolset()` 重算声明并 dispatch（`extension-tools.ts` 的 `applyActiveTools`）。
  */
-export function setActiveToolNames(names: readonly string[]): boolean {
-  if (frozen) return false;
+export function setActiveToolNames(names: readonly string[]): void {
   activeOverride = new Set(names);
-  return true;
 }
 
-/** 关掉装载窗口（`prompt.init` 之后调一次）：工具集从此定死。 */
-export function freezeActiveTools(): void {
-  frozen = true;
-}
-
-/** 测试用：清空扩展工具、激活集与冻结标记（模块级状态，会跨用例漏）。 */
+/** 测试用：清空扩展工具与激活集（模块级状态，会跨用例漏）。 */
 export function resetToolRegistryForTest(): void {
   extensionEntries.length = 0;
   activeOverride = undefined;
-  frozen = false;
 }
 
 /** 所有工具条目（内置 + 扩展），带暴露元数据。内置一律 `direct`。 */

@@ -11,6 +11,11 @@
  * | `getBranch()` | 恢复「上一轮存下来的搜索结果」（`/search` 那个命令列的就是它们） |
  * | `buildSessionContext(branch)` | 重建对话，判「这次请求里模型已经用过哪些 web 工具」 |
  *
+ * `pi-subagents` 另外要一个 `getSessionFile()`（会话文件的绝对路径）：它用这个路径算
+ * 「本会话的 subagent 产物放哪」。**两处都会读**，所以少它就不是「某个命令不可用」，
+ * 而是 `session_start` 与每轮 `before_agent_start` 各一条
+ * `sessionManager.getSessionFile is not a function`。
+ *
  * ## 为什么用**本项目**的会话，而不是 pi 的 SessionManager
  *
  * pi 那边是 `SessionManager` **类**，它的条目来自 pi 自己的 `sessions/*.jsonl`。本项目的
@@ -21,7 +26,8 @@
  * 那症状是：「`/search` 列不出刚才搜的东西」，而且**只在同一个会话里出错**（重启就
  * 「好了」，因为那时文件里的内容恰好等于内存里的）。极难归因。
  *
- * 所以这里只实现**三个只读成员**，数据源是本项目的 `state.messages`。
+ * 所以这里只实现上面那几个只读成员，数据源是本项目的 `state.messages`（`getSessionFile`
+ * 例外 —— 它读落盘器，那就是文件本身的真相）。
  *
  * ## `custom` 条目怎么办：不存，于是它们「不存在」
  *
@@ -36,15 +42,22 @@
  * ## 刻意**不**实现的
  *
  * pi 的 `SessionManager` 有几十个方法（`addEntry` / `fork` / `navigateTree` / …）。那些是
- * pi 的**会话层**，本项目刻意不接。这里只给上面三个 —— 扩展去调别的会在 undefined 上炸，
+ * pi 的**会话层**，本项目刻意不接。这里只给上面那几个 —— 扩展去调别的会在 undefined 上炸，
  * 那比给一堆「说谎的 no-op」诚实（后者会让扩展以为操作成功了）。
  */
 import type { AgentStore } from './store';
 import type { Message } from '@earendil-works/pi-ai';
 
-/** 扩展会碰到的 `ctx.sessionManager` 成员（只有这三个是读）。 */
+/** 扩展会碰到的 `ctx.sessionManager` 成员（只有这几个是读）。 */
 export interface ExtensionSessionManager {
   getSessionId(): string | undefined;
+  /**
+   * 当前会话文件的绝对路径。
+   *
+   * 取不到时返回 `undefined`（不写会话文件 / 还没建落盘器）—— `pi-subagents` 对
+   * `undefined` 有降级路径（回退到 sessionId 当身份），不报错。
+   */
+  getSessionFile(): string | undefined;
   getBranch(): readonly unknown[];
 }
 
@@ -59,9 +72,15 @@ export interface ExtensionSessionManager {
 export function extensionSessionManager(
   store: AgentStore,
   sessionId: () => string,
+  /**
+   * 当前会话文件路径。同样是**取值函数**：`/new` 换会话后文件也换（与 `sessionId`
+   * 同一个理由）。不给就是「没有文件」（不写会话文件的会话）。
+   */
+  sessionFile: () => string | undefined = () => undefined,
 ): ExtensionSessionManager {
   return {
     getSessionId: () => sessionId(),
+    getSessionFile: () => sessionFile(),
     /**
      * 官方那条路是 `buildSessionContext(branch).messages`，而 `branch` 是**条目数组**
      * （`{type:'message', message}` 那种）。本项目直接给 `state.messages` ——

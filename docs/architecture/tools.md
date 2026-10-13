@@ -135,7 +135,7 @@ export function getTools(cwd = process.cwd()) {
 | 函数 | 是什么 | 谁读 |
 | --- | --- | --- |
 | `getTools()` | 内置（按 `defaultTools` 开着的）+ 全部扩展工具（去 `hidden`） | 注册表视图、`getTool()`、初始 state |
-| `declaredToolset()` | 激活集 ∩ 注册表，跑过 `prepareLoadout` | `prompt.init`（**真的发给模型的那份**） |
+| `declaredToolset()` | 激活集 ∩ 注册表，跑过 `prepareLoadout` | `prompt.init`（装载那一次）与 `tools.changed`（会话中途改）——都是**真的发给模型的那份** |
 | `callableTools()` | `codemode` / `deferred` + 激活的 `direct` | codemode 脚本的 `tools`、`ctx.executeTool` |
 
 `getTools()` 里可能有模型看不见的工具（MCP 默认就是）—— 「注册了」与「模型看得到」

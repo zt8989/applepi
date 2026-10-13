@@ -33,11 +33,13 @@
  *
  * ## 一处刻意的偏差
  *
- * 扩展的 prompt 注入（`promptSnippet` / `promptGuidelines`）在 pi 那边是**每轮现拼**，
- * 本项目的 system prompt 是**装载时定下**的（`prompt.init`，见 `system-prompt.ts`）。
- * 工具集不该在一轮对话中间变 —— 那会让已发出的 `messages` 与 prompt 对不上，而
- * prompt-cache 的前缀也整个作废。所以只在装载时装一次，改工具集要 `/new` 换会话，
- * 与 skill 清单同一个口径。
+ * 扩展的 prompt 注入在 pi 那边是**每轮现拼**，而工具集在本项目是**声明的**：
+ * `state.prompt.tools` 是「现在能执行什么」，transcript 里的 system 消息是
+ * 「模型被允许调什么」。会话中途可以变（`pi.setActiveTools()` 真的生效，
+ * `web_enable` / `subagents_enable` 那些 loader 工具靠的就是它）—— 前提是**变了要声明**：
+ * `reducer.ts` 的 `agent.run` 在请求前 diff 出 `toolsAdded` / `toolsRemoved`
+ * 追加一条消息（pi-agent-core 的 `declareToolChanges` 同一步）。
+ * 于是**已有消息一个字节不动**（prompt-cache 的前缀因此活下来），模型也明确知道工具变了。
  *
  * 由此推出一条**已知无效**的路径：`ask_user_question` 自带的 `before_agent_start`
  * 协调器（非交互时把工具摘掉）在本项目里是 no-op —— 工具集在会话中途不变，
@@ -55,7 +57,12 @@ import { DefaultPackageManager } from '@earendil-works/pi-coding-agent/dist/core
 import { createSourceInfo } from '@earendil-works/pi-coding-agent/dist/core/source-info.js';
 import type { PathMetadata } from '@earendil-works/pi-coding-agent/dist/core/package-manager.js';
 import type { Extension } from '@earendil-works/pi-coding-agent/dist/core/extensions/types.js';
-import { createCodemodeExtension, createMcpExtension, SettingsManager } from '@earendil-works/pi-coding-agent';
+import {
+  createCodemodeExtension,
+  createMcpExtension,
+  createToolSearchExtension,
+  SettingsManager,
+} from '@earendil-works/pi-coding-agent';
 import type { AgentStore } from './store';
 import type { AgentTool, AgentToolResult } from './agent-tool';
 import {
@@ -68,6 +75,7 @@ import {
   type ToolLoadout,
   type ToolLoadoutChanges,
   type ToolNamespace,
+  activeToolNames,
 } from './tools';
 import {
   adaptExtensionTool,
@@ -140,9 +148,15 @@ export interface ExtensionHost {
   /**
    * 每轮开始前给扩展一个 `before_agent_start`。
    *
-   * 扩展可以改工具集（走 `setActiveTools` → reducer action）与注入 prompt 片段。
-   * prompt 片段**只记在诊断里、不采信**：本项目的 prompt 是装载时定下的，中途改会让
-   * 已发出的消息与 prompt 对不上。改 prompt 要 `/new`。
+   * 扩展可以改工具集（走 `setActiveTools` → reducer action）与**改 prompt 段**：
+   * handler 在 `systemPromptOptions.sections` 里写回的段与「当前生效」那份一 diff，
+   * 变了的段作为一条 `prompt.segment.added` 追加（按段名 patch，**已有消息不动**）。
+   * 但**整段替换**（`systemPrompt` / `forceSystemPrompt`）仍然不采信：本项目的
+   * system prompt 是装载时定下的，中途整段替换会让已发出的消息与 prompt 对不上。
+   *
+   * `ctx` 与事件里的 `selectedTools` 都是**真的**（官方 ctx + 当前声明给模型的工具名）
+   * —— 扩展会读它们，给个最小版就是每轮一条 `Cannot read properties of undefined`
+   * （见 `extension-prompt.ts` 的文件头）。
    */
   beforeAgentStart(text?: string | undefined): Promise<void>;
   /**
@@ -225,6 +239,13 @@ export interface LoadExtensionHostOptions {
    * 当时的值，而注册时那个值还不是最终的。
    */
   sessionId?: (() => string) | undefined;
+  /**
+   * 当前会话**文件**路径的取值函数（同样是函数：`/new` 之后换文件）。
+   *
+   * `pi-subagents` 要它算「本会话的 subagent 产物放哪」（`session_start` 与每轮
+   * `before_agent_start` 都读）；不给就是 `undefined`，它会回退到 sessionId。
+   */
+  sessionFile?: (() => string | undefined) | undefined;
   /**
    * `pi.sendMessage` 的落点：一条**用户消息**。
    *
@@ -381,7 +402,8 @@ function msg(error: unknown): string {
 export async function loadExtensionHost(
   options: LoadExtensionHostOptions,
 ): Promise<ExtensionHost> {
-  const { store, cwd, uiOptions, disabled, runtime, sessionId, onSendMessage, canSend } = options;
+  const { store, cwd, uiOptions, disabled, runtime, sessionId, sessionFile, onSendMessage, canSend } =
+    options;
   // runtime 没给时造一个「什么都没有」的占位，只为让 bindCore 的签名固定。
   // 它只会被读 `ctx.model`（→ undefined）与 modelRegistry（→ undefined），而
   // 那正是降级路径上该有的形状（见 extension-models.ts 的文件头）。
@@ -425,12 +447,20 @@ const errors: string[] = [];
   // **放在文件扩展之后**：本项目的工具收集是同名先注册者优先，而 pi 对
   // codemode / mcp 这两个是 `replaceable`（第三方同名扩展顶掉内置）—— 同样效果。
   //
-  // 不装 `tool_search`：它把 `deferred` 工具「装载」成 declared，而那个动作要中途改
-  // 工具声明（本项目的工具集装载时定死）。`deferred` 归入 codemode，理由见 tools.ts。
+  // `tool_search` 也装：它把 `codemode` / `deferred` 暴露的工具「装载」成声明
+  // （BM25 搜一轮，命中的下一轮就进工具表）。早先不装的理由是「本项目的工具集装载时
+  // 定死」，那条在工具集可变 + 声明链路就位之后不成立了 —— 它依赖的三样
+  // （`getAllTools` 的 exposure/namespace、`getActiveTools`、真的生效的
+  // `setActiveTools`）本项目都有，且它装载的结果会走 `tools.changed` → `agent.run`
+  // 的声明增量，与前缀缓存那条约束不冲突。
+  //
+  // 它注册为 `defaultActive: false`（pi 也一样）：要用得在 `settings.json` 的
+  // `defaultTools` 里写 `+tool_search`。
   if (withBuiltins) {
     const builtins: ReadonlyArray<{ factory: ExtensionFactory; path: string }> = [
       { factory: createMcpExtension(), path: 'builtin:mcp' },
       { factory: createCodemodeExtension(), path: 'builtin:codemode' },
+      { factory: createToolSearchExtension(), path: 'builtin:tool-search' },
     ];
     for (const builtin of builtins) {
       try {
@@ -460,7 +490,11 @@ const errors: string[] = [];
     // 判「模型这轮已经用过哪些 web 工具」）。数据源是**本项目的** `state.messages`，
     // 不是 pi 的 SessionManager —— 那是另一份内存（读文件的话只能看到上一次进程的）。
     // 详见 `extension-sessions.ts` 的文件头。
-    extensionSessionManager(store, sessionId ?? (() => store.getState().trace.sessionId)) as never,
+    extensionSessionManager(
+      store,
+      sessionId ?? (() => store.getState().trace.sessionId),
+      sessionFile ?? (() => undefined),
+    ) as never,
     extensionModelRegistry(effectiveRuntime) as never,
   );
 
@@ -592,14 +626,32 @@ const errors: string[] = [];
       })),
     loaded: loaded.extensions.length,
     beforeAgentStart: async (text?: string) => {
-      await notifyBeforeAgentStart({
+      const patch = await notifyBeforeAgentStart({
         handlers: beforeAgentStart,
         store,
         text,
-        hasUI: uiOptions !== undefined,
         cwd,
+        // **官方那个** ctx（与 `session_start` / `tool_call` 发出去的是同一个）——
+        // 扩展会读 `ctx.sessionManager` / `ctx.hasUI`…，手搓一个最小 ctx 只会让它们
+        // 在缺字段上炸（见 extension-prompt.ts 的文件头）。
+        ctx: runner.createContext(),
+        // 与扩展自己调 `pi.getActiveTools()` 同一个函数 —— 事件里那份工具名与它们从
+        // 宿主问到的那份永远一致（见 `activeToolsFromState`）。
+        selectedTools: activeToolsFromState(store.getState(), cwd),
         onError: onExtensionError,
       });
+      // 扩展真改了 prompt 段：追加一条**补丁消息**（按段替换），而不是去改装载时那条
+      // head —— 前缀缓存靠的就是「已有消息一个字节不动」（见 `prompt-head.ts`）。
+      if (patch !== undefined) {
+        store.dispatch({
+          type: 'prompt.segment.added',
+          role: 'system',
+          // 文本为空：内容全在段里（`sections` 只带变了的段，`null` = 删段）。
+          text: '',
+          sections: patch,
+          source: 'before_agent_start',
+        });
+      }
     },
     startSession: async () => {
       // 官方 `session_start`：MCP 靠它读 mcp.json 并开始连接服务器。
@@ -613,7 +665,13 @@ const errors: string[] = [];
         type: 'before_agent_start' as const,
         prompt: '',
         images: [],
-        systemPromptOptions: { cwd, sections },
+        // 这一刻 `prompt.init` 还没发生，所以 `activeToolsFromState` 读的是注册表的
+        // 激活集 —— 正是扩展此刻从 `pi.getActiveTools()` 会读到的同一份。
+        systemPromptOptions: {
+          cwd,
+          sections,
+          selectedTools: activeToolsFromState(store.getState(), cwd),
+        },
       };
       const ctx = runner.createContext();
       for (const handler of beforeAgentStart) {
@@ -729,8 +787,6 @@ function nextNestedId(callerId: string): string {
  */
 function bindCore(options: BindCoreOptions): void {
   const { runner, store, uiOptions, runtime, onSendMessage, cwd, onError, syncTools } = options;
-  /** 「装载窗口已关」的诊断只记一次（见下面 `setActiveTools`）。 */
-  let warnedActiveTools = false;
   const noUi = (what: string) => Promise.reject(new Error(`本项目不支持扩展的「${what}」`));
   runner.bindCore(
     {
@@ -787,21 +843,18 @@ function bindCore(options: BindCoreOptions): void {
       getAllTools: () => allToolsInfo(cwd),
       // 真的 settings（`codemode.mode` / `inlineBudget` / `defaultTools` 都从这里读）。
       getSettings: () => loadPiSettings() as never,
-      setActiveTools: (names: string[]) => {
-        // 装载窗口内（`prompt.init` 之前）真的改；窗口一关就只记**一条**诊断。
-        // 只记一条是因为扩展可能在每次工具调用里都试一次（`pi-web-access` 的
-        // `web_enable` 就是）—— 每试一次记一行会把真正的诊断淹没掉（项目里那条
-        // 「噪音会让人把真的诊断一起忽略掉」的教训）。
-        if (!applyActiveTools(store, names) && !warnedActiveTools) {
-          warnedActiveTools = true;
-          onError('setActiveTools', `装载窗口已关，忽略工具集变更（${names.length} 个名字）`);
-        }
-      },
+      // **真的**改（会话中途也改）：更新激活集 + 把新声明 dispatch 进 state。
+      // 之后模型怎么被告知是 `agent.run` 的事（diff 出 `toolsAdded` / `toolsRemoved`），
+      // 见 `extension-tools.ts` 的 `applyActiveTools`。
+      setActiveTools: (names: string[]) => applyActiveTools(store, names, cwd),
       // **真的**刷新：MCP 服务器连上后 `pi.registerTool()` 会走到这里，我们重扫 runner
       // 的注册表并更新本项目的工具表（新工具从脚本 / `getAllTools()` 立刻可见）。
-      // 注意：**声明给模型**的那份在 `prompt.init` 时就定死了，这里不改它 ——
-      // 中途往模型工具表里加东西会让已发出的消息与 prompt 对不上（见 extension-tools.ts）。
-      refreshTools: () => syncTools(),
+      // 新注册的工具若是**默认激活**的，它也该进声明 —— 所以这里再算一次声明
+      // （`applyActiveTools` 用的是「当前激活集」，新工具自然在里面）。
+      refreshTools: () => {
+        syncTools();
+        applyActiveTools(store, [...activeToolNames(cwd)], cwd);
+      },
       getCommands: () => [],
       setModel: () => noUi('换模型'),
       getThinkingLevel: () => store.getState().thinkingLevel,

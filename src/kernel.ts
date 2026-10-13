@@ -38,8 +38,8 @@ import {
 } from './thinking-level';
 import { readCompactionEnabled, writeCompactionEnabled } from './compact';
 import path from 'node:path';
-import { declaredToolset, freezeActiveTools } from './tools';
-import { buildSystemPromptText, promptToolsFrom, type PromptToolLike } from './system-prompt';
+import { declaredToolset } from './tools';
+import { buildPromptParts, buildSystemPromptText, promptToolsFrom, type PromptToolLike } from './system-prompt';
 import { loadExtensionHost } from './extension-host';
 import type { HostUiOptions } from './extension-ui';
 import type { ExtensionHost } from './extension-host';
@@ -355,9 +355,12 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     ...(options.noExtensions ? {} : { runtime }),
     ...(options.uiOptions ? { uiOptions: options.uiOptions } : {}),
     ...(options.noExtensions ? { disabled: true } : {}),
-    // 会话：扩展的 `getSessionId()` / `getBranch()`。传的是**取值函数**而不是常量 ——
-    // `/new` 换会话后 id 会变，而扩展问的时候得报新的那个。
+    // 会话：扩展的 `getSessionId()` / `getSessionFile()` / `getBranch()`。传的是
+    // **取值函数**而不是常量 —— `/new` 换会话后 id 与文件都变，而扩展问的时候得报
+    // 新的那个。`recorder` 此刻还是 null（`openRecorder` 在后面），但取值函数读的是
+    // `current`，扩展真问的时候它已经填上了。
     sessionId: () => current.sessionId,
+    sessionFile: () => current.recorder?.file,
     // 扩展的 `pi.sendMessage` 落到哪里：一条**用户消息**（于是环会跑起来），
     // 与界面里敲一句话同一条路。
     onSendMessage: (text) => {
@@ -370,7 +373,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   // ── 发 `session_start`：MCP 靠它读 `mcp.json` 并开始连服务器 ──
   //
   // **必须在算工具表之前**：MCP 会发现「有 codemode 暴露的服务器」并激活 `codemode`
-  // （走 `setActiveTools`，而那条只在装载窗口内真的生效）；而 `direct` 服务器的工具是
+  // （走 `setActiveTools` → 本项目的 `state.prompt.tools`）；而 `direct` 服务器的工具是
   // 在连接过程中动态注册的 —— 加载后必须再扫一遍。
   await extensionHost.startSession();
   // 收 `before_agent_start` 写的 prompt 段（MCP 的 `mcp_servers`）。
@@ -407,7 +410,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     // MCP 的 codemode 工具没激活时不进工具表，而 codemode 的 `mode: "only"`
     // 会把直调工具从声明里藏掉（它们仍可被脚本调）。
   ].filter((tool) => declaredNames.has(tool.name) && !declared.hidden.has(tool.name));
-  const systemPrompt = buildSystemPromptText({
+  const { text: systemPrompt, sections: promptSections } = buildPromptParts({
     cwd,
     tools: promptTools,
     skills: skillRegistry.skills,
@@ -420,6 +423,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   store.dispatch({
     type: 'prompt.init',
     systemPrompt,
+    // 分段与整段一起装：整段是发给模型的那份，分段是「以后按段 patch」的原料
+    // （见 `prompt-head.ts` 与 `system-prompt.ts` 的 `buildPromptParts`）。
+    sections: promptSections,
     tools: declared.tools.map((tool) => ({
       name: tool.name,
       description: tool.description,
@@ -428,9 +434,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     skills: skillRegistry.skills,
     skillDiagnostics: skillRegistry.diagnostics,
   });
-  // 工具集从此定死（见 tools.ts 的 `freezeActiveTools`）：之后再有 `setActiveTools`
-  // 只会得到一条诊断，而不是一份与 prompt 对不上的声明。
-  freezeActiveTools();
+  // 工具集**不是**定死的：之后 `setActiveTools`（`web_enable` / `subagents_enable`
+  // 那些 loader 工具）真的会改声明，而变更由 `agent.run` 在请求前 diff 成一条
+  // `toolsAdded` / `toolsRemoved` 消息声明出去（见 `prompt-head.ts`）。
   store.dispatch({
     type: 'model.init',
     provider: runtime.spec.provider,
@@ -465,6 +471,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         // 落**拼好的那一整段**（不是 customPrompt 的原文）：回放时要能重建
         // 「当时发给模型的到底是什么」，而 AGENTS.md 与 skill 清单都可能已经变了。
         systemPrompt,
+        // 分段一并落：中途的 prompt 变更只 patch 变了的段，回放时靠它还原
+        // 「当时有哪几段」（没有它就只能整段替换，见 `prompt-head.ts`）。
+        sections: promptSections,
         tools: store.getState().prompt.tools,
         // skills 一并落：回放时要知道当时有哪些 skill（它们拼进了 prompt）。
         ...(skillRegistry.skills.length > 0 ? { skills: skillRegistry.skills } : {}),

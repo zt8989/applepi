@@ -179,9 +179,13 @@ prompt 里的 `mcp_servers` 段（「有这个服务器、工具从 codemode 脚
 配了 `codemode` 暴露的 MCP 服务器时它**会自己开**（`mcp.json` 顶层的
 `"autoEnableCodemode": false` 可以关掉）。
 
+`tool_search` 也装（pi 的内置扩展），但它注册时是**不激活**的 —— 要用得在
+`settings.json` 的 `defaultTools` 里写 `+tool_search`；激活后模型能把 `codemode` /
+`deferred` 暴露的工具搜出来装进工具表。
+
 **已知边界**（都写在 [`docs/architecture/mcp-codemode.md`](docs/architecture/mcp-codemode.md)）：
-不装 `tool_search`（它要中途改工具声明，与本项目冲突），`deferred` 归入 codemode；
-装载后才连上的 `direct` 服务器，其工具要 `/new` 才进模型工具表；`/new` 不重连 MCP。
+装载后才连上的 `direct` 服务器，其工具会在下一次请求前作为**声明增量**进模型工具表
+（不必 `/new`）；`/new` 不重连 MCP；不装 `llama.cpp`（那是本地模型那条路）。
 
 ## 运行
 

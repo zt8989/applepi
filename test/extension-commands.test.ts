@@ -223,6 +223,25 @@ test('sessionManager：getSessionId 跟着会话变（不是注册时的常量�
   assert.equal(sm.getSessionId(), 'sess-second');
 });
 
+test('sessionManager：getSessionFile 跟着会话变，取不到时诚实地说没有', async () => {
+  // `pi-subagents` 要这个路径算「本会话的 subagent 产物放哪」，两处读它：
+  // `session_start` 与**每轮** `before_agent_start`。少这个成员的症状是
+  // `sessionManager.getSessionFile is not a function`（每轮一条）。
+  const faux = createFauxRuntime();
+  faux.setResponses(demoResponses());
+  const { store } = createAgentStoreWith({ runtime: faux.runtime, cwd: process.cwd() });
+
+  const none = extensionSessionManager(store, () => 's', () => undefined);
+  assert.equal(none.getSessionFile(), undefined, '没有落盘器就不该编一个路径出来');
+
+  // 与 sessionId 同一个理由：`/new` 之后文件也换，所以它必须是**取值函数**。
+  let file: string | undefined = '/tmp/sessions/sess-first.jsonl';
+  const sm = extensionSessionManager(store, () => 'sess-first', () => file);
+  assert.equal(sm.getSessionFile(), '/tmp/sessions/sess-first.jsonl');
+  file = '/tmp/sessions/sess-second.jsonl';
+  assert.equal(sm.getSessionFile(), '/tmp/sessions/sess-second.jsonl');
+});
+
 test('sessionManager：getBranch 给的是**条目**，官方的 buildSessionContext 能用', async () => {
   // 这一条钉住那个「包一层」的决定。扩展是这么调的：
   //

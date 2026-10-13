@@ -25,7 +25,6 @@ import {
   activeToolNames,
   callableTools,
   declaredToolset,
-  freezeActiveTools,
   getCallableTool,
   registeredToolInfos,
   registerToolEntries,
@@ -36,9 +35,9 @@ import type { AgentTool } from '../src/agent-tool';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/fake-mcp-server.mjs', import.meta.url));
 
-// 注册表是**模块级**的（`tools.ts`），而内核会把「激活集」冻结（`freezeActiveTools`）。
+// 注册表是**模块级**的（`tools.ts`），激活集也在那里。
 // 一个进程里只该有一个内核，但测试里会建好几个 —— 所以每个用例前清一次，
-// 不然上一个内核冻结/激活过的状态会漏给下一个（真出现过：第二个用例的 codemode 不生效）。
+// 不然上一个内核激活过的状态会漏给下一个（真出现过：第二个用例的 codemode 不生效）。
 test.beforeEach(() => resetToolRegistryForTest());
 
 function fakeTool(name: string): AgentTool {
@@ -80,17 +79,22 @@ test('exposure：`+codemode` 名字激活后它才进声明（defaultActive:fals
   registerToolEntries([{ tool: fakeTool('codemode'), exposure: 'model-only', defaultActive: false }]);
   const cwd = process.cwd();
   assert.ok(!activeToolNames(cwd).has('codemode'), '默认不激活');
-  assert.equal(setActiveToolNames([...activeToolNames(cwd), 'codemode']), true);
+  setActiveToolNames([...activeToolNames(cwd), 'codemode']);
   assert.ok(declaredToolset(cwd).tools.some((t) => t.name === 'codemode'), '激活后才声明');
   resetToolRegistryForTest();
 });
 
-test('exposure：装载窗口关掉之后 setActiveToolNames 不生效（返回 false）', () => {
+test('exposure：会话中途 setActiveToolNames 也生效（loader 工具靠这条）', () => {
+  // 早先这里钉的是「窗口关了就拒绝」——那条不变式换了：工具集中途可变，前提是
+  // 变化会被**声明**出去（`agent.run` 的 diff，见 prompt-head.test.ts）。
   resetToolRegistryForTest();
   registerToolEntries([{ tool: fakeTool('x'), exposure: 'model-only', defaultActive: false }]);
-  freezeActiveTools();
-  assert.equal(setActiveToolNames(['x']), false, '窗口关了就该拒绝');
-  assert.ok(!declaredToolset(process.cwd()).tools.some((t) => t.name === 'x'));
+  assert.ok(!declaredToolset(process.cwd()).tools.some((t) => t.name === 'x'), '默认不激活');
+  setActiveToolNames(['x']);
+  assert.ok(
+    declaredToolset(process.cwd()).tools.some((t) => t.name === 'x'),
+    '中途激活要立刻体现在声明里',
+  );
   resetToolRegistryForTest();
 });
 
@@ -231,4 +235,61 @@ test('MCP：服务器工具按 codemode 暴露，脚本能调、模型看不到'
   assert.ok(info, 'MCP 工具该在注册表里');
   assert.equal(info?.exposure, 'deferred');
   assert.equal(info?.namespace?.name, 'mcp__fake');
+});
+test('装载：`+tool_search` 能把 deferred 工具搜出来，下一轮就声明给模型', async (t) => {
+  // `tool_search` 是 pi 的内置扩展（本项目也装）：BM25 搜 `codemode` / `deferred` 暴露
+  // 的工具，命中的走 `setActiveTools()` 装载。早先本项目不装它（「工具集装载时定死」），
+  // 那条理由在工具集可变 + 声明链路之后不成立了 —— 这条测试钉住整条路真的通。
+  const home = configHome();
+  const settingsPath = path.join(home, 'settings.json');
+  writeFileSync(settingsPath, JSON.stringify({ defaultTools: ['+tool_search'] }));
+  t.after(() => rmSync(settingsPath, { force: true }));
+  const mcpPath = path.join(home, 'mcp.json');
+  writeFileSync(
+    mcpPath,
+    JSON.stringify({ mcpServers: { fake: { command: process.execPath, args: [FIXTURE] } } }),
+  );
+  t.after(() => rmSync(mcpPath, { force: true }));
+  const workdir = mkdtempSync(path.join(tmpdir(), 'ela-toolsearch-'));
+  t.after(() => rmSync(workdir, { recursive: true, force: true }));
+
+  const kernel = await createKernel({ provider: 'faux', demo: true, cwd: workdir, traceDir: null });
+  t.after(() => kernel.dispose());
+
+  const names = (): string[] => kernel.store.getState().prompt.tools.map((tool) => tool.name);
+  assert.ok(names().includes('tool_search'), `该声明 tool_search，实际：${names().join(',')}`);
+  assert.ok(
+    !names().includes('mcp__fake__echo'),
+    'MCP 工具（deferred）默认不进声明 —— 否则搜索工具就没意义了',
+  );
+
+  // 服务器是**后台**连的：先走一次 `tool_call` 门（与环同一个门）等它连上 ——
+  // 门只看 codemode 脚本点了哪个服务器，所以这里给一段「点名它」的脚本。
+  // 不等的话搜的是空表，症状是 `No matching tools found.`（看起来像搜索坏了）。
+  await kernel.extensions.beforeToolCall('c0', 'codemode', {
+    code: "const r = await tools.mcp__fake__echo({ text: 'warm' }); return r;",
+  });
+  const { registeredToolInfos } = await import('../src/tools');
+  assert.ok(
+    registeredToolInfos(workdir).some((entry) => entry.name === 'mcp__fake__echo'),
+    '门走完之后服务器该连上、工具该进注册表',
+  );
+
+  const { getTool } = await import('../src/tools');
+  const search = getTool('tool_search', workdir);
+  assert.ok(search, '注册表里该有 tool_search');
+  const result = await search.execute('s1', { query: 'echo' });
+  const text = result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n');
+  assert.match(text, /Loaded 1 tool/, `该搜到那个 MCP 工具：${text}`);
+
+  assert.ok(names().includes('mcp__fake__echo'), '搜到之后它进当前声明');
+
+  // 而「进声明」这件事要真的变成一条 `toolsAdded` —— 模型下一轮才知道它能直接调。
+  kernel.store.dispatch({ type: 'agent.run' } as never);
+  const added = kernel.store
+    .getState()
+    .messages.filter((message) => message.role === 'system')
+    .flatMap((message) => (message.role === 'system' ? (message.toolsAdded ?? []) : []))
+    .map((tool) => tool.name);
+  assert.ok(added.includes('mcp__fake__echo'), `声明增量里该有它：${added.join(',')}`);
 });

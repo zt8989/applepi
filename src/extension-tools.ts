@@ -15,7 +15,8 @@
  * （那会连带丢掉这一轮的工具结果，症状是「会话文件写到一半断了」）。
  */
 import type { AgentTool, AgentToolResult } from './agent-tool';
-import { activeToolNames, setActiveToolNames } from './tools';
+import { activeToolNames, declaredToolset, setActiveToolNames } from './tools';
+import type { PromptToolDefinition } from './actions';
 import type { AgentStore } from './store';
 import type { ExtensionRunner } from '@earendil-works/pi-coding-agent/dist/core/extensions/runner.js';
 import type { AgentState } from './state';
@@ -157,14 +158,15 @@ function jsonSafe(value: unknown): unknown {
 /**
  * 扩展看到的「当前工具集」。
  *
- * 两个来源，按是否已经装载完分开：
+ * 两个来源，按 `prompt.init` 装没装分开：
  *
- * - **装载窗口内**（`prompt.init` 之前）：读注册表的活动集（`activeToolNames`）。
+ * - **装载前**（`prompt.init` 之前）：读注册表的活动集（`activeToolNames`）。
  *   MCP 扩展在 `session_start` 里就问这个 —— 那一刻 state 里还没有工具表，
  *   读 state 会得到空数组，于是它以为自己一个工具都没有，把 codemode 也当成
  *   “不需要激活”。
- * - **装载完**：读 `state.prompt.tools` —— 那**就是**发给模型的声明
- *   （`effects.ts` 的 `toolSchemas()` 原样读它），与「模型能调什么」永远一致。
+ * - **装载后**：读 `state.prompt.tools` —— 那**就是**当前声明（`declaredToolset()`
+ *   算出来、`tools.changed` 更新、`effects.ts` 的 head 读它），与「模型能调什么」
+ *   一致，且会话中途变了也是新的那份。
  *
  * 判据是 `state.prompt.tools.length === 0`（装载前它就是空的）。
  */
@@ -174,25 +176,38 @@ export function activeToolsFromState(state: AgentState, cwd?: string): string[] 
 }
 
 /**
- * 扩展要改工具集（`pi.setActiveTools()`）。
+ * 扩展要改工具集（`pi.setActiveTools()`）—— **会话中途也真的生效**。
  *
- * ## 只在**装载窗口**里真的生效
+ * 两件事分开做，因为它们的「真相」在不同地方：
  *
- * 本项目的工具集与 system prompt 一样是**装载时**定下的（`prompt.init`）。窗口内
- * （内核还没算好声明）改它就真的改；窗口关掉之后再改就**不生效**，返回 false，
- * 由调用方记一条诊断。
+ * 1. `setActiveToolNames(names)` 更新**激活集**（模块级）—— `pi.getActiveTools()` /
+ *    运行时的可调表读它（见 `tools.ts` 的 `activeToolNames()`）。
+ * 2. `dispatch(tools.changed)` 更新 `state.prompt.tools`（**当前声明**）。
  *
- * 为什么窗口外不让改：一轮对话中间换工具会让 `state.messages` 与 prompt 对不上
- * （模型可能已经在调一个刚被摘掉的工具），而 prompt-cache 的前缀整个作废。
+ * ## 为什么不再需要「装载窗口」
  *
- * 这条对 `ask_user_question` 自带的协调器（在 `before_agent_start` 里按 `ctx.hasUI`
- * 摘工具）**也**成立：本项目只有交互式一种模式、`hasUI` 恒真，而那个事件在装载之后
- * 才发，所以那里恒为 no-op。
+ * 早先这里有个窗口：窗口中（`prompt.init` 之前）允许改，窗口外一律拒绝并记诊断。
+ * 拒绝的理由是「中途换工具会让已发出的 `messages` 与 prompt 对不上」。那个理由现在
+ * 由**声明**解决了：`reducer.ts` 的 `agent.run` 在请求前把「能执行的」与「已经声明给
+ * 模型的」diff 成一条 `toolsAdded` / `toolsRemoved` 消息（pi 的 `declareToolChanges`
+ * 同一步），于是**已有的消息一个字节不动**，模型也会被明确告知工具变了。
  *
- * 真要改工具集：`/new` 换会话（与 skill 清单同一个口径），或改 `settings.json` 后重启。
+ * 收益是具体的：`pi-web-access` 的 `web_enable`、`pi-subagents` 的 `subagents_enable`
+ * 都是「loader 工具」—— 它们整条功能就是「运行中把工具加进来」。窗口在时它们在本项目里
+ * 只能回一句「still inactive」。
  *
- * @returns 真的生效了没有。false = 窗口已关（调用方该说出来，而不是假装改了）。
+ * ## `hidden` 怎么处理
+ *
+ * `declaredToolset()` 会把 `prepareLoadout` 声明的 `hiddenDeclarations` 从给模型的数组里
+ * 去掉（codemode 靠这个藏起直调工具）。所以这里拿**它算出来的那份**去 dispatch，
+ * 而不是自己拼。
  */
-export function applyActiveTools(_store: AgentStore, names: readonly string[]): boolean {
-  return setActiveToolNames(names);
+export function applyActiveTools(store: AgentStore, names: readonly string[], cwd: string): void {
+  setActiveToolNames(names);
+  const declared: readonly PromptToolDefinition[] = declaredToolset(cwd).tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters,
+  }));
+  store.dispatch({ type: 'tools.changed', tools: [...declared] });
 }

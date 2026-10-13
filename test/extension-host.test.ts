@@ -461,10 +461,44 @@ test('扩展：before_agent_start 环在跑的时候不发（否则会凭空多�
     ],
     store: { ...store, getState: () => ({ ...store.getState(), phase: 'thinking' }) } as never,
     text: 'hi',
-    hasUI: true,
     cwd: process.cwd(),
+    // 这两个测试的 handler 不看 ctx，所以给它一个空的（真跑的时候是官方 ctx，
+    // 见 `extension-prompt.ts` 的文件头）。
+    ctx: {} as never,
+    selectedTools: ['read'],
   });
   assert.equal(called, 0, '环在跑时不该发 before_agent_start');
+});
+
+test('扩展：before_agent_start 的 selectedTools 是真数组（pi-subagents 的 handler 第一句就读它）', async () => {
+  // `pi-subagents` 0.77 的主 handler 第一句是
+  // `event.systemPromptOptions.selectedTools.includes('subagent')`，少这个字段就是
+  // 每轮一条 `Cannot read properties of undefined (reading 'includes')`。
+  // 这里把「handler 会怎么读」整个跑一遍：读得到、是**当前声明**的那份、而且能 push。
+  const { store } = freshStore();
+  const errors: string[] = [];
+  const read: string[][] = [];
+  const { notifyBeforeAgentStart } = await import('../src/extension-prompt');
+  await notifyBeforeAgentStart({
+    handlers: [
+      (event) => {
+        read.push([...event.systemPromptOptions.selectedTools]);
+        // 就是 pi-subagents 那句读法。
+        assert.ok(event.systemPromptOptions.selectedTools.includes('read'), '该读得到当前声明的工具名');
+        // `tool-activation` 会往里 push —— 冻结的数组会在那里抛另一个错
+        // （`push is not a function`），所以这里钉住「是一份可写的副本」。
+        event.systemPromptOptions.selectedTools.push('subagents_enable');
+      },
+    ],
+    store,
+    text: 'hi',
+    cwd: process.cwd(),
+    ctx: {} as never,
+    selectedTools: ['read', 'bash'],
+    onError: (_where, message) => errors.push(message),
+  });
+  assert.deepEqual(read, [['read', 'bash']], '事件里那份就是宿主读到的声明');
+  assert.deepEqual(errors, [], '不该有任何扩展诊断');
 });
 
 test('扩展：before_agent_start 在 idle 时发，handler 抛错不炸环', async () => {
@@ -484,8 +518,9 @@ test('扩展：before_agent_start 在 idle 时发，handler 抛错不炸环', as
     ],
     store,
     text: 'hello',
-    hasUI: true,
     cwd: process.cwd(),
+    ctx: {} as never,
+    selectedTools: ['read'],
     onError: (_where, message) => errors.push(message),
   });
   assert.deepEqual(seen, ['hello', 'hello'], '两个 handler 都该被调到（一个抛了不挡下一个）');
@@ -494,8 +529,9 @@ test('扩展：before_agent_start 在 idle 时发，handler 抛错不炸环', as
 
 test('扩展：ask_user_question 的 before_agent_start 协调器在本项目是 no-op', { skip: !hasAskUser && '没装 rpiv-ask-user-question' }, async () => {
   // 钉住「工具集不中途变」这个决定：协调器在 hasUI=true 时该什么都不做。
-  // 真去 assert「没改」需要观察 state —— 而 applyActiveTools 本来就是空实现。
-  // 这里验的是它**跑得起来**且**不报错**（那条协调器读的是 ctx.hasUI）。
+  // 现在 `applyActiveTools` **不是**空实现（真去改会改到 `tools.ts` 的模块级激活集），
+  // 所以这里要看的是它**跑得起来**且**不报错**（那条协调器读 ctx.hasUI），以及事件字段
+  // 够真扩展读（见下面的断言）。
   useRealHome();
   try {
     const { store } = freshStore();
@@ -517,6 +553,14 @@ test('扩展：ask_user_question 的 before_agent_start 协调器在本项目是
     });
     registerExtraTools([]);
     await host.beforeAgentStart('hi');
+    // 事件形状够不够，就看真扩展能不能读完不报错。这里最贵的一条是 `pi-subagents`：
+    // 少了 `selectedTools` 或 `sessionManager.getSessionFile()` 就是**每轮**一条
+    // `Cannot read properties of undefined…`（而它不是这个测试的断言对象，很容易漏看）。
+    assert.deepEqual(
+      host.errors.filter((e) => e.includes('Cannot read properties of undefined')),
+      [],
+      'before_agent_start 的事件字段该够真扩展读',
+    );
     // state 里的工具清单原封不动。
     assert.deepEqual(
       store.getState().prompt.tools.map((t) => t.name),

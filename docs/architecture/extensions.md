@@ -195,19 +195,17 @@ pi.setActiveTools([...new Set([...pi.getActiveTools(), ...names])]);
 
 这不是巧合而是设计：扩展问「现在有哪些工具」，答案必须是「模型看得见哪些」。
 
-装载窗口内（`prompt.init` 之前）它是空的，所以这个 getter 在那种时候读**注册表的激活集**
+`prompt.init` 之前它是空的，所以这个 getter 在那种时候读**注册表的激活集**
 （`activeToolNames()`）—— MCP 扩展在 `session_start` 里就要问它（那时还没有 prompt）。
 判据是 `state.prompt.tools.length === 0`，见 `extension-tools.ts`。
 
-### ③ `ctx.sessionManager`：仍然不接
+### ③ `ctx.sessionManager`：接了（只读）
 
-pi 的会话层是它的**应用层**，本项目刻意不接（见
-[surfaces](surfaces.md)「为什么不用 pi 自己的 InteractiveMode」）。
+pi 的会话**层**（`addEntry` / `fork` / `navigateTree`…）本项目刻意不接（见
+[surfaces](surfaces.md)「为什么不用 pi 自己的 InteractiveMode」），但扩展**读会话**的
+那几个成员接了 —— 数据源是本项目的 `state.messages`，见下面的「`ctx.sessionManager`：接了」。
 
-扩展若去读那个 ctx 的成员（`pi-web-access` 用它读会话条目以重建上下文、算
-opencode 的 session header），会在那里炸出「cannot read property of undefined」—— 那比
-给一个**会静默说谎**的空实现好得多：后者会让扩展以为「会话里什么都没有」而改走另一条
-路，症状离真因很远。
+这一节早先写的是「仍然不接」，于是 `pi-web-access` 一读就在 `undefined` 上炸。
 
 ## 不接的：命令与快捷键
 
@@ -254,18 +252,26 @@ $ pnpm start
 
 ## 三个坑
 
-### 一、工具集**不中途变**（于是那条协调器是 no-op）
+### 一、工具集**中途可变**，但「变了要声明」
 
-扩展的 prompt 注入在 pi 那边是每轮现拼，本项目是**装载时**定下（`prompt.init`）。
-工具集在会话中途换会让已发出的 `messages` 与 prompt 对不上，而 prompt-cache 的前缀整个
-作废。
+早先这里写的是「工具集装载时定死」：`setActiveTools()` 只在装载窗口内生效，窗口外
+一律拒绝并记一条诊断。理由是对的（中途换工具会让已发出的 `messages` 与 prompt 对不上、
+prompt-cache 前缀作废），结论是错的 —— 那两条现在都由**声明**解决了：
 
-所以 `applyActiveTools()` 是**空实现** —— 不是忘了做。由此推出一条**已知无效**的路径：
-`ask_user_question` 自带的 `before_agent_start` 协调器（非交互时把工具摘掉）在本项目
-恒为 no-op，因为本项目只有交互式一种模式、`hasUI` 恒真。
+- `setActiveTools()`（`extension-tools.ts` 的 `applyActiveTools`）真的更新
+  `state.prompt.tools`；
+- `reducer.ts` 的 `agent.run` 在**请求前**把「能执行的」与「已经声明给模型的」
+  diff 成一条 `toolsAdded` / `toolsRemoved` 的 system 消息（pi-agent-core 的
+  `declareToolChanges` 同一步）；
+- **head 永远是装载时那批**（`state.prompt.headTools`）—— 已有消息一个字节不动。
 
-真要改工具集：`/new` 换会话，或改 `settings.json` 后重启。测试里钉住了
-（`test/extension-host.test.ts` 的「协调器在本项目是 no-op」）。
+收益是具体的：`pi-web-access` 的 `web_enable`、`pi-subagents` 的 `subagents_enable`
+都是 loader 工具，整条功能就是「运行中把工具加进来」；窗口在时它们只能回一句
+「still inactive」。
+
+`ask_user_question` 自带的 `before_agent_start` 协调器在本项目仍然是 no-op，但理由
+只剩一条：本项目只有交互式一种模式、`hasUI` 恒真，所以它要做的事本来就不需要做
+（不再是「改了也不生效」）。
 
 ### 二、无 UI 时**不绑** `ctx.ui`，而不是绑一个空的
 
@@ -295,18 +301,46 @@ TypeError: Cannot read properties of undefined (reading 'requestRender')
 `notify` 例外：它**不用** `live()`，因为扩展的提示在界面起来之前也该能出（而不是把一条
 提示变成一个异常）。
 
-## `before_agent_start`：发，但只发一半
+## `before_agent_start`：发，段改动真的采信
 
 发这个事件的两个理由：
 
 1. 工具集 —— 不发它 `ask_user_question` 的协调器**永远不会被调用**；
-2. 不违反契约 —— 扩展可能靠这个事件做别的事，不发等于骗它「没这回事」，症状会出现在
-   它内部的某个远端调用上，极难归因。
+2. 不违反契约 —— 扩展可能靠这个事件做别的事（改 prompt 段、记一次「轮开始」…），
+   不发等于骗它「没这回事」，症状会出现在它内部的某个远端调用上，极难归因。
 
-**不采信它的 prompt 改动**（官方那个 `emitBeforeAgentStart` 会用 `systemPromptOptions`
-**重建**整份 system prompt，而本项目只存了成品文本、没有那份可重拼的 options）。
-所以自己按「这件事只需要 `ctx`」调 handler：第一个扩展的协调器只读 `ctx.hasUI`，
-事件本身一个字段都不碰。
+**整段替换不采信，按段 patch 采信**。官方那个 `emitBeforeAgentStart` 会用
+`systemPromptOptions` **重建**整份 system prompt 并整段塞进请求；本项目的 prompt 是
+装载时定下的，整段换会让已发出的 `messages` 与 prompt 对不上。但**分段**是存着的
+（`state.prompt.sections`），于是：handler 写回的段与「当前生效」那份一 diff，
+**只有变了的段**进一条新的 system 消息（`prompt.segment.added`，`null` = 删段）。
+
+为什么非要「按段 + 追加」而不是「重发整段」：**前缀缓存**。请求里靠前的那部分
+（head 与已有消息）一个字节都不能动，否则整段 token 的缓存作废。head 的形状见
+`src/prompt-head.ts`：
+
+- head 是 `messages[0]` 的一条 system 消息（装着全量 `sections` 与 `toolsAdded`），
+  **不是** `Context.systemPrompt` / `Context.tools` —— 那两个字段会被 pi-ai
+  **每轮**重建成 head，改一个字就整条重造；
+- 支持 mid-conv system 的模型：head 原样 + 后面的段 patch 一起发；
+- 不支持的模型：pi-ai 的 `resolveTranscript` → `collapseSystemMessages` 把它们
+  **回放合并**成一条 head（语义相同，代价是这一轮前缀必断 —— 模型能力的硬约束）。
+
+**`ctx` 用官方那个**（`runner.createContext()`），不手搓最小版。早先这里是
+`{ hasUI, mode, cwd }` 三字段，理由是「那条协调器只读 `ctx.hasUI`」—— 直到
+`pi-subagents` 的 handler 去读 `ctx.sessionManager` 算会话身份：手搓的 ctx 里那个是
+`undefined`，于是**每轮**一条 `Cannot read properties of undefined (reading
+'getSessionFile')`，而那个堆栈里一帧本项目的代码都没有。官方 ctx 的每个成员本项目都
+已经接好了（见上面的 `getActiveTools` / `getAllTools` / `sessionManager` 那些节），
+所以它既不更假、也不更容易崩 —— 它只是**不装**。
+
+**事件字段按「谁会读」给**：`cwd`、`sections`（MCP 往里写 `mcp_servers`）、
+`selectedTools`（`pi-subagents` 主 handler 第一句就是
+`...selectedTools.includes('subagent')`）。少一个 = 每轮一条 `Cannot read properties of
+undefined`；多给（`skills` / `toolSnippets` / `forceSystemPrompt`…）= 骗扩展它能重拼
+prompt。`selectedTools` 是**真值**（当前声明给模型的工具名，与它自己调
+`pi.getActiveTools()` 同一份），可写只是为了别让 `??=` / `push` 那种写法炸在冻结的数组上
+（我们只拿它给 handler 读；真正生效靠它同时调 `pi.setActiveTools()`）。
 
 两条守卫：
 
@@ -405,8 +439,10 @@ snippet 里）—— 错报一条就变成永远修不掉的 `[Extension issues]
 
 ## `ctx.sessionManager`：接了
 
-它只读三处：`getSessionId()`（算 opencode 的请求头）、`getBranch()`（恢复上次的搜索
-结果）、`buildSessionContext(branch)`（重建对话，判「这轮模型用过哪些 web 工具」）。
+它只读四处：`getSessionId()`（算 opencode 的请求头）、`getSessionFile()`（`pi-subagents`
+拿它算「本会话的 subagent 产物放哪」）、`getBranch()`（恢复上次的搜索结果）、
+`buildSessionContext(branch)`（重建对话，判「这轮模型用过哪些 web 工具」），
+另外 `pi-subagents` 的 `session_start` handler 也会读前两个。
 
 ### 数据源是**本项目**的会话
 
@@ -417,7 +453,17 @@ pi 那边是 `SessionManager` **类**，条目来自它自己的 `sessions/*.jso
 症状是「`/search` 列不出刚才搜的东西」，而且**只在同一个会话里出错**（重启就「好了」，
 因为那时文件里的内容恰好等于内存里的）。极难归因。
 
-所以只实现那三个只读成员，数据源是 `state.messages`。
+所以只实现那几个只读成员，数据源是 `state.messages`（`getSessionFile` 例外 —— 它读
+本项目的落盘器，那才是文件本身的真相）。
+
+### `getSessionFile()`：给路径，不给就诚实地说 `undefined`
+
+`pi-subagents` 用它算「本会话的 subagent 产物放哪」（`session_start` 与**每轮**
+`before_agent_start` 都读）。它是个**取值函数**（指到落盘器当时的文件）：`/new` 之后
+文件也换，写死常量的话扩展算出来的产物目录会永远是上一个会话的。
+
+不写会话文件（或落盘器还没建）时返回 `undefined` —— 不编一个假路径出来。
+`pi-subagents` 对 `undefined` 有降级路径（回退到 `getSessionId()` 当身份），不报错。
 
 ### `getBranch()` 必须包一层 `{type:'message', message}`
 
@@ -514,9 +560,10 @@ pi 那边是 `SessionManager` **类**，条目来自它自己的 `sessions/*.jso
 | `src/extension-ui.ts` | `ctx.ui`：`custom()`（overlay / inline）、`setWidget`、`theme`、`notify`、raw input |
 | `src/extension-tools.ts` | pi `ToolDefinition` → 本项目 `AgentTool`；工具集读/写 |
 | `src/extension-models.ts` | `ctx.modelRegistry`：官方的 `ModelRegistry` 门面 |
-| `src/extension-sessions.ts` | `ctx.sessionManager`：三个只读成员，数据源是 `state.messages` |
+| `src/extension-sessions.ts` | `ctx.sessionManager`：四个只读成员，数据源是 `state.messages`（`getSessionFile` 读落盘器） |
 | `src/extension-commands.ts` | 斜杠命令与快捷键（内置键优先） |
-| `src/extension-prompt.ts` | `before_agent_start` 的接线与两条守卫 |
+| `src/extension-prompt.ts` | `before_agent_start` 的接线、**段补丁**与两条守卫 |
+| `src/prompt-head.ts` | 请求 head（prompt + 初始工具声明）与「当前生效 sections」的回放 |
 | `test/extension-*.test.ts` | 真扩展 + 探针 + 模拟按键（三个文件） |
 
 ## 测试为什么用真扩展

@@ -21,14 +21,27 @@ pi 那边这两个都是**内置扩展**（`createMcpExtension()` / `createCodem
 重写一遍等于把 MCP 客户端与那个沙箱重做一次，而且会漂移。本项目只提供**自己那一半**：
 环、store、工具注册表，以及官方扩展要的 ctx 成员。
 
-### 不装 `tool_search`
+### `tool_search`：**装了**
 
-pi 的内置扩展一共有四个（还有 `llama.cpp` 与 `tool-search`）。`tool_search` **刻意不装**：
+pi 的内置扩展一共四个（还有 `llama.cpp`）。本项目装三个：`mcp` / `codemode` /
+**`tool-search`**（不装 `llama.cpp` —— 那是本地模型跑的，见 `provider.md`）。
 
-它把 `deferred` 工具「装载」成 declared，而那个动作要**中途改工具声明** —— 与本项目
-「工具集装载时定死」直接冲突（见 [extensions](extensions.md#工具集不中途变)）。装了它，
-模型会看到一句「Loaded N tools」，而那 N 个工具下一轮**并不在**工具表里：静默撒谎，
-比不装坏得多。
+`tool_search` 干的事就一件：BM25 搜 `codemode` / `deferred` 暴露的工具，命中的走
+`setActiveTools()` 装载成 declared，下一轮模型就能直接调。
+
+早先本项目**刻意不装**它，理由是「它要中途改工具声明，与本项目『工具集装载时定死』
+冲突」。那条不变式换成「**中途可变，但变了要声明**」之后（见
+[extensions](extensions.md#一工具集中途可变但变了要声明)），它依赖的三样东西本项目都有：
+
+| 它要的 | 本项目给的 |
+| --- | --- |
+| `pi.getAllTools()` 的 `exposure` / `namespace` | 真的读注册表（`registeredToolInfos()`） |
+| `pi.getActiveTools()` | 当前**声明**（`state.prompt.tools`） |
+| `pi.setActiveTools()` | 真的改（`tools.changed` → `agent.run` 的声明增量） |
+
+注册是 `defaultActive: false`（pi 也一样）：要用得在 `settings.json` 的 `defaultTools` 里
+写 `+tool_search`。测试里钉住了整条路（`test/mcp-codemode.test.ts` 的
+「`+tool_search` 能把 deferred 工具搜出来」）。
 
 于是 `deferred` 归入 codemode（官方文档原话：codemode 或 deferred 的工具都能从两种
 间接机制到达，脚本本来就能调它）—— 脚本用 `searchTools()` / `ALL_TOOLS` /
@@ -44,7 +57,7 @@ pi 的内置扩展一共有四个（还有 `llama.cpp` 与 `tool-search`）。`t
 | `direct` | 开（激活时） | 开 | 内置工具、普通扩展工具、MCP 配了 `direct` 的 |
 | `model-only` | 开 | **否** | codemode 自己（脚本不能再起脚本） |
 | `codemode` | 否（除非显式激活） | 开 | MCP 工具的配置默认值 |
-| `deferred` | 否 | 开 | pi 靠 tool_search 装载；本项目归入 codemode |
+| `deferred` | 否 | 开 | `tool_search` 装载（搜到才声明）；搜不到就从 codemode 脚本调 |
 | `hidden` | 否 | 否 | 服务器已撤下的工具 |
 
 两个容易踩的点：
@@ -52,13 +65,16 @@ pi 的内置扩展一共有四个（还有 `llama.cpp` 与 `tool-search`）。`t
 - **`direct` 也要激活才可调**（与 pi 的 `_getCallableTools` 一致）。`defaultTools` 关掉的
   内置工具，脚本里也调不到 —— 那是对的，否则「关掉 grep」只关了模型那一半。
 - **MCP 扩展会把配置里的 `codemode` 注册成 `deferred`**（官方 `toToolExposure()` 的映射）。
-  两者对模型都是「不声明」，差别只在 tool_search 能不能装载；本项目不装 tool_search，
-  所以这一层差异不可见。`mcp_servers` 段里写的仍是配置的那个词。
+  两者对模型都是「不声明」；差别看 `tool_search` —— 现在本项目装了它，所以这层差异
+  **看得见**：模型能把它们搜出来装进声明。`mcp_servers` 段里写的仍是配置的那个词。
 
-## 声明集在装载时定死
+## 声明集：装载时算一次，之后随 `setActiveTools()` 更新
 
-`state.prompt.tools`（= 发给模型的工具声明）仍然是 `prompt.init` 一次性装进去的，
-本轮的 `declaredToolset()`（`tools.ts`）算出它：
+`state.prompt.tools`（= 当前声明）装载时由 `prompt.init` 装进去，之后每次
+`setActiveTools()`（`tools.changed`）重算一份 —— 而「变了」这件事由 `agent.run`
+在请求前 diff 成 `toolsAdded` / `toolsRemoved` 声明给模型（见
+[extensions](extensions.md#一工具集中途可变但变了要声明)）。每次重算都走
+`declaredToolset()`（`tools.ts`）：
 
 ```
 激活集 ∩ 注册表（去 hidden） → 跑一遍 prepareLoadout 钩子 → 声明
@@ -104,7 +120,7 @@ declaredToolset() + prompt.init + freezeActiveTools()
 | `pi.registerTool()` 的**动态**注册 | `refreshTools` 真的重扫 runner 的注册表（MCP 服务器连上后走这里） | `extension-host.ts` 的 `syncExtensionTools()` |
 | `pi.getAllTools()` 的 exposure / namespace | 真的读注册表 | `tools.ts` 的 `registeredToolInfos()` |
 | `pi.getSettings()` | 真的读 `~/.pi/agent/settings.json` | `pi-config.ts` 的 `loadPiSettings()` |
-| `systemPromptOptions.sections` | 装载时收集一次，拼进 prompt（`mcp_servers` 段） | `system-prompt.ts` 的 `sections` |
+| `systemPromptOptions.sections` | 装载时收集一次拼进 prompt；之后每轮 `before_agent_start` 写回的段**按段 patch**（变了才追加一条消息） | `system-prompt.ts` 的 `sections` / `extension-prompt.ts` |
 | `tool_call` 事件 | 环在每次工具执行前发（顶层 + 脚本的嵌套调用） | `effects.ts` 的 `onToolCall` / `extension-host.ts` 的 `beforeToolCall` |
 
 ### 为什么 `tool_call` 那一条不能省
@@ -161,12 +177,14 @@ MCP 的 `tool_call` handler 做一件很具体的事：**codemode 脚本点名�
 ## 已知边界
 
 - **装载后连上的 `direct` 服务器，工具不会被补进模型的工具表。** pi 会在下一个请求里补，
-  本项目不会（声明定死）。装载时 `direct` 服务器**等 10 秒**（官方那个上限），等到的就在；
+  本项目不会（声明只在 `setActiveTools()` 之后更新，而它不会为了等一个服务器去重算）。
+  装载时 `direct` 服务器**等 10 秒**（官方那个上限），等到的就在；
   之后连上的仍能从脚本调（`refreshTools` 会进可调表）—— 只是模型不知道它存在，
   要 `/new` 换会话才进工具表。慢服务器建议配成 `codemode`（脚本里会等）。
 - **`/new` 不重发 `session_start`**，所以 MCP 服务器不会重读 `mcp.json`、也不会重连。
   改了 `mcp.json` 要重启（与改 `settings.json` 的 `defaultTools` 同一条）。
-- **`deferred` 没有 `tool_search`**：见上，它只能在脚本里调。
+- **`deferred` 要靠 `tool_search` 装载**：它默认不进声明（模型看不见），两条路到它 ——
+  模型调 `tool_search` 搜出来，或 codemode 脚本直接调。
 - **MCP 工具不进权限确认**：本项目还没有权限扩展那一层，`tool_call` 的 `block` 已经把口子
   留好了（`beforeToolCall` 的返回值），但还没有谁用它。
 

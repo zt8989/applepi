@@ -165,10 +165,37 @@ export function stopCauseText(cause: StopCause): string {
  * 扩展（洋葱式 middleware）不写在这里 —— 它横切所有 action，见 src/middleware.ts。
  */
 export interface PromptState {
-  /** 基础 system prompt。 */
+  /** 基础 system prompt（渲染好的整段）。 */
   systemPrompt: string;
-  /** 工具的完整定义（原样进 LLM 请求的那三样）。 */
+  /**
+   * 整段 prompt 的**分段**（pi 的 `SystemPromptSections`：段名 → 文本）。
+   *
+   * `systemPrompt` 是它的渲染结果，而这个才是原料：有了它，中途的 prompt 变更才能
+   * **按段 patch**（只有变了的段进新消息，已有消息一个字节不动 —— 前缀缓存因此保住）。
+   * 没它的话任何变更都得整段重发。
+   *
+   * **可选**：旧轨迹文件的 init 段里没有这个字段。没有时只能当「一整段 prompt」
+   * （head 用 `content` 而不是 `sections`，见 `prompt-head.ts`）。
+   */
+  sections?: Record<string, string>;
+  /**
+   * **当前**工具的完整定义（原样进 LLM 请求的那三样）。
+   *
+   * 会话中途会变（loader 工具 `web_enable` / `subagents_enable` 会调 `setActiveTools`），
+   * 变更走 `tools.changed`，而「变了」这件事由 `agent.run` 在请求前 diff 成一条
+   * `toolsAdded` / `toolsRemoved` 消息声明给模型（见 `prompt-head.ts`）。
+   */
   tools: PromptToolDefinition[];
+  /**
+   * **装载时**那一批工具定义 —— head 里 `toolsAdded` 用的就是它，永不更新。
+   *
+   * 为什么必须留一份「旧的」：head 是**不可变历史**（前缀缓存靠的就是它一个字节不动）。
+   * 工具集变了之后，如果 head 也跟着换成新的，前缀立刻作废 —— 变更必须作为
+   * **新的** system 消息追加（`toolsAdded`），而不是去改第一条。
+   *
+   * 缺省（老轨迹回放 / 测试）时按「没有变过」处理：head 直接用 `tools`。
+   */
+  headTools?: PromptToolDefinition[];
   /**
    * 装进来的 skill 清单（`skills.ts` + 官方 `loadSkills()`）。
    *

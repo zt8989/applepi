@@ -556,6 +556,16 @@ test('端到端：装载与对话都落盘，回放时零 token 复现', async (
       '工具的完整定义都在（回放不必重装配）',
     );
     assert.ok(init.prompt.tools[0]?.description, '连 description 一起落盘');
+    // 分段也落：中途的 prompt 变更只 patch 变了的段，回放时靠它还原「当时有哪几段」。
+    assert.ok(init.prompt.sections, 'prompt.init 该带 sections');
+    assert.ok(
+      init.prompt.sections.preamble?.startsWith('你是测试助手'),
+      `preamble 段该是那段自定义前言。实际：${init.prompt.sections.preamble?.slice(0, 80)}`,
+    );
+    assert.ok(
+      init.prompt.sections.cwd?.startsWith('<cwd>'),
+      '其余段该是带 tag 的（模型靠 tag 把后来的更新对上号）',
+    );
     assert.ok(init.model, 'model.init 在');
     assert.equal(init.model.provider, 'faux');
     assert.ok(init.model.capabilities, '能力也落盘（回放不必再问 provider）');

@@ -13,6 +13,7 @@ import {
 } from './state';
 import { appendNode, patchNode, type TraceNode, type TraceNodeStatus, type TraceTree } from './trace';
 import { compactReasonText, type CompactReason } from './compact';
+import { buildPromptHead, declaredToolSchemas, toolDeclarationDelta } from './prompt-head';
 /**
  * 一张纯表：action → (下一个状态, 该发哪些 effect)。
  *
@@ -441,6 +442,47 @@ function flushModelChange(state: AgentState, now: number): AgentState {
   };
 }
 
+
+/**
+ * 请求即将发起时，把**工具集的变化**声明进消息流。
+ *
+ * `state.prompt.tools` 是「能执行什么」，transcript 里的声明是「模型能调什么」；
+ * 两者不一致就追加一条 `toolsAdded` / `toolsRemoved` 的 system 消息 —— 与
+ * pi-agent-core 的 `declareToolChanges(context, pendingMessages)` 同一步。
+ *
+ * ## 为什么 head 要拿 `headTools`
+ *
+ * head 是 `messages[0]` 的**不可变历史**，它的 `toolsAdded` 必须一直是装载时那批。
+ * 拿「当前工具集」去构造 head 的话，`web_enable` 一启用新工具，head 就跟着变，
+ * 前面所有 token 的缓存前缀全废 —— 那是这次改动要防的头号事故。
+ * 变更只能作为**新的** system 消息追加（`toolDeclarationDelta` 算出来的差）。
+ *
+ * ## 为什么放在 `agent.run` 而不是 effect 里
+ *
+ * 状态只能由 action 改。`agent.run` 正是「请求即将发起」那一步（下一件事就是
+ * `callLlm`），所以声明在这里落地最准 —— effect 里改 state 会绕过 reducer。
+ */
+function withToolDeclarations(state: AgentState): Message[] {
+  const changes = toolDeclarationDelta({
+    head: buildPromptHead({
+      systemPrompt: state.prompt.systemPrompt,
+      ...(state.prompt.sections !== undefined ? { sections: state.prompt.sections } : {}),
+      tools: declaredToolSchemas(state.prompt.headTools ?? state.prompt.tools),
+    }),
+    currentTools: declaredToolSchemas(state.prompt.tools),
+    messages: state.messages,
+  });
+  if (changes === undefined) return state.messages;
+  const message: Message = {
+    role: 'system',
+    content: '',
+    toolsAdded: changes.toolsAdded,
+    ...(changes.toolsRemoved.length > 0 ? { toolsRemoved: changes.toolsRemoved } : {}),
+    timestamp: Date.now(),
+  };
+  return [...state.messages, message];
+}
+
 const transitions: TransitionHandlers = {
   // ── prompt 侧装载 ──
 
@@ -480,6 +522,10 @@ const transitions: TransitionHandlers = {
       // 原样接收：内核拼好的那一段就是最终形态（工具规则 / AGENTS.md / cwd / skills）。
       systemPrompt: action.systemPrompt,
       tools: action.tools,
+      // 装载时那一批**单独留一份**：head 的 `toolsAdded` 用它，之后工具集再变也不动
+      // （见 PromptState.headTools）。
+      headTools: action.tools,
+      ...(action.sections ? { sections: action.sections } : {}),
       ...(action.skills ? { skills: action.skills } : {}),
       ...(action.skillDiagnostics && action.skillDiagnostics.length > 0
         ? { skillDiagnostics: action.skillDiagnostics }
@@ -511,6 +557,7 @@ const transitions: TransitionHandlers = {
     const message: Message = {
       role: action.role,
       content: action.text,
+      ...(action.sections !== undefined ? { sections: action.sections } : {}),
       timestamp: now,
       ...(action.source !== undefined ? { source: action.source } : {}),
     } as Message;
@@ -518,10 +565,14 @@ const transitions: TransitionHandlers = {
     // parent 取此刻的 tip —— 于是它就落在「下一轮会读它的那次调用」的正上方。
     const { tree } = appendNode(state.trace, state.trace.tipId, 'prompt.segment', {
       status: 'ok',
-      label: summarize(action.text),
-      detail: action.text,
+      label: action.text === '' ? summarize(Object.keys(action.sections ?? {}).join(' ')) : summarize(action.text),
+      detail:
+        action.text === ''
+          ? JSON.stringify(action.sections ?? {})
+          : action.text,
       meta: {
         role: action.role,
+        ...(action.sections !== undefined ? { sections: Object.keys(action.sections).join(',') } : {}),
         ...(action.source !== undefined ? { source: action.source } : {}),
       },
       createdAt: now,
@@ -529,6 +580,24 @@ const transitions: TransitionHandlers = {
     });
     return { ...state, trace: tree, messages: [...state.messages, message] };
   },
+
+  /**
+   * 工具集变了：只更新**当前声明**。
+   *
+   * `headTools` 保持不动（head 是不可变历史）。老轨迹回放里可能还没有这个字段
+   * （那时声明就是 `tools` 那一份）—— 首次变更时把**变更前**那份记下来当 head，
+   * 否则 head 会跟着新工具集走，前缀立刻作废。
+   */
+  'tools.changed': (state, action) => ({
+    ...state,
+    prompt: {
+      ...state.prompt,
+      tools: action.tools,
+      ...(state.prompt.headTools === undefined ? { headTools: state.prompt.tools } : {}),
+    },
+    // 扁平别名跟着更新（真相在 prompt 块里）。
+    toolNames: action.tools.map((tool) => tool.name),
+  }),
 
   // ── model 侧装载 ──
 
@@ -939,6 +1008,9 @@ const transitions: TransitionHandlers = {
     if (state.phase === 'thinking' && state.openStepNodeId !== null) return state;
     return {
       ...state,
+      // 请求即将发起 —— 工具集的变化要在**这一刻**声明出去（pi 的 `declareToolChanges`
+      // 同一步）：变了就追加一条 system 消息，没变一个字节都不加。
+      messages: withToolDeclarations(state),
       phase: 'thinking',
       error: null,
       errorNodeId: null,

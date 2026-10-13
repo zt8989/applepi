@@ -92,6 +92,15 @@ export type AgentAction =
       type: 'prompt.init';
       /** 基础 system prompt（内核装配时定的那段）。 */
       systemPrompt: string;
+      /**
+       * system prompt 的**分段**（`system-prompt.ts` 的 `buildPromptParts`）。
+       *
+       * `systemPrompt` 是它的渲染结果。两份一起装：回放 / 恢复时拿得到分段，
+       * 中途的 prompt 变更才能按段 patch（前缀缓存的前提，见 `prompt-head.ts`）。
+       *
+       * **可选**：旧轨迹的 init 段里没有它（那时只有一整段可用）。
+       */
+      sections?: Record<string, string> | undefined;
       /** 工具的完整定义。 */
       tools: PromptToolDefinition[];
       /**
@@ -114,15 +123,37 @@ export type AgentAction =
    * 落进 `state.messages` —— 即 Conversation 的一部分，所以它会被一起落盘、一起回放。
    * 模型支不支持中途插：`ModelCapabilities.midConvoSystemMessages`。不支持时 pi-ai 会把后来的
    * system 消息折进开头那条，我们不自己折。
+   *
+   * ## `sections`：按**段名** patch（而不是再接一整段文本）
+   *
+   * pi 的形状：head 里带着全量 sections（`preamble` 加其余包 `tag` 的段），后来的消息
+   * 只需带上**变了的段**——`null` 表示删掉那一段。这样已有消息一个字节不动，
+   * 前缀缓存能活下来（而不支持中途插 system 的模型由 pi-ai 折叠）——见 `prompt-head.ts`。
+   *
+   * 带 `sections` 时 `text` 通常为空（`''`）：内容全在段里。
    */
   | {
       type: 'prompt.segment.added';
       role: 'system' | 'developer';
       text: string;
+      sections?: Record<string, string | null> | undefined;
       /** 来源标记（哪个 hook / 手动），UI 要显示「这段是哪来的」。 */
       source?: string | undefined;
     }
 
+
+  /**
+   * 工具集变了（`pi.setActiveTools()` → 本项目的 `state.prompt.tools`）。
+   *
+   * **只改「当前声明」，不动 head**：变更怎么告诉模型是下一步的事（`agent.run` 在请求前
+   * diff 出 `toolsAdded` / `toolsRemoved` 追加一条 system 消息）。两件事分开的理由见
+   * `prompt-head.ts`：head 一动，前缀缓存全废。
+   */
+  | {
+      type: 'tools.changed';
+      /** **当前**工具的完整定义（`declaredToolset()` 算好的那份）。 */
+      tools: PromptToolDefinition[];
+    }
 
   /** ═══ model 侧 ═══ */
   /**

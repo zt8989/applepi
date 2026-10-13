@@ -2783,18 +2783,31 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const send = (text: string): void => {
     // 工作状态（上框线那个「思考中…」）不在这里手动开 —— `refresh()` 从 state 现推。
     // `user.message` 会把 `phase` 拉到 `thinking`，下面那行 `dispatch` 之后紧接着的
-    // `refresh()` 就把状态画上了。（dispatch 是同步的，所以不存在「先渲染一帧空边框」的窗口。）
+    // `refresh()` 就把状态画上了。
+    //
     // `before_agent_start` 在**发出去之前**调（与 pi 同序）：扩展看到的是「用户刚说了
     // 什么、即将开跑」这个时刻。
     //
-    // **不 await**：那个事件在本项目里是 no-op（工具集不中途变），而 await 会把
-    // 「敲回车」到「界面开始转圈」之间插入一段不可中断的等待。将来真要采信它的时候
-    // 改成 `void (async () => { await …; store.dispatch(...) })()` —— 注意那时
-    // `user.message` 必须**在** await 之后，否则时序反了。
-    void beforeAgentStartHook?.(text);
-    store.dispatch({ type: 'user.message', text });
-    refresh();
+    // **必须 await**：扩展现在可以改 prompt 段（写回 `systemPromptOptions.sections`，
+    // 我们把它 diff 成一条 `prompt.segment.added`）—— 那条补丁消息得在
+    // `user.message` **之前**就位，否则本轮的请求已经把 `state.messages` 读走了。
+    // 改回 `void` 的话症状很轻：首轮拿不到扩展的段，而看不出哪里错。
+    //
+    // 期间用一个门钉住重复发送：原来靠「`dispatch` 同步把 `phase` 变成 thinking」防连按，
+    // 现在 `await` 会把这个窗口打开。
+    if (sending) return;
+    sending = true;
+    void (async () => {
+      try {
+        await beforeAgentStartHook?.(text);
+      } finally {
+        sending = false;
+      }
+      store.dispatch({ type: 'user.message', text });
+      refresh();
+    })();
   };
+  let sending = false;
 
   // 布局：AltScreen = 真正的全屏（占满视口、终端不留回滚缓冲）。
   // 纵向三段：顶行一行（页签 + 统计）/ 中间那块（当前页，唯一可伸缩）/ 底部输入区。

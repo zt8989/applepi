@@ -33,6 +33,13 @@ export type InitRecord =
   | {
       op: 'prompt.init';
       systemPrompt: string;
+      /**
+       * system prompt 的**分段**（`system-prompt.ts` 的 `buildPromptParts`）。
+       *
+       * 与 `systemPrompt`（它的渲染结果）一起落：中途的 prompt 变更只 patch 变了的
+       * 段，回放时靠它还原「当时有哪几段」；没有它就只能当一整段（旧会话）。
+       */
+      sections?: Record<string, string>;
       tools: { name: string; description: string; parameters: unknown }[];
       /**
        * 装进来的 skill 清单（可选 —— 旧会话没这个字段）。
