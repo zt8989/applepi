@@ -3052,6 +3052,14 @@ function renderPlain(text: string): string[] {
  * 用 pi 官方的 `SkillInvocationMessageComponent`（与 `parseSkillBlock()` 同源）——
  * 折叠态是「[skill] name」一行，Ctrl+O 展开是全文。形状与官方一致，不自己画。
  *
+ * ## 块后面那句话要**单独再画一条用户消息**
+ *
+ * 官方组件的类注释就写着「Only renders the skill block itself - user message is
+ * rendered separately」，pi 的 `addMessageToChat()` 也在那一支里补了 `Spacer(1)` +
+ * `UserMessageComponent(skillBlock.userMessage)`。本项目早先只画了卡片，症状是
+ * `/skill:x 帮我看下这个报错` 里**人问的那句话整个不见了** —— 而模型明明收到了它，
+ * 于是「模型在回答哪句话」在界面上无从对照。
+ *
  * 认不出来就画普通用户消息（不是 `[]`）：宁可多显示一点，也不要把内容吞掉。
  */
 function renderSkillBlock(text: string, width: number, expanded: boolean): string[] {
@@ -3059,7 +3067,13 @@ function renderSkillBlock(text: string, width: number, expanded: boolean): strin
   if (!block) return renderUser(text, width);
   const component = new SkillInvocationMessageComponent(block, getMarkdownTheme());
   component.setExpanded(expanded);
-  return component.render(usableWidth(width));
+  const lines = component.render(usableWidth(width));
+  if (block.userMessage) {
+    // 一行空隙：与 pi 的 `Spacer(1)` 同一处，也是为了别让蓝块贴着卡片的下框线。
+    lines.push('');
+    lines.push(...renderUser(block.userMessage, width));
+  }
+  return lines;
 }
 
 /** 用户消息：整块蓝底铺满。 */

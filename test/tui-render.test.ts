@@ -260,6 +260,45 @@ function toolState(args: {
 // 每帧都渲染一次，主题必须先装上（见 src/tui/theme.ts：没 initTheme 读 theme 会抛）。
 setupTheme(undefined, 'dark');
 
+// ─── `/skill:<名字> 问题`：卡片 + 人问的那句话，两条都要画 ───
+
+/** 一条用户消息的 state（对话区渲染只需要 `messages`）。 */
+function userOnly(text: string): AgentState {
+  return { messages: [{ role: 'user', content: text, timestamp: 1 }], toolTimings: {} } as unknown as AgentState;
+}
+
+/** `/skill:x` 展开出来的那一整段（与 `expandSkillCommand()` 同形）。 */
+const SKILL_BLOCK =
+  '<skill name="code-review" location="/tmp/skills/code-review/SKILL.md">\n' +
+  'References are relative to /tmp/skills/code-review.\n\n正文第一步…\n</skill>';
+
+test('skill 块 + 问题：卡片与人问的那句话都要画（与 pi 同一处补一条用户消息）', () => {
+  // 官方组件的类注释写着「Only renders the skill block itself - user message is rendered
+  // separately」，pi 的 addMessageToChat 那一支里确实补了 Spacer + UserMessageComponent。
+  // 早先只画卡片，症状是「人问的那句话整个不见了」——而模型收到了它。
+  const out = stripTerminalSequences(
+    renderTranscript(userOnly(`${SKILL_BLOCK}\n\n帮我看下这个报错`), 0, 80, false),
+  );
+  assert.ok(out.includes('[skill]'), `要有 skill 卡片：${out}`);
+  assert.ok(out.includes('code-review'), `卡片上要有名字：${out}`);
+  assert.ok(out.includes('帮我看下这个报错'), `人问的那句话不能被吞掉：${out}`);
+});
+
+test('skill 块没有问题时：只画卡片（不多出一条空的用户消息）', () => {
+  const out = stripTerminalSequences(renderTranscript(userOnly(SKILL_BLOCK), 0, 80, false));
+  const nonEmpty = out.split('\n').filter((line) => line.trim() !== '');
+  assert.equal(nonEmpty.length, 1, `折叠态就是一行，实际：${JSON.stringify(out)}`);
+  assert.ok(nonEmpty[0]?.includes('[skill]'), nonEmpty[0] ?? '(空)');
+});
+
+test('skill 块 + 问题：展开（Ctrl+O）时两条都在，问题仍然单独一条', () => {
+  const out = stripTerminalSequences(
+    renderTranscript(userOnly(`${SKILL_BLOCK}\n\n第二个问题`), 0, 80, true),
+  );
+  assert.ok(out.includes('正文第一步'), `展开后要有正文：${out}`);
+  assert.ok(out.includes('第二个问题'), `展开后问题也要在：${out}`);
+});
+
 test('工具块：标题行是英文工具名 + 参数（pi 形状，不是中文 label）', () => {
   const state = toolState({ toolName: 'read', args: { path: 'package.json' } });
   const out = stripTerminalSequences(renderTranscript(state, 0, 80, false));
