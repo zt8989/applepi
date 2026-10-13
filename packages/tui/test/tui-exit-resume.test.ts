@@ -133,6 +133,7 @@ async function runExitCase(keys: string[], id: string): Promise<ExitCaseResult> 
       '--cwd',
       cwd,
       '--no-extensions',
+      '--no-web',
     ];
     const scriptPath = path.join(cwd, 'exit-case.exp');
     writeFileSync(

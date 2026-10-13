@@ -19,6 +19,9 @@ import { createKernel, type Kernel } from '@ela/core/kernel';
 import { runTui } from './app';
 import { setupTheme } from './theme';
 import { keyLabel } from './keybindings';
+import { WebBridge } from './web/bridge';
+import { startWebServer, type WebServerHandle } from './web/server';
+import { extensionLabels } from './resource-labels';
 import type { Theme } from '@earendil-works/pi-coding-agent';
 // pi 的 theme 是 globalThis 上的一个 Proxy —— initTheme() 之后一直可读。
 // 直接 import（不缓存）是为了「initTheme 可能被再调」时读到的是当时那个。
@@ -70,6 +73,10 @@ interface CliArgs {
   help: boolean;
   demo: boolean;
   noTrace: boolean;
+  /** 不启 web ui（`--no-web`）。 */
+  noWeb: boolean;
+  /** web ui 的端口（默认 30141；被占就往后试）。 */
+  webPort?: number | undefined;
   sessionId?: string;
   /** 工具的工作目录（文件操作边界）。 */
   cwd: string;
@@ -107,6 +114,8 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
       --skill <path>     额外的 skill 文件或目录（可重复；默认扫 ~/.pi/agent/skills 与 <cwd>/.pi/skills）
       --cwd <dir>       工具的工作目录（文件操作边界，默认当前目录）
       --trace-dir <dir> 轨迹目录（默认 ~/.pi/agent/traces）
+      --web-port <n>    浏览器界面的端口（默认 30141；只绑 127.0.0.1，被占就往后试）
+      --no-web           不起浏览器界面（只要终端界面）
   -h, --help             显示本帮助
 
 内置工具（默认 read / write / edit / bash；powershell / grep / find / ls 默认关，
@@ -119,6 +128,12 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
   grep       - 搜文件内容（需要 ripgrep）
   find       - 按 glob 找文件（需要 fd）
   ls         - 列目录内容
+
+浏览器界面（默认随终端一起启动，\`--no-web\` 关掉）:
+  http://127.0.0.1:30141/   pi-web-ui 的聊天界面。环仍然是终端这一个进程里的那一份 ——
+                            浏览器只是订阅它、往里发话（模型密钥与工具都在服务端）。
+                            前端要先构建一次：\`pnpm build\`（没构建会显示一页说明）。
+                            只绑本机、无认证：工具没有沙箱，别把它挂到局域网上。
 
 界面里（键名按当前键位解析，改过 ~/.pi/agent/keybindings.json 就会跟着变）:
   ${keyLabel('app.trace.toggle').padEnd(19)}在「对话」与「轨迹」两页之间切换（顶部有页签）
@@ -159,6 +174,7 @@ function parseArgs(argv: string[]): CliArgs {
     help: false,
     demo: false,
     noTrace: false,
+    noWeb: false,
     noExtensions: false,
     cwd: process.cwd(),
     skillPaths: [],
@@ -253,6 +269,12 @@ function parseArgs(argv: string[]): CliArgs {
         break;
       case '--no-trace':
         args.noTrace = true;
+        break;
+      case '--web-port':
+        args.webPort = Number.parseInt(next(), 10);
+        break;
+      case '--no-web':
+        args.noWeb = true;
         break;
       case '--no-extensions':
         args.noExtensions = true;
@@ -378,6 +400,47 @@ async function main(): Promise<void> {
     }
   }
 
+  // ── web ui：与终端同一个环，只是第二个订阅者 ──
+  //
+  // 服务端起在**同一个进程**里（环只有一份，跑在内核里）。它只把 store 的状态与事件
+  // 转发给浏览器，自己不碰模型、不跑工具。起不来（端口全占、权限）**不影响终端界面**，
+  // 所以这里把错误降级成一行提示。
+  let web: WebServerHandle | undefined;
+  let bridge: WebBridge | undefined;
+  let webNotice: string | undefined;
+  if (!args.noWeb) {
+    bridge = new WebBridge(
+      {
+        store: kernel.store,
+        cwd: args.cwd,
+        getSessionId: () => kernel.sessionId,
+        setModel: (provider, id) => kernel.setModel(provider, id),
+        newSession: () => kernel.newSession(),
+        resolveModel: (provider, id) => {
+          try {
+            // `getModels()` 对未知 provider 会抛（best-effort），所以裹一层。
+            return kernel.runtime.models.getModels(provider).find((model) => model.id === id) ?? null;
+          } catch {
+            return null;
+          }
+        },
+      },
+      // 开场诊断与终端那边同一个口径：装了哪些扩展 + 装载失败。
+      [
+        ...extensionLabels(kernel.extensions.entries).map((label) => `已装扩展：${label}`),
+        ...kernel.extensions.errors.map((error) => `扩展装载诊断：${error}`),
+      ],
+    );
+    try {
+      web = await startWebServer({ bridge, ...(args.webPort !== undefined ? { port: args.webPort } : {}) });
+      webNotice = `web ui: ${web.url}`;
+    } catch (error) {
+      process.stderr.write(
+        `web ui 起不来（终端界面不受影响）：${String(error instanceof Error ? error.message : error)}\n`,
+      );
+    }
+  }
+
   const prompt = args.prompt ?? (args.demo ? '算一下 (3+4)*6' : undefined);
   process.exitCode = await runTui({
     store: kernel.store,
@@ -410,6 +473,8 @@ async function main(): Promise<void> {
     // 把活着的界面交给内核的扩展宿主（它在装扩展时只能拿到一个待填的引用）。
     publishUi: (options) => {
       uiRef.current = options;
+      // 界面起来了才报 web ui 的地址（备用屏之前写 stdout 会被它盖掉，见文件末尾的注释）。
+      if (webNotice !== undefined) options.onNotice(webNotice);
     },
     // 开场报一行装了哪些扩展 + 装载诊断（与 skill 清单同一个口径）。
     //
@@ -421,6 +486,10 @@ async function main(): Promise<void> {
       errors: kernel.extensions.errors,
     },
     ...(prompt !== undefined ? { prompt } : {}),
+  }).finally(async () => {
+    // 关掉监听端口，否则事件循环上一直有活，进程退不掉（与 `kernel.dispose()` 同一个道理）。
+    await web?.close();
+    bridge?.dispose();
   });
 }
 

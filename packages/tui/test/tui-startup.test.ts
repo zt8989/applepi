@@ -295,7 +295,7 @@ async function firstFrame(
   env: NodeJS.ProcessEnv = envWithoutTestHome(),
 ): Promise<{ text: string; raw: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn('node', ['--import', 'tsx', ENTRY], {
+    const child = spawn('node', ['--import', 'tsx', ENTRY, '--no-web'], {
       cwd: ROOT,
       // COLUMNS/LINES：pi-tui 量尺寸用。给一个确定的宽高，断言才稳定。
       //
@@ -369,7 +369,7 @@ async function sessionsPanel(
   ms = 11000,
 ): Promise<{ text: string; raw: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn('node', ['--import', 'tsx', ENTRY], {
+    const child = spawn('node', ['--import', 'tsx', ENTRY, '--no-web'], {
       cwd: ROOT,
       env: envWithoutTestHome(),
       stdio: ['pipe', 'pipe', 'pipe'],

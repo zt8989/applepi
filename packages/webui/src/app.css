@@ -1,0 +1,30 @@
+/*
+ * webui 的样式。
+ *
+ * pi-web-ui 自带编译好的 Tailwind 产物（`app.css`，含它自己的 theme 变量与组件用的
+ * 工具类）—— 直接引进来；本项目自己那点外壳用 Tailwind v4 现算。
+ *
+ * 顺序有讲究：**pi-web-ui 的在前**。它那些工具类（`bg-background` 等）是编译进
+ * 文件里的字面值，不会被 v4 的默认 theme 影响；反过来（v4 在前）才有风险 ——
+ * v4 的 preflight 与 theme 变量会盖掉它依赖的基础样式。
+ */
+@import '@earendil-works/pi-web-ui/app.css';
+@import 'tailwindcss';
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ChatPanel 自己撑满父容器（它的根节点是 h-full）。 */
+#ela-chat > * {
+  height: 100%;
+}

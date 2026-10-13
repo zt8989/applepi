@@ -32,10 +32,12 @@ pi-coding-agent 的官方实现，pi-ai 升到 1.0.2）给了 [tools](architectu
 
 | 包 | 目录 | 是什么 |
 | --- | --- | --- |
-| `@ela/core` | `packages/core/src/` | 内核：环 / store / reducer / effects / trace / compact / kernel / provider / 扩展宿主（`extension-*`） |
-| `@ela/tui` | `packages/tui/src/` | pi-tui 终端界面（`main.ts` 是入口，`packages/tui/bin/ela.mjs` 是全局启动器） |
+| `@ela/core` | `packages/core/src/` | 内核：环 / store / reducer / effects / trace / compact / kernel / provider / 扩展宿主（`extension-*`）/ 线协议（`web-protocol.ts`） |
+| `@ela/tui` | `packages/tui/src/` | pi-tui 终端界面（`main.ts` 是入口，`packages/tui/bin/ela.mjs` 是全局启动器）+ web server（`web/`） |
+| `@ela/webui` | `packages/webui/src/` | 浏览器界面（Vite + pi-web-ui）；详见 [webui](architecture/webui.md) |
 
-- **依赖方向只有一条：`tui → core`**（`workspace:*`）。core 不认识 tui。
+- **依赖方向只有一条：tui → core**（`workspace:*`），webui → core（**只引类型**：线协议）。core 不认识 tui / webui。
+  tui 另有一个到 webui 的依赖 —— 那是为了拿到它的 `dist/` 做静态资源（见 [webui](architecture/webui.md)）。
 - **跨包导入走包名子路径**（`@ela/core/provider`）：core 的 `exports` 直接把 `./src/*.ts` 暴露出去，
   没有构建步骤 —— tsx 与 `tsc`（`moduleResolution: Bundler`）都直接读源码。
 - **界面的每个跨包触碰点都经过内核装配**（见 [kernel](architecture/kernel.md)）：tui 拿到的是
@@ -69,4 +71,5 @@ pi-coding-agent 的官方实现，pi-ai 升到 1.0.2）给了 [tools](architectu
 | [thinking](architecture/thinking.md) | 思考级别：五条来源的优先级、clamp（为什么默认会变成 high）、四个写入口、会话往返、思考预算 |
 | [settings](architecture/settings.md) | 设置：`/settings` 面板里有什么、哪些键本项目真的会读、加一行的顺序 |
 | [extensions](architecture/extensions.md) | 装 pi 扩展：官方 loader + jiti 虚拟模块、overlay 宿主、工具集不中途变 |
+| [webui](architecture/webui.md) | 浏览器界面：线协议、桥的映射、pi-web-ui 的替身、端口与构建 |
 | [mcp-codemode](architecture/mcp-codemode.md) | 内置扩展 `mcp` + `codemode`：exposure 五种取值、装载顺序、`tool_call` 门、已知边界 |

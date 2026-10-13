@@ -1,0 +1,31 @@
+{
+  "name": "@ela/webui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "event-loop-agent 的浏览器界面：pi-web-ui 的 ChatPanel，环在 tui 那一侧跑。",
+  "type": "module",
+  "exports": {
+    "./package.json": "./package.json",
+    "./dist/*": "./dist/*"
+  },
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ela/core": "workspace:*",
+    "@earendil-works/pi-agent-core": "^1.0.2",
+    "@earendil-works/pi-web-ui": "0.75.3",
+    "@mariozechner/mini-lit": "^0.2.0",
+    "highlight.js": "^11.11.1",
+    "lit": "^3.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.17",
+    "@types/node": "^24.0.0",
+    "tailwindcss": "^4.1.17",
+    "typescript": "^5.7.2",
+    "vite": "^7.1.6"
+  }
+}

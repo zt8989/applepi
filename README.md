@@ -25,6 +25,10 @@ agent** —— 循环不是写出来的，是 reducer 与副作用互相 dispatc
   `edit` 的那些坑、`AGENTS.md` 项目上下文、cwd、skill 清单。自己**一个字都不写** ——
   项目自己的规则写在 `.pi/APPEND_SYSTEM.md`（或家目录那份）里，与 pi 同路径、同优先级。
   手写提示词会把那些踩坑换来的经验全扔掉。
+- **也能在浏览器里用。** 默认随终端起一个 web server（`http://127.0.0.1:30141/`），
+  界面是 `@earendil-works/pi-web-ui` 的聊天界面 —— 但**环还是终端进程里那一个**，
+  浏览器只是渲染层（模型密钥与工具都在服务端）。见
+  [`docs/architecture/webui.md`](docs/architecture/webui.md)。
 
 **本文只讲怎么装、怎么起、怎么测。** 它是什么、内部怎么转、接口有哪些见
 [`docs/architecture.md`](docs/architecture.md)。文档分工：README 是入口，
@@ -55,11 +59,22 @@ npm 只拷 `bin/`（`files` 之外的仓库文件不会跟着走），入口全�
 推 **tui 包根** —— 与调用时的 cwd 无关，因此**任何目录里都能跑**：
 
 ```bash
-ela                              # 交互式
+ela                              # 交互式（同时起浏览器界面）
 ela -p "今天几号？"              # 跑一条就退出
 ela --demo                       # 不打网络
 ela --cwd ~/some/project         # 工具的文件边界换到别处
+ela --no-web                     # 不要浏览器界面
+ela --web-port 8080              # 换浏览器界面的端口（默认 30141）
 ```
+
+浏览器界面（`http://127.0.0.1:30141/`，默认开启）需要**先构建一次前端**：
+
+```bash
+pnpm build                       # = pnpm --filter @ela/webui build
+```
+
+没构建也能起 —— 那一页会给一句「先跑 pnpm build」。只绑 `127.0.0.1`、无认证：
+工具没有沙箱，别把它挂到局域网上。
 
 改 `packages/*/src/*.ts` 后**直接生效**，不用重新 link。代价是仓库的 `node_modules` 得在
 （`rm -rf node_modules` 之后全局命令会报模块找不到 —— 这是软链方案的固有性质）。
@@ -210,6 +225,18 @@ pnpm start --thinking high "帮我看看这个并发问题"   # 一次性的思�
 pnpm start -m cn:deepseek-v4.1-flash:high   # 同一个意思：模型 pattern 的 :<级别> 后缀
 ```
 
+**浏览器界面**（pi-web-ui，默认随终端一起起）：
+
+```bash
+pnpm build                       # 先构建一次前端（dist/ 不在版本库里）
+pnpm start                       # 然后开浏览器：http://127.0.0.1:30141/
+pnpm start --no-web              # 只要终端
+pnpm start --web-port 8080       # 换端口（被占就往后试，真地址会报出来）
+```
+
+两边是**同一个环**：在浏览器里发的话，终端那边也会看到（反之亦然）。
+实现与边界见 [`docs/architecture/webui.md`](docs/architecture/webui.md)。
+
 界面里：`Ctrl+R` **在「对话」与「轨迹」两页之间切换**（顶部有页签标出当前在哪页），
 `Alt+↑/↓` 或 `Ctrl+P/N` 翻当前页（半页），`Ctrl+O` 展开/收起工具输出，
 `Ctrl+T` 展开/收起模型的思考块，`Ctrl+Q` 切换入队模式，`Ctrl+L` 开模型面板。
@@ -351,7 +378,8 @@ auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 prov
 
 ```bash
 pnpm test           # 全部离线测试（core + tui），不打网络
-pnpm typecheck      # 两个包各跑一次 tsc --noEmit
+pnpm typecheck      # 三个包各跑一次 tsc --noEmit
+pnpm build          # 构建前端（webui 的 dist/，不在版本库里）
 
 pnpm core:test      # 只跑 core 包
 pnpm tui:test       # 只跑 tui 包
@@ -364,13 +392,14 @@ reducer 纯性、轨迹树的不变量（**超时后重试的父 id 指向超时
 ## 目录
 
 ```
-packages/core/src/        内核：环 / store / reducer / effects / trace / compact / kernel / 扩展宿主
+packages/core/src/        内核：环 / store / reducer / effects / trace / compact / kernel / 扩展宿主 / 线协议
 packages/core/scripts/    配置迁移（migrate-config-dir / migrate-models）
-packages/tui/src/         pi-tui 终端界面（main.ts 是入口）
+packages/tui/src/         pi-tui 终端界面（main.ts 是入口）+ web server（web/）
 packages/tui/bin/ela.mjs  全局 CLI 启动器（只做 tsx 装载，逻辑都在 src/）
+packages/webui/src/       浏览器界面（Vite + pi-web-ui；`pnpm build` 出 dist/）
 packages/*/test/          离线测试（按包分）
 test-support/             测试共享脚手架（配置家目录隔离 + 守卫）
-docs/architecture/        架构现状
+docs/architecture/        架构现状（浏览器界面见 webui.md）
 patches/                  pnpm patch（打开 pi-coding-agent 的内部子路径）
 ~/.pi/agent/              运行时状态：配置 / 会话 / 轨迹（与 pi 共用，不在仓库里）
 ```

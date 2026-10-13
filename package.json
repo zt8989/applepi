@@ -14,6 +14,7 @@
     "start": "node --import tsx packages/tui/src/main.ts",
     "agent": "node --import tsx packages/tui/src/main.ts",
     "typecheck": "pnpm -r typecheck",
+    "build": "pnpm --filter @ela/webui build",
     "test": "pnpm -r test",
     "core:test": "pnpm --filter @ela/core test",
     "tui:test": "pnpm --filter @ela/tui test",

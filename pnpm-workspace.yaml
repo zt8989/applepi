@@ -1,6 +1,11 @@
 packages:
   - 'packages/*'
 
+# pi-web-ui → xlsx 走的是 URL（`https://cdn.sheetjs.com/...`），pnpm 11 默认把这种
+# 「exotic 子依赖」当供应链风险拦下（ERR_PNPM_EXOTIC_SUBDEP）。要装 pi-web-ui 就得放行，
+# 而它没有 allowlist 这种粒度 —— 只能整个关掉。这是本项目唯一一处放宽。
+blockExoticSubdeps: false
+
 # pnpm 的构建脚本白名单。
 #
 # pnpm 10+ 默认**拦截所有依赖的 postinstall**（供应链安全）。不放行的话每次 pnpm 命令

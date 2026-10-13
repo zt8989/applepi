@@ -14,6 +14,8 @@ store、也跑环，就会出现两处都发起 LLM 调用、消息流不一致�
 所以：
 
 - `npm start` 读 `kernel.store`，界面只订阅、只 dispatch，**不自己跑环**。
+- 浏览器界面（[webui](webui.md)）是**同一个 store 的第二个订阅者** —— 它连 tui 的 web
+  server，状态与事件都由桥从这一个 store 映射出去；两边说的话进的是同一个环。
 
 配置这一层**直接用 pi-coding-agent 的 `ModelRuntime`**（它自己读 `~/.pi/agent` 的
 models.json / auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 provider 的
