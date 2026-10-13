@@ -44,7 +44,7 @@ import { createRuntime, defaultProviderSpec } from '../src/provider';
 import type { AgentStore } from '../src/store';
 import { getTool, getTools, registerExtraTools } from '../src/tools';
 import { initTheme, theme } from '@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';
-import { TuiAltScreen } from '@earendil-works/pi-tui';
+import { TuiAltScreen, type Component } from '@earendil-works/pi-tui';
 import type { HostUiOptions } from '../src/extension-ui';
 
 // ── 用真配置家目录（见文件头） ──
@@ -120,12 +120,33 @@ function fakeTui(written: string[]): TuiAltScreen {
   return new TuiAltScreen(terminal, true, undefined, {});
 }
 
-function hostUiOptions(tui: TuiAltScreen, notices: string[] = []): HostUiOptions {
+/**
+ * 宿主探针的「输入区槽位」：记下 `mountEditorSlot()` 收到的东西。
+ *
+ * 真界面（`tui/app.ts`）把这一格换成扩展组件并重排布局；探针只需要
+ * 「挂上了什么 / 还回来了没有」这两个事实 —— 所以只是一个引用。
+ */
+interface FakeEditorSlot {
+  current: (Component & { dispose?: () => void }) | undefined;
+}
+
+function hostUiOptions(
+  tui: TuiAltScreen,
+  notices: string[] = [],
+  slot?: FakeEditorSlot,
+): HostUiOptions {
   return {
     tui,
     theme,
     addInputListener: (listener) => tui.addInputListener(listener),
     onNotice: (text) => notices.push(text),
+    // **故意**在没传 slot 时不提供这个能力：探针默认就是「没有输入区槽位的宿主」，
+    // 于是「非 overlay 的 custom 必须明说不行」那条测试测的就是它。
+    ...(slot === undefined
+      ? {}
+      : { mountEditorSlot: (component: (Component & { dispose?: () => void }) | undefined) => {
+          slot.current = component;
+        } }),
   };
 }
 
@@ -287,20 +308,25 @@ test('扩展：无 UI 时 ask_user_question 自己降级（而不是崩）', { s
   }
 });
 
-test('扩展：给真 UI 时 custom() 真的把浮层挂上去（overlay 宿主成立）', { skip: !hasAskUser && '没装 rpiv-ask-user-question' }, async () => {
+test('扩展：给真 UI 时 custom() 把问卷挂进输入区槽位（inline 宿主成立）', { skip: !hasAskUser && '没装 rpiv-ask-user-question' }, async () => {
   useRealHome();
   try {
     const { store } = freshStore();
     const written: string[] = [];
     const tui = fakeTui(written);
+    const slot: FakeEditorSlot = { current: undefined };
     initTheme('dark', false);
 
-    await loadExtensionHost({ store, cwd: process.cwd(), uiOptions: () => hostUiOptions(tui) });
+    await loadExtensionHost({
+      store,
+      cwd: process.cwd(),
+      uiOptions: () => hostUiOptions(tui, [], slot),
+    });
     const tool = getTool('ask_user_question');
     assert.ok(tool, '工具应该在注册表里');
     registerExtraTools([]);
 
-    // 不 resolve —— 它在等用户答。我们只看「浮层上去了没有」。
+    // 不 resolve —— 它在等用户答。我们只看「组件挂上去了没有」。
     const pending = tool!.execute(
       'call-2',
       {
@@ -321,15 +347,26 @@ test('扩展：给真 UI 时 custom() 真的把浮层挂上去（overlay 宿主�
     // 防止它 reject 时变成 unhandled rejection。
     pending.catch(() => undefined);
 
-    // **轮询到浮层出现**，而不是固定等 3 秒。
+    // **轮询到槽位里真的有东西**，而不是固定等 3 秒。
     //
     // 那个 3 秒是照着扩展自己文档里的「渲染图约 560ms 冷加载 + 2 秒预热」估的，
     // 而整套测试并发跑时机器负载完全不同 —— 实测它在单跑时过、全量跑时挂。
     // 等一个**事件**（而不是一个时长）就不会假失败。
-    await waitFor(() => tui.hasOverlay(), 20_000, '扩展的对话框浮层没有出现');
+    //
+    // ## 为什么断言的是槽位而不是 `hasOverlay()`
+    //
+    // 扩展 2.13 起**默认**走 Pi 的 editor slot（`presentation.ts` 的
+    // `resolvePresentation()`），overlay 只在「已经有另一个浮层」时降级用 ——
+    // 所以第一份问卷根本不进 overlay 栈，「浮层在不在」从此是个空断言。
+    await waitFor(() => slot.current !== undefined, 20_000, '扩展的问卷没有挂进输入区槽位');
 
-    // 关掉它，别让浮层留在栈上。
-    tui.hideOverlay();
+    // 收工：直接给组件喂 Esc（取消）。不把它结掉的话，它会一直抱着扩展模块里的那个
+    // 模块级变量（`presentation.ts` 的 `inlineSlotHeld`），同一进程里后面的用例就
+    // 全部只能降级成 overlay —— 而那种「后面突然变了」最难查。
+    slot.current?.handleInput?.('\x1b');
+    const result = (await pending) as { details?: unknown };
+    assert.deepEqual(result.details, { answers: [], cancelled: true }, 'Esc 该是「放弃」');
+    assert.equal(slot.current, undefined, '答完该把 composer 还回去');
     void written;
   } finally {
     restoreHome();
@@ -359,15 +396,53 @@ test('扩展：notify 接到界面的那行提示上', () => {
   assert.notEqual(notices[0], notices[1], '级别不同前缀该不同（要能一眼分出是警告）');
 });
 
-test('扩展：非 overlay 的 custom 明确报错（不假装成功）', async () => {
+test('扩展：宿主没有输入区槽位时，非 overlay 的 custom 明确报错（不假装成功）', async () => {
   // 静默 no-op 会让扩展以为界面接受了它的组件，而实际什么都没发生 ——
   // 那个症状（对话框不出现、也不报错）最难查。
+  //
+  // 「宿主没有槽位」是**真实存在**的一档：`tui.ts` 的 `requireUi()` 在界面起来之前
+  // 给的就是这个占位宿主，测试探针默认也是它。
   const tui = fakeTui([]);
   const ui = createHostUi(() => hostUiOptions(tui));
+  let factoryCalled = false;
   await assert.rejects(
-    () => ui.custom(() => ({ render: () => [], invalidate: () => {} }), { overlay: false }),
+    () =>
+      ui.custom(
+        () => {
+          factoryCalled = true;
+          return { render: () => [], invalidate: () => {} };
+        },
+        { overlay: false },
+      ),
     /overlay/,
   );
+  assert.equal(factoryCalled, false, '明确拒绝时不该把工厂也调了');
+});
+
+test('扩展：inline custom 挂进输入区槽位，done 之后把 composer 还回去', async () => {
+  const tui = fakeTui([]);
+  const slot: FakeEditorSlot = { current: undefined };
+  const ui = createHostUi(() => hostUiOptions(tui, [], slot));
+
+  const component: Component = { render: () => [], invalidate: () => {} };
+  let done: ((result: string) => void) | undefined;
+  const pending = ui.custom<string>(
+    (_tui, _theme, _keybindings, finish) => {
+      done = finish;
+      return component;
+    },
+    { overlay: false },
+  );
+
+  // 工厂是同步返回的，但 `mountEditorSlot` 在 promise 链上下一个 microtask 里调 ——
+  // 让出一轮再断言。
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(slot.current, component, '组件该挂进输入区槽位');
+
+  assert.ok(done, '工厂该拿到 done');
+  done('answer');
+  assert.equal(await pending, 'answer', 'done 的结果就是 custom() 的结果');
+  assert.equal(slot.current, undefined, 'done 之后该把 composer 还回去');
 });
 
 test('扩展：before_agent_start 环在跑的时候不发（否则会凭空多出消息）', async () => {
@@ -482,8 +557,11 @@ test('扩展：pi-web-access 装上，5 个 web 工具进注册表', { skip: !ha
     for (const want of ['web_search', 'fetch_content', 'source_check']) {
       assert.ok(names.includes(want), `缺工具 ${want}：${names.join(',')}`);
     }
-    // 全部都要 promptSnippet —— 官方语义是「没有 snippet 就不进 prompt」，而
-    // extension-host.ts 会为那种情况报一条诊断（上面断言 errors 为空已经盖住了）。
+    // 这两个工具要有 promptSnippet。
+    //
+    // 注意：**没有 snippet 不是错误**（工具照样进 API 请求的 tools 数组，
+    // 见 `extension-host.ts` 那段注释）—— 所以这里断言的是「它进没进 prompt 的工具节」，
+    // 而不是「没进就有人报错」。
     for (const want of ['web_search', 'fetch_content']) {
       assert.ok(
         host.promptTools.some((t) => t.name === want),
