@@ -73,11 +73,12 @@ function advancesTip(node) {
 │  ○  n8 step.start: 第 2 步
 │  │  ○  n9 llm.result: 今天是 10 月 5 日
 │  └─ n10 step.end: 第 2 步结束（0 个工具调用） (tools=0)
-└◎ n11 turn.end: 回合 1 结束：模型说完了 (reason=completed, steps=2)
+└─ n11 turn.end: 回合 1 结束：模型说完了 (reason=completed, steps=2)
 ```
 
 （渲染时会带上每个节点的耗时与 `meta`；这里为了让形状好读，把它们省了。
-最后一行 `└◎` 是「容器的闭口点」与「它就是当前 tip」叠在一起，见下面渲染一节。）
+最后一行就是当前 tip（`n11`）—— 它在字形上与别的节点一样，只在界面上**加粗**，
+见下面渲染一节。）
 
 一个回合里模型可以跑很多步（模型→工具→模型→…），**那是同一个回合的正常推进，不是重试**
 —— `traceStats` 的 `retries` 因此要求那组兄弟里**有失败的**才算。
@@ -91,7 +92,7 @@ function advancesTip(node) {
 │  │  ○  n4 error: LLM 调用超时（1s） (kind=timeout, cause=timeout)
 │  └─ n5 step.end: 第 1 步结束（0 个工具调用） (tools=0)
 │  ○  n6 step.start: 第 2 步（重试）
-│  │  ◎  n7 llm.result: 好了        ← tip
+│  │  ○  n7 llm.result: 好了        ← tip（界面上加粗）
 │  └─ n8 step.end: 第 2 步结束（0 个工具调用） (tools=0)
 ```
 
@@ -111,10 +112,28 @@ function advancesTip(node) {
 `traceRows()` 把树算成一行一行（`renderTree()` 只是把它拼起来）。
 每行是 `<轨道><符号> <id> <kind>: <label>`：
 
-- **符号**：当前 tip 是 `◎`，其余是 `○`；容器的闭口点（`turn.end` / `step.end`）是 `└─`，
-  而它**恰好又是 tip** 时画 `└◎`（同宽，所以不会错位 —— 不这样的话，回合说完、
-  会话闲置的那个状态，界面上一个 `◎` 都看不到）。
+- **符号**：**所有**节点都是 `○`；容器的闭口点（`turn.end` / `step.end`）是 `└─`。
+  早先 tip 单独画 `◎`（圈里套圈），于是同一棵树上有两种圆点字形 —— 差异又很轻微，
+  读起来像画错。现在 tip 靠**加粗**区分（见下），字形上树上只剩一种圈。
 - **轨道**：一行左边有几段 `│  `，就说明它在几层容器里。
+
+### tip 在哪里体现
+
+`traceRows()` 是**纯文本**层（没有 ANSI），所以它给出的行里看不出 tip。加粗是渲染层
+给的，判据只有一处 —— `emphasizedTraceLine()`（`src/tui/app.ts`）：
+
+- 节点 `status === 'error'`，或
+- 它就是 `tree.tipId`。
+
+两处渲染都用它：`renderColoredTree()`（一次性模式 / `--print` 的树）与
+`TraceChunks.lineOf()`（轨迹页）。**分成两条判据就会分家** —— 一次性模式里加粗的
+是 tip、界面里不是，而那种 bug 只有同时盯着两边的人能发现。
+
+代价是 `renderTree()`（纯文本路径）没有 tip 标记：每个节点都是 `○`。
+
+因为 tip 不再改字形，`TraceChunks` 的轨道前缀缓存里也不再需要 `tipId`（key 只剩
+「会话 id + 节点数」）；但 tip **换人**时旧、新两行的加粗都变了，所以那两行仍要
+主动作废（见 `syncLayout()`）—— 不能只指望「新节点一定是新对象」。
 
 **缩进只由 `turn.start` 与 `step.start` 给**，别的节点不给 —— 包括
 `llm.result` → `tool.call` → `tool.result` 那串父子链，它们都画在步里面那一列。
@@ -165,8 +184,9 @@ function advancesTip(node) {
 逐行抠出节点 id」，那个正则的 kind 白名单**漏了 `turn.start` / `step.end` 四个 kind**
 （它们于是整族不上色，静默退化）—— 现在把节点对象一起给出来，不再认文本格式。
 
-`TraceChunks` 的轨道前缀按「会话 id + 节点数 + tip」缓存：流式 token 一帧里节点只被换了标签，
-轨道一个字没变。
+`TraceChunks` 的轨道前缀按「会话 id + 节点数」缓存：流式 token 一帧里节点只被换了标签，
+轨道一个字没变。tip **不进这个 key** —— 它不改字形（只是加粗），换人时单独作废那两行
+（见上面「tip 在哪里体现」）。
 
 ## 落盘与回放
 

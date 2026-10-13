@@ -270,7 +270,7 @@ export class TraceChunks implements Component {
   private layout: Map<string, string> = new Map();
   /** 上面那份缓存的 key（见 `syncLayout`）。 */
   private layoutKey = '';
-  /** 上一条 tip —— 换人时那个旧节点的符号要从 `◎` 变回 `○`，得让它重算。 */
+  /** 上一条 tip —— 换人时**加粗**要从旧那行挪到新那行（见 `syncLayout`）。 */
   private lastTipId: string | null = null;
   /** 宽度变了要清折行缓存（`Text` 按宽度分桶缓存）。 */
   private lastWidth = 0;
@@ -344,8 +344,8 @@ export class TraceChunks implements Component {
     // 空树时给一句说明，而不是留一个 0 高的块（0 高度会让整块在布局里消失，
     // 于是「按了切页键没反应」与「面板塌了」看起来一模一样）。
     //
-    // 非空时这一块**完全不出现** —— 以前它是 `HEAD → <tipId>`，现在 tip 就画在
-    // 树上（`◎` / 闭合点的 `└◎`），再写一行就是重复。
+    // 非空时这一块**完全不出现** —— 以前它是 `HEAD → <tipId>`，现在 tip 就是树上
+    // 那一行（加粗），再写一行就是重复。
     this.showingNotice = order.length === 0;
     if (this.showingNotice && this.lastNotice !== emptyText) {
       this.noticeBlock.setText(dim(emptyText));
@@ -355,30 +355,38 @@ export class TraceChunks implements Component {
   }
 
   /**
-   * 同步轨道布局缓存（只在**结构**变了时重算）。
+   * 同步轨道布局缓存（只在**结构**变了时重算），并处理 tip 换人。
    *
-   * ## key 为什么是这三样
+   * ## 两件事分开算：前缀看结构，加粗看 tip
    *
-   * 轨道只取决于：哪棵树（会话 id）、有多少个节点（节点只增不减，所以个数就是结构版本）、
-   * 谁是 tip（`◎` 画在哪一行）。这三样没变，每一行的前缀就一模一样 ——
-   * 流式 token 那一帧也就什么都不用算。
+   * 轨道前缀只取决于：哪棵树（会话 id）、有多少个节点（节点只增不减，所以个数就是
+   * 结构版本）。tip **不改字形**（所有节点都是 `○`，见 trace.ts），它只决定哪一行
+   * 加粗 —— 而加粗是 `lineOf()` 里现算的，不进这份缓存。
    *
-   * 反过来说，「闭合一个容器」也不需要重算：闭合点的出现本身就是**新节点**（`step.end`），
-   * 节点数变了，key 变了。而它只影响自己那一行（以及下一条 tip 的行）—— 老行一个字不改。
+   * 反过来说，「闭合一个容器」也不需要重算前缀：闭合点的出现本身就是**新节点**
+   * （`step.end`），节点数变了，key 变了。
    */
   private syncLayout(tree: TraceTree): void {
-    const key = `${tree.sessionId}|${tree.order.length}|${tree.tipId ?? ''}`;
-    if (key === this.layoutKey) return;
-    this.layoutKey = key;
-    this.layout = new Map<string, string>();
-    for (const row of traceRows(tree, { maxWidth: 0 })) this.layout.set(row.node.id, row.prefix);
-    // tip 换人：上一条 tip 的符号要从 `◎` 变回 `○`，而它在 `lastNodes` 里引用没变
-    // （内容确实只差那一个字符），所以得**主动**让它重算。
-    if (this.lastTipId !== null && this.lastTipId !== tree.tipId) {
-      const at = tree.order.indexOf(this.lastTipId);
-      if (at >= 0) this.lastNodes[at] = undefined;
+    const key = `${tree.sessionId}|${tree.order.length}`;
+    if (key !== this.layoutKey) {
+      this.layoutKey = key;
+      this.layout = new Map<string, string>();
+      for (const row of traceRows(tree, { maxWidth: 0 })) this.layout.set(row.node.id, row.prefix);
     }
-    this.lastTipId = tree.tipId;
+    // tip 换人：加粗从旧那一行挪到新那一行 —— 这是**两行都变了**（一边去掉加粗、一边加上），
+    // 而它们在 `lastNodes` 里的引用没变（节点本身一个字没动），所以得**主动**作废，
+    // 否则增量逻辑会跳过这两行，加粗就留在原地（或者根本不上）。
+    //
+    // 新 tip 也要作废：多数时候它是刚追加的新节点（已经会重算），但并非总是 ——
+    // 单靠「新节点引用是新的」当保证，就会得到一个「偶发不加粗」的 bug。
+    if (this.lastTipId !== tree.tipId) {
+      for (const id of [this.lastTipId, tree.tipId]) {
+        if (id === null) continue;
+        const at = tree.order.indexOf(id);
+        if (at >= 0) this.lastNodes[at] = undefined;
+      }
+      this.lastTipId = tree.tipId;
+    }
   }
 
   /**
@@ -420,8 +428,8 @@ export class TraceChunks implements Component {
     const meta = metaSuffixOf(node);
     const text = `${prefix}${node.id} ${node.kind}: ${node.label}${elapsed}${meta}`;
     const line = truncateToWidth(text, width);
-    // 失败的节点加粗，视觉上更跳一点（与 renderColoredTree 同一口径）。
-    return node.status === 'error' ? bold(color(line)) : color(line);
+    // 失败与 tip 都加粗 —— 判据在 `emphasizedTraceLine()`（与 renderColoredTree 同一份）。
+    return emphasizedTraceLine(node, tree) ? bold(color(line)) : color(line);
   }
 }
 
@@ -433,10 +441,31 @@ function metaSuffixOf(node: TraceNode): string {
 }
 
 /**
+ * 轨迹树里这一行要不要**加粗** —— 两处渲染（`TraceChunks.lineOf()` 与
+ * `renderColoredTree()`）共用这一条判据。
+ *
+ * 两个条件：节点**失败**（视觉上更跳）、或者是当前 **tip**。
+ *
+ * tip 现在**只有这一个标记** —— 字形上所有节点都是 `○`。早先 tip 单独画 `◎`
+ * （圈里套圈），于是同一棵树上有两种圆点字形，差异又很轻微，读起来像画错；
+ * 换成加粗之后树上只剩一种符号，tip 反而更跳。判据写两遍的话，一次性模式与
+ * 轨迹页的 tip 迟早会不一致。
+ *
+ * 两个条件合在一个 `||` 里（而不是叠两层 bold）：加粗是同一个属性。
+ */
+export function emphasizedTraceLine(node: TraceNode, tree: TraceTree): boolean {
+  return node.status === 'error' || tree.tipId === node.id;
+}
+
+/**
  * 把轨迹树画成带颜色的轨道树。
  *
  * 直接复用 trace.ts 的 `traceRows()`（纯函数，测试里也在用），再按节点上色 ——
  * 这样「命令行里看到的树」和「界面里看到的树」是同一份逻辑，不会各画各的。
+ *
+ * 上色之外还给 tip 那一行**加粗**（`tree.tipId`）：树上所有节点都是 `○`，加粗是
+ * 「我现在在哪」的唯一标记。与 `TraceChunks.lineOf()` 同一口径 —— 两处分开写的话，
+ * 一次性模式与界面里的 tip 迟早会不一致。
  *
  * ## 为什么不再用正则从文本里抠节点 id
  *
@@ -451,8 +480,8 @@ export function renderColoredTree(tree: TraceTree, maxWidth: number): string {
   return rows
     .map((row) => {
       const color = nodeColor(row.node);
-      // 失败的节点加粗，视觉上更跳一点。
-      return row.node.status === 'error' ? bold(color(row.text)) : color(row.text);
+      // 失败与 tip 都加粗 —— 与 `TraceChunks.lineOf()` 同一份判据（见 `emphasizedTraceLine`）。
+      return emphasizedTraceLine(row.node, tree) ? bold(color(row.text)) : color(row.text);
     })
     .join('\n');
 }

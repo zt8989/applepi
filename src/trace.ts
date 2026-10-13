@@ -441,20 +441,21 @@ const SCOPE_CLOSE_KINDS: ReadonlySet<TraceNodeKind> = new Set<TraceNodeKind>([
 
 /** 一级轨道的宽度（3）。下面几个符号必须同宽，否则竖线会错位。 */
 const RAIL = '│  ';
-/** 普通节点。 */
-const DOT = '○  ';
-/** 当前 tip（最后推进过的那个节点）。 */
-const DOT_TIP = '◎  ';
-/** 容器的闭合点（`turn.end` / `step.end`）。 */
-const CORNER = '└─ ';
 /**
- * 闭合点**同时**是 tip —— 拐角里嵌上 tip 那个符号（同宽，所以不会错位）。
+ * 节点圆点 —— **所有节点都用它**（包括当前 tip）。
  *
- * 为什么需要它：一个回合正常说完时，tip 恰好就是 `turn.end`（`turn.end` 推进 tip）。
- * 只画 `└─` 的话，会话闲置时界面上**一个 `◎` 都看不到** —— 而「我现在在这」
- * 正是轨道图最该回答的那一个问题。
+ * 早先 tip 单独画 `◎`（两个圈的那种），于是树上同时出现两种圆点字形；现在统一成
+ * 一种圈，tip 改由**加粗**区分（`renderColoredTree()` / `TraceChunks.lineOf()` 里给的）。
+ * 这里（纯文本层）不再需要 tipId —— 加粗是颜色/属性，不属于字形。
  */
-const CORNER_TIP = '└◎ ';
+const DOT = '○  ';
+/**
+ * 容器的闭合点（`turn.end` / `step.end`）。
+ *
+ * 拐角与圆点同宽，所以闭合点**同时**是 tip 时也不需要另造一个 `└◎` —— 加粗同样落在
+ * 这一行上（早先那个 `CORNER_TIP` 就是为了不在拐角处丢 tip；改用加粗之后它没必要了）。
+ */
+const CORNER = '└─ ';
 
 function truncate(text: string, width: number): string {
   if (width <= 0) return text;
@@ -474,7 +475,7 @@ function metaSuffix(node: TraceNode): string {
  *
  * ## 形状从哪来：lazygit 的 `--graph`
  *
- * 每个节点一个圆点（`○`，当前 tip 是 `◎`），左边是它所在各层容器的竖线：
+ * 每个节点一个圆点（`○`，**tip 也是它**），左边是它所在各层容器的竖线：
  *
  * ```
  * ○  n1 user: 查两个
@@ -487,7 +488,17 @@ function metaSuffix(node: TraceNode): string {
  * └─ n8 turn.end: 回合 1 结束：模型说完了
  * ```
  *
- * 容器的闭合点画 `└─`；它恰好又是 tip 时画 `└◎`（见 `CORNER_TIP`）。
+ * 容器的闭合点画 `└─`。
+ *
+ * ## tip 不在这层表达
+ *
+ * 「我现在在哪」由**加粗**给（`renderColoredTree()` / `TraceChunks.lineOf()` 按
+ * `tree.tipId` 判）。这里刻意不给 tip 造第二个字形：早先 tip 是 `◎`（圈里套圈），
+ * 于是同一棵树上有两种圆点，而字形差异又很轻微 —— 读起来像画错了。统一成一种圈、
+ * 用加粗区分之后，树上只剩一种符号，tip 反而更跳。
+ *
+ * 代价是**纯文本路径没有 tip 标记**（这里不产出 ANSI）：`renderTree()` 打出来的树
+ * 每个节点都是 `○`。一次性模式的树走 `renderColoredTree()`，加粗是在的。
  *
  * ## 缩进只由容器给：轮一层、步一层
  *
@@ -586,13 +597,7 @@ export function traceRows(tree: TraceTree, options: TreeRenderOptions = {}): Tra
         break;
     }
 
-    const marker = SCOPE_CLOSE_KINDS.has(node.kind)
-      ? node.id === tree.tipId
-        ? CORNER_TIP
-        : CORNER
-      : node.id === tree.tipId
-        ? DOT_TIP
-        : DOT;
+    const marker = SCOPE_CLOSE_KINDS.has(node.kind) ? CORNER : DOT;
     const prefix = RAIL.repeat(stack.length) + marker;
     const elapsed = node.endedAt === null ? '' : ` ${formatDuration(node.endedAt - node.createdAt)}`;
     const head = `${prefix}${node.id} ${node.kind}: ${node.label}${elapsed}${metaSuffix(node)}`;
@@ -611,9 +616,12 @@ export function traceRows(tree: TraceTree, options: TreeRenderOptions = {}): Tra
  *
  * ## 为什么没有 `HEAD → <tipId>` 那一行
  *
- * 以前最后会补一行 tip 指向谁。现在 tip **就画在树上**（`◎`；它与容器闭合点重合时
- * 是 `└◎`），再写一行说的是同一件事。少一行，也不再有「树里那行到底是节点还是尾巴」
+ * 以前最后会补一行 tip 指向谁。现在 tip **就是树上那一行**（加粗；闭合点同时是 tip
+ * 时那一行也加粗），再写一行说的是同一件事。少一行，也不再有「树里那行到底是节点还是尾巴」
  * 这个歧义（按行数校验的测试曾经得记得给它加一）。
+ *
+ * 这里打出来的是**纯文本**（没有 ANSI），所以看不出哪一行是 tip —— 看得出的那条路是
+ * `renderColoredTree()`（一次性模式与轨迹页都走它）。
  */
 export function renderTree(tree: TraceTree, options: TreeRenderOptions = {}): string {
   const rows = traceRows(tree, options);

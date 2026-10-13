@@ -17,7 +17,9 @@ import {
   cwdLine,
   dim,
   dimLine,
+  emphasizedTraceLine,
   modelLine,
+  renderColoredTree,
   TraceChunks,
   isScrollDown,
   isScrollUp,
@@ -1097,6 +1099,48 @@ test('TraceChunks：节点多了也能全部拿到（一块一行，不是整棵
   assert.match(lines[119] ?? '', /n120 llm.result: 节点 119/);
 });
 
+test('轨迹：所有节点都是 `○`，tip 靠加粗区分（不再有第二个圈 `◎`）', () => {
+  // 早先 tip 单独画 `◎`（圈里套圈），于是同一棵树上有两种圆点字形 —— 差异又很轻微，
+  // 读起来像画错。现在统一 `○`，tip 由**加粗**表达。
+  //
+  // 判据抽在 `emphasizedTraceLine()` 里、`TraceChunks.lineOf()` 与 `renderColoredTree()`
+  // 共用 —— 一次性模式与轨迹页的 tip 因此不会分家。
+  let tree = createTraceTree('s');
+  tree = appendNode(tree, null, 'user', { status: 'ok', label: '你好', createdAt: 0, endedAt: 0 }).tree;
+  tree = appendNode(tree, tree.tipId, 'llm.result', {
+    status: 'ok', label: '好了', createdAt: 1, endedAt: 1,
+  }).tree;
+  assert.equal(tree.tipId, 'n2');
+  assert.equal(emphasizedTraceLine(tree.nodes['n2']!, tree), true, 'tip 要加粗');
+  assert.equal(emphasizedTraceLine(tree.nodes['n1']!, tree), false, '非 tip 不加粗');
+  // 失败的节点也加粗 —— 这是原有行为，别被这次改动带走。
+  const failed = patchNode(tree, 'n1', { status: 'error' });
+  assert.equal(emphasizedTraceLine(failed.nodes['n1']!, failed), true, '失败也加粗');
+
+  // 字形：树上只有 `○` / `└─`，一个 `◎` 都没有；tip 那行与其它行在**字形上**一模一样。
+  const plain = stripTerminalSequences(renderColoredTree(tree, 0));
+  assert.equal(/◎/.test(plain), false, plain);
+  const plainLines = plain.split('\n');
+  assert.equal(plainLines.length, 2);
+  assert.ok(plainLines.every((line) => /^(│  )*(○  |└─ )/.test(line)), plain);
+
+  // 加粗真的落在 tip 那一行、且**只**落在它上面（颜色由 FORCE_COLOR=3 打开，见 isolated-home）。
+  const colored = renderColoredTree(tree, 0).split('\n');
+  const boldLines = colored.filter((line) => line.includes('\x1b[1m'));
+  assert.equal(boldLines.length, 1, `只有 tip 那一行加粗：${colored.join('\n')}`);
+  assert.ok(boldLines[0]?.includes('n2 llm.result'), boldLines[0]);
+
+  // 轨迹页（TraceChunks）走同一条路：tip 那行加粗，字形里没有 `◎`。
+  // 注意用**未剥 ANSI** 的 `render()`（`linesOf()` 会把加粗剥掉，`◎` 那三条断言看不出差别）。
+  const chunks = new TraceChunks();
+  chunks.update(tree, 80, '');
+  const pageLines = chunks.render(80).join('\n').split('\n');
+  assert.equal(/◎/.test(stripTerminalSequences(pageLines.join('\n'))), false, pageLines.join('\n'));
+  const pageBold = pageLines.filter((line) => line.includes('\x1b[1m'));
+  assert.equal(pageBold.length, 1, `轨迹页也只有 tip 那一行加粗：${pageLines.join('\n')}`);
+  assert.ok((pageBold[0] ?? '').includes('n2 llm.result'), pageBold[0]);
+});
+
 test('TraceChunks：只重算变化的那个节点（追加，不是全量重画）', () => {
   const chunks = new TraceChunks();
   let tree = createTraceTree('s');
@@ -1120,7 +1164,7 @@ test('TraceChunks：只重算变化的那个节点（追加，不是全量重画
   }
   assert.equal(changed, 1, '只有一个节点的行变了');
   // 耗时是 endedAt - createdAt = 100 - 29 = 71ms（节点号从 1 起，所以是 n30）。
-  // 行首是轨道符号（`○` / `◎`，见 trace.ts 的 `traceRows`），成败在颜色里。
+  // 行首是轨道符号（所有节点都是 `○`，见 trace.ts 的 `traceRows`），成败在颜色里。
   assert.match(after[29] ?? '', /n30 tool\.call: 工具 29 71ms/, '最后那个节点闭合了');
 });
 

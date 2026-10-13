@@ -253,7 +253,7 @@ test('需求核心：LLM 超时后重试，重试节点的父 id 指向**超时�
   //   │  │  ○  n4 error: ...
   //   │  └─ n5 step.end: 第 1 步结束
   //   │  ○  n6 step.start: 第 2 步（重试）
-  //   │  │  ◎  n7 llm.result: 好了
+  //   │  │  ○  n7 llm.result: 好了   ← tip（字形上也是 ○，加粗在带色渲染里）
   //   │  └─ n8 step.end: 第 2 步结束
   //
   // 失败与成功现在靠**颜色**分（红加粗 / 绿），不再靠 `✗` / `✓` 字 ——
@@ -263,9 +263,11 @@ test('需求核心：LLM 超时后重试，重试节点的父 id 指向**超时�
   assert.match(rendered, /^│  ○  n3 step\.start: 第 1 步/m);
   assert.match(rendered, /^│  ○  n6 step\.start: 第 2 步（重试）/m);
   assert.match(rendered, /^│  └─ n5 step\.end/m);
-  // turn 容器在最左列（它自己不开缩进），tip 画在树上是 `◎`（不再另起一行 `HEAD →`）。
+  // turn 容器在最左列（它自己不开缩进），tip 画在树上（不再另起一行 `HEAD →`）——
+  // 而它现在与别的节点同一个符号（`○`），加粗是在带色那两层给的。
   assert.match(rendered, /^○  n2 turn\.start: 回合 1/m);
-  assert.match(rendered, /◎  n7 llm\.result/m);
+  assert.match(rendered, /^│  │  ○  n7 llm\.result/m);
+  assert.equal(/◎/.test(rendered), false, '树上不该再有两种圆点');
 });
 
 test('鉴权失败不重试：错误在树上，但没有分叉，环收工', () => {

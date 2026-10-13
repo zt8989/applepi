@@ -16,7 +16,9 @@ import type { AgentAction } from '../src/actions';
  * - `turn.start` / `step.start` **无条件**给子孙加一级缩进；别的节点不加
  *   （`llm.result` → `tool.call` → `tool.result` 是同一件事的两半，都在步里面那一列）。
  * - `turn.end` / `step.end` 画在**自己容器那一列**，符号 `└─` —— 于是括号是闭合的。
- * - 当前 tip 画 `◎`，其余画 `○`。成败靠**颜色**（红加粗 / 绿），不再有 `✗` / `✓` 字符。
+ * - **所有**节点都画 `○`（包括当前 tip）；tip 靠加粗区分（`emphasizedTraceLine()`），
+ *   而这几个测试走的是 `renderTree()`／`traceRows()`（纯文本、不上色），所以这里
+ *   看不到 tip —— 意不在字形。成败靠**颜色**（红加粗 / 绿），不再有 `✗` / `✓` 字符。
  *
  * ## 这组测试守的是什么
  *
@@ -114,7 +116,7 @@ test('一轮一步：轮一层、步一层，容器开与关在同一列', () =>
     '│  ○  n3 step.start: 第 1 步 <t> (provider=faux, model=fake)',
     '│  │  ○  n4 llm.result: 42 <t>',
     '│  └─ n5 step.end: 第 1 步结束（0 个工具调用） <t> (tools=0)',
-    '└◎ n6 turn.end: 回合 1 结束：模型说完了 <t> (reason=completed, steps=1)',
+    '└─ n6 turn.end: 回合 1 结束：模型说完了 <t> (reason=completed, steps=1)',
   ]);
 });
 
@@ -142,9 +144,10 @@ test('缩进用完即还：第 2 轮不该比第 1 轮深', () => {
   const userLines = lines(rendered).filter((line) => line.includes(' user: '));
   assert.equal(userLines.length, 3);
   for (const line of userLines) assert.equal(indentOf(line), 0, `user 该在最左列：${line}`);
-  // 三个 turn.start 也全在最左列，三个 turn.end 是 `└─`（最后一个同时是 tip，画 `└◎`）。
+  // 三个 turn.start 也全在最左列，三个 turn.end 都是 `└─`（统一一种符号 —— 包括
+  // 最后一个同时是 tip 的那个）。
   assert.equal(lines(rendered).filter((line) => /^○  n\d+ turn\.start/.test(line)).length, 3);
-  assert.equal(lines(rendered).filter((line) => /^└[─◎] n\d+ turn\.end/.test(line)).length, 3);
+  assert.equal(lines(rendered).filter((line) => /^└─ n\d+ turn\.end/.test(line)).length, 3);
 });
 
 test('装载节点（prompt.* / model.init）平铺 —— 它们本来就并列，不是链', () => {
@@ -209,7 +212,7 @@ test('回合没有 turn.end 时，下一句话也要从最左列开始', () => {
   const rendered = renderTree(state.trace, { maxWidth: 0 });
   console.log(`\n${rendered}\n`);
 
-  assert.match(rendered, /^◎  n6 user: 第二句/m);
+  assert.match(rendered, /^○  n6 user: 第二句/m);
   assert.match(rendered, /^○  n7 turn\.start: 回合 2/m);
   assert.match(rendered, /^│  ○  n8 step\.start: 第 1 步/m);
   // 第 1 轮里那几行的缩进不受影响。
@@ -242,33 +245,27 @@ test('树结构本身没变：缩进只影响画法，不影响父子关系', ()
   assert.equal(state.trace.nodes['n8']?.kind, 'step.end');
 });
 
-test('tip 是 `◎`，且换 tip 时只有一个符号变（前缀是从树里算出来的，不是写死的）', () => {
-  const before = play(
-    { type: 'user.message', text: '你好' },
-    { type: 'turn.start' },
-    { type: 'step.start' },
-    { type: 'llm.done', message: assistantMessage([{ type: 'text', text: '好了' }], 'stop') },
-  );
-  const rows = traceRows(before.trace, { maxWidth: 0 });
-  const tipRow = rows.find((row) => row.node.id === before.trace.tipId);
-  assert.ok(tipRow, 'tip 那一行应该在');
-  assert.ok(tipRow.prefix.endsWith('◎  '), `tip 该画 ◎：${JSON.stringify(tipRow.prefix)}`);
-  assert.equal(rows.filter((row) => row.prefix.includes('◎')).length, 1, '◎ 只有一个');
-
-  // 回合正常说完之后 tip 就是 `turn.end` —— 那是**闭合点**，所以 ◎ 挪到拐角里（`└◎`）。
-  // 不这样的话，会话闲置时（这正是最常盯着看的那个状态）界面上一个 ◎ 都没有。
-  const afterTurnEnd = play(
+test('所有节点都是 `○` —— tip 不再换字形（早先 tip 是 `◎`，树上有两种圈）', () => {
+  const state = play(
     { type: 'user.message', text: '你好' },
     { type: 'turn.start' },
     { type: 'step.start' },
     { type: 'llm.done', message: assistantMessage([{ type: 'text', text: '好了' }], 'stop') },
     { type: 'turn.end' },
   );
-  const endRows = traceRows(afterTurnEnd.trace, { maxWidth: 0 });
-  const endTip = endRows.find((row) => row.node.id === afterTurnEnd.trace.tipId);
-  assert.equal(endTip?.node.kind, 'turn.end');
-  assert.equal(endTip?.prefix, '└◎ ', `闭合点同时是 tip 时该画 └◎：${JSON.stringify(endTip?.prefix)}`);
-  assert.equal(endRows.filter((row) => row.prefix.includes('◎')).length, 1, '◎ 仍然只有一个');
+  const rows = traceRows(state.trace, { maxWidth: 0 });
+  // 一个行首符号只有两种：`○`（节点）与 `└─`（容器闭合点）—— `◎` 这个字形彻底没了。
+  for (const row of rows) {
+    assert.ok(/^(│  )*(○  |└─ )$/.test(row.prefix), `行首符号只该是 ○ 或 └─：${JSON.stringify(row.prefix)}`);
+  }
+  assert.equal(rows.filter((row) => row.prefix.includes('◎')).length, 0, '不该再有 ◎');
+  // 仍然有唯一的 tip（它只是不再体现在字形上，而是加粗 —— 纯文本这层看不出来，
+  // 所以判据本身在 tui-render.test.ts 里测 `emphasizedTraceLine()`）。
+  assert.equal(rows.filter((row) => row.node.id === state.trace.tipId).length, 1);
+  // 回合正常说完之后 tip 就是 `turn.end`，而它现在与其它闭合点长得一模一样。
+  assert.equal(state.trace.nodes[state.trace.tipId ?? '']?.kind, 'turn.end');
+  const endTip = rows.find((row) => row.node.id === state.trace.tipId);
+  assert.equal(endTip?.prefix, '└─ ');
 });
 
 test('每一行都带一段轨道前缀，且 `traceRows` 与 `renderTree` 是同一份画法', () => {
@@ -311,8 +308,9 @@ test('插话（steer）属于当前回合 —— 它来了不收口', () => {
   });
   const rendered = renderTree(steer.tree, { maxWidth: 0 });
   console.log(`\n${rendered}\n`);
-  // 插话那一行仍在轮/步的缩进里（它没有把括号弹掉）。它是最后一个推进 tip 的节点，所以是 `◎`。
-  assert.match(rendered, /^│  │  ◎  n5 user: steer: 顺便看下版本/m);
+  // 插话那一行仍在轮/步的缩进里（它没有把括号弹掉）。它是最后一个推进 tip 的节点 ——
+  // 而 tip 不再换字形，所以这里也是普通的 `○`（加粗在 `emphasizedTraceLine()` 那个判据里）。
+  assert.match(rendered, /^│  │  ○  n5 user: steer: 顺便看下版本/m);
 });
 
 // ── 并行工具要走真环（工具节点是 effect 开的，reducer 造不出来） ──
