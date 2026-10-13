@@ -417,6 +417,30 @@ function beginTrace(state: AgentState, now: number): TraceTree {
   return tree;
 }
 
+/**
+ * 把「模型 / 思考级别变了」补成**一个** `model.init` 节点 —— 推迟到下次真要发消息时补。
+ *
+ * ## 为什么不在 `model.init` / `thinking.changed` 里当场补
+ *
+ * 那两个 action 是**界面动作**（`/model`、`Ctrl+P`、`Shift+Tab`、`/thinking`、设置面板
+ * 里改某一档），而轨迹树要回答的是「这一轮实际发出去的是什么」。所以：
+ *
+ * - 来回切三次、或先换模型再调思考级别 = 树上**一个**节点，内容是最后那版；
+ * - 节点落在 user 节点**之前**（也就是 `turn.start` 之前），读起来就是
+ *   「这一轮带着这个模型/档位」，与 `beginTrace()` 补装载节点同一个口径。
+ *
+ * 标记（`modelTraceDirty`）只在 `traceBegun` 之后置上：树还没开时本来就不建节点，
+ * `beginTrace()` 会从 state 里读出那一刻生效的那一版（包含刚改的档位）。
+ */
+function flushModelChange(state: AgentState, now: number): AgentState {
+  if (!state.modelTraceDirty) return state;
+  return {
+    ...state,
+    trace: appendModelNode(state.trace, state.model, now),
+    modelTraceDirty: false,
+  };
+}
+
 const transitions: TransitionHandlers = {
   // ── prompt 侧装载 ──
 
@@ -514,8 +538,10 @@ const transitions: TransitionHandlers = {
    * 能力随 init 一起落盘：回放时不必再问 provider「这个模型能不能中途插 system」。
    *
    * 与 `prompt.init` 同一个理由（见那条的注释）：开局那次**不开**轨迹节点，
-   * 那一个 `model.init` 节点由 `beginTrace()` 在第一条用户消息时补上；
-   * 已经开过树（换模型）则当场追加一个新节点，旧的不改写。
+   * 那一个 `model.init` 节点由 `beginTrace()` 在第一条用户消息时补上。
+   *
+   * 已经开过树（换模型）也**不**当场追加 —— 只置一个标记，由 `flushModelChange()`
+   * 在下次发话时补一个（来回切三次只留一个节点，内容是最新那版）。
    */
   'model.init': (state, action) => {
     const model = {
@@ -529,8 +555,9 @@ const transitions: TransitionHandlers = {
     };
     return {
       ...state,
-      trace: state.traceBegun ? appendModelNode(state.trace, model, Date.now()) : state.trace,
       model,
+      // 树开着才需要补：没开的话 beginTrace() 会从 state 里读（就是刚装的这版）。
+      modelTraceDirty: state.traceBegun ? true : state.modelTraceDirty,
       // 扁平别名跟着更新。
       providerName: action.provider,
       modelId: action.modelId,
@@ -547,14 +574,20 @@ const transitions: TransitionHandlers = {
       content: action.content ?? action.text,
       timestamp: now,
     };
-    // **先补装载节点、再开 user 节点** —— 顺序就是它们在树上的顺序，
-    // 于是渲染出来是「这次调用带着什么 prompt」在「用户说了什么」上面。
+    // **先补装载节点、再补「换过模型 / 思考级别」那一笔、最后才是 user 节点** ——
+    // 顺序就是它们在树上的顺序，于是渲染出来是「这次调用带着什么上下文」在
+    // 「用户说了什么」上面。
     //
-    // 这一步就是「进入会话不建节点，发了第一句话才建」：内核一装配时树上还是空的
+    // 第一步就是「进入会话不建节点，发了第一句话才建」：内核一装配时树上还是空的
     // （prompt.init / model.init 只改 state），到这里才第一次有节点。
-    const withInit = beginTrace(state, now);
+    //
+    // 第二步是同一件事的后半段：树已经开着的时候切换了模型 / 档位，那一条
+    // `model.init` 也在这一刻落下（`turn.start` 之前）。第一次发话时它是个空操作
+    // —— 装载那一版刚由第一步补过。
+    const begun = beginTrace(state, now);
+    const withModel = flushModelChange({ ...state, trace: begun }, now);
     // 用户节点是一棵新树的根，并且推进 tip —— 后面所有的回合都挂在它下面。
-    const { tree, node } = appendNode(withInit, withInit.tipId, 'user', {
+    const { tree, node } = appendNode(withModel.trace, withModel.trace.tipId, 'user', {
       status: 'ok',
       label: summarize(action.text),
       detail: action.text,
@@ -562,7 +595,9 @@ const transitions: TransitionHandlers = {
       endedAt: now,
     });
     return {
-      ...state,
+      // 展开 `withModel` 而不是 `state`：它带着 `flushModelChange` 清过的标记（以及
+      // 刚补上的那条 `model.init`——`tree` 就是在它上面接着长的）。
+      ...withModel,
       trace: tree,
       traceBegun: true,
       phase: 'thinking',
@@ -673,10 +708,13 @@ const transitions: TransitionHandlers = {
       timestamp: now,
     };
     const isSteer = action.as === 'steer';
+    // 插进来的这条消息也要在下一次请求里生效，所以「换过模型 / 档位」那一笔
+    // 同样先落在它前面（第一次发话时由 user.message 补过，这里一般是空操作）。
+    const withModel = flushModelChange(state, now);
     // steer 的 user 节点挂在**当前回合容器**下面（它是这回合里的一个额外输入）；
     // followUp 的则是**新回合的起点**，所以要挂在 tip 下面（新容器稍后开在它底下）。
-    const parentId = isSteer ? (state.openTurnNodeId ?? state.trace.tipId) : state.trace.tipId;
-    const userNode = appendNode(state.trace, parentId, 'user', {
+    const parentId = isSteer ? (state.openTurnNodeId ?? withModel.trace.tipId) : withModel.trace.tipId;
+    const userNode = appendNode(withModel.trace, parentId, 'user', {
       status: 'ok',
       label: `${isSteer ? 'steer' : 'followUp'}: ${summarize(action.text)}`,
       detail: action.text,
@@ -685,7 +723,8 @@ const transitions: TransitionHandlers = {
       endedAt: now,
     });
     const base: AgentState = {
-      ...state,
+      // 展开 `withModel`：它带着清过的标记与刚补的 `model.init`。
+      ...withModel,
       trace: userNode.tree,
       messages: [...state.messages, message],
       deliveringInput: null,
@@ -740,14 +779,19 @@ const transitions: TransitionHandlers = {
     if (state.openTurnNodeId !== null) return state;
     const now = Date.now();
     const turnIndex = state.turnIndex + 1;
+    // 「换过模型 / 档位」那一笔要在容器**之前**落下 —— 它就是这条不变式本身：
+    // 树上的 `model.init` 说的是「这一轮用的是这个」，所以必须在 turn.start 上面。
+    // （走 user.message 的路已经在补 user 节点前刷过了，这里一般是空操作；
+    //  留着它是因为这一条才是「在 turn.start 之前」的硬保证。）
+    const withModel = flushModelChange(state, now);
     // turn 挂到 **tip**（即那条 user 节点）下面。
-    const { tree, node } = appendNode(state.trace, state.trace.tipId, 'turn.start', {
+    const { tree, node } = appendNode(withModel.trace, withModel.trace.tipId, 'turn.start', {
       status: 'pending',
       label: `回合 ${turnIndex}`,
       createdAt: now,
     });
     return {
-      ...state,
+      ...withModel,
       trace: tree,
       openTurnNodeId: node.id,
       turnIndex,
@@ -788,6 +832,9 @@ const transitions: TransitionHandlers = {
       return { ...closed, stepIndex: 0, turnSteps: state.turnSteps };
     }
     const now = Date.now();
+    // 「换过模型 / 档位」那一笔也先落下来：这条 followUp 马上要开一个新回合，
+    // 而新回合用的是「此刻生效」的那一版。
+    const flushed = flushModelChange(closed, now);
     // 先把 followUp 那句话作为 user 消息插进去（它开启新回合，所以算回合的起点），
     // 再开回合容器 —— 于是 user 节点在树上排在 turn.start 之前，与正常入口一致。
     const message: Message = {
@@ -795,7 +842,7 @@ const transitions: TransitionHandlers = {
       content: queued.content ?? queued.text,
       timestamp: now,
     };
-    const userNode = appendNode(closed.trace, closed.trace.tipId, 'user', {
+    const userNode = appendNode(flushed.trace, flushed.trace.tipId, 'user', {
       status: 'ok',
       label: `followUp: ${summarize(queued.text)}`,
       detail: queued.text,
@@ -809,7 +856,8 @@ const transitions: TransitionHandlers = {
       createdAt: now,
     });
     return {
-      ...closed,
+      // 展开 `flushed`（它带着清过的标记与可能刚补上的那条 `model.init`）。
+      ...flushed,
       trace: opened.tree,
       openTurnNodeId: opened.node.id,
       openTurnSeq: closed.turnIndex + 1,
@@ -1307,6 +1355,9 @@ const transitions: TransitionHandlers = {
     ...state,
     model: { ...state.model, thinkingLevel: action.level },
     thinkingLevel: action.level,
+    // 思考级别也是「这一轮实际用的上下文」的一部分（写在 model.init 节点的 meta 里），
+    // 所以跟换模型走同一条路：只置标记，下次发话时一并补进树。
+    modelTraceDirty: state.traceBegun ? true : state.modelTraceDirty,
   }),
 
   // ── 上下文压缩 ──

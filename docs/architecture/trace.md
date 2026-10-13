@@ -217,10 +217,10 @@ function advancesTip(node) {
 
 | kind | 谁产生 | label | meta |
 | --- | --- | --- | --- |
-| `prompt.base` | 第一条 `user.message` | system prompt 首行摘要 | — |
-| `prompt.tools` | 第一条 `user.message` | 工具名逗号分隔 | `count` |
-| `prompt.skills` | 第一条 `user.message` | skill 名逗号分隔 | `count` |
-| `model.init` | 第一条 `user.message` | `provider/model` | `thinking` / `midConvoSystem` / `midConvoTools` / `developerRole` |
+| `prompt.base` | 第一条 `user.message`，或树开过之后的 `prompt.init`（热重载） | system prompt 首行摘要 | — |
+| `prompt.tools` | 同上 | 工具名逗号分隔 | `count` |
+| `prompt.skills` | 同上 | skill 名逗号分隔 | `count` |
+| `model.init` | 第一条 `user.message`，以及**下一次发话前**（见下） | `provider/model` | `thinking` / `midConvoSystem` / `midConvoTools` / `developerRole` |
 | `prompt.segment` | `prompt.segment.added` | 片段首行摘要 | `role` / `source` |
 
 完整内容在 `detail` 里（prompt 全文、每个工具的 description、片段原文），`label` 只是摘要。
@@ -259,6 +259,28 @@ function advancesTip(node) {
 **追加**一对新节点，旧的不改写。生效的是最新那个（`state.prompt` 里是最新值）。
 
 开局前反复 `prompt.init` 则不建任何节点 —— 那时树还没开，等第一句话再从 state 补一次就够了。
+
+### 换模型 / 换思考级别：等到下次发话前补**一个**
+
+`model.init`（`/model`、`Ctrl+P`、`Ctrl+L`）与 `thinking.changed`（`Shift+Tab`、`/thinking`、
+设置面板里改某一档）**都不当场建节点**，只把 `state.modelTraceDirty` 置起来。
+真正补进树的是 `flushModelChange()`（`reducer.ts`），落在下一次要发消息的那一刻：
+`user.message` / `queue.delivered` 补 user 节点之前、`turn.start` 开容器之前。
+
+为什么要这样：切换是**界面动作**，而树上该回答的是「这一轮实际用的上下文是什么」。
+来回切三次模型、又改两次档位，若每次都留节点，两句人话之间就会夹着五个 `model.init`
+——而其中只有最后一个真的生效过。现在：
+
+- 中间切多少次都只留**一个**节点，内容是那一刻生效的那一版；
+- 它落在 user 节点（以及 `turn.start`）**之前** —— 读起来就是「这一轮带着这个模型 / 档位」，
+  与 `beginTrace()` 补装载节点同一个口径；
+- 没换过就不补（`modelTraceDirty` 是唯一判据）。
+
+注意档位是写在 `model.init` 节点 `meta` 里的（不另开一种 kind）：只改了思考级别时，
+补出来的那条节点 model 名字不变、`thinking` 变了 —— 那正是「这一轮上下文变了」的全部事实。
+
+**`prompt.init` 的热重载不走这条路**（它当场追加）：热重载是「文件变了、我们重新读了一遍」，
+不是用户在切东西；而且那一刻树上就能看出新 prompt 何时生效，对排查更有用。
 
 ### reset 会清掉它们
 

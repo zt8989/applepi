@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createInitialState, type AgentState } from '../src/state';
 import { createAgentReducer } from '../src/reducer';
-import { renderTree, traceStats, type TraceNodeKind } from '../src/index';
+import { renderTree, traceStats, type TraceNode, type TraceNodeKind } from '../src/index';
 import type { AgentAction, ModelCapabilities, PromptToolDefinition } from '../src/actions';
 
 const CAPS: ModelCapabilities = {
@@ -265,6 +265,157 @@ test('conversation.reset 清掉 prompt.* / model.init 节点（它们是会话�
   // 但装载好的 prompt / model 状态仍在（会话级的）
   assert.equal(state.prompt.seeded, true);
   assert.equal(state.prompt.systemPrompt, 'p');
+});
+
+// ── 换模型 / 换档位：只在下次发话前补**一个** ──
+
+/** 装载某个模型（与内核 `setModel` 发的载荷同形，这里只要 provider / model / 档位）。 */
+function modelInit(provider: string, modelId: string, thinkingLevel: string): AgentAction {
+  return {
+    type: 'model.init',
+    provider,
+    modelId,
+    thinkingLevel: thinkingLevel as never,
+    capabilities: CAPS,
+  };
+}
+
+const usage = () => ({
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+});
+
+const assistantMessage = (text: string): AgentAction =>
+  ({
+    type: 'llm.done',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text }],
+      api: 'openai-completions',
+      provider: 'p',
+      model: 'm',
+      usage: usage(),
+      stopReason: 'stop',
+      timestamp: 1,
+    },
+  }) as unknown as AgentAction;
+
+/**
+ * 走完一个回合：`user → turn.start → step.start → llm.done`。
+ *
+ * 为什么要走完而不是只 dispatch `user.message`：那个迁移的守卫是「相位 idle 才接」，
+ * 跑着的时候第二句话会被直接丢掉 —— 测试里就会看到与真人不一致的顺序。
+ */
+function completeTurn(
+  r: ReturnType<typeof createAgentReducer>,
+  state: AgentState,
+  text: string,
+): AgentState {
+  return play(
+    r,
+    state,
+    { type: 'user.message', text },
+    { type: 'turn.start' },
+    { type: 'step.start' },
+    assistantMessage('好'),
+  );
+}
+
+/** 最后一条 `model.init` 节点（补出来的那条应当就是它）。 */
+function lastModelNode(state: AgentState): TraceNode | undefined {
+  for (let i = state.trace.order.length - 1; i >= 0; i -= 1) {
+    const node = state.trace.nodes[state.trace.order[i] as string];
+    if (node?.kind === 'model.init') return node;
+  }
+  return undefined;
+}
+
+test('换模型**不当场建节点** —— 切换是界面动作，不是「发生过的事」', () => {
+  let state = play(
+    REDUCER,
+    seed(),
+    { type: 'prompt.init', systemPrompt: 'p', tools: TOOLS },
+    modelInit('workbuddy', 'cn:space-bunny', 'high'),
+    { type: 'user.message', text: '你好' },
+  );
+  const before = state.trace.order.length;
+  assert.equal(before, 4, '装载三个 + user');
+
+  // 切了三次模型、改了两次档位 —— 树上一个字都不该动。
+  state = reduce(state, modelInit('workbuddy', 'cn:another', 'off'));
+  state = reduce(state, { type: 'thinking.changed', level: 'max' });
+  state = reduce(state, modelInit('other', 'm-2', 'low'));
+  state = reduce(state, { type: 'thinking.changed', level: 'medium' });
+  assert.equal(state.trace.order.length, before, '还没发话，树上不该多节点');
+  assert.equal(state.modelTraceDirty, true, '但记下了「变了、还没写进树」');
+});
+
+test('下一次发话时补**一个** `model.init` —— 内容是最后生效的那版，落在 user / turn.start 之前', () => {
+  const r = REDUCER;
+  let state = play(
+    r,
+    seed(),
+    { type: 'prompt.init', systemPrompt: 'p', tools: TOOLS },
+    modelInit('workbuddy', 'cn:space-bunny', 'high'),
+  );
+  state = completeTurn(r, state, '第一句');
+
+  // 五次切换（三次换模型、两次改档位），其间一句话都没说。
+  state = reduce(state, modelInit('workbuddy', 'cn:another', 'off'));
+  state = reduce(state, { type: 'thinking.changed', level: 'max' });
+  state = reduce(state, modelInit('other', 'm-2', 'low'));
+  state = reduce(state, { type: 'thinking.changed', level: 'medium' });
+  const afterSwitches = state.trace.order.length;
+
+  state = completeTurn(r, state, '第二句');
+
+  const kindsNow = kinds(state);
+  // 只多了**一个** node，而且它就是补出来的那条 model.init。
+  assert.equal(kindsNow.filter((kind) => kind === 'model.init').length, 2, '开局一个 + 补一个');
+  const added = lastModelNode(state);
+  assert.equal(added?.label, 'other/m-2', '补的是最后生效的那一版');
+  assert.equal(added?.meta?.['thinking'], 'medium', '档位也是最后那版');
+  // 这一回合多出来的正是「补的那一条 model.init + 正常的 5 个节点」。
+  assert.equal(state.trace.order.length, afterSwitches + 6, '第二回合多了一个 model.init');
+  assert.equal(state.modelTraceDirty, false, '补过就清标记');
+
+  // 位置：就在这一回合的 user 节点（以及 turn.start）**之前**。
+  const at = state.trace.order.indexOf(added?.id ?? '');
+  assert.deepEqual(
+    kindsNow.slice(at, at + 3),
+    ['model.init', 'user', 'turn.start'],
+    `补的那条要落在 user 之前，但顺序是：${kindsNow.slice(Math.max(0, at - 1)).join(' → ')}`,
+  );
+});
+
+test('只改思考级别也补 —— 档位写在 model.init 节点的 meta 里，它也是这一轮上下文的一部分', () => {
+  const r = REDUCER;
+  let state = play(r, seed(), modelInit('p', 'm', 'off'));
+  state = completeTurn(r, state, '第一句');
+  assert.equal(lastModelNode(state)?.meta?.['thinking'], 'off');
+
+  state = reduce(state, { type: 'thinking.changed', level: 'high' });
+  assert.equal(lastModelNode(state)?.meta?.['thinking'], 'off', '改的当下不写树');
+
+  state = completeTurn(r, state, '第二句');
+  assert.equal(lastModelNode(state)?.meta?.['thinking'], 'high', '下一句话时补上');
+  assert.equal(kinds(state).filter((kind) => kind === 'model.init').length, 2);
+});
+
+test('没换过就不补 —— 第二回合不会凭空多出一个 model.init', () => {
+  const r = REDUCER;
+  let state = play(r, seed(), modelInit('p', 'm', 'off'));
+  state = completeTurn(r, state, '第一句');
+  state = completeTurn(r, state, '第二句');
+  assert.equal(
+    kinds(state).filter((kind) => kind === 'model.init').length,
+    1,
+    '只有开局那一个',
+  );
 });
 
 // ── 渲染 ──

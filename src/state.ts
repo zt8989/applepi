@@ -343,6 +343,20 @@ export interface AgentState {
    * 顺带当幂等守卫：补过装载段之后再来第二句话，不会把装载节点追加第二遍。
    */
   traceBegun: boolean;
+  /**
+   * 树开过之后换过模型 / 思考级别（`model.init` / `thinking.changed`），但**还没写进树**。
+   *
+   * ## 为什么不换一次就追加一个节点
+   *
+   * 切换是界面上的动作，而树上该回答的是「这一轮实际用的上下文是什么」。来回切三次、
+   * 或先换模型再改思考级别，就会在对话中间多堆三个夹在两句人话之间的 `model.init`，
+   * 而它们什么也没解释（真正生效的只有最后一个）。
+   *
+   * 现在只置一个标记，等到下一次真要发消息时由 `flushModelChange()` 补**一个**节点，
+   * 内容是那一刻生效的那一版，位置在 user 节点**之前** —— 与装载节点的口径一致
+   * 见 `beginTrace()`：发过话才留痕，而且留的是当时真正生效的那一版。
+   */
+  modelTraceDirty: boolean;
   /** 当前在跑的 LLM 尝试节点 id；没有则 null。 */
   openLlmNodeId: string | null;
   /** 当前在跑的 step 容器节点 id（`step.start`）；没有则 null。 */
@@ -527,6 +541,7 @@ export function createInitialState(options: InitialStateOptions): AgentState {
     aborted: false,
     trace: options.trace ?? createTraceTree(options.sessionId ?? newSessionId()),
     traceBegun: false,
+    modelTraceDirty: false,
     openLlmNodeId: null,
     openToolNodeIds: {},
     toolProgress: {},
