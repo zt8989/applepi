@@ -260,6 +260,57 @@ function toolState(args: {
 // 每帧都渲染一次，主题必须先装上（见 src/tui/theme.ts：没 initTheme 读 theme 会抛）。
 setupTheme(undefined, 'dark');
 
+// ─── 收尾说明（中止 / 截断）与命令反馈卡：形状照 pi ───
+
+test('中止的消息：pi 的组件画 `Operation aborted`，本项目不再自己写一段中文', () => {
+  // 官方 `AssistantMessageComponent` 自己处理 `stopReason`：
+  //   aborted（无工具调用）→ 空一行 + `Operation aborted`（`Request was aborted` 这种
+  //   provider 原文会被它换成这一句）；length → `Response was truncated before completion.`；
+  //   error → `Error: <原因>`。本项目早先重建假消息时丢掉了 stopReason，于是这些一行都不画，
+  //   而自己在尾部用中文重写了一遍（还附上「按 Ctrl+R 看轨迹树」）。
+  const aborted = {
+    role: 'assistant',
+    content: [{ type: 'text', text: '我正在想' }],
+    api: 'openai-completions',
+    provider: 'p',
+    model: 'm',
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: 'aborted',
+    errorMessage: 'Request was aborted',
+    timestamp: 2,
+  } as unknown as Message;
+  const state = {
+    messages: [{ role: 'user', content: '慢慢想', timestamp: 1 } as Message, aborted],
+    toolTimings: {},
+    phase: 'idle',
+  } as unknown as AgentState;
+  const out = stripTerminalSequences(renderTranscript(state, 0, 80, false));
+  assert.ok(out.includes('Operation aborted'), `要画 pi 那句：${out}`);
+  assert.ok(!out.includes('Request was aborted'), `provider 原文该被换成那句：${out}`);
+  assert.ok(out.includes('我正在想'), '部分内容要留着');
+});
+
+test('命令反馈卡：上面一行空行 + 左边一格（pi 的 Spacer(1) + paddingX=1）', () => {
+  const state = { messages: [{ role: 'user', content: '你好', timestamp: 1 } as Message], toolTimings: {} } as unknown as AgentState;
+  const out = stripTerminalSequences(
+    renderTranscript(state, 0, 40, false, [{ text: 'Thinking blocks: hidden', at: 1 }]),
+  ).split('\n');
+  const index = out.findIndex((line) => line.includes('Thinking blocks: hidden'));
+  assert.ok(index > 0, `卡要画出来：${out.join('/')}`);
+  assert.equal(out[index - 1], '', '卡上面要有一行空行');
+  assert.ok(out[index]?.startsWith(' Thinking'), `左边要留一格：${JSON.stringify(out[index])}`);
+});
+
+test('命令反馈卡：多行卡每一行都缩一格（`/help` 那种）', () => {
+  const state = { messages: [], toolTimings: {} } as unknown as AgentState;
+  const out = stripTerminalSequences(
+    renderTranscript(state, 0, 40, false, [{ text: '/model\n/thinking', at: 0 }]),
+  ).split('\n');
+  const first = out.findIndex((line) => line.includes('/model'));
+  assert.equal(out[first], ' /model');
+  assert.equal(out[first + 1], ' /thinking', '第二行也要缩');
+});
+
 // ─── `/skill:<名字> 问题`：卡片 + 人问的那句话，两条都要画 ───
 
 /** 一条用户消息的 state（对话区渲染只需要 `messages`）。 */

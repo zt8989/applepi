@@ -104,6 +104,74 @@ test('用户手动中断：stopCause=user（不是 timeout，也不是笼统的 
   assert.equal(state.retrying, false, '用户主动停的不该自动重试');
 });
 
+test('中止的部分消息（stopReason=aborted）：记成用户停的，**不**记成「模型自己说完了」', async () => {
+  // 这条盯的是另一条路：provider 把中止做成了「一条 `stopReason: 'aborted'` 的**部分消息**」
+  // （pi-ai 的 openai-completions 就是这么做的，AbortError 被它换成一份中断消息交回来）。
+  // 本项目的 `llm.done` 早先无论什么 stopReason 都写成 `completed`，于是界面显示
+  // 「✗ 模型自己说完了：Request was aborted」+「按 Ctrl+R 看轨迹树」—— 用户自己按的停止，
+  // 却像被程序报了个错，而「模型自己说完了」那句是错的。
+  const faux = createFauxRuntime();
+  const store = createAgentStore({
+    runtime: faux.runtime,
+    systemPrompt: 'test',
+    streamFn: () =>
+      ({
+        async *[Symbol.asyncIterator]() {
+          const partial = {
+            ...assistantMessage('我正在想'),
+            stopReason: 'aborted',
+            errorMessage: 'Request was aborted',
+          } as unknown as AssistantMessage;
+          yield { type: 'text_delta', contentIndex: 0, delta: '我正在想', partial } as never;
+          yield { type: 'done', reason: 'aborted', message: partial } as never;
+        },
+      }) as never,
+  });
+
+  store.dispatch({ type: 'user.message', text: '慢慢想' });
+  const state = await waitForIdle(store);
+  assert.equal(state.phase, 'idle', '中止也是一轮的结束');
+  assert.equal(state.stopReason, 'aborted', '粗分类是 aborted（UI 分红/灰用）');
+  assert.equal(state.stopCause, 'user', '具体原因是「用户按了停止」');
+  assert.equal(state.stopCauseDetail, '用户手动中断');
+  assert.equal(state.error, null, '中止不往 error 里写 —— 中止说明属于那条消息（pi 的写法）');
+  // 部分内容留着（pi 也留着：中止不该把已经流出来的话吞掉）。
+  assert.equal(state.messages.length, 2);
+  const last = state.messages[1] as AssistantMessage;
+  assert.equal(last.stopReason, 'aborted');
+  const text = Array.isArray(last.content)
+    ? last.content.map((c) => (c.type === 'text' ? c.text : '')).join('')
+    : String(last.content);
+  assert.equal(text, '我正在想', '已经流出来的话要留着');
+});
+
+test('中止时不接手那条消息里的工具调用（用户都喊停了，不该再跑工具）', async () => {
+  const faux = createFauxRuntime();
+  const store = createAgentStore({
+    runtime: faux.runtime,
+    systemPrompt: 'test',
+    streamFn: () =>
+      ({
+        async *[Symbol.asyncIterator]() {
+          const partial = {
+            ...assistantMessage('我要跑个命令'),
+            content: [
+              { type: 'text', text: '我要跑个命令' },
+              { type: 'toolCall', id: 'call_9', name: 'bash', arguments: { command: 'rm -rf /tmp/x' } },
+            ],
+            stopReason: 'aborted',
+          } as unknown as AssistantMessage;
+          yield { type: 'done', reason: 'aborted', message: partial } as never;
+        },
+      }) as never,
+  });
+
+  store.dispatch({ type: 'user.message', text: '等等' });
+  const state = await waitForIdle(store);
+  assert.deepEqual(state.pendingToolCalls, [], '中止后不该有待跑的工具');
+  assert.equal(state.phase, 'idle', '也不该进 calling-tools');
+});
+
 test('超时：stopCause=timeout，且**不**被记成用户中断', async () => {
   const faux = createFauxRuntime();
   const store = createAgentStore({

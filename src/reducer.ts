@@ -955,9 +955,22 @@ const transitions: TransitionHandlers = {
     // 它的闭合点是 tool.batch.done。只有「无工具」才在这一步就把 step 关掉。
     const closed = closeLlmSuccess(state, Date.now(), text);
     const hasTools = toolCalls.length > 0;
+    //
+    // **用户按了停止**（pi-ai 把那份部分消息以 `stopReason: 'aborted'` 交回来）。
+    //
+    // 这一支必须在这里分：以前无论什么 stopReason 都写成 `completed`，于是界面显示
+    // 「✗ 模型自己说完了：Request was aborted」+「按 Ctrl+R 看轨迹树」—— 用户自己按的
+    // 停止，却像被程序报了个错，而那句「模型自己说完了」也是错的。
+    //
+    // 保留那份**部分消息**（pi 也这么做：中止不会把已经流出来的话吞掉），中止说明由
+    // 渲染那一层交给 pi 的 `AssistantMessageComponent` 自己画（`stopReason === 'aborted'`
+    // → 它画 `Operation aborted`，与 pi 逐字一致）。
+    const aborted = message.stopReason === 'aborted';
+    // 中止时**不接手那些工具调用**：用户都喊停了，再跑 `rm -rf` 就很离谱。
+    const continues = hasTools && !aborted;
     // 无工具 = 模型自己说完了 —— 这是整个回合的终点，所以现在就把 step 与 turn 都关上。
     // 有工具 = 还要跑下一轮，step 留着等 tool.batch.done 收尾。
-    const withStep = hasTools ? closed : closeStepNode(closed, Date.now(), 'ok');
+    const withStep = continues ? closed : closeStepNode(closed, Date.now(), aborted ? 'aborted' : 'ok');
     return {
       ...withStep,
       messages: [...withStep.messages, message],
@@ -966,15 +979,17 @@ const transitions: TransitionHandlers = {
       turns: withStep.turns + 1,
       usage: message.usage ?? withStep.usage,
       totalCost: withStep.totalCost + (message.usage?.cost?.total ?? 0),
-      pendingToolCalls: toolCalls,
-      error: message.errorMessage ?? withStep.error,
-      phase: hasTools ? 'calling-tools' : 'idle',
+      pendingToolCalls: aborted ? [] : toolCalls,
+      // 中止不往 `error` 里写：那一条会被尾部渲染成一段中文说明 + 轨迹节点提示，
+      // 而 pi 的写法是「中止说明属于那条 assistant 消息」（见上）。
+      error: aborted ? null : (message.errorMessage ?? withStep.error),
+      phase: continues ? 'calling-tools' : 'idle',
       // 有工具 = 这一轮还没完（要接着跑下一轮 LLM），所以不是「停」。
       // 无工具 = 模型自己说完了，这才是真正的收工。
-      stopReason: hasTools ? null : 'completed',
+      stopReason: continues ? null : aborted ? 'aborted' : 'completed',
       // 正常收工的原因也记一份：界面不必再猜「completed」是被砍的还是真说完。
-      stopCause: hasTools ? null : 'completed',
-      stopCauseDetail: hasTools ? null : stopCauseText('completed'),
+      stopCause: continues ? null : aborted ? 'user' : 'completed',
+      stopCauseDetail: continues ? null : stopCauseText(aborted ? 'user' : 'completed'),
     };
   },
 

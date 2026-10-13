@@ -19,7 +19,8 @@
 
 按键（**键名都从键位表解析**，见下节）：`Ctrl+R` 切轨迹页，`Ctrl+O` 展开/收起工具输出，
 `Ctrl+T` 展开/收起思考块（pi 的 `app.thinking.toggle`，与 pi 同 id），
-`Ctrl+C` 在环跑时中断这一轮、空闲时退出。完整的一份在 `/hotkeys` 里。
+`Ctrl+C` 清空编辑器（连按两次退出），**中断是 `Escape`**（pi 的 `app.interrupt`）。
+完整的一份在 `/hotkeys` 里。
 
 ### composer 与 pi 一致：横线颜色 + 状态画在上框线
 
@@ -139,6 +140,13 @@ pi-tui 的 `MIN_RENDER_INTERVAL_MS` 是 16ms —— 每帧 1.2 秒时渲染永�
 
 - 卡存在 `statusCards: { text; at }[]` 里，`at` = 显示时的**消息条数**；渲染时按它
   splice 在那条消息边界上。于是新消息排在卡**下面**，卡被往上顶、随会话一起滚。
+- **形状与 pi 逐字同形**：卡**上面**一行空行 + 左边一格缩进 —— pi 建的是
+  `new Spacer(1)` + `new ThemedText(..., 1, 0)`（空行在上、`paddingX = 1`）。
+  早先是「左边不缩、空行加在卡下面」，于是卡贴着左边缘、且与上一行内容之间没有空隙。
+- **卡里的文案照 pi 那几句**（它有对应动作的）：`Thinking blocks: hidden|visible`、
+  `Tool output: expanded|collapsed`、`Thinking level: high`、`Model: <id>`、
+  `Switched to <id> (thinking: high)`、`Operation aborted` —— 自己写一句更长的中文
+  只会让同一个动作在两个应用里说得不一样。
 - **尾部还是这张卡就覆盖**：`notify` 时若 `messages.length` 没变，`at` 相同 →
   就地改 `text`。连续改配置（换模型 → 切思考级别）不会刷屏。
 - **中间插过东西就另起一张**：一旦有了新消息，`at` 不再相等 → push 一张新卡，

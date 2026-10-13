@@ -296,6 +296,26 @@ test('renderTail 不含流式文字（它由独立的块负责，否则会画两
   );
 });
 
+test('renderTail：用户中止只说一句 `Operation aborted`（不再提示去看轨迹）', () => {
+  // 以前这一支是「■ 用户手动中断：LLM 调用已中断（轨迹节点 n7）」+「已按你的要求停下…」，
+  // 而小结里还跟着一句「按 Ctrl+R 看轨迹树」—— 用户自己按的停止，却像被报了个错，
+  // 还顺手推销了一次轨迹页。pi 只有一句 `Operation aborted`（在 assistant 消息的末尾）。
+  // 这一支是「没有任何 assistant 消息可画」的那种中止（流挂住时按 Esc 走 `llm.failed`）。
+  const state = stateOf(history(1), {
+    phase: 'idle',
+    error: 'LLM 调用已中断',
+    stopCause: 'user',
+    stopCauseDetail: '用户手动中断',
+    stopReason: 'aborted',
+    errorNodeId: 'n7',
+  });
+  const out = stripTerminalSequences(renderTail(state, 80).join('\n'));
+  assert.ok(out.includes('Operation aborted'), `要与 pi 同一句：${out}`);
+  assert.ok(!out.includes('Ctrl+R'), `不该再提示看轨迹：${out}`);
+  assert.ok(!out.includes('用户手动中断'), `不再重复一遍原因：${out}`);
+  assert.ok(!out.includes('n7'), `也不再报轨迹节点：${out}`);
+});
+
 // ── 工作状态（画在 composer 上框线上，与 pi 同位置） ──
 //
 // `workingStatusText()` 是那个**从 state 现推**的纯函数：思考中 / 压缩中 / 重试 三个状态

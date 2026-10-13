@@ -1640,7 +1640,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
               return;
             }
             refresh();
-            notify(dim(`已切到 ${model.id}（${model.provider}）`));
+            // 与 pi 同一句（`selectModel` 的 `showStatus`）。
+            notify(`Model: ${model.id}`);
           },
           onSelectAsDefault: (model) => {
             if (!writeDefaultModel(model.provider, model.id, cwd)) {
@@ -1649,7 +1650,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
             }
             if (options.setModel?.(model.provider, model.id)) {
               refresh();
-              notify(dim(`已存为默认并切到 ${model.id}（${model.provider}）`));
+              // pi 存默认时多带 provider（`Default model: provider/id`）。
+              notify(`Default model: ${model.provider}/${model.id}`);
             } else {
               notify(yellow(`已存为默认，但换不了 ${model.id}（配置里没它）`));
             }
@@ -1731,6 +1733,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
       if (actionMatches(data, 'app.tools.expand')) {
         expanded = !expanded;
         refresh();
+        // 与 pi 同一句（它的 `toggleToolOutputExpansion()`）：早先这里一声不喊。
+        notify(`Tool output: ${expanded ? 'expanded' : 'collapsed'}`);
         return true;
       }
       // `app.thinking.toggle`（默认 Ctrl+T）：展开/收起思考块。**与 pi 同 id 同键**。
@@ -1744,7 +1748,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
       if (actionMatches(data, 'app.thinking.toggle')) {
         hideThinking = !hideThinking;
         refresh();
-        notify(dim(`思考块：${hideThinking ? '已折叠（只留一行）' : '已展开'}`));
+        notify(`Thinking blocks: ${hideThinking ? 'hidden' : 'visible'}`);
         // 落盘是**尽力而为**：内存里那个值已经是权威（界面当然立刻跟着变），
         // 写不进去（没权限）只影响「下次启动的默认值」—— 那种情况下说一句，别静默。
         void writeHideThinkingBlock(hideThinking, cwd).then((ok) => {
@@ -1904,12 +1908,12 @@ export async function runTui(options: TuiOptions): Promise<number> {
     if (next === undefined) {
       // pi 的文案（`Current model does not support thinking`）——说的是「没得切」，
       // 而不是「你敲错了键」。
-      notify(yellow('当前模型不支持 thinking（没有可切的级别）'));
+      notify('Current model does not support thinking');
       return;
     }
     store.dispatch({ type: 'thinking.changed', level: next as typeof before });
     refresh();
-    notify(dim(`思考级别：${next}`));
+    notify(`Thinking level: ${next}`);
   };
 
   /**
@@ -1952,7 +1956,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
       return;
     }
     if (nextIndex === currentIndex) {
-      notify(dim('只有这一个可切的模型'));
+      // pi 的两句（`cycleModel()`）：作用域里只有一个 vs 整个 provider 下只有一个。
+      notify(scoped.length > 0 ? 'Only one model in scope' : 'Only one model available');
       return;
     }
     if (!options.setModel(next.provider, next.id, {
@@ -1964,7 +1969,11 @@ export async function runTui(options: TuiOptions): Promise<number> {
       return;
     }
     refresh();
-    notify(dim(`已切到 ${next.id}（${next.provider}）`));
+    // 与 pi 同一句（`cycleModel()`）：`Switched to <名字>`，思考档位非 off 时跟一个括号。
+    const level = store.getState().thinkingLevel;
+    const thinkingStr =
+      store.getState().model.reasoning && level !== 'off' ? ` (thinking: ${level})` : '';
+    notify(`Switched to ${next.id}${thinkingStr}`);
   };
 
   /** 最后一条 assistant 消息里的可见文本（`app.message.copy` 用它，与 pi 的 `getLastAssistantText` 同口径）。 */
@@ -2285,13 +2294,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
             return;
           }
           refresh();
-          notify(
-            dim(
-              persist
-                ? `已存为默认并切到 ${model.id}（${model.provider}）`
-                : `已切到 ${model.id}（${model.provider}）`,
-            ),
-          );
+          // 与 pi 同一句：`Model: <id>` / 存默认时 `Default model: <provider>/<id>`。
+          notify(persist ? `Default model: ${model.provider}/${model.id}` : `Model: ${model.id}`);
         };
         // `/model <词>`：精确命中就直接切（与 pi 的 `findExactModelMatch` 同一形状），
         // 否则带词开面板（官方组件拿它当 `initialSearchInput`）。
@@ -2337,7 +2341,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
         // 与内核启动时的 clamp 是同一个来源。
         const levels = supportedThinkingLevels(currentModelObject());
         if (levels.length === 0) {
-          notify(yellow('当前模型不支持 thinking（没有可切的级别）'));
+          notify('Current model does not support thinking');
           return;
         }
         /** 真的换一档。`persist` = `Ctrl+S`（写 `settings.json` 的 `defaultThinkingLevel`）。 */
@@ -2345,7 +2349,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
           store.dispatch({ type: 'thinking.changed', level });
           refresh();
           if (!persist) {
-            notify(dim(`思考级别：${level}`));
+            // 与 pi 同两句（`selectThinkingLevel()`）：选中 vs 存成默认。
+            notify(`Thinking level: ${level}`);
             return;
           }
           // 写盘是异步的（pi 的 `save()` 是入队写），所以提示放在 `.then` 里 ——
@@ -2353,7 +2358,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
           void writeDefaultThinkingLevel(level, cwd).then((ok) => {
             notify(
               ok
-                ? dim(`已存为默认思考级别：${level}`)
+                ? `Default thinking level: ${level}`
                 : yellow('没能写进 settings.json（写权限？），默认思考级别没变'),
             );
           });
@@ -2439,14 +2444,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
           },
           autoCompact: options.autoCompactEnabled?.() ?? null,
           onAutoCompactChange: (enabled) => {
+            // 与 pi 一样**不报状态**：面板里那一行的右值当场就变了（`true` → `false`），
+            // 再插一张卡是重复 —— pi 的 `onAutoCompactChange` 也只改值 + 刷底栏。
             options.setAutoCompactEnabled?.(enabled);
-            notify(
-              dim(
-                enabled
-                  ? '自动压缩：开'
-                  : '自动压缩：关（/compact 仍然能手动压一次）',
-              ),
-            );
             refresh();
           },
         });
@@ -3102,6 +3102,24 @@ function renderAssistant(
   isStreaming = false,
   /** 思考块是否折叠（`Ctrl+T`）。折叠时官方组件只留一行斜体 `Thinking…`。 */
   hideThinking = false,
+  /**
+   * 这条消息是怎么停的（`message.stopReason` / `message.errorMessage`）。
+   *
+   * ## 为什么要把它交给官方组件
+   *
+   * pi 的 `AssistantMessageComponent` 自己会画那几种收尾：
+   *
+   * | `stopReason` | 它画什么 |
+   * | --- | --- |
+   * | `aborted`（且没有工具调用） | 空一行 + `Operation aborted`（`Request was aborted` 这种 provider 原文会被它换成这句） |
+   * | `length` | 空一行 + `Response was truncated before completion.` |
+   * | `error`（且没有工具调用） | 空一行 + `Error: <原因>` |
+   *
+   * 本项目早先只过滤出 text/thinking 块重建一个**假消息**（丢掉 stopReason），于是那些说明
+   * 一行都不画，而自己又在尾部用中文重写了一遍（还附上「按 Ctrl+R 看轨迹树」）——
+   * 同一件事两处表达，且两处都与 pi 不一样。现在把字段原样传进去，低层交给 pi 画。
+   */
+  stop?: { stopReason?: string | undefined; errorMessage?: string | undefined } | undefined,
 ): string[] {
   // 先筛掉空的：Markdown 对空白文本返回 []，而 toolCall 块在这里不画
   // （它由紧接着的 toolResult 消息负责）—— 不筛的话每条纯工具调用消息会多出空行。
@@ -3112,7 +3130,13 @@ function renderAssistant(
     return false;
   });
   if (visible.length === 0) return [];
-  const message = { role: 'assistant', content: visible } as never;
+  const message = {
+    role: 'assistant',
+    content: visible,
+    // 官方组件靠这两个字段决定「要不要在末尾补一行中止/截断/错误说明」。
+    ...(stop?.stopReason === undefined ? {} : { stopReason: stop.stopReason }),
+    ...(stop?.errorMessage === undefined ? {} : { errorMessage: stop.errorMessage }),
+  } as never;
   // 第二个参数就是官方的 `hideThinkingBlock` —— 折叠的渲染（那一行 `Thinking…`）由
   // 它自己负责，我们只管把开关传对。
   const component = new AssistantMessageComponent(message, hideThinking, getMarkdownTheme(), 'Thinking…', 1);
@@ -3522,7 +3546,10 @@ export function renderMessage(
     // 后面接上「正在跑的工具」：那些工具还没产出 toolResult，所以它们的块
     // 只能在这里画（位置也正好：紧跟发起它的那条消息）。
     const running = runningToolsAfter(state, message);
-    const lines = renderAssistant(message.content, width, false, hideThinking);
+    const lines = renderAssistant(message.content, width, false, hideThinking, {
+      stopReason: message.stopReason,
+      errorMessage: message.errorMessage,
+    });
     for (const call of running) {
       lines.push(...renderRunningTool(state, call, width, expanded));
     }
@@ -3734,12 +3761,14 @@ export class TranscriptChunks {
       const card = statusCards[i]!;
       let block = this.statusBlocks[i];
       if (!block) {
-        block = new Text('', 0, 0);
+        // `paddingX = 1` + 前面一行空行 —— 与 pi 的 `showStatus()` 逐字同形：
+        // 它建的是 `new Spacer(1)` + `new ThemedText(..., 1, 0)`（空行在上、左边留一格）。
+        // 早先是 `(0, 0)` + 尾随换行，于是卡贴着左边缘、且与上一行内容之间没有空隙。
+        block = new Text('', 1, 0);
         this.statusBlocks[i] = block;
       }
       this.statusAnchors[i] = card.at;
-      // 卡后面跟一个空行，与 pi 的「spacer + text」同形（稍后 `render` 里也这样接）。
-      const text = card.text === '' ? '' : `${card.text}\n`;
+      const text = card.text === '' ? '' : `\n${card.text}`;
       if (this.lastStatus[i] !== card.text) {
         this.lastStatus[i] = card.text;
         block.setText(text);
@@ -3959,8 +3988,13 @@ export function renderTail(state: AgentState, width: number): string[] {
     // 停止原因写在前面：光看 error 那句技术文案（'LLM 调用已中断'）没人知道发生了什么。
     const cause = state.stopCauseDetail ? `${state.stopCauseDetail}：` : '';
     if (stoppedByUser) {
-      lines.push(`  ${dim('■')} ${dim(`${cause}${state.error}`)} ${dim(node)}`);
-      lines.push(dim('  已按你的要求停下，模型没写完 —— 追问即可继续。'));
+      // 用户自己按的停止：只报 pi 那一句，**不**再说一遍原因、不再报轨迹节点、
+      // 也不提示去看轨迹树（用户没出错，不该被推去排查）。
+      //
+      // 这条路是「没有任何 assistant 消息可画」的那种中止（流挂住时按 Esc 走 `llm.failed`）；
+      // 中止时已经有部分内容的情形由 pi 的 `AssistantMessageComponent` 画在**那条消息自己**
+      // 的末尾（`Operation aborted`），这里不会再进。
+      lines.push(`  ${dim('Operation aborted')}`);
     } else if (capped) {
       lines.push(`  ${yellow('■')} ${yellow(state.error)} ${dim(node)}`);
       lines.push(dim('  这是上限收工，不是出错 —— 继续追问即可，或用 /new 换个会话。'));
@@ -3988,9 +4022,14 @@ export function renderTranscript(
 ): string {
   const lines: string[] = [];
   // 卡按其锚点 splice，不再是「贴顶一行」。
+  // 空行在卡**上面** + 左边一格缩进 —— 与 pi 的 `showStatus()`（`Spacer(1)` + `paddingX=1`）同形。
+  // 两处（这里与 `TranscriptChunks`）必须一致：一次性模式与界面里看到的得是同一个东西。
   const cardsAt = (index: number): void => {
     for (const card of statusCards ?? []) {
-      if (card.at === index && card.text !== '') lines.push(card.text, '');
+      if (card.at === index && card.text !== '') {
+        // 每一行都缩一格（`/help` 那种多行卡也是）—— pi 的 `paddingX` 就是逐行生效的。
+        lines.push('', ...card.text.split('\n').map((row) => ` ${row}`));
+      }
     }
   };
   cardsAt(from);
