@@ -296,6 +296,56 @@ test('banner 是常驻的（开场那节永不消失），与命令反馈卡分�
   assert.ok(bare.render(80).length > 0);
 });
 
+/**
+ * 命令反馈卡上下的空隙：**上一下一，各一行，且都无底色**。
+ *
+ * 回归（用户报的「webui 之上两行空隙，webui 与用户会话之间没空隙」）：
+ *   1. banner 的尾随空行 + 卡自带的前导空行 ⇒ 卡上叠成两行；
+ *   2. 卡后面紧跟用户消息时，用户块首行是 `UserMessageComponent` 的 `paddingY`
+ *      （**带底色**，看着是蓝块的一部分，不算空隙）⇒ 视觉上「贴着」。
+ *
+ * 判据用**未剥色**的行：无底色空行是纯空格（`trim() === ''`），带底色的
+ * padding 行含转义序列（`trim() !== ''`）。
+ */
+test('命令反馈卡：上一下各一行空隙（banner 尾随空行不与卡的前导空行叠成两行）', () => {
+  const chunks = new TranscriptChunks();
+  chunks.update(
+    stateOf([{ role: 'user', content: '你好' } as Message]),
+    60,
+    false,
+    [{ text: 'web ui: http://localhost:3000', at: 0 }],
+    { text: '[Skills]\ndemo, other' },
+  );
+  const raw = chunks.render(60);
+  const at = raw.findIndex((line) => line.includes('web ui:'));
+  assert.ok(at > 0, `卡要画出来：${raw.join('/')}`);
+  assert.ok(raw[at - 1]!.trim() === '', '卡上面一行是**无底色**空行');
+  assert.ok(
+    raw[at - 2] === undefined || raw[at - 2]!.trim() !== '',
+    `卡上面只有一行空行（不与 banner 的尾随空行叠成两行）：${JSON.stringify(raw.slice(at - 3, at + 1))}`,
+  );
+  assert.ok(
+    raw[at + 1] !== undefined && raw[at + 1]!.trim() === '',
+    `卡下面一行是**无底色**空行（不是用户块的蓝色 padding）：${JSON.stringify(raw.slice(at, at + 3))}`,
+  );
+});
+
+test('命令反馈卡：中间插进对话流时，卡与用户消息之间只有一行无底色空隙（不与 Spacer 叠起来）', () => {
+  const before = history(1); // 问题 0 / 回答 0
+  const grown = [...before, { role: 'user', content: '新追问' } as Message];
+  const chunks = new TranscriptChunks();
+  chunks.update(stateOf(grown), 60, false, [{ text: 'Model: deepseek', at: before.length }]);
+  const raw = chunks.render(60);
+  const at = raw.findIndex((line) => line.includes('Model: deepseek'));
+  assert.ok(at > 0, `卡要画出来：${raw.join('/')}`);
+  assert.ok(raw[at - 1]!.trim() === '', '卡上面一行空行');
+  assert.ok(raw[at + 1]!.trim() === '', '卡下面一行空行');
+  assert.ok(
+    raw[at + 2] !== undefined && raw[at + 2]!.trim() !== '',
+    `卡下面只有一行无底色空行（第二行就是用户块带底色的 padding）：${JSON.stringify(raw.slice(at, at + 3))}`,
+  );
+});
+
 test('错误提示从 trace 派生并画在对话流里（不再靠 state.error 那一行）', () => {
   // 旧行为：错误来自 `state.error`，而它会在下一次提问 / 重试时被清成 null ——
   // 用户看到的就是「报过错，一重新发就没了」。现在错误是轨迹上的节点，

@@ -4419,38 +4419,62 @@ export class TranscriptChunks {
   render(width: number): string[] {
     const at = this.lastWidth > 0 ? this.lastWidth : width;
     const lines: string[] = [];
-    lines.push(...this.bannerBlock.render(at));
+    // 卡**上面**那行空隙由卡自带（前导 `\n`，对齐 pi 的 `Spacer(1)`）；**下面**那行
+    // 由紧跟它的那个块补 —— 卡自己不知道后面跟的是什么。
+    //
+    // 为什么不能只靠下一块自带的空行：用户消息块首行是 `UserMessageComponent` 的
+    // `paddingY`（**带底色**，看着是蓝块的一部分，不算空隙），所以卡与用户消息之间
+    // 会「贴着」。这里按「上一行 / 下一块首行是不是**无底色**空行」判断，是才不重复补。
+    // 带底色的 padding 行含转义序列，`trim()` 不为空 —— 于是这里认得出它、照补一行。
+    let pendingBlankBelow = false;
+    const isBlank = (line: string | undefined): boolean => line === undefined || line.trim() === '';
+    const pushBlock = (blockLines: readonly string[]): void => {
+      if (pendingBlankBelow && blockLines.length > 0) {
+        if (!isBlank(lines[lines.length - 1]) && !isBlank(blockLines[0])) lines.push('');
+        pendingBlankBelow = false;
+      }
+      lines.push(...blockLines);
+    };
+    const pushCard = (blockLines: readonly string[]): void => {
+      if (blockLines.length === 0) return;
+      // 卡自带前导空行；上一块已经留下**无底色**空行（如 banner 的尾随空行）时
+      // 去掉自己那行，免得叠成两行。
+      pendingBlankBelow = false;
+      lines.push(
+        ...(lines.length > 0 && isBlank(lines[lines.length - 1]) && isBlank(blockLines[0])
+          ? blockLines.slice(1)
+          : blockLines),
+      );
+      pendingBlankBelow = true;
+    };
+    pushBlock(this.bannerBlock.render(at));
     // 状态卡与键位表都**钉在当时的消息边界**上（各自的 `at`）：这样它后面的对话会把它
     // 往上顶、随会话一起滚，而不是永远贴在屏幕底部。
     //
     // 同一锚点上键位表排前面：它是用户主动拉出来看的一张长表，先看到；
     // 命令反馈是刚发生的事，紧跟其后。
     const hotkeysAt = this.hotkeysAtIndex;
-    const cardsAt = (index: number): string[] => {
-      const out: string[] = [];
+    const cardsAt = (index: number): void => {
       for (let k = 0; k < this.statusBlocks.length; k += 1) {
-        if ((this.statusAnchors[k] ?? -1) === index) out.push(...this.statusBlocks[k]!.render(at));
+        if ((this.statusAnchors[k] ?? -1) === index) pushCard(this.statusBlocks[k]!.render(at));
       }
-      return out;
     };
     /** 锚点在末尾或更后（如 `/new` 截短了消息）的卡一律排在最后。 */
-    const cardsAtEnd = (): string[] => {
-      const out: string[] = [];
+    const cardsAtEnd = (): void => {
       for (let k = 0; k < this.statusBlocks.length; k += 1) {
-        if ((this.statusAnchors[k] ?? -1) >= this.blocks.length) out.push(...this.statusBlocks[k]!.render(at));
+        if ((this.statusAnchors[k] ?? -1) >= this.blocks.length) pushCard(this.statusBlocks[k]!.render(at));
       }
-      return out;
     };
     for (let i = 0; i < this.blocks.length; i += 1) {
-      lines.push(...cardsAt(i));
-      if (i === hotkeysAt) lines.push(...this.hotkeysBlock.render(at));
+      cardsAt(i);
+      if (i === hotkeysAt) pushBlock(this.hotkeysBlock.render(at));
       const block = this.blocks[i];
-      if (block) lines.push(...block.render(at));
+      if (block) pushBlock(block.render(at));
     }
     // 锚点落在末尾（`at >= blocks.length`）或一条消息都没有时。
-    lines.push(...cardsAtEnd());
-    if (hotkeysAt >= this.blocks.length) lines.push(...this.hotkeysBlock.render(at));
-    lines.push(...this.streamBlock.render(at));
+    cardsAtEnd();
+    if (hotkeysAt >= this.blocks.length) pushBlock(this.hotkeysBlock.render(at));
+    pushBlock(this.streamBlock.render(at));
     return lines;
   }
 
