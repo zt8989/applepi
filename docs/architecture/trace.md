@@ -27,12 +27,23 @@ interface TraceNode {
   label: string;                 // 短标签，渲染用
   detail?: string;               // 详细文本（回答全文、错误信息、工具参数）
   meta?: Record<string, string>; // provider / model / tool / kind
+  message?: Message;             // 这条节点对应的 pi 消息（user / assistant / toolResult）
   createdAt: number;
   endedAt: number | null;        // 与 createdAt 相减得耗时
 }
 ```
 
 `turn.*` / `step.*` 是**容器**（区间），`llm.result` / `tool.result` / `error` 是里面的**事件**。
+
+### 消息挂在节点上
+
+会产生一条对话消息的节点（`user` / `llm.result` / `tool.result` / 工具失败的 `error` /
+`prompt.segment`）自己带着整份 pi 消息。因为界面的**时间线是从轨迹派生的**，而不是
+回头去读 `state.messages` —— 详见 [stream](stream.md)。只有两条路：
+
+- 旧轨迹文件里没有这个字段（那时消息单独落在 `op:'message'` 行），派生时整体退回
+  从会话文件读回来的那份；
+- 新会话里它就是真相，所以图片 / 思考块 / toolResult 的 `details`（edit 的 diff）都不丢。
 
 ## 两层容器：turn 与 step
 

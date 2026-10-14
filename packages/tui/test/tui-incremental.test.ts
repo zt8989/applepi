@@ -14,7 +14,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { stripTerminalSequences } from '@earendil-works/pi-tui';
-import { renderTranscript, TranscriptChunks, renderTail, TraceChunks, workingStatusText } from '../src/app';
+import { renderTranscript, TranscriptChunks, TraceChunks, workingStatusText } from '../src/app';
 import { createTraceTree, appendNode, patchNode, renderTree, traceStats, type TraceTree } from '@ela/core/trace';
 import { setupTheme } from '../src/theme';
 import type { AgentState } from '@ela/core/state';
@@ -35,6 +35,8 @@ function history(count: number): Message[] {
 function stateOf(messages: Message[], extra: Partial<AgentState> = {}): AgentState {
   return {
     messages,
+    // 时间线从 trace 派生：没有 trace 就没法派生（真实 state 里一定有）。
+    trace: createTraceTree('t'),
     phase: 'idle',
     streamingText: '',
     thinkingText: '',
@@ -43,6 +45,19 @@ function stateOf(messages: Message[], extra: Partial<AgentState> = {}): AgentSta
     error: null,
     ...extra,
   } as unknown as AgentState;
+}
+
+/** 往树上追加一个「没有消息」的 `error` 节点（派生时会变成一条错误提示）。 */
+function withErrorNotice(state: AgentState, label: string, cause?: string): AgentState {
+  const { tree } = appendNode(state.trace, null, 'error', {
+    status: 'error',
+    label,
+    detail: label,
+    meta: cause !== undefined ? { cause } : {},
+    createdAt: 1,
+    endedAt: 1,
+  });
+  return { ...state, trace: tree };
 }
 
 const noCards: { text: string; at: number }[] = [];
@@ -267,17 +282,18 @@ test('banner 是常驻的（开场那节永不消失），与命令反馈卡分�
   assert.ok(bare.render(80).length > 0);
 });
 
-test('收工原因画在最后（流式/重试提示之后）', () => {
-  const state = stateOf(history(2), {
-    phase: 'idle',
-    error: 'LLM 调用超时',
-    stopReason: 'error',
-  });
-  const out = stripTerminalSequences(chunksLines(state, 80));
+test('错误提示从 trace 派生并画在对话流里（不再靠 state.error 那一行）', () => {
+  // 旧行为：错误来自 `state.error`，而它会在下一次提问 / 重试时被清成 null ——
+  // 用户看到的就是「报过错，一重新发就没了」。现在错误是轨迹上的节点，
+  // 只要节点还在，提示就一直在。
+  let state = withErrorNotice(stateOf(history(2)), 'LLM 调用超时', 'timeout');
+  const out = stripTerminalSequences(renderTranscript(state, 0, 80, false));
+  assert.ok(out.includes('大模型调用超时'), out);
   assert.ok(out.includes('LLM 调用超时'), out);
-  const idx = out.indexOf('LLM 调用超时');
-  const lastAnswer = out.indexOf('回答 1');
-  assert.ok(idx > lastAnswer, '收工原因要排在最后一条消息之后');
+  // 重新发一句话（error 被清空）之后，提示仍在。
+  state = { ...state, error: null } as AgentState;
+  const again = stripTerminalSequences(renderTranscript(state, 0, 80, false));
+  assert.ok(again.includes('LLM 调用超时'), `重发后错误提示应该还在：${again}`);
 });
 
 function chunksLines(state: AgentState, width: number): string {
@@ -286,34 +302,19 @@ function chunksLines(state: AgentState, width: number): string {
   return chunks.render(width).join('\n');
 }
 
-test('renderTail 不含流式文字（它由独立的块负责，否则会画两遍）', () => {
+test('流式文字只由独立那块画一次（整段渲染里仍然要有）', () => {
   const state = stateOf(history(1), { phase: 'thinking', streamingText: '流式中的字' });
-  assert.ok(!renderTail(state, 80).join('\n').includes('流式中的字'));
-  // 但整段渲染仍然要有（一次性模式走那条路，形状必须一致）。
   assert.ok(
     stripTerminalSequences(renderTranscript(state, 0, 80, false)).includes('流式中的字'),
     '一次性模式那条路仍然要画出流式文字',
   );
 });
 
-test('renderTail：用户中止只说一句 `Operation aborted`（不再提示去看轨迹）', () => {
-  // 以前这一支是「■ 用户手动中断：LLM 调用已中断（轨迹节点 n7）」+「已按你的要求停下…」，
-  // 而小结里还跟着一句「按 Ctrl+R 看轨迹树」—— 用户自己按的停止，却像被报了个错，
-  // 还顺手推销了一次轨迹页。pi 只有一句 `Operation aborted`（在 assistant 消息的末尾）。
-  // 这一支是「没有任何 assistant 消息可画」的那种中止（流挂住时按 Esc 走 `llm.failed`）。
-  const state = stateOf(history(1), {
-    phase: 'idle',
-    error: 'LLM 调用已中断',
-    stopCause: 'user',
-    stopCauseDetail: '用户手动中断',
-    stopReason: 'aborted',
-    errorNodeId: 'n7',
-  });
-  const out = stripTerminalSequences(renderTail(state, 80).join('\n'));
-  assert.ok(out.includes('Operation aborted'), `要与 pi 同一句：${out}`);
-  assert.ok(!out.includes('Ctrl+R'), `不该再提示看轨迹：${out}`);
-  assert.ok(!out.includes('用户手动中断'), `不再重复一遍原因：${out}`);
-  assert.ok(!out.includes('n7'), `也不再报轨迹节点：${out}`);
+test('用户中止：只说一句「用户手动中断」，不提示去看轨迹', () => {
+  const state = withErrorNotice(stateOf(history(1)), 'LLM 调用已中断', 'user');
+  const out = stripTerminalSequences(renderTranscript(state, 0, 80, false));
+  assert.ok(out.includes('用户手动中断'), `要报出原因：${out}`);
+  assert.ok(!out.includes('Ctrl+R'), `用户自己按的停止不该被推去排查：${out}`);
 });
 
 // ── 工作状态（画在 composer 上框线上，与 pi 同位置） ──
@@ -362,7 +363,7 @@ test('workingStatusText：重试 > 压缩 > 生成（重试时带的是信息量
   assert.match(workingStatusText(both) ?? '', /正在重试/, '三个都真时优先说重试');
 });
 
-test('renderTail 里不再画重试那行（它搬到了 composer 的上框线）', () => {
+test('工作状态（重试）只在上框线那一处，不在对话流里重复一遍', () => {
   const state = stateOf(history(1), {
     phase: 'thinking',
     retrying: true,
@@ -370,7 +371,7 @@ test('renderTail 里不再画重试那行（它搬到了 composer 的上框线�
     maxLlmAttempts: 2,
   } as Partial<AgentState>);
   assert.ok(
-    !renderTail(state, 80).join('\n').includes('重试'),
+    !stripTerminalSequences(renderTranscript(state, 0, 80, false)).includes('重试'),
     '重试提示只该在 composer 上框线那一处（见 workingStatusText）',
   );
 });

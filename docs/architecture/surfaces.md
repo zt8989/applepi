@@ -141,13 +141,15 @@ pi-tui 的 `MIN_RENDER_INTERVAL_MS` 是 16ms —— 每帧 1.2 秒时渲染永�
 
 分成三处缓存：
 
-1. **每条消息一个 `Text`**，下标与 `state.messages` 一一对应。`Text` 自己缓存
+1. **每条消息一个 `Text`**，下标与**轨迹派生的消息**一一对应（见 [stream](stream.md)）。`Text` 自己缓存
    `render()` 的结果，只在 `setText()` 时失效，所以历史块在后续帧里直接命中。
 2. **渲染结果再缓存一层**（`WeakMap<message, Map<`${width}:${expanded}`, lines>>`）——
    连折行都不用重做。键里带宽度与折叠状态，因为这两者都会改变渲染结果。
-3. **尾部独立的几块**（状态卡 / 键位表 / 流式那段 / 收工原因）。流式只碰中间那个。
+3. **尾部独立的几块**（状态卡 / 键位表 / 流式那段）。流式只碰中间那个。
    状态卡与键位表都**钉在当时的消息边界**上（各自的锚点 `at`），所以新消息排在它们
    下面、把它们往上顶 —— 形状与 pi 的 `chatContainer.addChild` 一致。
+   状态卡有**两种来源**：命令反馈（`notify()`）与**轨迹派生的提示**（错误 / 配置切换 /
+   压缩，见 [stream](stream.md)）—— 两者同一套锚点渲染。
 
 三条不能省的细节：
 
@@ -163,7 +165,7 @@ pi-tui 的 `MIN_RENDER_INTERVAL_MS` 是 16ms —— 每帧 1.2 秒时渲染永�
 
 ### 命令反馈卡：照抄 pi 的 `showStatus`
 
-`notify()`（命令结果、换模型、切思考块…）不再是「贴顶一行、6 秒消失」，而是
+`notify()`（命令结果、切工具折叠…）不再是「贴顶一行、6 秒消失」，而是
 **钉进对话流的卡片**，与 pi 的 `showStatus` 同形：
 
 - 卡存在 `statusCards: { text; at }[]` 里，`at` = 显示时的**消息条数**；渲染时按它
@@ -172,9 +174,10 @@ pi-tui 的 `MIN_RENDER_INTERVAL_MS` 是 16ms —— 每帧 1.2 秒时渲染永�
   `new Spacer(1)` + `new ThemedText(..., 1, 0)`（空行在上、`paddingX = 1`）。
   早先是「左边不缩、空行加在卡下面」，于是卡贴着左边缘、且与上一行内容之间没有空隙。
 - **卡里的文案照 pi 那几句**（它有对应动作的）：`Thinking blocks: hidden|visible`、
-  `Tool output: expanded|collapsed`、`Thinking level: high`、`Model: <id>`、
-  `Switched to <id> (thinking: high)`、`Operation aborted` —— 自己写一句更长的中文
+  `Tool output: expanded|collapsed`、`Operation aborted` —— 自己写一句更长的中文
   只会让同一个动作在两个应用里说得不一样。
+  **换模型 / 换思考级别不在这里 `notify` 了**：那是**配置切换**，作为轨迹派生的提示
+  统一给（见 [stream](stream.md)）—— 否则同一个动作会显示两遍。
 - **尾部还是这张卡就覆盖**：`notify` 时若 `messages.length` 没变，`at` 相同 →
   就地改 `text`。连续改配置（换模型 → 切思考级别）不会刷屏。
 - **中间插过东西就另起一张**：一旦有了新消息，`at` 不再相等 → push 一张新卡，

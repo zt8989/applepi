@@ -104,16 +104,23 @@ function openStepNode(state: AgentState, now: number): { state: AgentState; node
 }
 
 /** 成功：在 step 下挂 result 节点（它才是推进 tip 的那个）。 */
-function closeLlmSuccess(state: AgentState, now: number, detail: string): AgentState {
+function closeLlmSuccess(
+  state: AgentState,
+  now: number,
+  detail: string,
+  message: Message,
+): AgentState {
   const openId = state.openStepNodeId ?? state.openLlmNodeId;
   let { trace } = state;
   if (openId) trace = patchNode(trace, openId, { status: 'ok', endedAt: now });
-  const { tree, node } = appendNode(
-    trace,
-    openId,
-    'llm.result',
-    { status: 'ok', label: summarize(detail), detail, createdAt: now, endedAt: now },
-  );
+  const { tree, node } = appendNode(trace, openId, 'llm.result', {
+    status: 'ok',
+    label: summarize(detail),
+    detail,
+    message,
+    createdAt: now,
+    endedAt: now,
+  });
   return { ...state, trace: tree, openLlmNodeId: null, retrying: false };
 }
 
@@ -366,7 +373,13 @@ function appendPromptNodes(tree: TraceTree, prompt: AgentState['prompt'], now: n
 }
 
 /** 把 model 那半（provider / model / 思考级别 / 能力）追加到树上。 */
-function appendModelNode(tree: TraceTree, model: AgentState['model'], now: number): TraceTree {
+function appendModelNode(
+  tree: TraceTree,
+  model: AgentState['model'],
+  now: number,
+  /** `true` = 这是用户**切换**模型 / 档位后补的那一条（开场装载不传）。 */
+  changed = false,
+): TraceTree {
   const caps = model.capabilities;
   // 能力逐条写进 meta：树上就能一眼看出「这个模型能不能中途插 system」。
   return appendNode(tree, tree.tipId, 'model.init', {
@@ -378,6 +391,8 @@ function appendModelNode(tree: TraceTree, model: AgentState['model'], now: numbe
       midConvoSystem: String(caps.midConvoSystemMessages),
       midConvoTools: String(caps.midConvoToolAdditions),
       developerRole: String(caps.developerRole),
+      // 界面从轨迹派生时间线：只有切换过才留一条提示（开场装载那条不打）。
+      ...(changed ? { changed: '1' } : {}),
     },
     createdAt: now,
     endedAt: now,
@@ -437,7 +452,7 @@ function flushModelChange(state: AgentState, now: number): AgentState {
   if (!state.modelTraceDirty) return state;
   return {
     ...state,
-    trace: appendModelNode(state.trace, state.model, now),
+    trace: appendModelNode(state.trace, state.model, now, true),
     modelTraceDirty: false,
   };
 }
@@ -570,6 +585,7 @@ const transitions: TransitionHandlers = {
         action.text === ''
           ? JSON.stringify(action.sections ?? {})
           : action.text,
+      message,
       meta: {
         role: action.role,
         ...(action.sections !== undefined ? { sections: Object.keys(action.sections).join(',') } : {}),
@@ -660,6 +676,7 @@ const transitions: TransitionHandlers = {
       status: 'ok',
       label: summarize(action.text),
       detail: action.text,
+      message,
       createdAt: now,
       endedAt: now,
     });
@@ -787,6 +804,7 @@ const transitions: TransitionHandlers = {
       status: 'ok',
       label: `${isSteer ? 'steer' : 'followUp'}: ${summarize(action.text)}`,
       detail: action.text,
+      message,
       meta: { queued: action.as },
       createdAt: now,
       endedAt: now,
@@ -915,6 +933,7 @@ const transitions: TransitionHandlers = {
       status: 'ok',
       label: `followUp: ${summarize(queued.text)}`,
       detail: queued.text,
+      message,
       meta: { queued: 'followUp' },
       createdAt: now,
       endedAt: now,
@@ -1073,7 +1092,7 @@ const transitions: TransitionHandlers = {
     //
     // **这一步不开 step.end**：有工具时 step 还没完（工具批次也要算在这个 step 里），
     // 它的闭合点是 tool.batch.done。只有「无工具」才在这一步就把 step 关掉。
-    const closed = closeLlmSuccess(state, Date.now(), text);
+    const closed = closeLlmSuccess(state, Date.now(), text, message);
     const hasTools = toolCalls.length > 0;
     //
     // **用户按了停止**（pi-ai 把那份部分消息以 `stopReason: 'aborted'` 交回来）。
@@ -1312,6 +1331,7 @@ const transitions: TransitionHandlers = {
           status: 'error',
           label: text,
           detail: text,
+          message: result,
           meta: { tool: result.toolName },
           createdAt: now,
           endedAt: now,
@@ -1320,6 +1340,7 @@ const transitions: TransitionHandlers = {
           status: 'ok',
           label: summarize(text),
           detail: text,
+          message: result,
           meta: { tool: result.toolName },
           createdAt: now,
           endedAt: now,

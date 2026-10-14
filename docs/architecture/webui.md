@@ -65,6 +65,27 @@ pi-web-ui 只有两个落点（见它 `components/AgentInterface.js`）：
 + `toolResult` 消息）渲染工具块，用 `pendingToolCalls` 标「跑着」。所以桥不发
 `tool_execution_*`。
 
+## 提示也在聊天流里（错误 / 配置切换 / 压缩）
+
+`state.messages` 不是 `state.messages` 原样转出去的 —— 它是**从轨迹派生**的（见
+[stream](stream.md)）：真消息原样，而错误 / 配置切换 / 压缩这些提示变成一条**合成消息**
+（`role = 'ela-notice'`）插在正确的消息之间。
+
+浏览器侧用 pi-web-ui 留的口子注册一个 renderer：
+
+```ts
+registerMessageRenderer('ela-notice', { render: (msg) => html`…` });
+```
+
+`MessageList` 对每个消息先试 `renderMessage(role)` —— 命中就渲染它。不注册的话
+那个 role 会被当成未知消息直接跳过（症状：切换模型 / 报错，浏览器里什么都不多）。
+
+合成消息**只活在线协议上**：内核的 `messages` 一个字节不动，更不会发给模型
+（`renderStats` 只看 `role === 'assistant'`，也不受影响）。
+
+这修掉了一个旧症状：`errorMessage` 虽然一直在 `WebAgentState` 里，但 pi-web-ui 的
+`AgentInterface` **根本不读它** —— 所以 LLM 调用失败在浏览器里根本看不到。
+
 ## 模型列表（与 TUI 一致）
 
 浏览器里那个模型选择器**不是 pi-web-ui 自带的**。

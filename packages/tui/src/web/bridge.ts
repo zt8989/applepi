@@ -24,22 +24,24 @@
  */
 
 import type { AgentStore } from '@ela/core/store';
-import type { AgentState } from '@ela/core/state';
-import { stopCauseText } from '@ela/core/state';
+import { stopCauseText, type AgentState } from '@ela/core/state';
 import { abortRun } from '@ela/core/run-control';
 import { isThinkingLevel } from '@ela/core/thinking-level';
+import { deriveStream, type StreamNoticeEntry } from '@ela/core/stream';
 import {
   WEB_PROTOCOL_VERSION,
+  STREAM_NOTICE_ROLE,
   type WebAgentEvent,
   type WebAgentState,
   type WebClientMessage,
   type WebModelRef,
   type WebServerMessage,
+  type WebStreamItem,
+  type WebStreamNotice,
 } from '@ela/core/web-protocol';
 import type {
   Api,
   AssistantMessage,
-  Message,
   Model,
   TextContent,
   ThinkingContent,
@@ -125,15 +127,31 @@ export function modelRefs(models: readonly Model<Api>[]): WebModelRef[] {
   }));
 }
 
-/** 只发对话三类消息 —— `system` 是 prompt 的载体，界面不渲染它。 */function conversational(messages: readonly Message[]): Message[] {
-  return messages.filter((message) => message.role !== 'system');
+/**
+ * 把轨迹派生的会话流变成线协议里的 `messages`：真消息原样，提示转成合成消息。
+ *
+ * 提示走一个**自定义 role**（`STREAM_NOTICE_ROLE`），由浏览器那边注册的 renderer 画成卡。
+ * 它只活在这份线上数据里：`state.messages`（发给模型的）一个字节都不动。
+ */
+function streamItems(state: AgentState): WebStreamItem[] {
+  return deriveStream(state.trace, state.messages).map((entry) =>
+    entry.kind === 'message'
+      ? entry.message
+      : ({
+          role: STREAM_NOTICE_ROLE,
+          tone: entry.tone,
+          title: entry.title,
+          ...(entry.detail !== undefined ? { detail: entry.detail } : {}),
+          timestamp: Date.now(),
+        } satisfies WebStreamNotice),
+  );
 }
 
 /** 最后一条助手消息（收工时发 `message_end` 用）。 */
-function lastAssistant(messages: readonly Message[]): AssistantMessage | undefined {
+function lastAssistant(messages: readonly WebStreamItem[]): AssistantMessage | undefined {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
-    if (message !== undefined && message.role === 'assistant') return message;
+    if (message !== undefined && message.role === 'assistant') return message as AssistantMessage;
   }
   return undefined;
 }
@@ -263,7 +281,7 @@ export class WebBridge {
     return {
       sessionId: this.options.getSessionId(),
       cwd: this.options.cwd,
-      messages: conversational(state.messages),
+      messages: streamItems(state),
       model,
       thinkingLevel: state.thinkingLevel,
       isStreaming: state.phase !== 'idle',

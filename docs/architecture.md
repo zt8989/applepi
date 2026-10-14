@@ -61,6 +61,7 @@ pi-coding-agent 的官方实现，pi-ai 升到 1.0.2）给了 [tools](architectu
 | [overview](architecture/overview.md) | 三条铁律、进程与端口、一次消息的路径 |
 | [loop](architecture/loop.md) | 环怎么转：action、transitions 表、接线表、超时与重试 |
 | [trace](architecture/trace.md) | 轨迹树：节点模型、tip 规则、渲染、落盘与回放 |
+| [stream](architecture/stream.md) | 会话流：时间线从轨迹派生（消息 + 提示），TUI 与 WebUI 共用一份 |
 | [kernel](architecture/kernel.md) | 内核装配：一个 store，界面共享它 |
 | [tools](architecture/tools.md) | 工具来自 pi-coding-agent，那层适配做了什么；扩展工具并进同一张表 |
 | [provider](architecture/provider.md) | 配置从哪来：复用 pi 的 ModelRuntime，内置 provider 目录 |
