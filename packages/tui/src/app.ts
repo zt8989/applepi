@@ -898,28 +898,50 @@ function padToWidth(text: string, width: number): string {
 }
 
 /**
+ * 斜杠命令表里的一行。
+ *
+ * `SlashCommand`（pi-tui 的）只有 `name` / `description`；多出来的 `web` 是给
+ * webui 用的：那个命令在浏览器里也能跑（非会话类）。不标 = 终端专有。
+ * 接口在 `web/api.ts`，驱动它的 HTTP 路由在 `web/server.ts`。
+ */
+export interface ElaSlashCommand {
+  name: string;
+  description: string;
+  web?: boolean | undefined;
+}
+
+/**
  * 斜杠命令表——**唯一的真相**。
  *
- * 补全（`setAutocompleteProvider`）和 `/help` 都念这一份，所以加命令只改这里一处；
- * 以前 `/help` 里手抄了一份，两边会漂移。
+ * 补全（`setAutocompleteProvider`）、`/help`、以及 webui 的 `/` 下拉都念这一份，
+ * 所以加命令只改这里一处；以前 `/help` 里手抄了一份，两边会漂移。
  */
-const SLASH_COMMANDS: SlashCommand[] = [
+export const SLASH_COMMANDS: ElaSlashCommand[] = [
   {
     name: 'model',
     description: '换模型（弹窗选择；`/model <id>` 精确命中时直接切；与 pi 同名）',
+    web: true,
   },
   {
     name: 'thinking',
     description:
       '思考级别（弹窗选择；`/thinking <级别>` 直接切；面板里 Ctrl+S 存默认；与 pi 同名）',
+    web: true,
   },
   {
     name: 'settings',
     description: '设置面板（自动压缩 / 隐藏思考块 / 每个模型的默认思考级别；与 pi 同名）',
+    web: true,
   },
   {
     name: 'scoped-models',
     description: '启用/禁用哪些模型参与 Ctrl+P 循环（Ctrl+S 存进 settings）',
+    web: true,
+  },
+  {
+    name: 'skills',
+    description: '列出这一轮真的进了 prompt 的 skill（不是磁盘上的全集）',
+    web: true,
   },
   {
     name: 'sessions',
@@ -945,8 +967,9 @@ const SLASH_COMMANDS: SlashCommand[] = [
   {
     name: 'hotkeys',
     description: '列出全部键位（键名实时解析，与 pi 的 /hotkeys 同形）',
+    web: true,
   },
-  { name: 'help', description: '列出全部命令' },
+  { name: 'help', description: '列出全部命令', web: true },
 ];
 
 export interface TuiOptions {

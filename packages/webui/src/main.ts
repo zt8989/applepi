@@ -27,6 +27,9 @@ import { STREAM_NOTICE_ROLE } from '@ela/core/web-protocol';
 import { RemoteAgent } from './remote-agent';
 import { openModelPicker } from './model-picker';
 import { installToolMessageView } from './tool-view';
+import { installCommandPalette } from './command-palette';
+import { elaApi } from './api';
+import { parseCommand, runCommand } from './commands';
 import './app.css';
 
 /**
@@ -141,20 +144,37 @@ function wsUrl(): string {
   return `${protocol}//${window.location.host}/ws`;
 }
 
-/** 当前模型的 provider/id（选择器用它置顶 + 打勾）。拿不到就给 `null`。 */
-function currentModelRef(agent: RemoteAgent): { provider: string; id: string } | null {
-  const model = agent.state.model as { provider?: unknown; id?: unknown } | null;
-  const provider = model?.provider;
-  const id = model?.id;
-  return typeof provider === 'string' && typeof id === 'string' ? { provider, id } : null;
-}
-
 async function main(): Promise<void> {
   installStorage();
   registerStreamNotice();
   // 工具卡换成折叠行视图（见 tool-view.ts）—— 必须在界面首次渲染前装好。
   installToolMessageView();
   buildShell();
+
+  /**
+   * 打开模型选择器：目录 / 作用域从 HTTP 接口现取。
+   *
+   * 不再随 `hello` 来 —— 那些是「非会话数据」，改成接口后由前端按需取（也更新鲜：
+   * TUI 里刚改过作用域，这里再开就是新的）。
+   */
+  async function openModelPickerFromApi(): Promise<void> {
+    try {
+      const info = await elaApi.models();
+      openModelPicker({
+        models: info.models,
+        current: info.current,
+        scopedModelIds: info.scoped,
+        onSelect: (model) => {
+          // 走接口换（服务端才是真相）——它会推一份新状态回来。
+          void elaApi.setModel(`${model.provider}/${model.id}`).then((result) => {
+            if (!result.ok) pushNotice(result.message ?? '换模型失败', 'warn');
+          });
+        },
+      });
+    } catch (error) {
+      pushNotice(`拿不到模型目录：${error instanceof Error ? error.message : String(error)}`, 'warn');
+    }
+  }
 
   const chatPanel = new ChatPanel();
   const agent = new RemoteAgent({
@@ -170,25 +190,27 @@ async function main(): Promise<void> {
     onStatus: (status) => {
       setStatus(status === 'open' ? '已连接' : status === 'connecting' ? '连接中…' : '断开，重连中…');
     },
+    // 斜杠命令：走 HTTP 接口，不发给模型（与 TUI 的 `runCommand` 同一个分工）。
+    onPrompt: async (text) => {
+      const parsed = parseCommand(text);
+      if (parsed === null) return false;
+      await runCommand(parsed.name, parsed.arg, {
+        notice: (notice, tone = 'info') => pushNotice(notice, tone),
+        openModelPicker: () => void openModelPickerFromApi(),
+      });
+      return true;
+    },
   });
+
+  // 输入 `/` 时的命令补全（命令表同样来自 HTTP 接口）。
+  installCommandPalette(() => elaApi.commands());
 
   await chatPanel.setAgent(agent as never, {
     // 密钥在服务端。这里返回 true 只是让 pi-web-ui 的「没 key 就不发」那道闸放行。
     onApiKeyRequired: async () => true,
     // 换模型：**接管**掉 pi-web-ui 自带的 selector（它列的是它打包那一代 pi-ai 的内置
-    // 目录），改成服务端给的那份 —— 与 TUI 的 `/model` 面板同一份。
-    onModelSelect: () => {
-      openModelPicker({
-        models: agent.models,
-        current: currentModelRef(agent),
-        scopedModelIds: agent.scopedModelIds,
-        onSelect: (model) => {
-          // 写 `state.model` → RemoteAgentState 的 setter 把 provider/id 发给服务端，
-          // 由内核的 `setModel()` 真换（浏览器自己不换）。
-          agent.state.model = model;
-        },
-      });
-    },
+    // 目录），改成服务端接口给的那份 —— 与 TUI 的 `/model` 面板同一份。
+    onModelSelect: () => void openModelPickerFromApi(),
   });
 
   const chat = document.getElementById('ela-chat');

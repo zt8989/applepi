@@ -7,6 +7,7 @@ import { createAgentStore } from '@ela/core/store';
 import { createFauxRuntime, demoResponses } from '@ela/core/provider';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import { WebBridge, modelRefs } from '../src/web/bridge';
+import { createWebApi } from '../src/web/api';
 import { startWebServer, type WebServerHandle } from '../src/web/server';
 import type { WebServerMessage } from '@ela/core/web-protocol';
 import { WEB_PROTOCOL_VERSION } from '@ela/core/web-protocol';
@@ -98,6 +99,7 @@ async function start(): Promise<{
     reasoning: true,
   } as unknown as Model<Api>;
 
+  const resolveModel = (provider: string): Model<Api> | null => (provider === 'faux' ? model : null);
   const bridge = new WebBridge(
     {
       store,
@@ -105,23 +107,34 @@ async function start(): Promise<{
       getSessionId: () => 'web-test-session',
       setModel: () => true,
       newSession: () => {},
-      resolveModel: (provider) => (provider === 'faux' ? model : null),
-      // 模型目录与服务端同一条路：调用方喂的是 `modelRefs(getAvailableSnapshot())`。
-      modelCatalog: [
-        { provider: 'faux', id: 'fake', name: 'Faux', reasoning: true },
-        { provider: 'faux', id: 'fake-2', name: 'Faux 2', reasoning: false },
-      ],
-      scopedModelIds: () => ['faux/fake'],
+      resolveModel,
     },
     ['测试诊断一行'],
   );
+  // 非会话数据的 HTTP 接口：命令表 / 模型目录 / settings 都从这里出。
+  const api = createWebApi({
+    store,
+    cwd: '/tmp/ela-web-test',
+    modelCatalog: () => [model, { ...model, id: 'fake-2', name: 'Faux 2', reasoning: false }],
+    resolveModel,
+    setModel: () => true,
+    autoCompactEnabled: () => true,
+    setAutoCompactEnabled: () => {},
+    commands: [
+      { name: 'model', description: '换模型', web: true },
+      { name: 'sessions', description: '恢复历史会话' },
+      { name: 'ext-thing', description: '扩展命令', source: 'extension' },
+    ],
+    hotkeys: () => ['| Ctrl+R | 轨迹 |'],
+    runExtensionCommand: async () => {},
+  });
 
   // 造一份假的 dist：一个 index.html + 一个资源，外加一个不存在的路径（验 SPA 回退）。
   const dist = mkdtempSync(path.join(tmpdir(), 'ela-web-dist-'));
   writeFileSync(path.join(dist, 'index.html'), '<!doctype html><div id="app"></div>');
   writeFileSync(path.join(dist, 'asset.txt'), 'hello-asset');
 
-  const server = await startWebServer({ bridge, port: 0, distDir: dist });
+  const server = await startWebServer({ bridge, api, port: 0, distDir: dist });
   return {
     server,
     bridge,
@@ -174,14 +187,48 @@ test('bridge：hello 带版本与诊断，浏览器 → 服务端 → 浏览器 
     assert.equal(hello.state.isStreaming, false);
     assert.equal(hello.state.model?.provider, 'faux');
     assert.deepEqual(hello.state.messages, []);
-    // 模型目录与作用域随 hello 一起来（浏览器侧选择器就吃它）。
+
+    // 模型目录 / 作用域改走 HTTP 接口（不再随 hello 来）。
+    const modelsInfo = (await (await fetch(`${ctx.server.url}api/models`)).json()) as {
+      models: { provider: string; id: string; name: string; reasoning: boolean }[];
+      scoped: string[] | null;
+      current: { provider: string; id: string } | null;
+    };
     assert.deepEqual(
-      hello.models.map((m) => `${m.provider}/${m.id}`),
+      modelsInfo.models.map((m) => `${m.provider}/${m.id}`),
       ['faux/fake', 'faux/fake-2'],
     );
-    assert.equal(hello.models[0]?.name, 'Faux');
-    assert.equal(hello.models[0]?.reasoning, true);
-    assert.deepEqual(hello.scopedModelIds, ['faux/fake']);
+    assert.equal(modelsInfo.models[0]?.name, 'Faux');
+    assert.equal(modelsInfo.models[0]?.reasoning, true);
+    // 测试环境里没写过 settings.json → 全开。
+    assert.equal(modelsInfo.scoped, null);
+    assert.equal(modelsInfo.current?.provider, 'faux');
+
+    // 命令表：内置的只有标了 `web` 的进，扩展的一律进（`sessions` 是会话类，不进）。
+    const commands = (await (await fetch(`${ctx.server.url}api/commands`)).json()) as {
+      name: string;
+      source: string;
+    }[];
+    assert.deepEqual(
+      commands.map((c) => c.name),
+      ['model', 'ext-thing'],
+    );
+    assert.equal(commands[1]?.source, 'extension');
+
+    // 动作接口：不认识的模型回 `ok: false` + 一句话（不是异常）。
+    const bad = (await (
+      await fetch(`${ctx.server.url}api/model`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ arg: 'nope/nope' }),
+      })
+    ).json()) as { ok: boolean; message?: string };
+    assert.equal(bad.ok, false);
+    assert.match(bad.message ?? '', /找不到模型/);
+
+    // 不认识的接口给 404（不能落进 SPA 回退变成一个 200 的 HTML）。
+    const missing = await fetch(`${ctx.server.url}api/nope`);
+    assert.equal(missing.status, 404);
 
     // 浏览器写状态：服务端要真的收下并回推一份新状态。
     client.send({ type: 'setThinking', level: 'high' });
@@ -310,29 +357,26 @@ test('bridge：错误从轨迹派生成合成提示（ela-notice）进线协议�
   }
 });
 
-test('bridge：没给目录时 hello 给空列表；空作用域归一成 null（= 全开）', () => {
+test('web api：空目录给空列表；空作用域归一成 null（= 全开）', () => {
   const faux = createFauxRuntime();
   faux.setResponses(demoResponses());
   const store = createAgentStore({ runtime: faux.runtime, systemPrompt: 'test' });
-  const bridge = new WebBridge({
+  const api = createWebApi({
     store,
     cwd: '/tmp/ela-web-test',
-    getSessionId: () => 's',
-    setModel: () => true,
-    newSession: () => {},
+    modelCatalog: () => [],
     resolveModel: () => null,
-    scopedModelIds: () => [],
+    setModel: () => true,
+    autoCompactEnabled: () => null,
+    setAutoCompactEnabled: () => {},
+    commands: [],
+    hotkeys: () => [],
+    runExtensionCommand: async () => {},
   });
-  try {
-    const hello = bridge.hello();
-    assert.equal(hello.type, 'hello');
-    if (hello.type !== 'hello') throw new Error('unreachable');
-    assert.deepEqual(hello.models, []);
-    // `[]` 与「没配过」是同一件事（与 TUI 的 `normalizeEnabled()` 同一个口径）。
-    assert.equal(hello.scopedModelIds, null);
-  } finally {
-    bridge.dispose();
-  }
+  const info = api.models();
+  assert.deepEqual(info.models, []);
+  // `[]` 与「没配过」是同一件事（与 TUI 的 `normalizeEnabled()` 同一个口径）。
+  assert.equal(info.scoped, null);
 });
 
 /**

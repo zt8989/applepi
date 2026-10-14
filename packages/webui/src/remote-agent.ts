@@ -22,7 +22,7 @@
  * 猜出来的状态与服务端错过一次就再也对不上。
  */
 
-import type { WebAgentState, WebClientMessage, WebModelRef, WebServerMessage } from '@ela/core/web-protocol';
+import type { WebAgentState, WebClientMessage, WebServerMessage } from '@ela/core/web-protocol';
 
 /** 宽松事件类型：pi-web-ui 只按 `type` 分支，其余字段它自己读。 */
 export interface RemoteAgentEvent {
@@ -108,6 +108,12 @@ export interface RemoteAgentHooks {
   onNotice?: ((level: string, text: string) => void) | undefined;
   /** 连接状态：connecting / open / closed。 */
   onStatus?: ((status: 'connecting' | 'open' | 'closed') => void) | undefined;
+  /**
+   * 提问前的拦截：返回 `true` = 已当**斜杠命令**处理，不要再发给模型。
+   *
+   * 命令走 HTTP 接口（见 `commands.ts`），所以这里可以 `await`。
+   */
+  onPrompt?: ((text: string) => boolean | Promise<boolean>) | undefined;
 }
 
 export class RemoteAgent {
@@ -129,15 +135,6 @@ export class RemoteAgent {
   private socket: WebSocket | undefined;
   private reconnectTimer: number | undefined;
   private closedByUs = false;
-
-  /**
-   * 模型目录 —— **与 TUI 的 `/model` 面板同一份**（服务端在 `hello` 里给）。
-   *
-   * 不是 pi-web-ui 自带那份内置目录：那个与内核能真发出去的模型对不上。
-   */
-  models: readonly WebModelRef[] = [];
-  /** 作用域（`settings.json` 的 `enabledModels`）；`null` = 全开。 */
-  scopedModelIds: readonly string[] | null = null;
 
   constructor(private readonly hooks: RemoteAgentHooks = {}) {
     this.state.onModelSelected = (provider, id) => this.send({ type: 'setModel', provider, id });
@@ -175,6 +172,8 @@ export class RemoteAgent {
   async prompt(input: unknown): Promise<void> {
     const text = extractText(input);
     if (text.trim() === '') return;
+    // 斜杠命令：走 HTTP 接口，不发给模型（与 TUI 的 `runCommand` 同一个分工）。
+    if ((await this.hooks.onPrompt?.(text)) === true) return;
     this.send({ type: 'prompt', text });
   }
 
@@ -222,8 +221,6 @@ export class RemoteAgent {
     }
     switch (message.type) {
       case 'hello':
-        this.models = message.models;
-        this.scopedModelIds = message.scopedModelIds;
         this.hooks.onNotices?.(message.notices);
         this.state.apply(message.state);
         this.hooks.onStateApplied?.();

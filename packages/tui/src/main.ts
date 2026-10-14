@@ -16,13 +16,14 @@ import { findSessionFile } from '@ela/core/config-home';
 import { defaultProviderSpec, providerNames } from '@ela/core/provider';
 import { THINKING_LEVELS, isThinkingLevel } from '@ela/core/thinking-level';
 import { createKernel, type Kernel } from '@ela/core/kernel';
-import { runTui } from './app';
+import { runTui, SLASH_COMMANDS } from './app';
 import { setupTheme } from './theme';
 import { keyLabel } from './keybindings';
-import { WebBridge, modelRefs } from './web/bridge';
+import { hotkeysMarkdown } from './hotkeys';
+import { WebBridge } from './web/bridge';
+import { createWebApi } from './web/api';
 import { startWebServer, type WebServerHandle } from './web/server';
 import { modelRuntimeFor } from './model-picker';
-import { readScopedModels } from '@ela/core/model-scope';
 import { extensionLabels } from './resource-labels';
 import type { Theme } from '@earendil-works/pi-coding-agent';
 // pi 的 theme 是 globalThis 上的一个 Proxy —— initTheme() 之后一直可读。
@@ -409,6 +410,15 @@ async function main(): Promise<void> {
   let bridge: WebBridge | undefined;
   let webNotice: string | undefined;
   if (!args.noWeb) {
+    // 模型解析：`getModels()` 对未知 provider 会抛（best-effort），裹一层。
+    // 桥与 HTTP 接口共用同一个 —— 否则两边对「这个模型存不存在」的判断会漂移。
+    const resolveModel = (provider: string, id: string) => {
+      try {
+        return kernel.runtime.models.getModels(provider).find((model) => model.id === id) ?? null;
+      } catch {
+        return null;
+      }
+    };
     bridge = new WebBridge(
       {
         store: kernel.store,
@@ -416,19 +426,7 @@ async function main(): Promise<void> {
         getSessionId: () => kernel.sessionId,
         setModel: (provider, id) => kernel.setModel(provider, id),
         newSession: () => kernel.newSession(),
-        resolveModel: (provider, id) => {
-          try {
-            // `getModels()` 对未知 provider 会抛（best-effort），所以裹一层。
-            return kernel.runtime.models.getModels(provider).find((model) => model.id === id) ?? null;
-          } catch {
-            return null;
-          }
-        },
-        // 模型目录**与 TUI 的 `/model` 面板同一份**（同一个 `ModelRuntime`），
-        // 否则浏览器里会列出 pi-web-ui 自带那份 1500+ 的内置目录（本机根本没配）。
-        modelCatalog: modelRefs([...modelRuntimeFor(kernel.runtime).getAvailableSnapshot()]),
-        // 作用域每次握手现读 —— 用户可能刚在 TUI 里改过 `/scoped-models`。
-        scopedModelIds: () => readScopedModels(args.cwd),
+        resolveModel,
       },
       // 开场诊断与终端那边同一个口径：装了哪些扩展 + 装载失败。
       [
@@ -436,8 +434,45 @@ async function main(): Promise<void> {
         ...kernel.extensions.errors.map((error) => `扩展装载诊断：${error}`),
       ],
     );
+    // 非会话数据 / 动作的 HTTP 接口（`/api/*`）—— 命令表、模型目录、settings 都在
+    // 服务端，浏览器不抄一份。命令表 = 内置的（带 `web` 标记）+ 扩展注册的。
+    const api = createWebApi({
+      store: kernel.store,
+      cwd: args.cwd,
+      // **与 TUI 的 `/model` 面板同一份**（同一个 `ModelRuntime`），否则会列出
+      // pi-web-ui 自带那份 1500+ 的内置目录（本机根本没配）。
+      modelCatalog: () => [...modelRuntimeFor(kernel.runtime).getAvailableSnapshot()],
+      resolveModel,
+      setModel: (provider, id) => kernel.setModel(provider, id),
+      autoCompactEnabled: () => kernel.autoCompactEnabled(),
+      setAutoCompactEnabled: (enabled) => kernel.setAutoCompactEnabled(enabled),
+      commands: [
+        ...SLASH_COMMANDS.map((command) => ({
+          name: command.name,
+          description: command.description,
+          ...(command.web === true ? { web: true } : {}),
+        })),
+        ...kernel.extensions.commands.list().map((command) => ({
+          name: command.name,
+          description: command.description ?? '',
+          source: 'extension' as const,
+        })),
+      ],
+      hotkeys: () => hotkeysMarkdown(kernel.extensions.commands.shortcuts()).split('\n'),
+      // 扩展命令的入口：内置的（`/model` 那些）在浏览器侧有各自界面，不走这里。
+      runExtensionCommand: (name, arg) => {
+        if (!kernel.extensions.commands.has(name)) {
+          return Promise.reject(new Error(`未知命令 /${name}（浏览器里只支持非会话类命令）`));
+        }
+        return kernel.extensions.commands.run(name, arg);
+      },
+    });
     try {
-      web = await startWebServer({ bridge, ...(args.webPort !== undefined ? { port: args.webPort } : {}) });
+      web = await startWebServer({
+        bridge,
+        api,
+        ...(args.webPort !== undefined ? { port: args.webPort } : {}),
+      });
       webNotice = `web ui: ${web.url}`;
     } catch (error) {
       process.stderr.write(

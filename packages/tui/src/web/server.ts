@@ -25,6 +25,7 @@ import path from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { parseClientMessage, type WebServerMessage, type WebClientMessage } from '@ela/core/web-protocol';
 import type { WebBridge } from './bridge';
+import type { WebApi } from './api';
 
 /** 默认端口：与 pi 的 web 客户端（`@agegr/pi-web`）同一个，撞上了也好认。 */
 export const DEFAULT_WEB_PORT = 30141;
@@ -34,6 +35,8 @@ const PORT_SCAN_LIMIT = 10;
 
 export interface WebServerOptions {
   bridge: WebBridge;
+  /** 非会话数据的 HTTP 接口（`/api/*`，见 [api](api.ts)）。 */
+  api: WebApi;
   /** 监听端口。被占就往后试（见 `PORT_SCAN_LIMIT`）。 */
   port?: number | undefined;
   /** 绑定地址。默认 `127.0.0.1`（见文件头）。 */
@@ -160,6 +163,10 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       res.end('ok\n');
       return;
     }
+    if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
+      void serveApi(options.api, req, res, url.pathname, log);
+      return;
+    }
     serveStatic(res, distDir, decodeURIComponent(url.pathname));
   });
 
@@ -282,6 +289,122 @@ function attach(ws: WebSocket, bridge: WebBridge): void {
     unsubscribe();
   });
   ws.on('error', unsubscribe);
+}
+
+/** 读一个 JSON 请求体（不限制类型；调用方自己校字段）。空体 / 坏 JSON 给 `undefined`。 */
+function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8').trim();
+      if (text === '') {
+        resolve(undefined);
+        return;
+      }
+      try {
+        resolve(JSON.parse(text));
+      } catch {
+        resolve(undefined);
+      }
+    });
+    req.on('error', () => resolve(undefined));
+  });
+}
+
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    // 这些是「当下的事实」（当前模型、settings），缓存没有意义。
+    'cache-control': 'no-store',
+  });
+  res.end(JSON.stringify(body));
+}
+
+/**
+ * 非会话数据的 HTTP 接口。
+ *
+ * 路径就是方法名：`GET /api/models`、`POST /api/model`（单数 = 改，复数 = 读）。
+ * 不认识的路径给 404，方法不对给 405 —— 都比默默回一份静态页强（SPA 的
+ * `serveStatic` 对任何路径都回 index.html，会把写错的接口变成一个 200 的 HTML）。
+ */
+async function serveApi(
+  api: WebApi,
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  log: (line: string) => void,
+): Promise<void> {
+  const method = req.method ?? 'GET';
+  const body = method === 'POST' ? await readJsonBody(req) : undefined;
+  const record = typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : {};
+  try {
+    switch (`${method} ${pathname}`) {
+      case 'GET /api/commands':
+        sendJson(res, 200, api.commands());
+        return;
+      case 'GET /api/models':
+        sendJson(res, 200, api.models());
+        return;
+      case 'GET /api/skills':
+        sendJson(res, 200, api.skills());
+        return;
+      case 'GET /api/thinking':
+        sendJson(res, 200, api.thinking());
+        return;
+      case 'GET /api/settings':
+        sendJson(res, 200, api.settings());
+        return;
+      case 'GET /api/hotkeys':
+        sendJson(res, 200, api.hotkeys());
+        return;
+      case 'POST /api/model':
+        sendJson(res, 200, api.setModel(typeof record['arg'] === 'string' ? record['arg'] : ''));
+        return;
+      case 'POST /api/thinking':
+        sendJson(res, 200, api.setThinking(typeof record['level'] === 'string' ? record['level'] : ''));
+        return;
+      case 'POST /api/settings':
+        sendJson(
+          res,
+          200,
+          await api.setSettings({
+            ...(typeof record['autoCompact'] === 'boolean' ? { autoCompact: record['autoCompact'] } : {}),
+            ...(typeof record['hideThinking'] === 'boolean' ? { hideThinking: record['hideThinking'] } : {}),
+            ...(typeof record['defaultThinkingLevel'] === 'string'
+              ? { defaultThinkingLevel: record['defaultThinkingLevel'] }
+              : {}),
+          }),
+        );
+        return;
+      case 'POST /api/scoped-models': {
+        const ids = Array.isArray(record['ids'])
+          ? record['ids'].filter((id): id is string => typeof id === 'string')
+          : null;
+        sendJson(res, 200, await api.setScopedModels(ids));
+        return;
+      }
+      case 'POST /api/command':
+        sendJson(
+          res,
+          200,
+          await api.runCommand(
+            typeof record['name'] === 'string' ? record['name'] : '',
+            typeof record['arg'] === 'string' ? record['arg'] : '',
+          ),
+        );
+        return;
+      default:
+        sendJson(res, 404, { ok: false, message: `未知接口 ${method} ${pathname}` });
+        return;
+    }
+  } catch (error) {
+    // 接口抛错（写盘权限、settings.json 坏了）不该让整个 web server 倒 —— 回一条
+    // 500 并把原因写进服务端日志，界面拿到的是「操作失败」而不是一个断开的连接。
+    const message = error instanceof Error ? error.message : String(error);
+    log(`[webui] ${method} ${pathname} 出错：${message}`);
+    sendJson(res, 500, { ok: false, message });
+  }
 }
 
 /**

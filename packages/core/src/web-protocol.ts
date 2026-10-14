@@ -23,8 +23,13 @@
 
 import type { Api, AssistantMessage, Message, Model } from '@earendil-works/pi-ai';
 
-/** 协议版本。对不上就拒绝连接 —— 比半懂不懂地解析强。 */
-export const WEB_PROTOCOL_VERSION = 2;
+/**
+ * 协议版本。对不上就拒绝连接 —— 比半懂不懂地解析强。
+ *
+ * v3：`hello` 不再塞模型目录 / 作用域 —— 那些（以及命令表这类非会话数据）改成
+ * HTTP 接口（`/api/*`，见 [api.ts](@ela/tui 的 web/api.ts)），前端按需取。
+ */
+export const WEB_PROTOCOL_VERSION = 3;
 
 /**
  * 聊天流里「提示」条目用的合成消息 role。
@@ -122,20 +127,6 @@ export type WebServerMessage =
       type: 'hello';
       version: number;
       state: WebAgentState;
-      /**
-       * 可选的模型目录 —— **与 TUI 的 `/model` 面板同一份**（内核的
-       * `ModelRuntime.getAvailableSnapshot()`，即「已配置的 provider 里那些」）。
-       *
-       * 不用 pi-web-ui 自带那份：那是它打包进去的一代 pi-ai 的内置目录（1500+，
-       * 含大量本机根本没配的 provider），与内核能真发出去的模型对不上。
-       */
-      models: WebModelRef[];
-      /**
-       * 作用域（`settings.json` 的 `enabledModels`）。`null` = 全开。
-       *
-       * 与 TUI 同一个口径：**有作用域时面板默认只看作用域内**。
-       */
-      scopedModelIds: string[] | null;
       /** 开场诊断（装了哪些扩展、装载失败等）—— 直接显示在对话区上方。 */
       notices: string[];
     }
@@ -150,6 +141,64 @@ export type WebClientMessage =
   | { type: 'setModel'; provider: string; id: string }
   | { type: 'setThinking'; level: string }
   | { type: 'newSession' };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 非会话数据的 HTTP 接口（`/api/*`）
+//
+// 这些**不进** WebSocket：它们与「环跑到哪一步」无关，按需取就行。放 HTTP 是为了
+// 让前端不必把服务端的事实抄一份（模型目录、命令表、作用域、settings 都在服务端）。
+// 形状定义在这里，因为它与线协议一样是**前后端唯一共同语言**。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** `GET /api/commands` 里的一条：`/` 补全下拉念它。 */
+export interface WebCommandInfo {
+  name: string;
+  description: string;
+  /** 内置还是扩展注册的。 */
+  source: 'builtin' | 'extension';
+}
+
+/** `GET /api/models`：目录 + 作用域 + 当前模型（选择器要置顶 + 打勾）。 */
+export interface WebModelsInfo {
+  models: WebModelRef[];
+  /** `settings.json` 的 `enabledModels`；`null` = 全开。 */
+  scoped: string[] | null;
+  current: { provider: string; id: string } | null;
+}
+
+/** `GET /api/skills`：进了 prompt 的 skill 清单（不是磁盘上的全集）。 */
+export interface WebSkillInfo {
+  name: string;
+  scope: string;
+  description: string;
+  filePath: string;
+}
+
+/** `GET /api/thinking`：当前档位 + 这个模型支持哪几档 + 默认档。 */
+export interface WebThinkingInfo {
+  current: string;
+  levels: string[];
+  default: string;
+}
+
+/** `GET /api/settings`。 */
+export interface WebSettingsInfo {
+  /** 自动压缩开关；`null` = 这个装配不支持（不显示那一行）。 */
+  autoCompact: boolean | null;
+  hideThinking: boolean;
+  defaultThinkingLevel: string;
+}
+
+/** `GET /api/hotkeys`：**终端界面**的键位表（浏览器里只当参考看）。 */
+export interface WebHotkeysInfo {
+  lines: string[];
+}
+
+/** `POST /api/*` 的回执。 */
+export interface WebActionResult {
+  ok: boolean;
+  message?: string | undefined;
+}
 
 /** 把线协议消息解析成客户端消息；形状不对就返回 `undefined`（不认识的一律忽略）。 */
 export function parseClientMessage(raw: string): WebClientMessage | undefined {

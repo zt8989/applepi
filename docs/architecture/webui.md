@@ -24,10 +24,15 @@ TUI 之外的第二块界面：**浏览器里的 pi-web-ui**，环仍然是终�
 
 | 部件 | 在哪 | 干什么 |
 | --- | --- | --- |
-| `web-protocol.ts` | `@ela/core` | **线协议**：状态与事件的形状（前后端唯一共同语言） |
+| `web-protocol.ts` | `@ela/core` | **线协议 + HTTP 接口的形状**（前后端唯一共同语言） |
 | `web/bridge.ts` | `@ela/tui` | 内核 → 线协议：订阅 store、映射状态、派发提问/中止/换模型 |
-| `web/server.ts` | `@ela/tui` | HTTP 静态资源 + `/ws`（WebSocket） |
+| `web/api.ts` | `@ela/tui` | **非会话数据的 HTTP 接口**（`/api/*`：命令表、模型目录、settings…） |
+| `web/server.ts` | `@ela/tui` | HTTP 静态资源 + `/api/*` + `/ws`（WebSocket） |
 | `src/remote-agent.ts` | `@ela/webui` | 线协议 → pi-web-ui：`Agent` 形状的替身 |
+| `src/api.ts` | `@ela/webui` | `/api/*` 的客户端 |
+| `src/command-palette.ts` | `@ela/webui` | 输入 `/` 时的命令补全下拉 |
+| `src/commands.ts` | `@ela/webui` | `/` 命令在浏览器侧的执行（弹面板 / 调接口） |
+| `src/modal.ts` | `@ela/webui` | 通用模态框（列表 / 纯文本） |
 | `src/model-picker.ts` | `@ela/webui` | 模型选择器（**接管**了 pi-web-ui 自带那个，见下） |
 | `src/main.ts` | `@ela/webui` | 挂 `ChatPanel`、铺 `AppStorage`、连 `/ws` |
 
@@ -97,13 +102,15 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 
 所以：
 
-- **服务端**在 `hello` 里带上目录（`WebModelRef[]`，紧凑投影：provider / id / name / reasoning）
-  与作用域（`settings.json` 的 `enabledModels`，`null` = 全开）。目录的取法与 TUI
-  **逐字相同**：`modelRuntimeFor(runtime).getAvailableSnapshot()`（`main.ts` 用 `modelRefs(...)`
-  投影；后者只是把整份 `Model` 削成四条字段 —— 整份 436 条约 250KB，没必要）。
+- **服务端**用 `GET /api/models` 给目录（`WebModelRef[]`，紧凑投影：provider / id / name /
+  reasoning）与作用域（`settings.json` 的 `enabledModels`，`null` = 全开）、以及当前模型。
+  目录的取法与 TUI **逐字相同**：`modelRuntimeFor(runtime).getAvailableSnapshot()`
+  （`main.ts` 用 `modelRefs(...)` 投影；后者只是把整份 `Model` 削成四条字段 ——
+  整份 436 条约 250KB，没必要）。**不再随 `hello` 来**（v3 起）：那是按需数据，
+  塞进握手就等于前端抄了一份快照。
 - **浏览器**走 pi-web-ui 留的口子接管：`ChatPanel.setAgent({ onModelSelect })`。设了它，
   `AgentInterface` 就**不弹**自己那个（`components/AgentInterface.js` 里那个分支），
-  改弹 `model-picker.ts`。
+  改弹 `model-picker.ts`（目录现取 `/api/models`）。
 
 与 TUI 对齐的行为：有作用域时**默认只看作用域内**（TUI 那边是
 `scope = scopedModels.length > 0 ? "scoped" : "all"`）、`Tab` 切 all/scoped、当前模型置顶打勾、
@@ -120,8 +127,10 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 刻意**没做**的（都属 pi 那套 settings / catalog 的入口）：
 
 - `Ctrl+S` 存默认（写 `settings.json` 的 `defaultModel`）；
-- 后台刷新目录（`ModelRuntime.refresh()`，会打网络）—— 所以列表是**启动那一刻**的快照；
-- `/scoped-models`（改作用域的界面）—— 浏览器里只能看，要改去 TUI。
+- 后台刷新目录（`ModelRuntime.refresh()`，会打网络）—— 所以列表是**取的那一刻**的快照。
+
+作用域现在能改了：`/scoped-models` 命令给一个勾选列表（`module.ts` 的通用模态框），
+勾一下即写 `settings.json`（见下）。
 
 ## 前端那几个「不得不」的地方
 
@@ -139,6 +148,46 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 
 还有一个 pi-web-ui 没给的东西：**状态变了它不会自己重画**（它只在事件上 `requestUpdate`）。
 所以 `main.ts` 在每次收到 `state` 之后手动调一次 `chatPanel.agentInterface?.requestUpdate()`。
+
+## 非会话数据走 HTTP 接口（`/api/*`）
+
+会话本身（消息、流式文本、工具状态）仍然走 WebSocket —— 那一份必须**推送**，因为它在
+秒级变化。而「模型目录 / 命令表 / 作用域 / settings / 键位」是**按需数据**：塞进
+`hello` / `state` 的结果是前端抄一份服务端的事实，改了 TUI 那边浏览器还拿着旧的。
+
+所以它们改成了 HTTP：
+
+| 接口 | 回什么 |
+| --- | --- |
+| `GET /api/commands` | `/` 补全下拉念的命令表（内置的标了 `web` 的 + 扩展注册的） |
+| `GET /api/models` | 目录 + 作用域 + 当前模型 |
+| `GET /api/skills` | 进了 prompt 的 skill 清单 |
+| `GET /api/thinking` | 当前档位 + 这个模型支持的档位 + 默认档 |
+| `GET /api/settings` | 自动压缩 / 隐藏思考块 / 默认思考级别 |
+| `GET /api/hotkeys` | 终端界面的键位表（浏览器里只当参考看） |
+| `POST /api/model` | `{arg}` → 精确命中就换（内核的 `setModel()`） |
+| `POST /api/thinking` | `{level}` |
+| `POST /api/settings` | `{autoCompact?, hideThinking?, defaultThinkingLevel?}` |
+| `POST /api/scoped-models` | `{ids}`（`null` = 全开） |
+| `POST /api/command` | `{name, arg}` → 跑一条**扩展**命令 |
+
+读写与 TUI 的 `/model`、`/thinking`、`/settings`、`/scoped-models` 面板落在**同一批函数**
+（内核的 `setModel()` / `settings.json` 的读写），所以两边不会不一致。
+
+## `/` 命令（浏览器侧）
+
+命令补全与执行在 `command-palette.ts` + `commands.ts`：
+
+- 输入框以 `/` 开头时弹出下拉（命令表来自 `GET /api/commands`，**与 TUI 的补全同一份**）；
+  `↑↓` 选 · `Tab` / `Enter` 补全 · 已是完整命令名时 `Enter` 直接执行。
+- 执行时不发给模型（`RemoteAgent.prompt` 里拦下，见 `onPrompt`）—— 与 TUI 的 `runCommand`
+  同一个分工：命令是「跟界面说」的通道，消息才是「跟模型说」。
+- `/model` 弹已有的模型选择器；`/thinking` `/settings` `/scoped-models` 弹通用模态框；
+  `/skills` `/help` `/hotkeys` 是纯文本弹窗；扩展命令走 `POST /api/command`。
+
+**只做非会话类**：`/new` `/sessions` `/resume` `/clean` `/compact` 服务端**不下发**
+（命令表里没标 `web: true`），所以浏览器里打它们会得到「浏览器里只支持非会话类命令」——
+那几件要动会话本身（换文件、删历史、整份换 messages），它们的界面还在终端那边。
 
 ## 启动与端口
 
