@@ -93,9 +93,9 @@ function seedModelInit(store: ReturnType<typeof createAgentStore>, runtime: Agen
   });
 }
 
-test('model.init 把 reasoning 装进 state，model.changed 会保守地清掉它', () => {
+test('model.changed 与 model.init 同一套载荷：reasoning / 能力 / 窗口一步到位', () => {
   // 底栏的 `• <级别>` 只看 `state.model.reasoning`（与 pi 的 `state.model?.reasoning`
-  // 同一条件）。装反了 / 忘记清的症状是：非 reasoning 模型上底栏挂着个 `• off`，
+  // 同一条件）。装反了 / 忘记带的症状是：非 reasoning 模型上底栏挂着个 `• off`，
   // 而它根本没有思考这回事。
   const { runtime } = twoModelRuntime();
   const store = createAgentStore({ runtime, systemPrompt: 'test' });
@@ -111,9 +111,21 @@ test('model.init 把 reasoning 装进 state，model.changed 会保守地清掉�
   });
   assert.equal(store.getState().model.reasoning, true, 'model.init 应把 reasoning 装进去');
 
-  // 换模型：能力与新模型的 reasoning 都还不知道，保守地当成不支持，等 model.init 补上。
-  store.dispatch({ type: 'model.changed', provider: model.provider, modelId: 'model-b' });
-  assert.equal(store.getState().model.reasoning, false, 'model.changed 应保守地把 reasoning 清成 false');
+  // 切到 model-b：一条 model.changed 带着它自己的 reasoning / 能力 / 窗口 ——
+  // 不再有「先保守清零、等 model.init 补上」的中间态。
+  const target = runtime.models.getModel(runtime.spec.provider, 'model-b');
+  assert.ok(target);
+  store.dispatch({
+    type: 'model.changed',
+    provider: target.provider,
+    modelId: target.id,
+    thinkingLevel: 'off',
+    reasoning: target.reasoning ?? false,
+    capabilities: readCapabilities(target),
+    contextWindow: target.contextWindow ?? 0,
+  });
+  assert.equal(store.getState().model.modelId, 'model-b');
+  assert.equal(store.getState().model.contextWindow, 2000, '能力 / 窗口跟着换了');
 });
 
 test('换了模型之后，下一个回合真的发给新的那个（不是建表那一个）', async () => {
@@ -127,12 +139,11 @@ test('换了模型之后，下一个回合真的发给新的那个（不是建�
   await waitForIdle(store);
   assert.deepEqual(seen, ['model-a'], '第一轮应发给建表时的那个模型');
 
-  // 换模型：与 `kernel.setModel()` 发的是**同样两条** action（顺序也一样）。
+  // 换模型：一条 `model.changed`（与 model.init 同一套载荷）。
   const target = runtime.models.getModel(runtime.spec.provider, 'model-b');
   assert.ok(target, '装配里应该有 model-b');
-  store.dispatch({ type: 'model.changed', provider: target.provider, modelId: target.id });
   store.dispatch({
-    type: 'model.init',
+    type: 'model.changed',
     provider: target.provider,
     modelId: target.id,
     thinkingLevel: 'off',
@@ -156,9 +167,8 @@ test('换了模型之后，压缩用的也是新模型（压缩那条路也读 s
   seedModelInit(store, runtime);
   const target = runtime.models.getModel(runtime.spec.provider, 'model-b');
   assert.ok(target);
-  store.dispatch({ type: 'model.changed', provider: target.provider, modelId: target.id });
   store.dispatch({
-    type: 'model.init',
+    type: 'model.changed',
     provider: target.provider,
     modelId: target.id,
     thinkingLevel: 'off',
@@ -204,9 +214,8 @@ test('换了模型之后，能力与窗口跟着换（不是沿用旧模型的�
 
   const target = runtime.models.getModel(runtime.spec.provider, 'model-b');
   assert.ok(target);
-  store.dispatch({ type: 'model.changed', provider: target.provider, modelId: target.id });
   store.dispatch({
-    type: 'model.init',
+    type: 'model.changed',
     provider: target.provider,
     modelId: target.id,
     thinkingLevel: 'off',
@@ -227,15 +236,14 @@ test('思考级别跨换模型保留（没配过 settings 时与 pi 同结果：
   store.dispatch({ type: 'thinking.changed', level: 'high' });
   const target = runtime.models.getModel(runtime.spec.provider, 'model-b');
   assert.ok(target);
-  // 这一条盯的是 store 那一层（两条 action 怎么搬 model 块）。
+  // 这一条盯的是 store 那一层（`model.changed` 怎么搬 model 块）。
   // `kernel.setModel()` 比这多一步：它先按 pi 的 `_getThinkingLevelForModelSwitch`
   // 重新解析（作用域条目 / per-model 覆盖 / 全局默认都排在「当前这一档」前面），
   // 而这三样都没配时就是这里的「从 state 读回级别」—— 那一层的行为在
   // `packages/core/test/thinking-level.test.ts` 里钉。
   const thinkingLevel = store.getState().model.thinkingLevel;
-  store.dispatch({ type: 'model.changed', provider: target.provider, modelId: target.id });
   store.dispatch({
-    type: 'model.init',
+    type: 'model.changed',
     provider: target.provider,
     modelId: target.id,
     thinkingLevel,

@@ -149,9 +149,11 @@ interface ModelCapabilities {
 类型没把它们带进公开面，所以按运行时字段读），`developerRole` 在 `compat` 里。
 
 **读不到就当 false。** 保守是对的：「以为支持但实际不支持」会让 pi-ai 把消息发出去然后被
-provider 拒；反过来「以为不支持但实际支持」只是少用了个特性。同一个常量
-`UNKNOWN_CAPABILITIES` 也用在 `model.changed` 之后 —— 换模型时能力先清成保守值，
-等新的 `model.init` 补上。
+provider 拒；反过来「以为不支持但实际支持」只是少用了个特性。
+
+换模型不会出现「还不知道支持什么」的中间态：`model.changed` 与 `model.init` **同一套载荷**
+（`ModelSpec`，`capabilities` / `contextWindow` 都在里面），一条就把整个模型装到位，
+不再需要「先清成保守值、等 `model.init` 补上」。
 
 ## 中途插入 system / developer
 
@@ -267,8 +269,8 @@ dispatch(action)
 
 - **`prompt.init`（热重载）**：当场**追加**一对新节点，旧的不改写（文件变了、我们重读了一遍，
   什么时候生效要看得到）。
-- **`model.init`（换模型）与 `thinking.changed`（换档位）**：只置
-  `state.modelTraceDirty`，等到**下一次真要发消息**时补**一个** `model.init` 节点
+- **`model.changed`（换模型）与 `thinking.changed`（换档位）**：只置
+  `state.modelTraceDirty`，等到**下一次真要发消息**时补**一个** `model.changed` 节点
   （`flushModelChange()`），落在 user / `turn.start` 之前。理由：切换是界面动作，
   树上要回答的是「这一轮实际用的上下文是什么」；来回切三次不该留下三个节点。
   细节见 [trace](trace.md) 的「换模型 / 换思考级别」一节。

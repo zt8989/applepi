@@ -24,7 +24,7 @@
  * | `user` / `llm.result` / `tool.result` / `prompt.segment` | `message`（节点自己带的 pi 消息） |
  * | 工具失败的 `error`（带 message） | `message`（那条 isError 的 toolResult） |
  * | LLM 失败的 `error` / `stop` | `notice`（红/黄/灰） |
- * | `model.init`（且换了模型 / 档位） | `notice`（配置切换） |
+ * | `model.changed` | `notice`（配置切换） |
  * | `compact` | `notice`（压缩） |
  * | 容器（`turn.*` / `step.*`）与 `tool.call` | 不产出（工具调用在助手消息里，结果由 toolResult 出） |
  * | `prompt.base` / `prompt.tools` / `prompt.skills` | 不产出（是上下文装载，不是对话） |
@@ -130,10 +130,8 @@ function noticeOf(node: TraceNode): StreamNoticeEntry | undefined {
         detail: node.detail ?? node.label,
       };
     }
-    case 'model.init': {
-      // 只有**用户真的切换过**才留提示（`changed` 标记由 `flushModelChange` 打上）。
-      // 开场装载那一版不打 —— 它不是「切换」，出现在对话开头只是噪声。
-      if (node.meta?.['changed'] !== '1') return undefined;
+    case 'model.changed': {
+      // 只把 `model.changed` 节点当配置提示（装载那条是 `model.init`，开头出现只是噪声）。
       const thinking = node.meta?.['thinking'];
       return {
         kind: 'notice',

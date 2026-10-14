@@ -64,6 +64,42 @@ export interface ModelCapabilities {
  * 注意 `llm.done` 之后的 `tool.call` 也是一个 action：它由 reducer 的接线发出来，
  * 走的是同一条 dispatch 回流，而不是从 effect 里直接跳到工具执行。
  */
+
+/**
+ * 模型侧一整套参数 —— `model.init` 与 `model.changed` **共用同一形状**。
+ *
+ * 两条 action 的差别只剩**语义**（装载 vs 切换），不再有「一条只带标识、另一条才带
+ * 能力」的分裂。于是：
+ *
+ *   - 谁被 dispatch 都能把 state 装成完整、可用的模型（不需要「保守清零 → 再补」的中间态）；
+ *   - 测试与调用方只需要认识一种载荷；
+ *   - 轨迹里记的是**那一刻真正生效的那一版**，不必猜它是从哪条 action 来的。
+ */
+export interface ModelSpec {
+  provider: string;
+  modelId: string;
+  thinkingLevel: ModelThinkingLevel;
+  /**
+   * 模型支不支持 reasoning（思考）。底栏据此决定显不显示 `• <级别>`。
+   *
+   * **可选**：省略就是 `false`（不显示）。真实运行时内核一定会给
+   * （它从模型对象读 `reasoning`），测试里造 action 不用关心这个。
+   */
+  reasoning?: boolean | undefined;
+  /** 这个模型支持什么（中途插 system / developer role / 中途加工具）。 */
+  capabilities: ModelCapabilities;
+  /**
+   * 上下文窗口（token）。底箱要算「已用 / 窗口」的百分比。
+   *
+   * **可选**：省略就是 0，底箱会不画那个百分比。真实运行时内核一定会给
+   * （它从模型对象读），但测试里造 action 不用关心这个。
+   *
+   * 为什么存在 action 里而不让界面去查模型：模型可能换，而这个值随模型落盘 ——
+   * 回放时不用重新去问 provider 它的窗口有多大。
+   */
+  contextWindow?: number | undefined;
+}
+
 export type AgentAction =
   /**
    * ═══ prompt 侧 ═══
@@ -155,37 +191,15 @@ export type AgentAction =
       tools: PromptToolDefinition[];
     }
 
-  /** ═══ model 侧 ═══ */
+/** ═══ model 侧 ═══ */
   /**
    * 装载模型：当前 provider / model / 思考级别，以及这个模型**支持什么**。
    *
-   * 能力（capabilities）是模型的属性而不是运行时状态，所以随 model.init 一起落盘 ——
-   * 回放时不需要重新去问 provider「这个模型能不能中途插 system」。
+   * `model.init` 与 `model.changed` 的载荷**完全一致**（`ModelSpec`），只差语义：
+   * 这条是「装载」，换模型走 `model.changed`。能力（capabilities）是模型的属性而不是
+   * 运行时状态，所以随它一起落盘 —— 回放时不需要重新去问 provider「这个模型能不能中途插 system」。
    */
-  | {
-      type: 'model.init';
-      provider: string;
-      modelId: string;
-      thinkingLevel: ModelThinkingLevel;
-      /**
-       * 模型支不支持 reasoning（思考）。底栏据此决定显不显示 `• <级别>`。
-       *
-       * **可选**：省略就是 `false`（不显示）。真实运行时内核一定会给
-       * （它从模型对象读 `reasoning`），测试里造 action 不用关心这个。
-       */
-      reasoning?: boolean;
-      capabilities: ModelCapabilities;
-      /**
-       * 上下文窗口（token）。底箱要算「已用 / 窗口」的百分比。
-       *
-       * **可选**：省略就是 0，底箱会不画那个百分比。真实运行时内核一定会给
-       * （它从模型对象读），但测试里造 action 不用关心这个。
-       *
-       * 为什么存在 action 里而不让界面去查模型：模型可能换，而这个值随 model.init
-       * 落盘 —— 回放时不用重新去问 provider 它的窗口有多大。
-       */
-      contextWindow?: number;
-    }
+  | ({ type: 'model.init' } & ModelSpec)
   | {
       /**
        * 人说了什么。`content` 是可选的：Web 侧带附件时，adapter 会把附件折成
@@ -358,8 +372,14 @@ export type AgentAction =
   | { type: 'tool.result'; message: ToolResultMessage }
   /** 一批工具跑完了。 */
   | { type: 'tool.batch.done'; count: number }
-  /** 换了模型。 */
-  | { type: 'model.changed'; provider: string; modelId: string }
+  /**
+   * 换了模型。与 `model.init` **同一套参数**（`ModelSpec`）。
+   *
+   * 为什么与 `model.init` 分开而不是复用一条：语义不同 —— 这条是「**切**成了什么」
+   * （轨迹里应当看得见），而 `model.init` 是「**装载**了什么」（开局那一次）。两者载荷
+   * 相同，所以「整个模型状态」只有一种写法；分开的只是轨迹上该不该留痕、留哪种痕。
+   */
+  | ({ type: 'model.changed' } & ModelSpec)
   /** 换了思考级别。 */
   | { type: 'thinking.changed'; level: ModelThinkingLevel }
   // ── 上下文压缩 ──

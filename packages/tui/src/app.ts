@@ -214,6 +214,9 @@ function nodeColor(node: TraceNode): (t: string) => string {
       return cyan;
     case 'model.init':
       return dim;
+    case 'model.changed':
+      // 换模型 / 换档位 —— 与装载同色（都是模型上下文的事），靠 label 里的名字区分。
+      return dim;
   }
 }
 
@@ -1002,7 +1005,7 @@ export interface TuiOptions {
   restoreSession?: ((file: string) => Promise<{ id: string; restored: number }>) | undefined;
   /**
    * 换模型（`/model`）。**必须由内核出手** —— 与 `restoreSession` 同一类原因：
-   * 换模型要 dispatch `model.changed` + `model.init`（能力与窗口随模型变），
+   * 换模型是内核的一条 `model.changed`（带全能力 / 窗口），
    * 而 effect 表读的模型是**每次请求现取**的（`store.ts` 的 `resolveModel`）。
    * 界面自己 dispatch 也能让底栏变，但那样就绕过了内核那道「先查模型存在再换」的闸。
    *
@@ -2395,7 +2398,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
           notify(yellow('未接内核（没有 provider 装配），换不了模型'));
           return;
         }
-        // 选了模型之后要**真的**换：内核 setModel() 发 `model.changed` + `model.init`。
+        // 选了模型之后要**真的**换：内核 setModel() 发一条 `model.changed`。
         const apply = (model: Model<any>, persist: boolean): void => {
           if (persist && !writeDefaultModel(model.provider, model.id, cwd)) {
             notify(yellow(`没能写进 settings.json（写权限？），默认模型没变；这一轮仍用 ${model.id}`));

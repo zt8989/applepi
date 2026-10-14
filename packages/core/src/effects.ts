@@ -103,7 +103,7 @@ export interface PiAiEffectsOptions {
    * 换了模型之后底栏变了、轨迹树里也记了新模型，**实际请求仍发给旧模型** ——
    * 症状是「换了没用」，而所有可见证据都说换了。
    *
-   * 给了它之后模型是**每次请求现取**的：`model.changed` + `model.init` 一 dispatch，
+   * 给了它之后模型是**每次请求现取**的：`model.changed` 一 dispatch，
    * 下一个回合就用新的。`getModel` 返回 `undefined`（模型在盘上找不到了，配置坏过）时
    * 退回闭包里那个 —— 那样至少还打得出请求，而抛 `undefined` 会让整条环崩在一个
    * 「本该打网络」的位置上。

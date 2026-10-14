@@ -36,7 +36,7 @@ pi 的会话文件（`sessions/`）只用于与 pi 互通。
 | `user` / `llm.result` / `tool.result` / `prompt.segment` | `message`（节点自己带的 pi 消息） |
 | 工具失败的 `error`（带 message） | `message`（那条 `isError` 的 toolResult） |
 | LLM 失败的 `error` / `stop` | `notice`（红 / 黄 / 灰） |
-| `model.init`（且换了模型 / 档位） | `notice`（配置切换） |
+| `model.changed` | `notice`（配置切换） |
 | `compact` | `notice`（压缩） |
 | 容器（`turn.*` / `step.*`）与 `tool.call` | 不产出（工具调用在助手消息里，结果由 toolResult 出） |
 | `prompt.base` / `prompt.tools` / `prompt.skills` | 不产出（是上下文装载，不是对话） |
@@ -55,8 +55,9 @@ pi 的会话文件（`sessions/`）只用于与 pi 互通。
 - 助手消息的**思考块**与 toolCall 块；
 - toolResult 的 `details`（edit 的彩色 diff、write 的文件内容…）。
 
-`model.init` 节点上还多一个 `meta.changed = '1'`：只有**用户真的切换过**才留配置提示；
-开场装载那一版不打（它不是「切换」，出现在对话开头只是噪声）。
+`model.changed` 节点与 `model.init` **同一种形状**（都带 provider/modelId/thinkingLevel 等 meta）：
+换模型 / 换档位时 `flushModelChange()` 只补一个 `model.changed` 节点，流就从它派生一条提示；
+开局那次 `model.init` 不产提示（它不是「切换」，出现在对话开头只是噪声）。
 
 ## 旧轨迹的退路
 

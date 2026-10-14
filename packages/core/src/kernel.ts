@@ -51,7 +51,8 @@ import { loadSkillRegistry } from './skills';
  *   - `supportsMidConvoSystemMessages` / `supportsMidConvoToolAdditions` 在 **BaseModel** 上（顶层）；
  *   - `supportsDeveloperRole` 在 **compat** 里，而且只有 openai 一族的 compat 有这个字段。
  *
- * 读不到就当 false（保守）—— 详见 reducer.ts 里 UNKNOWN_CAPABILITIES 的理由。
+ * 读不到就当 false（保守）—— 「以为支持但实际不支持」会让 pi-ai 把消息发出去然后被
+ * provider 拒，而那种失败长得像「随机 400」。
  *
  * 导出是因为 `setModel()` 与它的测试都要用**同一个读法**：两处各写一份的话它们会漂移，
  * 而漂移的症状是「底栏换了、实际请求还是按旧能力发」（那类失败极难归因）。
@@ -166,13 +167,15 @@ export interface Kernel {
   /**
    * 换模型。**真换** —— 之后的每个回合都发给新的那个。
    *
-   * ## 为什么是两条 action 而不是只一条
+   * ## 一条 action 就够：`model.changed` 带**整套**模型参数
    *
-   * `model.changed` 只改标识（provider / modelId），`model.init` 补上**能力与窗口**
-   * （`supportsMidConvoSystemMessages` / `contextWindow`…）。能力是**模型之间不一样**的：
-   * 一个支持中途插 system 的网关换成一个不支持的，还按旧的来会发出一份 provider 拒收的请求 ——
-   * 而那种失败长得像「随机 400」，极难归因。所以两条都要发，且顺序是先 changed 后 init
-   * （`model.changed` 把能力**保守地清掉**，`model.init` 才是权威，见 `reducer.ts`）。
+   * 能力（`capabilities`）与窗口（`contextWindow`）是**模型之间不一样**的：一个支持中途插
+   * system 的网关换成一个不支持的，还按旧的来会发出一份 provider 拒收的请求 —— 而那种
+   * 失败长得像「随机 400」，极难归因。所以 `model.changed` 与 `model.init` **载荷完全一致**
+   * （`ModelSpec`），一步把能力 / 窗口装到位，**不需要**「先保守清零、再补一条」的中间态。
+   *
+   * 两条 action 只差语义：`model.changed` 是「**切**成了什么」（轨迹里应当看得见），
+   * `model.init` 是「**装载**了什么」（开局那一次）。
    *
    * 思考级别**带着走**（从 state 读再传回去）：换模型不该顺手把 `high` 改成 `off`。
    *
@@ -180,7 +183,7 @@ export interface Kernel {
    * per-model 覆盖 / 全局默认都排在「当前这一档」前面，最后 clamp 到新模型支持的那几档）——
    * 没配过 settings 时结果与「带着走」相同，配过时才分得出来（见实现里的注释）。
    *
-   * @returns 换成功没有。找不���到那个模型就返回 `false` 并**不 dispatch** ——
+   * @returns 换成功没有。找不到那个模型就返回 `false` 并**不 dispatch** ——
    *   状态原封不动，比 dispatch 一次半换更安全。
    */
   setModel(
@@ -556,7 +559,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       return current.recorder;
     },
     /**
-     * 换模型：`model.changed`（改标识）+ `model.init`（补能力与窗口）。
+     * 换模型：一条 `model.changed`（载荷与 `model.init` 一样，带全能力 / 窗口）。
      *
      * ## 先查存在再 dispatch
      *
@@ -595,9 +598,8 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         defaultLevel: readDefaultThinkingLevel(cwd),
         current: store.getState().model.thinkingLevel,
       });
-      store.dispatch({ type: 'model.changed', provider, modelId } as AgentAction);
       store.dispatch({
-        type: 'model.init',
+        type: 'model.changed',
         provider,
         modelId,
         thinkingLevel,

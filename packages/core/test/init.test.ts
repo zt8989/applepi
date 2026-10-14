@@ -146,7 +146,7 @@ test('中途插入不影响基础 prompt —— 它是 messages 的一部分，�
 
 // ─── 换模型 / 换思考级别 ───
 
-test('model.changed：能力先保守清掉，等新的 model.init 补上', () => {
+test('model.changed：与 model.init 同一套参数，一步装完（不再有保守中间态）', () => {
   const reduce = reducer();
   let state = reduce(seed(), {
     type: 'model.init',
@@ -155,22 +155,31 @@ test('model.changed：能力先保守清掉，等新的 model.init 补上', () =
     thinkingLevel: 'off',
     capabilities: CAPS,
   });
-  state = reduce(state, { type: 'model.changed', provider: 'b', modelId: 'y' });
+  state = reduce(state, {
+    type: 'model.changed',
+    provider: 'b',
+    modelId: 'y',
+    thinkingLevel: 'high',
+    reasoning: true,
+    // 新模型不支持中途插 system —— 一次到位，不经过「全 false 再补」的中间态。
+    capabilities: {
+      midConvoSystemMessages: false,
+      midConvoToolAdditions: false,
+      developerRole: false,
+    },
+    contextWindow: 1234,
+  });
 
   assert.equal(state.model.provider, 'b');
   assert.equal(state.model.modelId, 'y');
-  // 能力不能沿用 —— 新模型可能不支持中途插
+  assert.equal(state.model.thinkingLevel, 'high');
+  assert.equal(state.model.reasoning, true);
   assert.equal(state.model.capabilities.midConvoSystemMessages, false);
-
-  // 补上新的能力
-  state = reduce(state, {
-    type: 'model.init',
-    provider: 'b',
-    modelId: 'y',
-    thinkingLevel: 'off',
-    capabilities: CAPS,
-  });
-  assert.equal(state.model.capabilities.midConvoSystemMessages, true);
+  assert.equal(state.model.contextWindow, 1234);
+  // 扁平别名跟着走。
+  assert.equal(state.providerName, 'b');
+  assert.equal(state.modelId, 'y');
+  assert.equal(state.thinkingLevel, 'high');
 });
 
 test('thinking.changed：model 块与扁平别名一起更新', () => {

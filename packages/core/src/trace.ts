@@ -95,6 +95,8 @@ export type TraceNodeKind =
   | 'prompt.skills'
   /** 装载的模型与它的能力（model.init）。 */
   | 'model.init'
+  /** 换成了哪个模型 / 哪个档位（model.changed / thinking.changed）。 */
+  | 'model.changed'
 
 /**
  * 节点状态。

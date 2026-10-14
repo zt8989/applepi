@@ -149,10 +149,9 @@ test('换模型 / 换档位：派生出一条 config 提示，位置在下一条
   });
   state = reduce(state, { type: 'turn.end' });
   assert.equal(state.phase, 'idle');
-  // 树已开：现在切换模型 + 档位。
-  state = reduce(state, { type: 'model.changed', provider: 'p', modelId: 'm2' });
+  // 树已开：现在切换模型 + 档位（一条 `model.changed`，载荷与 `model.init` 一致）。
   state = reduce(state, {
-    type: 'model.init',
+    type: 'model.changed',
     provider: 'p',
     modelId: 'm2',
     thinkingLevel: 'high',

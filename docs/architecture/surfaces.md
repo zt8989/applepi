@@ -370,7 +370,7 @@ pi 里这几个面板根本不是弹窗：`interactive-mode.js` 的 `showSelecto
 
 面板选完不能只 `showStatus()` —— 那是 pi 能这么干的原因：它有 `session.setModel()`。
 本项目状态**只能由 action 改**，所以换模型是 `kernel.setModel()`：它 dispatch
-`model.changed` + `model.init`（能力与窗口随模型变），并且**先查模型存在再 dispatch** ——
+`model.changed`（能力与窗口随模型变，与 `model.init` 同一套参数），并且**先查模型存在再 dispatch** ——
 查不到就返回 `false`、状态原封不动。
 
 关键的一环在 `store.ts`：effect 表的 `resolveModel` 让模型**每次请求现取**。

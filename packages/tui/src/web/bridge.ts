@@ -58,7 +58,7 @@ export interface WebBridgeOptions {
   resolveModel: (provider: string, id: string) => Model<Api> | null;
   /** 当前会话 id（**取值**，`/new` 之后会变）。 */
   getSessionId: () => string;
-  /** 换模型（内核的 `setModel()`：会 dispatch 两条 action）。 */
+  /** 换模型（内核的 `setModel()`：一条 `model.changed`）。 */
   setModel: (provider: string, id: string) => boolean;
   /** 开新会话（换 id → 换文件）。 */
   newSession: () => void;

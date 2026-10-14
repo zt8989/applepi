@@ -543,10 +543,9 @@ test('记录器：换模型会写一条 model_change（之前那个字段声明�
 
     // 先说一句话（于是 header 与第一条消息落盘 —— 那个「空会话不建文件」的规则）。
     dispatch({ type: 'user.message', text: '第一句' });
-    // 换模型：与 `kernel.setModel()` 发同样的两条 action。
-    dispatch({ type: 'model.changed', provider: 'workbuddy', modelId: 'cn:deepseek-v4.1-flash' });
+    // 换模型：一条 `model.changed`（与 model.init 同一套参数）。
     dispatch({
-      type: 'model.init',
+      type: 'model.changed',
       provider: 'workbuddy',
       modelId: 'cn:deepseek-v4.1-flash',
       thinkingLevel: 'off',
