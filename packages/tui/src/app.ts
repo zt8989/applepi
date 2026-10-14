@@ -36,11 +36,16 @@ import {
 } from '@earendil-works/pi-tui';
 import { abortRun } from '@ela/core/run-control';
 import { traceRows, traceStats, formatDuration, type TraceNode, type TraceTree } from '@ela/core/trace';
-import { compactReasonText } from '@ela/core/compact';
+import {
+  deriveStream,
+  streamMessages,
+  type StreamEntry,
+  type StreamNoticeEntry,
+} from '@ela/core/stream';
 import type { AgentState, QueuedInput, QueueKind } from '@ela/core/state';
 import type { AgentStore } from '@ela/core/store';
 import type { AgentAction } from '@ela/core/actions';
-import type { ToolCall } from '@earendil-works/pi-ai';
+import type { Message, ToolCall } from '@earendil-works/pi-ai';
 import { cleanSessionsExcept, listSessions, findSessionFile, resumeCommand, type SessionSummary } from '@ela/core/config-home';
 import { deleteSessionTrace, loadSessionMessages, openSessionPicker } from './session-picker';
 import { FOOTER_ROWS } from './composer-overlay';
@@ -208,6 +213,9 @@ function nodeColor(node: TraceNode): (t: string) => string {
     case 'prompt.skills':
       return cyan;
     case 'model.init':
+      return dim;
+    case 'model.changed':
+      // 换模型 / 换档位 —— 与装载同色（都是模型上下文的事），靠 label 里的名字区分。
       return dim;
   }
 }
@@ -1017,7 +1025,7 @@ export interface TuiOptions {
   restoreSession?: ((file: string) => Promise<{ id: string; restored: number }>) | undefined;
   /**
    * 换模型（`/model`）。**必须由内核出手** —— 与 `restoreSession` 同一类原因：
-   * 换模型要 dispatch `model.changed` + `model.init`（能力与窗口随模型变），
+   * 换模型是内核的一条 `model.changed`（带全能力 / 窗口），
    * 而 effect 表读的模型是**每次请求现取**的（`store.ts` 的 `resolveModel`）。
    * 界面自己 dispatch 也能让底栏变，但那样就绕过了内核那道「先查模型存在再换」的闸。
    *
@@ -1589,14 +1597,6 @@ export async function runTui(options: TuiOptions): Promise<number> {
     }
     return hotkeysLinesCache.lines;
   };
-  /**
-   * 已经报过一次的那次压缩（避免每帧都报一遍）。
-   *
-   * 为什么要单独记：`lastCompaction` 是**粘在 state 上的**（不会自动清），
-   * 而这个订阅器每次 store 变化都会跑 —— 不记就变成「每次刷新都插一行」。
-   */
-  let lastNoticedCompaction: AgentState['lastCompaction'] = null;
-
   const refresh = (): void => {
     const state = store.getState();
     // composer 上/下框线的颜色跟**思考级别**走 —— 与 pi 的 `updateEditorBorderColor()`
@@ -1635,7 +1635,24 @@ export async function runTui(options: TuiOptions): Promise<number> {
     );
     // 状态卡**不过期**（与 pi 一致）：它是会话里的一节，随对话滚走，而不是到点消失。
     // banner 同样常驻。
-    transcript.update(state, terminal.columns ?? 100, expanded, statusCards, banner, hotkeysLines(width), hotkeysAtMessageIndex ?? -1, hideThinking);
+    // 时间线从轨迹树派生（见 `@ela/core/stream`）：对话消息与提示（错误 / 配置切换 /
+    // 压缩）都从 `state.trace` 出来。`state.messages` 只当旧轨迹的退路（节点上
+    // 还没带 message 时），不再是界面的真相。
+    const entries = sessionEntries(state);
+    const streamMsgs = streamMessages(entries);
+    // 轨迹派生的卡与命令反馈卡合并后一起渲染：两者同形、各自的锚点各自算。
+    const cards = [...traceNoticeCards(entries), ...statusCards];
+    transcript.update(
+      state,
+      width,
+      expanded,
+      cards,
+      banner,
+      hotkeysLines(width),
+      hotkeysAtMessageIndex ?? -1,
+      hideThinking,
+      streamMsgs,
+    );
     // 轨迹：**每帧都同步**（即使不在轨迹页）—— 否则切过去的第一帧看到的是
     // 上一次 refresh 的快照，而那时可能已经落后好几步（症状：切过去先看到一棵
     // 少了几步的树，然后才突然补齐）。同步是增量的，成本与节点数无关。
@@ -1658,27 +1675,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // state 现推（见 `workingStatusText()`）。早先这里是一串 if/else 加一个
     // `lastLoaderMessage` 变量，三处各自记得收尾；漏一处的症状是「圈一直转」。
     // 现推就没有这笔账。
-    // 压缩跑完（或失败）：在对话区留一条**常驻**的说明。
-    //
-    // 为什么必须显眼：压缩是唯一会静默改写对话内容的操作——屏幕上那些用户消息
-    // 并没有消失，但它们已经不在模型的上下文里了。不说出来，用户看到的下一句回答
-    // 就会「凭空忘了」前面聊过的内容，而那正是最难归因的一类问题。
-    const compacted = state.lastCompaction;
-    if (compacted !== null && compacted !== lastNoticedCompaction) {
-      lastNoticedCompaction = compacted;
-      if (compacted.summarizedCount > 0) {
-        banner.text =
-          banner.text === ''
-            ? dim(
-                `[已压缩上下文] ${compactReasonText(compacted.reason)}：` +
-                  `${compacted.summarizedCount} 条老对话 → 一段摘要 + ${compacted.keptCount} 条最近消息` +
-                  `（之前的 ${formatTokens(compacted.tokensBefore)} 上下文已不在模型上下文里）`,
-              )
-            : banner.text;
-      } else {
-        notify(dim('没什么可压的（老对话还在保留窗口里）'));
-      }
-    }
+    // 压缩不再走 banner：`compact` 节点会在派生的会话流里出一条提示，
+    // 随会话滚走（这就是「以 trace 为基准」：同一件事只有一个来源）。
     refresh();
   });
 
@@ -1774,8 +1772,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
               return;
             }
             refresh();
-            // 与 pi 同一句（`selectModel` 的 `showStatus`）。
-            notify(`Model: ${model.id}`);
+            // 不再当场 `notify`：换模型作为一条配置提示由**轨迹派生**（`model.init`
+            // 节点带 `changed` 标记，下一次发话前落下）—— TUI 与 WebUI 同一份。
           },
           onSelectAsDefault: (model) => {
             if (!writeDefaultModel(model.provider, model.id, cwd)) {
@@ -1784,8 +1782,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
             }
             if (options.setModel?.(model.provider, model.id)) {
               refresh();
-              // pi 存默认时多带 provider（`Default model: provider/id`）。
-              notify(`Default model: ${model.provider}/${model.id}`);
+              // 存默认也要先换到它；切换本身不再当场 `notify`（由轨迹派生的配置提示给）。
             } else {
               notify(yellow(`已存为默认，但换不了 ${model.id}（配置里没它）`));
             }
@@ -2048,8 +2045,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
       return;
     }
     store.dispatch({ type: 'thinking.changed', level: next as typeof before });
+    // 不再当场 `notify`：换档位也由轨迹派生的配置提示给（`model.init` 带 `changed`）。
     refresh();
-    notify(`Thinking level: ${next}`);
   };
 
   /**
@@ -2105,11 +2102,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
       return;
     }
     refresh();
-    // 与 pi 同一句（`cycleModel()`）：`Switched to <名字>`，思考档位非 off 时跟一个括号。
-    const level = store.getState().thinkingLevel;
-    const thinkingStr =
-      store.getState().model.reasoning && level !== 'off' ? ` (thinking: ${level})` : '';
-    notify(`Switched to ${next.id}${thinkingStr}`);
+    // 切换的反馈不在这里 `notify`：由轨迹派生的配置提示统一给（见 `model.init` 的
+    // `changed` 标记）。这里只 `refresh()` 让底栏立刻跟上。
   };
 
   /** 最后一条 assistant 消息里的可见文本（`app.message.copy` 用它，与 pi 的 `getLastAssistantText` 同口径）。 */
@@ -2414,7 +2408,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
           notify(yellow('未接内核（没有 provider 装配），换不了模型'));
           return;
         }
-        // 选了模型之后要**真的**换：内核 setModel() 发 `model.changed` + `model.init`。
+        // 选了模型之后要**真的**换：内核 setModel() 发一条 `model.changed`。
         const apply = (model: Model<any>, persist: boolean): void => {
           if (persist && !writeDefaultModel(model.provider, model.id, cwd)) {
             notify(yellow(`没能写进 settings.json（写权限？），默认模型没变；这一轮仍用 ${model.id}`));
@@ -2429,8 +2423,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
             return;
           }
           refresh();
-          // 与 pi 同一句：`Model: <id>` / 存默认时 `Default model: <provider>/<id>`。
-          notify(persist ? `Default model: ${model.provider}/${model.id}` : `Model: ${model.id}`);
+          // 切换本身不再当场 `notify`（由轨迹派生的配置提示给）；
+          // 只失败的那几条（写盘 / 未接内核 / 换不了）在上面各自说。
         };
         // `/model <词>`：精确命中就直接切（与 pi 的 `findExactModelMatch` 同一形状），
         // 否则带词开面板（官方组件拿它当 `initialSearchInput`）。
@@ -2484,8 +2478,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
           store.dispatch({ type: 'thinking.changed', level });
           refresh();
           if (!persist) {
-            // 与 pi 同两句（`selectThinkingLevel()`）：选中 vs 存成默认。
-            notify(`Thinking level: ${level}`);
+            // 选中档位不再当场 `notify`：由轨迹派生的配置提示给（`model.init` 带 `changed`）。
             return;
           }
           // 写盘是异步的（pi 的 `save()` 是入队写），所以提示放在 `.then` 里 ——
@@ -2671,9 +2664,10 @@ export async function runTui(options: TuiOptions): Promise<number> {
         // 与面板底部的提示行同一个来源。
         hotkeysSource = hotkeysMarkdown(options.extensionCommands?.shortcuts() ?? []);
         hotkeysLinesCache = undefined;
-        // 插在**当前对话末尾**（= 现有消息数）。之后的对话排在这张表下面，于是它会被
+        // 插在**当前对话末尾**（= 派生消息数）。之后的对话排在这张表下面，于是它会被
         // 往上顶开 —— 与 pi 把键位表 `addChild` 进对话区同一效果（见 hotkeysAtMessageIndex）。
-        hotkeysAtMessageIndex = store.getState().messages.length;
+        // 用派生条数（不是 `state.messages.length`）：块的下标是派生列表的下标。
+        hotkeysAtMessageIndex = sessionMessageCount(store.getState());
         notify(dim('键位表已插进对话（改键位：~/.pi/agent/keybindings.json）'));
         refresh();
         return;
@@ -2708,7 +2702,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 卡被往上顶开、随会话滚走（`ScrollView` 的 `follow:'end'` 盯的是底部）。
    */
   const notify = (text: string): void => {
-    const at = store.getState().messages.length;
+    const at = sessionMessageCount(store.getState());
     const last = statusCards[statusCards.length - 1];
     if (last && last.at === at) {
       // 尾部仍是这张卡（之后没插过任何东西）→ 就地覆盖，不新开一行。
@@ -4105,8 +4099,6 @@ export class TranscriptChunks {
   private streamRenderedAt = 0;
   /** 流式重排的次数（被预算挡掉的不算）。给测试与诊断看 —— 不是界面状态。 */
   private streamRenders = 0;
-  /** 重试提示 + 收工原因 + 错误提示。 */
-  private readonly tail: Text;
   /**
    * 按消息缓存渲染结果。`WeakMap<object, Map<string, string[]>>`：
    * 外层按消息对象，内层按 `${width}:${expanded}:${hideThinking}` 键。
@@ -4115,11 +4107,10 @@ export class TranscriptChunks {
   /** 上一帧的宽度：变了就得让 pi-tui 重新折行（`Text` 自己会重算）。 */
   private lastWidth = 0;
   /**
-   * 两个尾块（banner / 收工原因）上一次的内容，避免每帧都 `setText`
-   * （那会让它们自己的折行缓存失效）。流式那一块走自己的路径，见 `updateStream`。
+   * 开场那节（banner）上一次的内容，避免每帧都 `setText`
+   * （那会让它自己的折行缓存失效）。流式那一块走自己的路径，见 `updateStream`。
    */
   private lastBanner = '';
-  private lastTail = '';
   /**
    * `/hotkeys` 那一块。
    *
@@ -4150,7 +4141,6 @@ export class TranscriptChunks {
   constructor() {
     this.bannerBlock = new Text('', 0, 0);
     this.streamBlock = new Text('', 0, 0);
-    this.tail = new Text('', 0, 0);
     this.hotkeysBlock = new Text('', 0, 0);
   }
 
@@ -4207,6 +4197,13 @@ export class TranscriptChunks {
      * 而把它插在中间会让所有现有调用点一起改。
      */
     hideThinking = false,
+    /**
+     * 要渲染的消息列表 —— **从轨迹派生的那份**（见 `sessionEntries`）。
+     *
+     * 不给就退回 `state.messages`（老调用方与测试）。界面正常路径一定要给，
+     * 因为那才是「以 trace 为基准」；`state.messages` 只是旧轨迹的退路。
+     */
+    derivedMessages?: readonly Message[],
   ): void {
     // 回收已结束的工具组件（**在渲染任何块之前**：工具刚跑完时 reducer 已把它移出
     // `executing`，于是这一帧就该把它的组件与 interval 一起清掉）。
@@ -4214,7 +4211,7 @@ export class TranscriptChunks {
     pruneLiveTools(state);
     const key = `${width}:${expanded}:${hideThinking}`;
     const widthChanged = width !== this.lastWidth;
-    const messages = state.messages;
+    const messages = derivedMessages ?? state.messages;
     const count = messages.length;
     // 消息变少（/new、恢复别的会话）：把多余的块**丢掉**。
     //
@@ -4261,7 +4258,6 @@ export class TranscriptChunks {
       banner?.text ?? '',
     );
     this.updateStream(state, width, hideThinking);
-    this.setIfChanged(this.tail, 'tail', renderTail(state, width).join('\n'), state.error ?? '');
     // 引用比对（见字段注释）：同一份行数组就不碰组件，重排与 markdown 解析都省了。
     if (hotkeys !== this.lastHotkeysLines) {
       this.lastHotkeysLines = hotkeys;
@@ -4281,7 +4277,7 @@ export class TranscriptChunks {
   }
 
   /** 内容真变了才 `setText`（它会清掉块自己的折行缓存）。 */
-  private setIfChanged(block: Text, slot: 'banner' | 'tail', text: string, identity: string): void {
+  private setIfChanged(block: Text, slot: 'banner', text: string, identity: string): void {
     if (this.lastOf(slot) === identity) return;
     this.remember(slot, identity);
     block.setText(text);
@@ -4350,13 +4346,12 @@ export class TranscriptChunks {
     return this.streamRenders;
   }
 
-  private lastOf(slot: 'banner' | 'tail'): string {
-    return slot === 'banner' ? this.lastBanner : this.lastTail;
+  private lastOf(slot: 'banner'): string {
+    return this.lastBanner;
   }
 
-  private remember(slot: 'banner' | 'tail', value: string): void {
-    if (slot === 'banner') this.lastBanner = value;
-    else this.lastTail = value;
+  private remember(slot: 'banner', value: string): void {
+    this.lastBanner = value;
   }
 
   /** 一条消息的块：命中缓存就不碰组件，否则重算并 `setText`。 */
@@ -4456,7 +4451,6 @@ export class TranscriptChunks {
     lines.push(...cardsAtEnd());
     if (hotkeysAt >= this.blocks.length) lines.push(...this.hotkeysBlock.render(at));
     lines.push(...this.streamBlock.render(at));
-    lines.push(...this.tail.render(at));
     return lines;
   }
 
@@ -4465,7 +4459,6 @@ export class TranscriptChunks {
     for (const block of this.statusBlocks) block.invalidate();
     this.bannerBlock.invalidate();
     this.streamBlock.invalidate();
-    this.tail.invalidate();
     this.hotkeysBlock.invalidate();
   }
 }
@@ -4500,48 +4493,84 @@ export function workingStatusText(state: AgentState): string | undefined {
 }
 
 /**
- * 对话区**尾部**那些不属于任何单条消息的行：正在流式生成的文字、收工原因。
+ * 会话流派生结果的缓存。
  *
- * 从 `renderTranscript` 里原样搬出来的，所以两处画出来的东西一致。
+ * ## 为什么可以按 `(tree, messages)` 的**引用**缓存
  *
- * 注意**不含**正在流式生成的文字：那一段由 `TranscriptChunks` 单独一个块负责
- * （它每帧都变，必须独立才能只重画它）。`renderTranscript` 里仍然拼上它，
- * 因为那是一趟性渲染，形状必须与界面一致。
- *
- * 也**不含**重试那行：它与「思考中 / 压缩中」一样是工作状态，画在 composer 的
- * 上框线里（见 `workingStatusText()`）—— 那是 pi 的位置。
+ * 流式 token（`llm.delta`）只改 `state.streamingText`，`state.trace` 与 `state.messages`
+ * 两个引用都不变 —— 于是那几百次 `refresh()` 全部命中缓存，派生的 O(节点数) 成本一点
+ * 不落在流式路径上（对话区的「没变的块不重算」铁律，这里也适用）。
+ * 真正会改 tree 的那些事件（开节点 / 闭合 / 工具结果）本来就该重算一遍。
  */
-export function renderTail(state: AgentState, width: number): string[] {
-  const lines: string[] = [];
-  // 收工原因。maxTurns 用「停」而不是「✗」：那是上限收工，不是出错，别吓唬人。
-  if (state.phase === 'idle' && state.error) {
-    const capped = state.stopReason === 'maxTurns';
-    // **用户自己按了停止**不是故障：以前与真错误同一条红字，看上去像程序崩了。
-    // 这里单独走灰色「已停止」，不吓人，也不必让人以为要去看轨迹排查。
-    const stoppedByUser = state.stopCause === 'user';
-    const node = state.errorNodeId ? `（轨迹节点 ${state.errorNodeId}）` : '';
-    // 停止原因写在前面：光看 error 那句技术文案（'LLM 调用已中断'）没人知道发生了什么。
-    const cause = state.stopCauseDetail ? `${state.stopCauseDetail}：` : '';
-    if (stoppedByUser) {
-      // 用户自己按的停止：只报 pi 那一句，**不**再说一遍原因、不再报轨迹节点、
-      // 也不提示去看轨迹树（用户没出错，不该被推去排查）。
-      //
-      // 这条路是「没有任何 assistant 消息可画」的那种中止（流挂住时按 Esc 走 `llm.failed`）；
-      // 中止时已经有部分内容的情形由 pi 的 `AssistantMessageComponent` 画在**那条消息自己**
-      // 的末尾（`Operation aborted`），这里不会再进。
-      lines.push(`  ${dim('Operation aborted')}`);
-    } else if (capped) {
-      lines.push(`  ${yellow('■')} ${yellow(state.error)} ${dim(node)}`);
-      lines.push(dim('  这是上限收工，不是出错 —— 继续追问即可，或用 /new 换个会话。'));
-    } else {
-      // 真失败：带上原因（超时 / 鉴权 / 网络…），免得只看到一句干巴巴的英文。
-      lines.push(`  ${red('✗')} ${red(`${cause}${state.error}`)} ${dim(node)}`);
-      lines.push(dim(`  按 ${keyLabel('app.trace.toggle')} 看轨迹树`));
-    }
-  }
-  return lines;
+const streamCache = new WeakMap<object, { messages: readonly Message[]; entries: StreamEntry[] }>();
+
+/** 从状态派生当前会话流（带缓存，见 `streamCache`）。 */
+export function sessionEntries(state: AgentState): StreamEntry[] {
+  const tree = state.trace as object | undefined;
+  if (tree === undefined) return deriveStream(state.trace, state.messages);
+  const cached = streamCache.get(tree);
+  if (cached !== undefined && cached.messages === state.messages) return cached.entries;
+  const entries = deriveStream(state.trace, state.messages);
+  streamCache.set(tree, { messages: state.messages, entries });
+  return entries;
 }
 
+/** 派生消息的条数 —— 命令反馈卡的锚点用它（**不是** `state.messages.length`）。 */
+export function sessionMessageCount(state: AgentState): number {
+  return streamMessages(sessionEntries(state)).length;
+}
+
+/** 一条提示卡的文字（上色；左边一格缩进与上面空行由卡自己的 `Text` 负责）。 */
+export function noticeCardText(entry: StreamNoticeEntry): string {
+  const mark =
+    entry.tone === 'error'
+      ? red('✗')
+      : entry.tone === 'warn'
+        ? yellow('■')
+        : entry.tone === 'config'
+          ? cyan('•')
+          : dim('·');
+  const title =
+    entry.tone === 'error'
+      ? red(entry.title)
+      : entry.tone === 'warn'
+        ? yellow(entry.title)
+        : entry.tone === 'config'
+          ? cyan(entry.title)
+          : dim(entry.title);
+  const detail =
+    entry.detail !== undefined && entry.detail !== entry.title ? ` ${dim(entry.detail)}` : '';
+  // 提示去看轨迹树只在真失败时给 —— 用户自己按的停止不该被推去排查。
+  const hint =
+    entry.tone === 'error' ? `\n${dim(`  按 ${keyLabel('app.trace.toggle')} 看轨迹树`)}` : '';
+  return `${mark} ${title}${detail}${hint}`;
+}
+
+/**
+ * 把派生的提示条目转成「钉进对话流」的卡（与 `notify` 的 statusCards 同一形状）。
+ *
+ * 锚点 = 「它前面有几条消息」。于是配置切换 / 错误就插在**当时那个位置**，
+ * 后面的对话会把它往上顶、随会话一起滚 —— 与命令反馈卡同一套渲染。
+ */
+export function traceNoticeCards(entries: readonly StreamEntry[]): { text: string; at: number }[] {
+  const cards: { text: string; at: number }[] = [];
+  let messages = 0;
+  for (const entry of entries) {
+    if (entry.kind === 'message') {
+      messages += 1;
+      continue;
+    }
+    cards.push({ text: noticeCardText(entry), at: messages });
+  }
+  return cards;
+}
+
+/**
+ * 把整段会话流渲染成文本（一次性模式与测试走它）。
+ *
+ * 与 `TranscriptChunks` 共用同一套「从轨迹派生」的条目：消息从节点带的 pi 消息渲染，
+ * 提示直接画成卡。这样 `-p` 管道输出与界面里看到的是同一个东西。
+ */
 export function renderTranscript(
   state: AgentState,
   from: number,
@@ -4556,13 +4585,11 @@ export function renderTranscript(
   hideThinking = false,
 ): string {
   const lines: string[] = [];
-  // 卡按其锚点 splice，不再是「贴顶一行」。
-  // 空行在卡**上面** + 左边一格缩进 —— 与 pi 的 `showStatus()`（`Spacer(1)` + `paddingX=1`）同形。
-  // 两处（这里与 `TranscriptChunks`）必须一致：一次性模式与界面里看到的得是同一个东西。
+  // 卡按其锚点 splice。空行在卡**上面** + 左边一格缩进 —— 与 pi 的
+  // `showStatus()`（`Spacer(1)` + `paddingX=1`）同形。
   const cardsAt = (index: number): void => {
     for (const card of statusCards ?? []) {
       if (card.at === index && card.text !== '') {
-        // 每一行都缩一格（`/help` 那种多行卡也是）—— pi 的 `paddingX` 就是逐行生效的。
         lines.push('', ...card.text.split('\n').map((row) => ` ${row}`));
       }
     }
@@ -4570,21 +4597,24 @@ export function renderTranscript(
   cardsAt(from);
   // `offset` 跟着实际插进去的行数走 —— 用户消息前面多了一行空隙，下标才不会错位。
   let offset = lines.length;
-  for (let i = from; i < state.messages.length; i += 1) {
-    const message = state.messages[i];
-    if (!message) continue;
+  let msgIndex = 0;
+  for (const entry of sessionEntries(state)) {
+    if (entry.kind === 'notice') {
+      const text = noticeCardText(entry);
+      if (text !== '') lines.push('', ...text.split('\n').map((row) => ` ${row}`));
+      continue;
+    }
+    const message = entry.message;
     lines.push(...userSpacer(message, offset));
     lines.push(...renderMessage(state, message, width, expanded, hideThinking));
     offset = lines.length;
-    // 下标 +1：卡片锚点是「第几条消息」（条数），而这里是 0 基的 i。
-    cardsAt(i + 1);
+    msgIndex += 1;
+    cardsAt(msgIndex);
   }
-  // 正在流式生成的这一段。**`renderTail` 里刻意不含它**（那边由独立的一块负责，
-  // 合成一个就会画两遍）—— 一次性模式不走 TranscriptChunks，所以要在这里补上，
+  // 正在流式生成的这一段：`TranscriptChunks` 里由独立的一块负责，
+  // 一次性模式不走它，所以这里必须补上，否则管道输出会丢掉模型正在说的话。
   if (state.phase === 'thinking' && state.streamingText) {
     lines.push(...renderAssistant([{ type: 'text', text: state.streamingText }], width, true, hideThinking));
   }
-  // 否则管道输出会丢掉模型正在说的话。
-  lines.push(...renderTail(state, width));
   return lines.join('\n');
 }

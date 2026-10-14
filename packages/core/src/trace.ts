@@ -28,6 +28,7 @@
  * reducer 里算，也可以在测试里断言，还能在 TUI 侧从 JSONL 回放重建。
  */
 import { uuidv7 } from '@earendil-works/pi-ai';
+import type { Message } from '@earendil-works/pi-ai';
 
 /** 节点类型。 */
 /**
@@ -94,6 +95,8 @@ export type TraceNodeKind =
   | 'prompt.skills'
   /** 装载的模型与它的能力（model.init）。 */
   | 'model.init'
+  /** 换成了哪个模型 / 哪个档位（model.changed / thinking.changed）。 */
+  | 'model.changed'
 
 /**
  * 节点状态。
@@ -118,6 +121,25 @@ export interface TraceNode {
   readonly detail?: string | undefined;
   /** 工具名 / provider / model 之类的附加信息。 */
   readonly meta?: Readonly<Record<string, string>> | undefined;
+  /**
+   * 这条节点对应的 **pi 消息**（user / assistant / toolResult / 中途追加的 system 段）。
+   *
+   * ## 为什么消息挂在节点上
+   *
+   * 时间线（界面看到的对话流）**从轨迹树派生**，而轨迹树是唯一真相。要让派生结果无损，
+   * 节点就得自己带着那份消息 —— 否则「派生」还得回头去读 `state.messages`，而那是
+   * **发给模型**的那份（会被压缩替换、会被恢复重灌），两边的顺序与内容迟早对不上。
+   *
+   * 于是 `state.messages` 只服务 LLM 请求，界面这边一个字节都不读它。
+   *
+   * 只有「会产生一条消息」的节点才有它：`user` / `llm.result` / `tool.result` /
+   * 工具失败的那个 `error` / `prompt.segment`。容器、`model.init`、`stop`、
+   * LLM 失败的 `error` 都没有。
+   *
+   * **可选**：旧轨迹文件里没有它（那时消息单独落在 `op:'message'` 行）——
+   * 派生时会退回「读 state.messages」，行为与改动前一致。
+   */
+  readonly message?: Message | undefined;
   readonly createdAt: number;
   /** 闭合时刻（未闭合为 null）；与 createdAt 相减得到耗时。 */
   readonly endedAt: number | null;
@@ -198,6 +220,8 @@ export function appendNode(
     label: string;
     detail?: string | undefined;
     meta?: Readonly<Record<string, string>> | undefined;
+    /** 这条节点对应的 pi 消息（见 `TraceNode.message`）。 */
+    message?: Message | undefined;
     createdAt: number;
     endedAt?: number | null | undefined;
   },
@@ -212,6 +236,7 @@ export function appendNode(
     label: options.label,
     ...(options.detail !== undefined ? { detail: options.detail } : {}),
     ...(options.meta !== undefined ? { meta: options.meta } : {}),
+    ...(options.message !== undefined ? { message: options.message } : {}),
     createdAt: options.createdAt,
     endedAt: options.endedAt === undefined ? null : options.endedAt,
   };
@@ -652,6 +677,8 @@ export interface SerializedTraceNode {
   // 显式带 | undefined：exactOptionalPropertyTypes 下，TraceNode 的可选项才能直接赋过来。
   readonly detail?: string | undefined;
   readonly meta?: Record<string, string> | undefined;
+  /** 这条节点对应的 pi 消息（见 `TraceNode.message`）。 */
+  readonly message?: Message | undefined;
   readonly createdAt: number;
   readonly endedAt: number | null;
 }
@@ -677,6 +704,7 @@ export function serializeTree(tree: TraceTree): SerializedTrace {
         label: node.label,
         ...(node.detail !== undefined ? { detail: node.detail } : {}),
         ...(node.meta !== undefined ? { meta: { ...node.meta } } : {}),
+        ...(node.message !== undefined ? { message: node.message } : {}),
         createdAt: node.createdAt,
         endedAt: node.endedAt,
       })),

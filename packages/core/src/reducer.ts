@@ -1,6 +1,6 @@
 import { Cmd, loop, type CmdType, type LoopReducer } from 'redux-loop';
 import type { AssistantMessage, Message, ToolCall, ToolResultMessage } from '@earendil-works/pi-ai';
-import type { AgentAction, AgentActionType, ModelCapabilities } from './actions';
+import type { AgentAction, AgentActionType, ModelSpec } from './actions';
 import {
   createInitialState,
   isRetryable,
@@ -104,16 +104,23 @@ function openStepNode(state: AgentState, now: number): { state: AgentState; node
 }
 
 /** 成功：在 step 下挂 result 节点（它才是推进 tip 的那个）。 */
-function closeLlmSuccess(state: AgentState, now: number, detail: string): AgentState {
+function closeLlmSuccess(
+  state: AgentState,
+  now: number,
+  detail: string,
+  message: Message,
+): AgentState {
   const openId = state.openStepNodeId ?? state.openLlmNodeId;
   let { trace } = state;
   if (openId) trace = patchNode(trace, openId, { status: 'ok', endedAt: now });
-  const { tree, node } = appendNode(
-    trace,
-    openId,
-    'llm.result',
-    { status: 'ok', label: summarize(detail), detail, createdAt: now, endedAt: now },
-  );
+  const { tree, node } = appendNode(trace, openId, 'llm.result', {
+    status: 'ok',
+    label: summarize(detail),
+    detail,
+    message,
+    createdAt: now,
+    endedAt: now,
+  });
   return { ...state, trace: tree, openLlmNodeId: null, retrying: false };
 }
 
@@ -314,17 +321,30 @@ function dedupeToolCallIds(
 }
 
 /**
- * 「还不知道这个模型支持什么」时的保守值：全 false。
+ * 把一份 `ModelSpec` 装进 state —— `model.init` 与 `model.changed` **共用这一份**。
  *
- * 用在两处：`createInitialState` 的空 model 块，以及 `model.changed` 之后等 `model.init` 补上之前。
- * 取保守值是因为「以为支持但实际不支持」会让 pi-ai 把消息发出去然后被 provider 拒；
- * 反过来「以为不支持但实际支持」只是少用了个特性。
+ * 载荷一致的好处就在这里：两条 action 只差「该不该在轨迹上留痕」，状态迁移一字不差。
+ * 早先 `model.changed` 只改标识、把能力保守清成 false（等 `model.init` 补），
+ * 于是存在一个「说要用新模型、却不知道它支持什么」的中间态 —— 现在没有了。
  */
-const UNKNOWN_CAPABILITIES: ModelCapabilities = {
-  midConvoSystemMessages: false,
-  midConvoToolAdditions: false,
-  developerRole: false,
-};
+function applyModelSpec(state: AgentState, spec: ModelSpec): AgentState {
+  return {
+    ...state,
+    model: {
+      provider: spec.provider,
+      modelId: spec.modelId,
+      thinkingLevel: spec.thinkingLevel,
+      reasoning: spec.reasoning ?? false,
+      capabilities: spec.capabilities,
+      contextWindow: spec.contextWindow ?? 0,
+      seeded: true,
+    },
+    // 扁平别名跟着更新（真相在 model 块里）。
+    providerName: spec.provider,
+    modelId: spec.modelId,
+    thinkingLevel: spec.thinkingLevel,
+  };
+}
 
 /** 把 prompt 那半（base / tools / skills）追加到树上。parent 取此刻的 tip。 */
 function appendPromptNodes(tree: TraceTree, prompt: AgentState['prompt'], now: number): TraceTree {
@@ -366,10 +386,16 @@ function appendPromptNodes(tree: TraceTree, prompt: AgentState['prompt'], now: n
 }
 
 /** 把 model 那半（provider / model / 思考级别 / 能力）追加到树上。 */
-function appendModelNode(tree: TraceTree, model: AgentState['model'], now: number): TraceTree {
+function appendModelNode(
+  tree: TraceTree,
+  model: AgentState['model'],
+  now: number,
+  /** 节点种类：装载（`model.init`）还是切换（`model.changed`）。 */
+  kind: 'model.init' | 'model.changed',
+): TraceTree {
   const caps = model.capabilities;
   // 能力逐条写进 meta：树上就能一眼看出「这个模型能不能中途插 system」。
-  return appendNode(tree, tree.tipId, 'model.init', {
+  return appendNode(tree, tree.tipId, kind, {
     status: 'ok',
     label: `${model.provider}/${model.modelId}`,
     meta: {
@@ -414,7 +440,7 @@ function beginTrace(state: AgentState, now: number): TraceTree {
   if (state.traceBegun) return state.trace;
   let tree = state.trace;
   if (state.prompt.seeded) tree = appendPromptNodes(tree, state.prompt, now);
-  if (state.model.seeded) tree = appendModelNode(tree, state.model, now);
+  if (state.model.seeded) tree = appendModelNode(tree, state.model, now, 'model.init');
   return tree;
 }
 
@@ -437,7 +463,7 @@ function flushModelChange(state: AgentState, now: number): AgentState {
   if (!state.modelTraceDirty) return state;
   return {
     ...state,
-    trace: appendModelNode(state.trace, state.model, now),
+    trace: appendModelNode(state.trace, state.model, now, 'model.changed'),
     modelTraceDirty: false,
   };
 }
@@ -570,6 +596,7 @@ const transitions: TransitionHandlers = {
         action.text === ''
           ? JSON.stringify(action.sections ?? {})
           : action.text,
+      message,
       meta: {
         role: action.role,
         ...(action.sections !== undefined ? { sections: Object.keys(action.sections).join(',') } : {}),
@@ -604,35 +631,13 @@ const transitions: TransitionHandlers = {
   /**
    * 装载模型：provider / model / 思考级别 + 这个模型支持什么。
    *
-   * 能力随 init 一起落盘：回放时不必再问 provider「这个模型能不能中途插 system」。
+   * 能力随它一起落盘：回放时不必再问 provider「这个模型能不能中途插 system」。
    *
    * 与 `prompt.init` 同一个理由（见那条的注释）：开局那次**不开**轨迹节点，
    * 那一个 `model.init` 节点由 `beginTrace()` 在第一条用户消息时补上。
-   *
-   * 已经开过树（换模型）也**不**当场追加 —— 只置一个标记，由 `flushModelChange()`
-   * 在下次发话时补一个（来回切三次只留一个节点，内容是最新那版）。
+   * 之后的**切换**走 `model.changed`（另一条 action，载荷相同）—— 那条才会开 `model.changed` 节点。
    */
-  'model.init': (state, action) => {
-    const model = {
-      provider: action.provider,
-      modelId: action.modelId,
-      thinkingLevel: action.thinkingLevel,
-      reasoning: action.reasoning ?? false,
-      capabilities: action.capabilities,
-      contextWindow: action.contextWindow ?? 0,
-      seeded: true,
-    };
-    return {
-      ...state,
-      model,
-      // 树开着才需要补：没开的话 beginTrace() 会从 state 里读（就是刚装的这版）。
-      modelTraceDirty: state.traceBegun ? true : state.modelTraceDirty,
-      // 扁平别名跟着更新。
-      providerName: action.provider,
-      modelId: action.modelId,
-      thinkingLevel: action.thinkingLevel,
-    };
-  },
+  'model.init': (state, action) => applyModelSpec(state, action),
 
   'user.message': (state, action) => {
     if (state.phase !== 'idle') return state;
@@ -660,6 +665,7 @@ const transitions: TransitionHandlers = {
       status: 'ok',
       label: summarize(action.text),
       detail: action.text,
+      message,
       createdAt: now,
       endedAt: now,
     });
@@ -787,6 +793,7 @@ const transitions: TransitionHandlers = {
       status: 'ok',
       label: `${isSteer ? 'steer' : 'followUp'}: ${summarize(action.text)}`,
       detail: action.text,
+      message,
       meta: { queued: action.as },
       createdAt: now,
       endedAt: now,
@@ -915,6 +922,7 @@ const transitions: TransitionHandlers = {
       status: 'ok',
       label: `followUp: ${summarize(queued.text)}`,
       detail: queued.text,
+      message,
       meta: { queued: 'followUp' },
       createdAt: now,
       endedAt: now,
@@ -1073,7 +1081,7 @@ const transitions: TransitionHandlers = {
     //
     // **这一步不开 step.end**：有工具时 step 还没完（工具批次也要算在这个 step 里），
     // 它的闭合点是 tool.batch.done。只有「无工具」才在这一步就把 step 关掉。
-    const closed = closeLlmSuccess(state, Date.now(), text);
+    const closed = closeLlmSuccess(state, Date.now(), text, message);
     const hasTools = toolCalls.length > 0;
     //
     // **用户按了停止**（pi-ai 把那份部分消息以 `stopReason: 'aborted'` 交回来）。
@@ -1312,6 +1320,7 @@ const transitions: TransitionHandlers = {
           status: 'error',
           label: text,
           detail: text,
+          message: result,
           meta: { tool: result.toolName },
           createdAt: now,
           endedAt: now,
@@ -1320,6 +1329,7 @@ const transitions: TransitionHandlers = {
           status: 'ok',
           label: summarize(text),
           detail: text,
+          message: result,
           meta: { tool: result.toolName },
           createdAt: now,
           endedAt: now,
@@ -1406,22 +1416,15 @@ const transitions: TransitionHandlers = {
   },
 
   /**
-   * 换模型。**能力也要跟着换** —— 新模型可能不支持中途插 system。
-   * 能力从哪来？内核换模型时会重新 dispatch 一条 `model.init`，那条才是权威；
-   * 这条只负责改标识，先把能力**保守地清掉**（标成不支持），等 model.init 补上。
+   * 换模型。与 `model.init` **同一套参数**（`ModelSpec`），只差语义与留痕。
+   *
+   * 载荷一致的好处：这里不再需要「先保守清零、等 model.init 补上」—— 一步到位。
+   * 轨迹上怎么体现：树开着才置 `modelTraceDirty`，由 `flushModelChange()` 在下次发话前
+   * 补一个 **`model.changed` 节点**（来回切三次只留一个，内容是最新那版）。
    */
   'model.changed': (state, action) => ({
-    ...state,
-    model: {
-      ...state.model,
-      provider: action.provider,
-      modelId: action.modelId,
-      // 新模型支不支持 reasoning 还不知道，保守地当不支持，等 model.init 补上。
-      reasoning: false,
-      capabilities: UNKNOWN_CAPABILITIES,
-    },
-    providerName: action.provider,
-    modelId: action.modelId,
+    ...applyModelSpec(state, action),
+    modelTraceDirty: state.traceBegun ? true : state.modelTraceDirty,
   }),
   'thinking.changed': (state, action) => ({
     ...state,
@@ -1560,7 +1563,7 @@ const transitions: TransitionHandlers = {
    * 清空对话（可选：换一个新会话 id）。
    *
    * 保留已装载的 prompt / model —— 它们是**会话级**的（这个内核用哪个模型、跟它说什么），
-   * 不是这一轮对话的产物。换模型请走 `model.changed` + `model.init`，别混在这里。
+   * 不是这一轮对话的产物。换模型请走 `model.changed`，别混在这里。
    *
    * 带 `action.sessionId` 时轨迹树的 sessionId 也跟着换，于是落盘换到新文件；
    * 不带则沿用原 id（只清对话）—— 但那样之后的消者会追加进同一个文件，

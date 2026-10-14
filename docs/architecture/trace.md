@@ -22,17 +22,28 @@ interface TraceNode {
       | 'llm.result'
       | 'tool.call' | 'tool.result' | 'error' | 'stop'
       // 上下文族（不推进 tip，见下）
-      | 'prompt.base' | 'prompt.tools' | 'prompt.segment' | 'model.init';
+      | 'prompt.base' | 'prompt.tools' | 'prompt.segment' | 'model.init' | 'model.changed';
   status: 'pending' | 'ok' | 'error' | 'aborted';
   label: string;                 // 短标签，渲染用
   detail?: string;               // 详细文本（回答全文、错误信息、工具参数）
   meta?: Record<string, string>; // provider / model / tool / kind
+  message?: Message;             // 这条节点对应的 pi 消息（user / assistant / toolResult）
   createdAt: number;
   endedAt: number | null;        // 与 createdAt 相减得耗时
 }
 ```
 
 `turn.*` / `step.*` 是**容器**（区间），`llm.result` / `tool.result` / `error` 是里面的**事件**。
+
+### 消息挂在节点上
+
+会产生一条对话消息的节点（`user` / `llm.result` / `tool.result` / 工具失败的 `error` /
+`prompt.segment`）自己带着整份 pi 消息。因为界面的**时间线是从轨迹派生的**，而不是
+回头去读 `state.messages` —— 详见 [stream](stream.md)。只有两条路：
+
+- 旧轨迹文件里没有这个字段（那时消息单独落在 `op:'message'` 行），派生时整体退回
+  从会话文件读回来的那份；
+- 新会话里它就是真相，所以图片 / 思考块 / toolResult 的 `details`（edit 的 diff）都不丢。
 
 ## 两层容器：turn 与 step
 
@@ -170,7 +181,7 @@ function advancesTip(node) {
 ### 节点状态画在颜色上，不在字上
 
 `✓` / `✗` / `⊘` / `·` 那套状态字符已经删掉：成功绿、失败红**加粗**、进行中黄、
-上下文族（`prompt.*` / `model.init`）暗。理由：`✓ n7 llm.result` 里那个 `✓` 占了宽度，
+上下文族（`prompt.*` / `model.init` / `model.changed`）暗。理由：`✓ n7 llm.result` 里那个 `✓` 占了宽度，
 而它说的信息与颜色重复；轨道符号要能一眼区分的是「这是哪个节点」，不是「它成没成」。
 
 代价是**纯文本那一份（`renderTree()`）看不出成败** —— 落盘、回放、统计都不受影响
@@ -240,7 +251,8 @@ function advancesTip(node) {
 | `prompt.base` | 第一条 `user.message`，或树开过之后的 `prompt.init`（热重载） | system prompt 首行摘要 | — |
 | `prompt.tools` | 同上 | 工具名逗号分隔 | `count` |
 | `prompt.skills` | 同上 | skill 名逗号分隔 | `count` |
-| `model.init` | 第一条 `user.message`，以及**下一次发话前**（见下） | `provider/model` | `thinking` / `midConvoSystem` / `midConvoTools` / `developerRole` |
+| `model.init` | 第一条 `user.message`（装载） | `provider/model` | `thinking` / `midConvoSystem` / `midConvoTools` / `developerRole` |
+| `model.changed` | 换模型 / 换档位后**下一次发话前**（见下） | `provider/model` | 同上 |
 | `prompt.segment` | `prompt.segment.added` | 片段首行摘要 | `role` / `source` |
 
 完整内容在 `detail` 里（prompt 全文、每个工具的 description、片段原文），`label` 只是摘要。
@@ -282,13 +294,13 @@ function advancesTip(node) {
 
 ### 换模型 / 换思考级别：等到下次发话前补**一个**
 
-`model.init`（`/model`、`Ctrl+P`、`Ctrl+L`）与 `thinking.changed`（`Shift+Tab`、`/thinking`、
+`model.changed`（`/model`、`Ctrl+P`、`Ctrl+L`）与 `thinking.changed`（`Shift+Tab`、`/thinking`、
 设置面板里改某一档）**都不当场建节点**，只把 `state.modelTraceDirty` 置起来。
 真正补进树的是 `flushModelChange()`（`reducer.ts`），落在下一次要发消息的那一刻：
 `user.message` / `queue.delivered` 补 user 节点之前、`turn.start` 开容器之前。
 
 为什么要这样：切换是**界面动作**，而树上该回答的是「这一轮实际用的上下文是什么」。
-来回切三次模型、又改两次档位，若每次都留节点，两句人话之间就会夹着五个 `model.init`
+来回切三次模型、又改两次档位，若每次都留节点，两句人话之间就会夹着五个 `model.changed`
 ——而其中只有最后一个真的生效过。现在：
 
 - 中间切多少次都只留**一个**节点，内容是那一刻生效的那一版；
@@ -296,15 +308,17 @@ function advancesTip(node) {
   与 `beginTrace()` 补装载节点同一个口径；
 - 没换过就不补（`modelTraceDirty` 是唯一判据）。
 
-注意档位是写在 `model.init` 节点 `meta` 里的（不另开一种 kind）：只改了思考级别时，
+注意档位是写在 `model.changed` 节点 `meta` 里的（不另开一种 kind）：只改了思考级别时，
 补出来的那条节点 model 名字不变、`thinking` 变了 —— 那正是「这一轮上下文变了」的全部事实。
+`model.init` 与 `model.changed` **载荷相同**（`ModelSpec`），只差语义：一个是「装载」、
+一个是「切换」—— 所以会话流只把 `model.changed` 当配置提示（见 [stream](stream.md)）。
 
 **`prompt.init` 的热重载不走这条路**（它当场追加）：热重载是「文件变了、我们重新读了一遍」，
 不是用户在切东西；而且那一刻树上就能看出新 prompt 何时生效，对排查更有用。
 
 ### reset 会清掉它们
 
-`conversation.reset` 与 `conversation.restored` 都清空树（连同 prompt.* / model.init），
+`conversation.reset` 与 `conversation.restored` 都清空树（连同 prompt.* / model.init / model.changed），
 但保留 `state.prompt` / `state.model` —— 那两块是会话级状态。见 [init](init.md)。
 
 `conversation.restored` 额外把「正在跑」的现场（`phase` / `streamingText` /

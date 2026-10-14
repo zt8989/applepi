@@ -19,11 +19,47 @@ import {
   ProviderKeysStore,
   SessionsStore,
   SettingsStore,
+  registerMessageRenderer,
   setAppStorage,
 } from '@earendil-works/pi-web-ui';
+import { html } from 'lit';
+import { STREAM_NOTICE_ROLE } from '@ela/core/web-protocol';
 import { RemoteAgent } from './remote-agent';
 import { openModelPicker } from './model-picker';
 import './app.css';
+
+/**
+ * 注册「提示」条目的 renderer —— 错误 / 配置切换 / 压缩。
+ *
+ * 这些条目由服务端**从轨迹派生**（见 `@ela/core/stream`），作为合成消息插在
+ * `state.messages` 的正确位置上。pi-web-ui 的 `MessageList` 对每个消息先试
+ * `renderMessage(role)`，命中就渲染它 —— 这就是「提示也在聊天流里」的实现。
+ * 不注册的话那个 role 会被当成未知消息直接跳过。
+ */
+function registerStreamNotice(): void {
+  registerMessageRenderer(STREAM_NOTICE_ROLE as never, {
+    render: (message: unknown) => {
+      const notice = message as { tone?: string; title?: string; detail?: string };
+      const tone = notice.tone ?? 'info';
+      const cls =
+        tone === 'error'
+          ? 'text-destructive'
+          : tone === 'warn'
+            ? 'text-yellow-600 dark:text-yellow-400'
+            : tone === 'config'
+              ? 'text-sky-600 dark:text-sky-400'
+              : 'text-muted-foreground';
+      const detail =
+        notice.detail !== undefined && notice.detail !== notice.title ? notice.detail : '';
+      return html`
+        <div class="px-1 text-sm leading-relaxed">
+          <span class="font-medium ${cls}">${notice.title ?? ''}</span>
+          ${detail === '' ? '' : html`<span class="ml-2 text-xs text-muted-foreground">${detail}</span>`}
+        </div>
+      `;
+    },
+  } as never);
+}
 
 /** pi-web-ui 的若干组件会读全局 storage；铺一份最小可用的（sessions 我们不真的用）。 */
 function installStorage(): void {
@@ -114,6 +150,7 @@ function currentModelRef(agent: RemoteAgent): { provider: string; id: string } |
 
 async function main(): Promise<void> {
   installStorage();
+  registerStreamNotice();
   buildShell();
 
   const chatPanel = new ChatPanel();

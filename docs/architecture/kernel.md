@@ -61,11 +61,15 @@ npm start              →  packages/tui/src/main.ts     → createKernel() → 
 
 ## 换模型
 
-`kernel.setModel(provider, modelId)`：**两条** action，先 `model.changed` 后 `model.init`。
+`kernel.setModel(provider, modelId)`：**一条** action —— `model.changed`，载荷与 `model.init`
+**完全一致**（`ModelSpec`：provider / modelId / thinkingLevel / reasoning / capabilities /
+contextWindow）。
 
-两条都要的原因是能力：**`supportsMidConvoSystemMessages` / `contextWindow` 这些在模型之间
-不一样**。`model.changed` 只改标识、并把能力**保守地清掉**（标成不支持），`model.init`
-才是权威。能力错的后果是发出一份 provider 拒收的请求 —— 那种失败长得像「随机 400」。
+两条 action 只差语义：`model.changed` 是「**切**成了什么」（轨迹里看得见），`model.init` 是
+「**装载**了什么」（开局那一次）。能力（`supportsMidConvoSystemMessages` / `contextWindow`
+这些）在模型之间**不一样**，所以必须与切换**同一次**装到位 —— 能力错的后果是发出一份
+provider 拒收的请求，而那种失败长得像「随机 400」；早先「先保守清零、等 `model.init` 补」
+的两段式因此被去掉了。
 
 两个决定值得记下：
 

@@ -455,8 +455,7 @@ async function main(): Promise<void> {
     newSession: () => kernel.newSession(),
     // 恢复历史：也必须走内核（换 id + 记录器游标对齐），界面自己做会把历史重写一遍。
     restoreSession: (file: string) => kernel.restoreSession(file),
-    // 换模型：dispatch `model.changed` + `model.init`（能力与窗口随模型变），
-    // 且**先查模型存在**。界面自己 dispatch 也能让底栏变，但那样绕过了那道闸。
+    // 换模型：一条 `model.changed`（带全能力 / 窗口），且**先查模型存在**。
     // 第三个参数是作用域条目写死的档位（`/scoped-models` 的 `p/i:high`）——
     // pi 的 `_cycleScopedModel` 也把它传下去（`setModel` 的第二个参数）。
     setModel: (provider: string, modelId: string, modelOptions?: { thinkingLevel?: string | undefined }) =>

@@ -81,6 +81,15 @@ export {
   type TraceSink,
 } from './trace-store';
 export {
+  deriveStream,
+  streamMessages,
+  type StreamEntry,
+  type StreamMessageEntry,
+  type StreamNoticeEntry,
+  type StreamNoticeTone,
+} from './stream';
+export { STREAM_NOTICE_ROLE, type WebStreamItem, type WebStreamNotice } from './web-protocol';
+export {
   createFileSink,
   listSessions,
   loadSession,

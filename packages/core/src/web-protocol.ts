@@ -27,6 +27,15 @@ import type { Api, AssistantMessage, Message, Model } from '@earendil-works/pi-a
 export const WEB_PROTOCOL_VERSION = 2;
 
 /**
+ * 聊天流里「提示」条目用的合成消息 role。
+ *
+ * 它只存在于**线协议**上（浏览器渲染用），不进内核的 `messages`、更不会发给模型。
+ * 定义在这里（而不是 `stream.ts`）是因为它是**线协议**的概念：bridge 发一个 role、
+ * webui 注册同一个 —— 两端都从这里取，免得各写一份。
+ */
+export const STREAM_NOTICE_ROLE = 'ela-notice';
+
+/**
  * 列表里的一条模型（**紧凑投影**，不是整份 `Model`）。
  *
  * ## 为什么不在线协议里传整份 Model
@@ -44,6 +53,23 @@ export interface WebModelRef {
 }
 
 /**
+ * 聊天流里的一条**提示**（合成消息）—— 错误 / 收工 / 配置切换 / 压缩。
+ *
+ * 它由 trace 派生（见 `@ela/core/stream`），只活在**线协议**上：浏览器注册一个自定义
+ * renderer 把这个 role 画成一张卡。它不进内核的 `messages`、更不会发给模型。
+ */
+export interface WebStreamNotice {
+  readonly role: typeof STREAM_NOTICE_ROLE;
+  readonly tone: 'error' | 'warn' | 'info' | 'config';
+  readonly title: string;
+  readonly detail?: string | undefined;
+  readonly timestamp: number;
+}
+
+/** 列表里的一条：真正的 pi 消息，或者一条提示。 */
+export type WebStreamItem = Message | WebStreamNotice;
+
+/**
  * 浏览器侧 `session.state` 的形状（pi-web-ui 真的会读的字段）。
  *
  * 与 pi-agent-core 的 `AgentState` 是同一口径，但**只有界面上真的用到的那些**：
@@ -55,8 +81,11 @@ export interface WebAgentState {
   sessionId: string;
   /** 工具的工作目录（界面上显示用）。 */
   cwd: string;
-  /** 发给模型的对话历史（user / assistant / toolResult）。 */
-  messages: Message[];
+  /**
+   * 发给模型的对话历史（user / assistant / toolResult），**从轨迹派生**，
+   * 并按锚点把提示条目插在正确的消息之间。
+   */
+  messages: WebStreamItem[];
   /** 当前模型对象（pi-ai 的 `Model`，可直接 JSON 传）。没解析出来时为 `null`。 */
   model: Model<Api> | null;
   /** 思考级别（pi-ai 的 `ModelThinkingLevel` 名字）。 */

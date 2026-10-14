@@ -284,6 +284,32 @@ test('modelRefs：投影成紧凑条目（id / 名字 / 能不能思考）', () 
   ]);
 });
 
+test('bridge：错误从轨迹派生成合成提示（ela-notice）进线协议的 messages', async () => {
+  // 以前 WebUI 的 `errorMessage` 进了线协议，而 pi-web-ui 根本不读它 —— 界面上什么都看不到。
+  // 现在错误是从轨迹派生的提示条目，作为合成消息插进 `messages`（浏览器注册的
+  // renderer 把它画成卡）。
+  const ctx = await start();
+  try {
+    ctx.store.dispatch({ type: 'user.message', text: '你好' });
+    ctx.store.dispatch({
+      type: 'llm.failed',
+      error: 'LLM 调用超时',
+      kind: 'timeout',
+      cause: 'timeout',
+    });
+    const hello = ctx.bridge.hello();
+    if (hello.type !== 'hello') throw new Error('unreachable');
+    const notices = hello.state.messages.filter(
+      (m) => (m as { role?: string }).role === 'ela-notice',
+    ) as { tone?: string; title?: string }[];
+    assert.ok(notices.length >= 1, '应当有一条合成提示');
+    assert.equal(notices[0]?.tone, 'error');
+    assert.ok(notices[0]?.title?.includes('超时'), `标题要能读：${notices[0]?.title}`);
+  } finally {
+    await ctx.dispose();
+  }
+});
+
 test('bridge：没给目录时 hello 给空列表；空作用域归一成 null（= 全开）', () => {
   const faux = createFauxRuntime();
   faux.setResponses(demoResponses());

@@ -39,7 +39,7 @@
  *
  * 选完之后不能只 `showStatus()` —— 那是 pi 的 `InteractiveMode` 能这么干的原因：它有
  * `session.setModel()`。本项目的状态**只能由 action 改**（reducer 纯函数那条不变式），所以
- * 换模型是 `kernel.setModel()`：它 dispatch `model.changed` + `model.init`，而 **effect 表
+ * 换模型是 `kernel.setModel()`：它 dispatch 一条 `model.changed`（带全能力 / 窗口），而 **effect 表
  * 读的模型是从 state 里取的**（见 `effects.ts` 里 `modelOf(state)`）。
  *
  * ## 降级路径：手写一个最小门面，而不是让面板不可用
