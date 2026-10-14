@@ -92,11 +92,30 @@ export class RemoteAgentState {
     this.pendingToolCalls = new Set(state.pendingToolCalls);
     this.errorMessage = state.errorMessage ?? undefined;
     this.toolNames = state.toolNames;
+    this.statsText = state.statsText;
+    this.statsLevel = state.statsLevel;
     this.sessionId = state.sessionId;
     this.cwd = state.cwd;
   }
 
   toolNames: readonly string[] = [];
+  /** 底栏统计行（与 TUI **逐字同形**）—— 服务端算好发来的。 */
+  statsText = '';
+  /** 统计行的告警级别（上下文占用 >70% / >90%）。 */
+  statsLevel: 'none' | 'warn' | 'error' = 'none';
+}
+
+/** 扩展要求的一个对话框（`ctx.ui.select/confirm/input` 的浏览器那一份）。 */
+export interface UiRequest {
+  id: string;
+  method: 'select' | 'confirm' | 'input';
+  title: string;
+  /** `select` 的选项。 */
+  options?: string[] | undefined;
+  /** `confirm` 的正文。 */
+  message?: string | undefined;
+  /** `input` 的占位符。 */
+  placeholder?: string | undefined;
 }
 
 export interface RemoteAgentHooks {
@@ -114,6 +133,10 @@ export interface RemoteAgentHooks {
    * 命令走 HTTP 接口（见 `commands.ts`），所以这里可以 `await`。
    */
   onPrompt?: ((text: string) => boolean | Promise<boolean>) | undefined;
+  /** 扩展要弹一个对话框（选择 / 是非题 / 文本输入）。 */
+  onUiRequest?: ((request: UiRequest) => void) | undefined;
+  /** 关掉那个弹窗（另一端先答了，或整轮被中断）。 */
+  onUiCancel?: ((id: string) => void) | undefined;
 }
 
 export class RemoteAgent {
@@ -181,6 +204,11 @@ export class RemoteAgent {
     this.send({ type: 'abort' });
   }
 
+  /** 回答一个扩展对话框。`cancelled` = 用户把它关了（不是空答案）。 */
+  respondUi(id: string, response: { value?: string; cancelled?: boolean }): void {
+    this.send({ type: 'ui-response', id, ...response });
+  }
+
   waitForIdle(): Promise<void> {
     return Promise.resolve();
   }
@@ -231,6 +259,12 @@ export class RemoteAgent {
         break;
       case 'notice':
         this.hooks.onNotice?.(message.level, message.text);
+        break;
+      case 'ui-request':
+        this.hooks.onUiRequest?.(message);
+        break;
+      case 'ui-cancel':
+        this.hooks.onUiCancel?.(message.id);
         break;
       case 'event':
         this.dispatch(message.event as RemoteAgentEvent);

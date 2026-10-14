@@ -373,6 +373,67 @@ test('扩展：给真 UI 时 custom() 把问卷挂进输入区槽位（inline �
   }
 });
 
+test('扩展：浏览器连上（mode=rpc）时问卷走 select/input 逐题回退', { skip: !hasAskUser && '没装 rpiv-ask-user-question' }, async () => {
+  useRealHome();
+  try {
+    const { store } = freshStore();
+    const written: string[] = [];
+    const tui = fakeTui(written);
+    const slot: FakeEditorSlot = { current: undefined };
+    initTheme('dark', false);
+    /** 假的浏览器对话框：记下问了什么，直接选第二个选项。 */
+    const asked: string[] = [];
+    const host = await loadExtensionHost({
+      builtins: false,
+      store,
+      cwd: process.cwd(),
+      uiOptions: () => ({
+        ...hostUiOptions(tui, [], slot),
+        dialogs: () => ({
+          available: () => true,
+          select: async (title: string, choices: readonly string[]) => {
+            asked.push(title);
+            return choices[1];
+          },
+          confirm: async () => true,
+          input: async () => undefined,
+        }),
+      }),
+    });
+    // 浏览器连着 → 宿主模式切到 rpc（`main.ts` 就是这么做）。
+    host.setUiMode('rpc');
+    const tool = getTool('ask_user_question');
+    assert.ok(tool, '工具应该在注册表里');
+    registerExtraTools([]);
+
+    const result = (await tool!.execute(
+      'call-rpc',
+      {
+        questions: [
+          {
+            question: 'Which approach?',
+            header: 'Approach',
+            options: [
+              { label: 'Minimal', description: 'Only what was asked.' },
+              { label: 'Thorough', description: 'Refactor neighbours too.' },
+            ],
+          },
+        ],
+      },
+      undefined,
+      undefined,
+    )) as { details?: { answers?: { answer?: string }[]; cancelled?: boolean } };
+
+    assert.equal(asked.length, 1, `该走一次 select（而不是 TUI 的 custom）：${asked.join('|')}`);
+    assert.equal(slot.current, undefined, 'rpc 那条路不该往输入区槽位挂组件');
+    assert.equal(result.details?.cancelled, false);
+    assert.equal(result.details?.answers?.[0]?.answer, 'Thorough', '选的是第二个选项');
+    void written;
+  } finally {
+    restoreHome();
+  }
+});
+
 /** 轮询到 `cond` 为真；超时抛（说清在等什么）。 */
 async function waitFor(cond: () => boolean, timeoutMs: number, what: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;

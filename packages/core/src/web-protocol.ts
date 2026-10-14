@@ -105,6 +105,17 @@ export interface WebAgentState {
   errorMessage: string | null;
   /** 工具名（展示用）。 */
   toolNames: string[];
+  /**
+   * 底栏那一行统计（与 TUI 的 `statsLine()` **逐字同形**）：
+   * `↑362k ↓310k R121M CH99.9% 52%/1.0M`。
+   *
+   * 为什么由服务端算而不是浏览器自己算：`CH`（缓存命中率）与上下文占用两段的口径都是
+   * 「最近一次有效调用」，且上下文窗口要从 `model.contextWindow` 取 —— 在 `statsLine()`
+   * 里定下之后，两边各自再算一份必漂。
+   */
+  statsText: string;
+  /** 统计行的告警级别（上下文占用 >70% = `warn`、>90% = `error`）。 */
+  statsLevel: 'none' | 'warn' | 'error';
 }
 
 /**
@@ -132,7 +143,27 @@ export type WebServerMessage =
     }
   | { type: 'state'; state: WebAgentState }
   | { type: 'event'; event: WebAgentEvent }
-  | { type: 'notice'; level: 'info' | 'warn' | 'error'; text: string };
+  | { type: 'notice'; level: 'info' | 'warn' | 'error'; text: string }
+  /**
+   * 扩展要弹一个原生对话框（`ctx.ui.select/confirm/input`）—— 与终端**各出一份**，
+   * 谁先回答谁算数（见 `@ela/core/extension-ui` 的 `raceDialog`）。
+   *
+   * 发给了**所有**连接：随便哪个标签页回答都算。
+   */
+  | {
+      type: 'ui-request';
+      id: string;
+      method: 'select' | 'confirm' | 'input';
+      title: string;
+      /** `select` 的选项。 */
+      options?: string[];
+      /** `confirm` 的正文。 */
+      message?: string;
+      /** `input` 的占位符。 */
+      placeholder?: string;
+    }
+  /** 关掉那个弹窗（另一端先答了 / 整轮被中断）。客户端收到就静默关掉。 */
+  | { type: 'ui-cancel'; id: string };
 
 /** 浏览器 → 服务端的消息。 */
 export type WebClientMessage =
@@ -140,7 +171,12 @@ export type WebClientMessage =
   | { type: 'abort' }
   | { type: 'setModel'; provider: string; id: string }
   | { type: 'setThinking'; level: string }
-  | { type: 'newSession' };
+  | { type: 'newSession' }
+  /**
+   * 回答一个 `ui-request`。`value` 的义：`select` = 选中的选项；`input` = 文本；
+   * `confirm` = `'yes'` / `'no'`。取消（关掉弹窗）给 `cancelled: true`。
+   */
+  | { type: 'ui-response'; id: string; value?: string; cancelled?: boolean };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 非会话数据的 HTTP 接口（`/api/*`）
@@ -225,6 +261,18 @@ export function parseClientMessage(raw: string): WebClientMessage | undefined {
     }
     case 'newSession':
       return { type: 'newSession' };
+    case 'ui-response': {
+      const id = (value as { id?: unknown }).id;
+      if (typeof id !== 'string') return undefined;
+      const answer = (value as { value?: unknown }).value;
+      const cancelled = (value as { cancelled?: unknown }).cancelled;
+      return {
+        type: 'ui-response',
+        id,
+        ...(typeof answer === 'string' ? { value: answer } : {}),
+        ...(cancelled === true ? { cancelled: true } : {}),
+      };
+    }
     default:
       return undefined;
   }

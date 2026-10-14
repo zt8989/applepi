@@ -24,10 +24,12 @@ import {
 } from '@earendil-works/pi-web-ui';
 import { html } from 'lit';
 import { STREAM_NOTICE_ROLE } from '@ela/core/web-protocol';
-import { RemoteAgent } from './remote-agent';
+import { RemoteAgent, type UiRequest } from './remote-agent';
 import { openModelPicker } from './model-picker';
+import { openConfirmDialog, openInputDialog, openSelectDialog } from './dialogs';
 import { installToolMessageView } from './tool-view';
 import { installCommandPalette } from './command-palette';
+import { installStatsView } from './stats';
 import { elaApi } from './api';
 import { parseCommand, runCommand } from './commands';
 import './app.css';
@@ -147,8 +149,10 @@ function wsUrl(): string {
 async function main(): Promise<void> {
   installStorage();
   registerStreamNotice();
-  // 工具卡换成折叠行视图（见 tool-view.ts）—— 必须在界面首次渲染前装好。
+  // 工具卡换成折叠行视图（见 tool-view.ts）、底栏统计行（见 stats.ts）——
+  // 必须在界面首次渲染前装好。
   installToolMessageView();
+  installStatsView();
   buildShell();
 
   /**
@@ -177,6 +181,8 @@ async function main(): Promise<void> {
   }
 
   const chatPanel = new ChatPanel();
+  /** 现在开着的扩展对话框（id → 只拆 DOM 的 close）。 */
+  const openDialogs = new Map<string, () => void>();
   const agent = new RemoteAgent({
     // pi-web-ui 只在**事件**上重画；服务端推来的整份状态不会触发它 —— 这里补一次。
     onStateApplied: () => {
@@ -189,6 +195,51 @@ async function main(): Promise<void> {
     onNotice: (level, text) => pushNotice(text, level === 'info' ? 'info' : level === 'warn' ? 'warn' : 'error'),
     onStatus: (status) => {
       setStatus(status === 'open' ? '已连接' : status === 'connecting' ? '连接中…' : '断开，重连中…');
+    },
+    // 扩展的对话框（`ctx.ui.select/confirm/input`）—— 与终端**各出一份**，谁先回答
+    // 谁算数（服务端 core 的 `raceDialog`）。终端那边先答了会发 `ui-cancel`，这里关掉。
+    onUiRequest: (request: UiRequest) => {
+      const answer = (response: { value?: string; cancelled?: boolean }): void => {
+        openDialogs.delete(request.id);
+        agent.respondUi(request.id, response);
+      };
+      // 同一个 id 重来（重连重放）→ 先撤掉旧的。
+      openDialogs.get(request.id)?.();
+      openDialogs.delete(request.id);
+      if (request.method === 'select') {
+        openDialogs.set(
+          request.id,
+          openSelectDialog({
+            title: request.title,
+            choices: request.options ?? [],
+            onAnswer: (value) => answer(value === undefined ? { cancelled: true } : { value }),
+          }),
+        );
+        return;
+      }
+      if (request.method === 'confirm') {
+        openDialogs.set(
+          request.id,
+          openConfirmDialog({
+            title: request.title,
+            message: request.message ?? '',
+            onAnswer: (value) => answer({ value: value ? 'yes' : 'no' }),
+          }),
+        );
+        return;
+      }
+      openDialogs.set(
+        request.id,
+        openInputDialog({
+          title: request.title,
+          placeholder: request.placeholder,
+          onAnswer: (value) => answer(value === undefined ? { cancelled: true } : { value }),
+        }),
+      );
+    },
+    onUiCancel: (id: string) => {
+      openDialogs.get(id)?.();
+      openDialogs.delete(id);
     },
     // 斜杠命令：走 HTTP 接口，不发给模型（与 TUI 的 `runCommand` 同一个分工）。
     onPrompt: async (text) => {

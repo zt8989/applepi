@@ -16,7 +16,7 @@ import { findSessionFile } from '@ela/core/config-home';
 import { defaultProviderSpec, providerNames } from '@ela/core/provider';
 import { THINKING_LEVELS, isThinkingLevel } from '@ela/core/thinking-level';
 import { createKernel, type Kernel } from '@ela/core/kernel';
-import { runTui, SLASH_COMMANDS } from './app';
+import { runTui, SLASH_COMMANDS, statsLine } from './app';
 import { setupTheme } from './theme';
 import { keyLabel } from './keybindings';
 import { WebBridge } from './web/bridge';
@@ -426,6 +426,14 @@ async function main(): Promise<void> {
         setModel: (provider, id) => kernel.setModel(provider, id),
         newSession: () => kernel.newSession(),
         resolveModel,
+        // 浏览器连上/全断开 → 切扩展宿主模式。有浏览器时 `ask_user_question` 那种
+        // 按 `ctx.mode` 选路的扩展才会走 `ctx.ui.select/input` 的逐题回退 —— 而那两个
+        // 方法由本项目同时发给**终端与浏览器**（见 `extension-ui.ts` 的 `raceDialog`）。
+        onPresenceChange: (connected) => kernel.extensions.setUiMode(connected ? 'rpc' : 'tui'),
+        // 底栏那一行（与终端**逐字同形**）：`↑362k ↓310k R121M CH99.9% 52%/1.0M`。
+        // 浏览器那边 pi-web-ui 自带的 `formatUsage` 只到 `R`/`W` —— 所以由服务端
+        // 算好整行发过去，而不是让它再算一份（口径一漂，两端对不上）。
+        stats: (state) => statsLine(state),
       },
       // 开场诊断与终端那边同一个口径：装了哪些扩展 + 装载失败。
       [
@@ -488,6 +496,9 @@ async function main(): Promise<void> {
     newSession: () => kernel.newSession(),
     // 恢复历史：也必须走内核（换 id + 记录器游标对齐），界面自己做会把历史重写一遍。
     restoreSession: (file: string) => kernel.restoreSession(file),
+    // 浏览器侧的对话框（`ctx.ui.select/confirm/input` 的那一份）。**取值**：桥可能
+    // 因为 `--no-web` 不存在，也可能在重连时换掉。
+    dialogs: () => bridge?.dialogs,
     // 换模型：一条 `model.changed`（带全能力 / 窗口），且**先查模型存在**。
     // 第三个参数是作用域条目写死的档位（`/scoped-models` 的 `p/i:high`）——
     // pi 的 `_cycleScopedModel` 也把它传下去（`setModel` 的第二个参数）。

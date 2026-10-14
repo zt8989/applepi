@@ -190,6 +190,17 @@ export interface ExtensionHost {
     input: Record<string, unknown>,
     options?: { parentToolCallId?: string | undefined; signal?: AbortSignal | undefined },
   ): Promise<{ block?: boolean; reason?: string | undefined; input: Record<string, unknown> }>;
+  /**
+   * 切扩展宿主的「模式」（官方 `ctx.mode`）：`'tui'` = 终端是交互方，`'rpc'` = 有个
+   * 非终端宿主在驱动。
+   *
+   * 为什么要有它：`ask_user_question` 这类扩展按 `ctx.mode` 选路 —— `'tui'` 走它自己的
+   * 全屏问卷（`ctx.ui.custom()`），`'rpc'` 走 `ctx.ui.select/input` 的逐题回退。本项目
+   * 想让**浏览器**也能答，就得在浏览器连上时切到 `'rpc'`（那时两端都由我们的
+   * `select/input` 驱动，见 `extension-ui.ts` 的 `raceDialog`）；浏览器全断开再切回。
+   */
+  setUiMode(mode: 'tui' | 'rpc'): void;
+
   dispose(): void;
 }
 
@@ -266,6 +277,7 @@ function emptyHost(errors: readonly string[] = []): ExtensionHost {
     errors,
     entries: [],
     loaded: 0,
+    setUiMode: () => {},
     beforeAgentStart: async () => {},
     startSession: async () => {},
     collectPromptSections: async () => ({}),
@@ -570,11 +582,31 @@ const errors: string[] = [];
     promptTools.push(...snaps);
   };
 
+  // UI 在**界面层**造（它要活着的 `tui` 实例，而内核不知道界面的存在）。
+  //
+  // 没给工厂 = 一次性模式（`-p`）或测试 → **不绑 UI**，官方 `hasUI` 就是 false，
+  // 扩展会把交互式工具从清单里摘掉。理由见 `LoadExtensionHostOptions.uiOptions` ——
+  // 给一个空 UI 会让扩展在 `custom()` 里撞上 undefined 的 tui，比没有界面更糟。
+  //
+  // 存住这个实例：`setUiMode()` 要拿**同一个**重新 `setUIContext` —— 官方是按
+  // `uiContext` 的引用判 `hasUI` 的，每次新建一个都会把那个判断搅乱。
+  let hostUi: ExtensionHostUi | undefined;
+  if (uiOptions !== undefined) {
+    // `as never`：官方的 `ExtensionUIContext` 有 26 个成员（`setWidget` / `setFooter` /
+    // `setHeader` / RPC 弹窗……），本项目只实现那几个真的能做的。直接断言会把
+    // 「缺一堆」这件事藏起来 —— 而它已经写在本文件与 `extension-ui.ts` 的注释里了。
+    hostUi = createHostUi(uiOptions);
+    runner.setUIContext(hostUi as never, 'tui');
+  }
+  const setUiMode = (mode: 'tui' | 'rpc'): void => {
+    if (hostUi === undefined) return;
+    runner.setUIContext(hostUi as never, mode);
+  };
+
   // 先绑 core（它把 `runtime.refreshTools` 接上），再扫一次。
   bindCore({
     runner,
     store,
-    uiOptions,
     runtime: effectiveRuntime,
     onSendMessage,
     cwd,
@@ -615,6 +647,7 @@ const errors: string[] = [];
     promptTools,
     commands,
     errors,
+    setUiMode,
     // **只报用户装的扩展**（内置的 mcp / codemode 不算「你装了扩展」），与 pi 的开场口径一致。
     entries: loaded.extensions
       .filter((ext) => !ext.path.startsWith('builtin:'))
@@ -704,7 +737,6 @@ const errors: string[] = [];
 interface BindCoreOptions {
   runner: ExtensionRunner;
   store: AgentStore;
-  uiOptions: (() => HostUiOptions) | undefined;
   runtime: AgentRuntime;
   onSendMessage: ((text: string) => void) | undefined;
   cwd: string;
@@ -786,7 +818,7 @@ function nextNestedId(callerId: string): string {
  *   （扩展）会看到失败并**告诉用户**，而静默成功会让模型名与实际不符却无人察觉。
  */
 function bindCore(options: BindCoreOptions): void {
-  const { runner, store, uiOptions, runtime, onSendMessage, cwd, onError, syncTools } = options;
+  const { runner, store, runtime, onSendMessage, cwd, onError, syncTools } = options;
   const noUi = (what: string) => Promise.reject(new Error(`本项目不支持扩展的「${what}」`));
   runner.bindCore(
     {
@@ -937,17 +969,6 @@ function bindCore(options: BindCoreOptions): void {
       },
     } as never,
   );
-  // UI 在**界面层**造（它要活着的 `tui` 实例，而内核不知道界面的存在）。
-  //
-  // 没给工厂 = 一次性模式（`-p`）或测试 → **不绑 UI**，官方 `hasUI` 就是 false，
-  // 扩展会把交互式工具从清单里摘掉。理由见 `LoadExtensionHostOptions.uiOptions` ——
-  // 给一个空 UI 会让扩展在 `custom()` 里撞上 undefined 的 tui，比没有界面更糟。
-  if (uiOptions !== undefined) {
-    // `as never`：官方的 `ExtensionUIContext` 有 26 个成员（`setWidget` / `setFooter` /
-    // `setHeader` / RPC 弹窗……），本项目只实现 3 个。直接断言会把「缺 23 个」这件事
-    // 藏起来 —— 而它已经写在本文件与 `extension-ui.ts` 的注释里了。
-    runner.setUIContext(createHostUi(uiOptions) as never, 'tui');
-  }
 }
 
 /**

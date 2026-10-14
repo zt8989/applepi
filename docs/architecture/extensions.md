@@ -94,8 +94,14 @@ inline 那条：宿主把**输入区那一格**（composer）换成扩展的组�
 而不是静默 no-op：能开这一格的只有真界面（`tui/app.ts`）与测试探针；
 `tui.ts` 的 `requireUi()` 在界面起来之前给的就是个没有槽位的占位宿主。
 
-没实现的是：`select` / `confirm` / `input`（RPC 宿主那套弹窗协议）、
-`setFooter` / `setHeader`（要接 pi 的应用层布局，见
+`select` / `confirm` / `input`（pi 给 VS Code pendant / Zed 那种宿主的「RPC 弹窗协议」）
+**也实现了**，而且是**两端各出一份、谁先回答谁算数**：终端那一份由 `tuiDialogs` 挂进
+同一个输入区槽位，浏览器那一份由 `web/bridge.ts` 的 `DialogHost` 发过去。这层分销是为
+`ask_user_question`：它按 `ctx.mode` 选路，
+浏览器连上时宿主模式切成 `'rpc'`（`extension-host.ts` 的 `setUiMode`），于是它走
+`select/input` 的逐题回退 —— 而那两个方法在**终端与浏览器里同时弹**。
+
+没实现的是：`setFooter` / `setHeader`（要接 pi 的应用层布局，见
 [surfaces](surfaces.md)「为什么不用 pi 自己的 InteractiveMode」）。
 
 ## 三个接缝
@@ -241,7 +247,9 @@ $ pnpm start
 
 **没实现的方法一律 reject，不静默 no-op。** 一个 `select()` 静默 resolve `undefined`
 的话，扩展会把「用户没选」当成真的答复发回模型 —— `undefined` 在 pi 的契约里明确表示
-「用户取消了」，给假值等于撒谎。
+「用户取消了」，给假值等于撒谎。（`select`/`confirm`/`input` 现在实现了；这条针对的是
+`setFooter`/`setHeader` 那批仍然不接的，以及「两端都没有可用对话框」那一档 ——
+那时 `select()` 仍然 reject。）
 
 非 overlay 形式的 `custom()` 现在**也实现了**（换掉 composer 那一格，见上）。
 宿主没有那一格时（`mountEditorSlot` 缺省）才抛错并说明原因。
@@ -475,9 +483,8 @@ pi 那边是 `SessionManager` **类**，条目来自它自己的 `sessions/*.jso
 
 - **那六个会话操作**（`waitForIdle` / `newSession` / `fork` / `navigateTree` /
   `switchSession` / `reload`）—— pi 的会话层。
-- **`ctx.ui.select` / `confirm` / `input`** —— RPC 宿主那套弹窗协议。本项目的选择有
-  自己的（`openSessionPicker`）。`/search` 选历史结果那条要 `select`，所以它会报
-  「不支持」而不是假装列了。
+- ~~**`ctx.ui.select` / `confirm` / `input`**~~ —— **已接**（见上「两端各出一份」）。
+  `pi-web-access` 的 `/search` 选历史结果那条因此真能用；终端与浏览器同时弹，先答的算。
 - **`setFooter` / `setHeader`** —— 要接 pi 的应用层布局。
 - **`pi.appendEntry`** —— 存「不发给模型」的会话条目（pi 会话层）。给 no-op 而不是报错，
   于是扩展自己的 `if (results.length === 0)` 会走：`/search` 回一句

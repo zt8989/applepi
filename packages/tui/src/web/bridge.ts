@@ -32,6 +32,7 @@ import { abortRun } from '@ela/core/run-control';
 import { isThinkingLevel } from '@ela/core/thinking-level';
 import { deriveStream, type StreamNoticeEntry } from '@ela/core/stream';
 import { expandSkillCommand, skillsInPrompt } from '@ela/core/skills';
+import type { DialogHost } from '@ela/core/extension-ui';
 import {
   WEB_PROTOCOL_VERSION,
   STREAM_NOTICE_ROLE,
@@ -66,6 +67,22 @@ export interface WebBridgeOptions {
   setModel: (provider: string, id: string) => boolean;
   /** 开新会话（换 id → 换文件）。 */
   newSession: () => void;
+  /**
+   * 底栏统计行（TUI 的 `statsLine()`）。给了才发 `statsText` / `statsLevel`。
+   *
+   * 走回调而不是在桥里 import `app.ts` 的 `statsLine`：桥是「内核状态 → 线协议」那一
+   * 层，不该知道 TUI 的组件模块 —— 那个模块会拉进一整棵 pi-tui 的渲染图，而桥在
+   * `--no-web` 之外的所有情形（含测试探针）都会被构造。
+   */
+  stats?: ((state: AgentState) => { text: string; level: 'none' | 'warn' | 'error' }) | undefined;
+  /**
+   * 浏览器连上 / 全断开时叫一声。
+   *
+   * 用来切扩展宿主模式（`setUiMode`）：有浏览器时切 `'rpc'`，`ask_user_question` 那种
+   * 按 `ctx.mode` 选路的扩展才会走 `ctx.ui.select/input` 的逐题回退 —— 而那两个方法
+   * 由本项目分发给**终端与浏览器两端**（见 `extension-ui.ts` 的 `raceDialog`）。
+   */
+  onPresenceChange?: ((connected: boolean) => void) | undefined;
 }
 
 /** 零用量：流式中的部分消息还没账可算。 */
@@ -246,6 +263,61 @@ export class WebBridge {
   private dirty = false;
   /** 合帧定时器；`undefined` = 这一窗还没排。 */
   private frameTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 待回答的对话框：id → 帧 + 收尾函数。见 `requestDialog`。 */
+  private readonly pendingDialogs = new Map<
+    string,
+    { message: WebServerMessage; finish: (value: string | undefined) => void }
+  >();
+  /** 对话框 id 的自增号（只需要在本进程内唯一）。 */
+  private dialogSeq = 0;
+
+  /**
+   * 浏览器侧的对话框宿主（`ctx.ui.select/confirm/input` 走它）。
+   *
+   * 发给**所有**连接：随便哪个标签页回答都算；谁先答就把别处的弹窗关掉。
+   */
+  readonly dialogs: DialogHost = {
+    available: () => this.listeners.size > 0,
+    select: (title, choices, signal) =>
+      this.requestDialog({ method: 'select', title, options: [...choices] }, signal),
+    confirm: (title, message, signal) =>
+      this.requestDialog({ method: 'confirm', title, message }, signal).then((value) => value === 'yes'),
+    input: (title, placeholder, signal) =>
+      this.requestDialog(
+        { method: 'input', title, ...(placeholder !== undefined ? { placeholder } : {}) },
+        signal,
+      ),
+  };
+
+  /** 广播一个对话框请求，等第一个回答（或 `signal` 中断）。 */
+  private requestDialog(
+    request: {
+      method: 'select' | 'confirm' | 'input';
+      title: string;
+      options?: string[];
+      message?: string;
+      placeholder?: string;
+    },
+    signal: AbortSignal,
+  ): Promise<string | undefined> {
+    const id = `ui-${++this.dialogSeq}`;
+    return new Promise<string | undefined>((resolve) => {
+      const finish = (value: string | undefined): void => {
+        if (!this.pendingDialogs.delete(id)) return;
+        // 别的标签页（以及双端里的终端）可能还在看同一个问题 —— 先让它们关掉。
+        this.broadcast({ type: 'ui-cancel', id });
+        resolve(value);
+      };
+      const message: WebServerMessage = { type: 'ui-request', id, ...request };
+      this.pendingDialogs.set(id, { message, finish });
+      if (signal.aborted) {
+        finish(undefined);
+        return;
+      }
+      signal.addEventListener('abort', () => finish(undefined), { once: true });
+      this.broadcast(message);
+    });
+  }
 
   constructor(options: WebBridgeOptions, notices: readonly string[] = []) {
     this.options = options;
@@ -276,10 +348,19 @@ export class WebBridge {
    * 订阅者拿到的东西一个字节都不少。
    */
   subscribe(listener: (message: WebServerMessage) => void): () => void {
-    if (this.listeners.size === 0) this.resync();
-    this.listeners.add(listener);
+    if (this.listeners.size === 0) {
+      this.resync();
+      this.listeners.add(listener);
+      this.options.onPresenceChange?.(true);
+    } else {
+      this.listeners.add(listener);
+    }
+    // 还没回答的对话框补发给这个新连接 —— 没有这一步的话，先弹的对话框在
+    // 「刷新页面 / 后开的标签页」里根本看不到，而服务端还卡在那里等答复。
+    for (const { message } of this.pendingDialogs.values()) listener(message);
     return () => {
-      this.listeners.delete(listener);
+      if (!this.listeners.delete(listener)) return;
+      if (this.listeners.size === 0) this.options.onPresenceChange?.(false);
     };
   }
 
@@ -353,12 +434,20 @@ export class WebBridge {
         this.options.newSession();
         return [];
       }
+      case 'ui-response': {
+        // 第一个回答算数（`finish` 自己判重）。
+        this.pendingDialogs.get(message.id)?.finish(message.cancelled === true ? undefined : message.value);
+        return [];
+      }
       default:
         return [];
     }
   }
 
   dispose(): void {
+    // 等着的对话框先放掉：不放的话扩展的那个 promise 永远不 resolve，
+    // 而它还占着那一刻的工具调用（退出时看着就是「进程不退」）。
+    for (const { finish } of [...this.pendingDialogs.values()]) finish(undefined);
     this.unsubscribe();
     this.listeners.clear();
     if (this.frameTimer !== undefined) {
@@ -371,6 +460,7 @@ export class WebBridge {
   private snapshot(): WebAgentState {
     const state = this.options.store.getState();
     const model = this.options.resolveModel(state.providerName, state.modelId);
+    const stats = this.options.stats?.(state);
     const errorMessage =
       state.stopReason === 'error' || state.stopReason === 'aborted'
         ? state.stopCause === null
@@ -390,6 +480,8 @@ export class WebBridge {
       pendingToolCalls: state.executing.map((tool) => tool.call.id),
       errorMessage,
       toolNames: [...state.toolNames],
+      statsText: stats?.text ?? '',
+      statsLevel: stats?.level ?? 'none',
     };
   }
 

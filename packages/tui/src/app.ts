@@ -87,6 +87,9 @@ import { AssistantMessageComponent } from '@earendil-works/pi-coding-agent/dist/
 import { SkillInvocationMessageComponent } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/skill-invocation-message.js';
 import { UserMessageComponent } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/user-message.js';
 import { ToolExecutionComponent } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/tool-execution.js';
+// `ctx.ui.select/confirm/input` 的终端组件（pi 自己那两个）。深路径导入：从包根引
+// 会把整个交互层（含它自己的启动器）拖进来。
+import { ExtensionInputComponent, ExtensionSelectorComponent } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/index.js';
 import {
   createBashToolDefinition,
   createEditToolDefinition,
@@ -119,7 +122,7 @@ import { piAgentDir } from '@ela/core/pi-config';
 import { extensionForImageMimeType, readClipboardImage } from '@earendil-works/pi-coding-agent/dist/utils/clipboard-image.js';
 import { contextLabels, extensionLabels } from './resource-labels';
 import { contextFilePaths } from '@ela/core/system-prompt';
-import type { HostUiOptions } from '@ela/core/extension-ui';
+import type { DialogHost, HostUiOptions, TuiDialogs } from '@ela/core/extension-ui';
 import type { ExtensionCommands } from '@ela/core/extension-commands';
 import type { ExtensionEntry } from '@ela/core/extension-host';
 import { expandSkillCommand, parseSkillMessage, skillCommands, skillsInPrompt, type SkillInfo } from '@ela/core/skills';
@@ -616,6 +619,13 @@ export interface StatsLine {
   text: string;
   /** 要在 dim 底箱里保持告警色的子段。 */
   warnings: { find: string; paint: (s: string) => string }[];
+  /**
+   * 告警级别（上下文占用超 70% = `warn`、超 90% = `error`）。
+   *
+   * 单独一个字段是给**浏览器**那一侧用的：它拿不到 `warnings` 里的 `paint` 函数（那是
+   * 终端上色的东西），但要能把整行染成黄/红 —— 见 `web/bridge.ts` 的 `statsText`。
+   */
+  level: 'none' | 'warn' | 'error';
 }
 
 /**
@@ -786,6 +796,7 @@ export function statsLine(state: AgentState): StatsLine {
 
   const parts: string[] = [];
   const warnings: StatsLine['warnings'] = [];
+  let level: StatsLine['level'] = 'none';
   if (totals.input > 0) parts.push(`↑${formatTokens(totals.input)}`);
   if (totals.output > 0) parts.push(`↓${formatTokens(totals.output)}`);
   if (totals.cacheRead > 0) parts.push(`R${formatTokens(totals.cacheRead)}`);
@@ -827,6 +838,7 @@ export function statsLine(state: AgentState): StatsLine {
       parts.push(display);
       if (percentValue > 70) {
         warnings.push({ find: display, paint: percentValue > 90 ? red : yellow });
+        level = percentValue > 90 ? 'error' : 'warn';
       }
     } else {
       // 还没有任何一次**有效**调用（会话刚开、或全部失败/被中断）：占用**未知**。
@@ -834,7 +846,7 @@ export function statsLine(state: AgentState): StatsLine {
       parts.push(`?/${formatTokens(contextWindow)}`);
     }
   }
-  return { text: parts.join(' '), warnings };
+  return { text: parts.join(' '), warnings, level };
 }
 
 /**
@@ -1017,6 +1029,11 @@ export interface TuiOptions {
    * 由本函数在 tui 建好之后填上；扩展工具真被调用时读它。
    */
   publishUi?: ((options: HostUiOptions) => void) | undefined;
+  /**
+   * 浏览器侧的对话框宿主（`web/bridge.ts`）。**取值而不是常量** —— 桥在 main.ts 里
+   * 建得比这里早，但调 `runTui` 时传进来的是个 getter，所以总是最新的那个。
+   */
+  dialogs?: (() => DialogHost | undefined) | undefined;
   /**
    * 扩展的 `before_agent_start`（可选）。
    *
@@ -2924,6 +2941,90 @@ export async function runTui(options: TuiOptions): Promise<number> {
     tui.requestRender();
   });
 
+  /**
+   * 扩展的**输入区槽位** —— 非 overlay 的 `custom()` 与三个原生对话框都落在这一格。
+   *
+   * 焦点与文本的存/还都在这里做（pi 在自己的 `showExtensionCustom()` 里也是这么做的）：
+   * 进槽位时把焦点交给扩展组件、记住 composer 里那行字；出槽位时把焦点**还回**
+   * composer，并把那行字还原。
+   *
+   * 为什么焦点必须在这里还：`tui.setFocus()` 是 pi-tui 的进程级状态，而扩展只会在
+   * 自己的 `done` 里 resolve —— 它不知道 composer 是谁。界面是**唯一**知道的那个。
+   */
+  const mountEditorSlot = (component: (Component & { dispose?: () => void }) | undefined): void => {
+    const previous = editorSlotComponent;
+    if (previous !== undefined && previous !== component) {
+      // pi 是直接 `clear()` 掉旧的（它那个 `custom()` 的 promise 就永远不 resolve）；
+      // 这里顺手 dispose，别把旧组件的定时器/监听器留在进程里。
+      try {
+        previous.dispose?.();
+      } catch {
+        // 旧组件的 dispose 失败不该挡住新的上场。
+      }
+    }
+    editorSlotComponent = component;
+    if (component === undefined) {
+      if (editorTextBeforeSlot !== undefined) {
+        editor.setText(editorTextBeforeSlot);
+        editorTextBeforeSlot = undefined;
+      }
+      tui.setFocus(editor);
+    } else {
+      editorTextBeforeSlot = editor.getText();
+      tui.setFocus(component);
+    }
+    // children 变了 —— 必须重设布局（同 setWidget：VStack 的 children 是建的时候定下的）。
+    applyLayout();
+    refresh();
+  };
+
+  /** 挂一个对话框组件，返回拆台函数（先 dispose，再还回 composer）。 */
+  const mountDialog = (component: Component & { dispose?: () => void }): (() => void) => {
+    mountEditorSlot(component);
+    let closed = false;
+    return () => {
+      if (closed) return;
+      closed = true;
+      try {
+        component.dispose?.();
+      } catch {
+        // 与槽位那边同一句：收尾失败不该把用户的答复丢掉。
+      }
+      mountEditorSlot(undefined);
+    };
+  };
+
+  /**
+   * 终端侧的 `ctx.ui.select/confirm/input`（与浏览器那一份在 core 的 `raceDialog` 里并起来）。
+   *
+   * 用 pi 自己那两个组件、挂在**同一个输入区槽位**里 —— 与 `custom()` 的非 overlay 那条路
+   * 同一个位置，扩展看到的布局形态不会因为「走哪条路」而变。
+   */
+  const tuiDialogs: TuiDialogs = {
+    select: (title, choices, done) =>
+      mountDialog(
+        new ExtensionSelectorComponent(title, [...choices], (option) => done(option), () => done(undefined), {
+          tui,
+        }),
+      ),
+    confirm: (title, message, done) =>
+      mountDialog(
+        new ExtensionSelectorComponent(
+          `${title}\n${message}`,
+          ['Yes', 'No'],
+          (option) => done(option === 'Yes'),
+          () => done(false),
+          { tui },
+        ),
+      ),
+    input: (title, placeholder, done) =>
+      mountDialog(
+        new ExtensionInputComponent(title, placeholder, (value) => done(value), () => done(undefined), {
+          tui,
+        }),
+      ),
+  };
+
   // 把活着的界面交给扩展宿主：内核装扩展时界面还没起来（那时只拿到一个待填的引用），
   // 现在 tui / theme / raw input 都有了，扩展的 `ctx.ui.custom()` 才能真的画出东西。
   //
@@ -2971,32 +3072,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
      * 为什么焦点必须在这里还：`tui.setFocus()` 是 pi-tui 的进程级状态，而扩展只会在
      * 自己的 `done` 里 resolve —— 它不知道 composer 是谁。界面是**唯一**知道的那个。
      */
-    mountEditorSlot: (component) => {
-      const previous = editorSlotComponent;
-      if (previous !== undefined && previous !== component) {
-        // pi 是直接 `clear()` 掉旧的（它那个 `custom()` 的 promise 就永远不 resolve）；
-        // 这里顺手 dispose，别把旧组件的定时器/监听器留在进程里。
-        try {
-          previous.dispose?.();
-        } catch {
-          // 旧组件的 dispose 失败不该挡住新的上场。
-        }
-      }
-      editorSlotComponent = component;
-      if (component === undefined) {
-        if (editorTextBeforeSlot !== undefined) {
-          editor.setText(editorTextBeforeSlot);
-          editorTextBeforeSlot = undefined;
-        }
-        tui.setFocus(editor);
-      } else {
-        editorTextBeforeSlot = editor.getText();
-        tui.setFocus(component);
-      }
-      // children 变了 —— 必须重设布局（同 setWidget：VStack 的 children 是建的时候定下的）。
-      applyLayout();
-      refresh();
-    },
+    mountEditorSlot,
+    tuiDialogs,
+    ...(options.dialogs !== undefined ? { dialogs: options.dialogs } : {}),
   });
 
   // 开场报一下装了哪些 skill —— 与 pi 同形（`[Skills]` 一节，逗号分隔的名字）。

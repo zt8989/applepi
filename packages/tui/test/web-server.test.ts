@@ -85,6 +85,8 @@ async function start(): Promise<{
   bridge: WebBridge;
   store: ReturnType<typeof createAgentStore>;
   dist: string;
+  /** `onPresenceChange` 收到的序列（浏览器连上 / 全断开）。 */
+  presence: boolean[];
   dispose(): Promise<void>;
 }> {
   const faux = createFauxRuntime();
@@ -101,6 +103,7 @@ async function start(): Promise<{
   } as unknown as Model<Api>;
 
   const resolveModel = (provider: string): Model<Api> | null => (provider === 'faux' ? model : null);
+  const presence: boolean[] = [];
   const bridge = new WebBridge(
     {
       store,
@@ -109,6 +112,7 @@ async function start(): Promise<{
       setModel: () => true,
       newSession: () => {},
       resolveModel,
+      onPresenceChange: (connected) => presence.push(connected),
     },
     ['测试诊断一行'],
   );
@@ -140,6 +144,7 @@ async function start(): Promise<{
     bridge,
     store,
     dist,
+    presence,
     dispose: async () => {
       await server.close();
       bridge.dispose();
@@ -439,6 +444,69 @@ test('bridge：`/skill:<名字>` 展开成 <skill> 块再发（文件在服务�
     bridge.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('bridge：扩展对话框广播给所有连接，第一个回答算数', async () => {
+  const ctx = await start();
+  const a = await connect(`${ctx.server.url.replace('http', 'ws')}ws`);
+  const b = await connect(`${ctx.server.url.replace('http', 'ws')}ws`);
+  try {
+    await a.waitFor('hello', (m) => m.type === 'hello');
+    await b.waitFor('hello', (m) => m.type === 'hello');
+    const pending = ctx.bridge.dialogs.select('选一个', ['x', 'y'], new AbortController().signal);
+    const request = await a.waitFor('ui-request', (m) => m.type === 'ui-request');
+    if (request.type !== 'ui-request') throw new Error('unreachable');
+    assert.equal(request.method, 'select');
+    assert.deepEqual(request.options, ['x', 'y']);
+    // 广播给所有连接（哪个标签页答都算）。
+    await b.waitFor('ui-request', (m) => m.type === 'ui-request' && m.id === request.id);
+    b.send({ type: 'ui-response', id: request.id, value: 'y' });
+    assert.equal(await pending, 'y');
+    // 另一个标签页收到「关掉弹窗」。
+    await a.waitFor('ui-cancel', (m) => m.type === 'ui-cancel' && m.id === request.id);
+  } finally {
+    a.close();
+    b.close();
+    await ctx.dispose();
+  }
+});
+
+test('bridge：对话框被 abort 时回 undefined 并发 ui-cancel（终端先答了那条路）', async () => {
+  const ctx = await start();
+  const client = await connect(`${ctx.server.url.replace('http', 'ws')}ws`);
+  try {
+    await client.waitFor('hello', (m) => m.type === 'hello');
+    const controller = new AbortController();
+    const pending = ctx.bridge.dialogs.input(
+      '说点什么',
+      '占位',
+      controller.signal,
+    );
+    const request = await client.waitFor('ui-request', (m) => m.type === 'ui-request');
+    if (request.type !== 'ui-request') throw new Error('unreachable');
+    assert.equal(request.placeholder, '占位');
+    controller.abort();
+    assert.equal(await pending, undefined);
+    await client.waitFor('ui-cancel', (m) => m.type === 'ui-cancel' && m.id === request.id);
+  } finally {
+    client.close();
+    await ctx.dispose();
+  }
+});
+
+test('bridge：第一个连接 → true、最后一个断开 → false（用来切扩展宿主模式）', async () => {
+  const ctx = await start();
+  const a = await connect(`${ctx.server.url.replace('http', 'ws')}ws`);
+  await a.waitFor('hello', (m) => m.type === 'hello');
+  const b = await connect(`${ctx.server.url.replace('http', 'ws')}ws`);
+  await b.waitFor('hello', (m) => m.type === 'hello');
+  assert.deepEqual(ctx.presence, [true], '第二个连接不该再叫一次 true');
+  a.close();
+  b.close();
+  // 断开是异步的，给它一拍。
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.deepEqual(ctx.presence, [true, false]);
+  await ctx.dispose();
 });
 
 /**

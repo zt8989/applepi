@@ -1,10 +1,10 @@
 /**
  * `ctx.ui` 的宿主实现 —— 扩展界面能力的**唯一**接缝。
  *
- * ## 只给 `custom()` 真的，其余给「能明说不行」的实现
+ * ## 两块能力：`custom()`（组件）与 `select/confirm/input`（原生对话框）
  *
- * 第一个接的扩展（`ask_user_question`）要的是：把一块自己的组件铺进来、拿键盘焦点，
- * 用户答完或按 ESC 之后 resolve 一个结果。它有**两种形态**，pi 两种都实现：
+ * 第一块是 `custom()` —— 把一块扩展自己的组件铺进来、拿键盘焦点，用户答完或按 ESC
+ * 之后 resolve 一个结果。它有**两种形态**，pi 两种都实现：
  *
  * | `custom()` 的参数 | pi 的落点 | 本项目的落点 |
  * | --- | --- | --- |
@@ -18,9 +18,15 @@
  * `mountEditorSlot`，把组件放进输入区那一格（pi 的 `editorContainer.clear();
  * addChild(component)`）。
  *
- * 它**不要**的：`select` / `confirm` / `input` 那套 RPC 弹窗协议（给 VS Code pendant、
- * Zed 那种宿主用的）、`setFooter` / `setHeader`（那要接 pi 的应用层布局，
- * 本项目刻意不接，见 `surfaces.md`）。
+ * 第二块是 `select` / `confirm` / `input`（pi 给 VS Code pendant / Zed 那种宿主的
+ * 「RPC 弹窗协议」）。本项目**两个界面各出一份，谁先回答谁算数**（`raceDialog`）：
+ * 终端那一份由 `tui/app.ts` 的 `tuiDialogs` 挂进同一个输入区槽位，浏览器那一份由
+ * `web/bridge.ts` 的 `DialogHost` 发过去。这层双端分销是为 `ask_user_question`：
+ * 它按 `ctx.mode` 选路（`'rpc'` 走 `select/input` 逐题回退），而本项目在
+ * **浏览器连上时**把模式切成 `'rpc'`（见 `extension-host.ts` 的 `setUiMode`）——
+ * 于是终端与浏览器都能答同一份问卷。
+ *
+ * 刻意**不接**的：`setFooter` / `setHeader`（那要接 pi 的应用层布局，见 `surfaces.md`）。
  *
  * ## 没实现的方法怎么给
  *
@@ -54,9 +60,55 @@ export interface CustomOptions {
   onHandle?: (handle: unknown) => void;
 }
 
+/**
+ * 官方对话框方法的选项（`ExtensionUIDialogOptions` 里我们用得到的两个）。
+ *
+ * 官方那个类型每个方法还带 `timeout`；本项目**不用**它（没人调），所以不收。
+ */
+export interface DialogOptions {
+  signal?: AbortSignal | undefined;
+}
+
+/**
+ * **终端侧**的原生对话框（`select` / `confirm` / `input`）。
+ *
+ * 由 TUI 提供（`app.ts` 的 `tuiDialogs`），**不在 core 里造组件**：那三个组件在
+ * pi-coding-agent 的交互层，core 静态引它等于把所有运行模式（含一次性 `-p`、测试）
+ * 都拖进 TUI 组件图。三个方法都返回「拆台」函数。
+ */
+export interface TuiDialogs {
+  select(title: string, options: readonly string[], done: (value: string | undefined) => void): () => void;
+  confirm(title: string, message: string, done: (value: boolean) => void): () => void;
+  input(title: string, placeholder: string | undefined, done: (value: string | undefined) => void): () => void;
+}
+
+/**
+ * **浏览器侧**的对话框宿主（`web/bridge.ts` 实现）。
+ *
+ * `available()` 是「现在有浏览器连着吗」—— 没有就只剩终端那一份。每个调用带一个
+ * `signal`：先回答的那一端赢，另一端据此把弹窗撤掉。
+ */
+export interface DialogHost {
+  available(): boolean;
+  select(title: string, options: readonly string[], signal: AbortSignal): Promise<string | undefined>;
+  confirm(title: string, message: string, signal: AbortSignal): Promise<boolean>;
+  input(title: string, placeholder: string | undefined, signal: AbortSignal): Promise<string | undefined>;
+}
+
 /** 扩展能用的界面能力（比官方的 `ExtensionUIContext` 窄：只留真的能做的）。 */
 export interface ExtensionHostUi {
   custom<T>(factory: CustomFactory<T>, options?: CustomOptions): Promise<T>;
+  /**
+   * 选项列表对话框。**终端与浏览器各出一份，谁先回答谁算数**。
+   *
+   * 两端都可用是刻意的：终端那边在看、浏览器那边在点，都可能先给出答案。
+   * 两端都没有（一次性 `-p`、纯探测宿主）→ reject —— 与这里其他方法同一口径（不静默给假值）。
+   */
+  select(title: string, choices: readonly string[], dialogOptions?: DialogOptions): Promise<string | undefined>;
+  /** 是非题。终端是 `Yes` / `No` 两个选项。 */
+  confirm(title: string, message: string, dialogOptions?: DialogOptions): Promise<boolean>;
+  /** 单行文本输入。取消给 `undefined`。 */
+  input(title: string, placeholder?: string, dialogOptions?: DialogOptions): Promise<string | undefined>;
   notify(message: string, type?: 'info' | 'warning' | 'error'): void;
   /**
    * 活的 pi theme 对象。
@@ -104,6 +156,58 @@ export interface HostUiOptions {
    * 的症状是「扩展在等一个永远不会出现的界面」，最难查。
    */
   mountEditorSlot?(component: (Component & { dispose?: () => void }) | undefined): void;
+  /**
+   * 终端侧的原生对话框（`select` / `confirm` / `input`）。TUI 提供；不给 = 这个宿主
+   * 只有浏览器那一份（或什么都没有）。
+   */
+  tuiDialogs?: TuiDialogs | undefined;
+  /**
+   * 浏览器侧的对话框宿主。**取值而不是常量** —— 桥创建得比 UI 晚（见 main.ts），
+   * 所以这里每次用时现读。不给 = 这个宿主没有浏览器一侧。
+   */
+  dialogs?: (() => DialogHost | undefined) | undefined;
+}
+
+/**
+ * 一次对话框：**终端与浏览器各来一份，谁先回答谁算数**。
+ *
+ * 先回答的那一端赢，另一端立刻撤掉（终端组件卸下 / 浏览器弹窗收到 `ui-cancel`）。
+ */
+function raceDialog<T>(options: {
+  tui?: ((done: (value: T | undefined) => void) => () => void) | undefined;
+  browser?: ((signal: AbortSignal) => Promise<T | undefined>) | undefined;
+  signal?: AbortSignal | undefined;
+  missing: () => Error;
+}): Promise<T | undefined> {
+  return new Promise<T | undefined>((resolve, reject) => {
+    let settled = false;
+    const controller = new AbortController();
+    let teardownTui: (() => void) | undefined;
+    const finish = (value: T | undefined): void => {
+      if (settled) return;
+      settled = true;
+      try {
+        teardownTui?.();
+      } catch {
+        // 拆台失败不该把用户的答复丢掉。
+      }
+      controller.abort();
+      resolve(value);
+    };
+    if (options.tui === undefined && options.browser === undefined) {
+      reject(options.missing());
+      return;
+    }
+    if (options.signal?.aborted === true) {
+      finish(undefined);
+      return;
+    }
+    options.signal?.addEventListener('abort', () => finish(undefined), { once: true });
+    teardownTui = options.tui?.(finish);
+    // 浏览器那条路出错（连接断了）就当成「这一端没答」—— **不**把整次对话报成失败，
+    // 终端那份还开着。
+    void options.browser?.(controller.signal).then(finish, () => finish(undefined));
+  });
 }
 
 function noticePrefix(type: string | undefined): string {
@@ -233,6 +337,57 @@ export function createHostUi(source: () => HostUiOptions): ExtensionHostUi {
             reject(error);
           },
         );
+      });
+    },
+
+    select: (title, options, opts) => {
+      const host = source();
+      const browser = host.dialogs?.();
+      return raceDialog<string>({
+        ...(host.tuiDialogs !== undefined
+          ? { tui: (done: (value: string | undefined) => void) => host.tuiDialogs!.select(title, options, done) }
+          : {}),
+        ...(browser?.available() === true
+          ? { browser: (signal: AbortSignal) => browser.select(title, options, signal) }
+          : {}),
+        ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
+        missing: () => new Error('本宿主没有可用的对话框（终端与浏览器都没有）'),
+      });
+    },
+
+    confirm: (title, message, opts) => {
+      const host = source();
+      const browser = host.dialogs?.();
+      return raceDialog<boolean>({
+        ...(host.tuiDialogs !== undefined
+          ? {
+              tui: (done: (value: boolean | undefined) => void) =>
+                host.tuiDialogs!.confirm(title, message, (value) => done(value)),
+            }
+          : {}),
+        ...(browser?.available() === true
+          ? { browser: (signal: AbortSignal) => browser.confirm(title, message, signal) }
+          : {}),
+        ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
+        missing: () => new Error('本宿主没有可用的对话框（终端与浏览器都没有）'),
+      }).then((value) => value === true);
+    },
+
+    input: (title, placeholder, opts) => {
+      const host = source();
+      const browser = host.dialogs?.();
+      return raceDialog<string>({
+        ...(host.tuiDialogs !== undefined
+          ? {
+              tui: (done: (value: string | undefined) => void) =>
+                host.tuiDialogs!.input(title, placeholder, done),
+            }
+          : {}),
+        ...(browser?.available() === true
+          ? { browser: (signal: AbortSignal) => browser.input(title, placeholder, signal) }
+          : {}),
+        ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
+        missing: () => new Error('本宿主没有可用的对话框（终端与浏览器都没有）'),
       });
     },
 
