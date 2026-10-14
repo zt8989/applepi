@@ -14,7 +14,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { stripTerminalSequences } from '@earendil-works/pi-tui';
-import { renderTranscript, TranscriptChunks, renderTail, TraceChunks, workingStatusText } from '../src/app';
+import {
+  renderTranscript,
+  renderMessage,
+  StreamingLines,
+  TranscriptChunks,
+  renderTail,
+  TraceChunks,
+  workingStatusText,
+} from '../src/app';
 import { createTraceTree, appendNode, patchNode, renderTree, traceStats, type TraceTree } from '@ela/core/trace';
 import { setupTheme } from '../src/theme';
 import type { AgentState } from '@ela/core/state';
@@ -47,6 +55,10 @@ function stateOf(messages: Message[], extra: Partial<AgentState> = {}): AgentSta
 
 const noCards: { text: string; at: number }[] = [];
 
+/** 时间预算那道闸的下限（app.ts 的 `STREAM_MIN_RENDER_MS`）—— 要等过它才保证重排。 */
+const STREAM_BUDGET_MS = 40;
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /** 轨迹块渲染出来的行（剔色 + 去空行）—— 与 tui-render.test.ts 里那个同形。 */
 function linesOf(chunks: TraceChunks, width = 80): string[] {
   return stripTerminalSequences(chunks.render(width).join('\n'))
@@ -69,7 +81,7 @@ test('分块渲染的内容与整段渲染逐行一致（优化不能改画面�
   assert.deepEqual(viaChunks, viaWhole);
 });
 
-test('流式的那一段画在最后，且只有它在变', () => {
+test('流式的那一段画在最后，且只有它在变', async () => {
   const chunks = new TranscriptChunks();
   const base = stateOf(history(3));
   chunks.update(base, 80, false, noCards);
@@ -84,7 +96,10 @@ test('流式的那一段画在最后，且只有它在变', () => {
   const after = stripTerminalSequences(chunks.render(80).join('\n'));
   assert.ok(after.includes('正在生成的话'), `流式文字要画出来：${after}`);
   assert.ok(chunks.render(80).length > before, '多了一段，行数要变多');
-  // 再来一帧：内容变长，仍只有尾部在变。
+  // 再来一帧：内容变长。**这一帧可能被时间预算挡掉**（见 app.ts 的 `STREAM_MIN_RENDER_MS`：
+  // 「上一次重排花了多久，下一次就至少隔三倍」）—— 所以断言是「迟早会补上」，
+  // 而不是「立刻可见」。补上的时机是下一帧越过预算之后。
+  await sleep(STREAM_BUDGET_MS + 5);
   chunks.update(
     stateOf(history(3), { phase: 'thinking', streamingText: '正在生成的话，而且更长了' }),
     80,
@@ -375,13 +390,17 @@ test('renderTail 里不再画重试那行（它搬到了 composer 的上框线�
   );
 });
 
-test('性能：流式时每帧只重画尾部（1200 条历史，每帧必须在 16ms 预算内）', () => {
+test('性能：流式时每帧只重画尾部（1200 条历史，每帧必须在 16ms 预算内）', async () => {
   const chunks = new TranscriptChunks();
   const history400 = history(400);
   chunks.update(stateOf(history400), 100, false, noCards);
-  const frames = 30;
-  const started = Date.now();
+  const frames = 24;
+  let spent = 0;
+  const renderedBefore = chunks.streamRenderCount;
   for (let i = 0; i < frames; i += 1) {
+    // **等过时间预算那道闸**：这一帧要真的重排，否则量的是「被跳过有多快」——那就白测了。
+    await sleep(STREAM_BUDGET_MS + 5);
+    const t0 = Date.now();
     chunks.update(
       stateOf(history400, { phase: 'thinking', streamingText: `片段 ${i}` }),
       100,
@@ -389,11 +408,17 @@ test('性能：流式时每帧只重画尾部（1200 条历史，每帧必须在
       noCards,
     );
     chunks.render(100);
+    spent += Date.now() - t0;
   }
-  const per = (Date.now() - started) / frames;
+  const per = spent / frames;
   // pi-tui 的 MIN_RENDER_INTERVAL_MS 是 16ms —— 超过它流式就会堆积、界面发涩。
   // 留 4 倍余量仍然远低于阈值：整段重绘在这个规模下是 ~300ms/帧。
   assert.ok(per < 64, `每帧 ${per.toFixed(1)}ms，超过预算（整段重绘是 ~300ms/帧）`);
+  // 钉一下「这一批真的重排过」—— 不然上面那个断言在「每帧都被预算跳过」时也会绿。
+  assert.ok(
+    chunks.streamRenderCount - renderedBefore >= frames,
+    `只重排了 ${chunks.streamRenderCount - renderedBefore} 次 / ${frames} 帧`,
+  );
 });
 
 test('性能：首帧要为整段历史付出代价（一次性），但不该是每帧都付', () => {
@@ -421,6 +446,138 @@ test('性能：首帧要为整段历史付出代价（一次性），但不该�
     second * 5 < Math.max(whole, 50),
     `第二帧 ${second}ms 仍然太慢（整段 ${whole}ms）：历史块没被缓存住`,
   );
+});
+
+// ══════════════════ 流式文字的增量排版（StreamingLines） ══════════════════
+
+const STREAM_WIDTH = 72;
+
+/**
+ * 流式里真会出现的各种块。每一条都**含段边界**（空行）—— 增量排版只在段边界处切，
+ * 所以语料必须覆盖「切点附近是围栏/列表/表格/公式」这些会让切分变成错的地方。
+ */
+const STREAM_CORPUS: readonly string[] = [
+  '第一段中文，写得长一点，长到必须折行才行，否则测不出折行位置对不对。\n\n第二段也一样长，长到折行。\n\n第三段收尾。',
+  '开头一句。\n\n- 列表甲，写得长一些以便折行。\n\n- 列表乙。\n\n1. 有序甲\n\n2. 有序乙\n\n收尾。',
+  '看代码：\n\n```ts\nconst a = 1;\n\nconst b = 2; // 围栏里的空行不算段边界\n```\n\n解释一句，后面还有很多字要写，确保它会折行。',
+  '未闭合的围栏（流式中途）：\n\n```\nlet x = 1;\n\n\n还有半截',
+  '# 标题\n\n正文一段，长一点长一点长一点长一点长一点。\n\n## 小标题\n\n又一段，也是长一点长一点长一点。',
+  '| 列 | 值 |\n| --- | --- |\n| 甲 | 1 |\n\n表格后的一段话，写长一点凑长度凑长度凑长度。',
+  '行内 `code` 与**加粗**混在一段里，再写点中文凑长度凑长度凑长度。\n\n> 引用一段，也写长一点凑长度凑长度。\n\n结束。',
+  '$$\nE = mc^2\n\n\\text{块里的空行不算段边界}\n$$\n\n公式后的一段话，凑长度凑长度。',
+  '缩进代码：\n\n    第一行代码\n\n    空行后面还是代码\n\n普通段落，凑长度凑长度凑长度凑长度。',
+  '纯段落一。\n\n纯段落二。\n\n纯段落三。\n\n纯段落四。\n\n纯段落五。',
+];
+
+/**
+ * **等价性**：增量排版拼出来的行，必须与官方组件「整段排一遍」逐字相同。
+ *
+ * 这条是拼接的地基：分段渲染再拼起来，只有在段边界处才与整段渲染等价。
+ * 切分器误把切点落在围栏里（或漏了段边界），症状就是「流式时看着好好的、
+ * 一转向下就变了形」—— 所以这里连**标记位**（OSC 133）都比。
+ */
+test('流式增量排版：与「整段排一遍」逐字一致（含围栏/表格/公式/缩进代码）', () => {
+  for (const text of STREAM_CORPUS) {
+    const whole = renderMessage(
+      stateOf([]),
+      { role: 'assistant', content: [{ type: 'text', text }] } as Message,
+      STREAM_WIDTH,
+      false,
+    );
+    const incremental = new StreamingLines().render(text, STREAM_WIDTH, false, false);
+    assert.deepEqual(
+      incremental,
+      whole,
+      `不一致（${JSON.stringify(text.slice(0, 24))}…）：\n增量=${JSON.stringify(incremental.slice(0, 6))}\n整段=${JSON.stringify(whole.slice(0, 6))}`,
+    );
+  }
+});
+
+/**
+ * **增量性**：逐 token 追加出来的结果，必须与「一次性喂全文」完全相同。
+ *
+ * 这条守的是切分**游标**：游标错位（少扫/多扫一个字符）在等价性那条里看不出来
+ * （那条只喂一次），而真实流式是一段一段喂进来的。
+ */
+test('流式增量排版：逐 token 追加 == 一次性喂全文', () => {
+  for (const text of STREAM_CORPUS) {
+    const oneShot = new StreamingLines().render(text, STREAM_WIDTH, false, false);
+    const streamed = new StreamingLines();
+    let lines: string[] = [];
+    // 每次只多几个字：既踩「行没写完」，也踩「正好切在段边界上」。
+    for (let i = 1; i <= text.length; i += 3) {
+      lines = streamed.render(text.slice(0, i), STREAM_WIDTH, false, false);
+    }
+    lines = streamed.render(text, STREAM_WIDTH, false, false);
+    assert.deepEqual(lines, oneShot, `逐块追加的结果与一次喂全文不一致（${JSON.stringify(text.slice(0, 24))}…）`);
+  }
+});
+
+/**
+ * **成本**：一段很长的回答流式写进来时，最后一帧的重排成本不该还随整段长度线性增长。
+ *
+ * 病根是「每 token 把整段回答重新 markdown 解析一遍」：实测 60K 字时单帧 25ms，
+ * 而 token 间隔只有几十毫秒 —— 主线程就此被吃满（界面「卡住」）。增量排版之后，
+ * 单帧只重排**当前这一段**，与整段长度无关。
+ *
+ * 断言用**比值**而不是墙钟：与「整段排一遍」比，必须便宜一个数量级。留了 5 倍余量，
+ * 免得在慢机器上抖出去。
+ */
+test('流式增量排版：单帧成本不随整段回答增长（O(段) 而不是 O(整段)）', () => {
+  const paragraph = '这一段是中文，用来把回答撑长：先看结论，再看依据，最后给一个反例。\n\n';
+  const paragraphs = 500;
+  const full = paragraph.repeat(paragraphs);
+
+  const wholeStarted = performance.now();
+  renderMessage(stateOf([]), { role: 'assistant', content: [{ type: 'text', text: full }] } as Message, STREAM_WIDTH, false);
+  const wholeMs = performance.now() - wholeStarted;
+
+  const streamed = new StreamingLines();
+  for (let i = 1; i <= paragraphs; i += 1) streamed.render(paragraph.repeat(i), STREAM_WIDTH, false, false);
+  const lastStarted = performance.now();
+  streamed.render(full, STREAM_WIDTH, false, false);
+  const lastMs = performance.now() - lastStarted;
+
+  assert.ok(
+    lastMs * 5 < wholeMs,
+    `最后一帧 ${lastMs.toFixed(2)}ms 与整段一次重排 ${wholeMs.toFixed(1)}ms 一个量级（增量没生效）`,
+  );
+});
+
+/**
+ * **时间预算**：连着来的 token 不必每个都排一遍。
+ *
+ * 增量排版能治「一段很长」，治不了「模型不写空行」——那时尾巴就是整段。这道闸按
+ * **上一次花了多久**推下一次的最小间隔（见 app.ts 的 `streamIntervalMs`），
+ * 所以连着的 50 个 token 只会重排少数几次；而隔过预算之后再来一帧，最新的全文一定补上。
+ */
+test('流式：连着来的 token 被时间预算合并，隔一拍后补上最新全文', async () => {
+  const chunks = new TranscriptChunks();
+  const base = stateOf(history(2));
+  chunks.update(base, 100, false, noCards);
+  const before = chunks.streamRenderCount;
+
+  for (let i = 1; i <= 50; i += 1) {
+    chunks.update(
+      stateOf(history(2), { phase: 'thinking', streamingText: '甲'.repeat(i) }),
+      100,
+      false,
+      noCards,
+    );
+  }
+  const rendered = chunks.streamRenderCount - before;
+  assert.ok(rendered < 5, `50 个 token 不该重排 ${rendered} 次（时间预算没生效）`);
+
+  await sleep(STREAM_BUDGET_MS + 5);
+  chunks.update(
+    stateOf(history(2), { phase: 'thinking', streamingText: '甲'.repeat(50) }),
+    100,
+    false,
+    noCards,
+  );
+  // 中文会在 100 列里折行，所以比之前把空白全去掉（看的是「是否出现这 50 个字」）。
+  const flat = stripTerminalSequences(chunks.render(100).join('\n')).replace(/\s+/g, '');
+  assert.ok(flat.includes('甲'.repeat(50)), '隔过预算之后该把最新全文补上');
 });
 
 // ══════════════════════ 轨迹侧的增量与复杂度 ══════════════════════

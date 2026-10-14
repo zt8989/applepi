@@ -3780,6 +3780,242 @@ export function renderMessage(
 // ══════════════════════════ 对话区：增量渲染 ══════════════════════════
 
 /**
+ * 流式块的**时间预算**：两次重排至少隔多久、最多隔多久（ms）。
+ *
+ * ## 为什么光有增量排版还不够
+ *
+ * 增量排版（`StreamingLines`）把每 token 的成本从 O(整段回答) 降到 O(当前那一段)，
+ * 但「一段」本身可以长得没法看：模型写长段落、或一大段代码围栏在流式里，
+ * 那一段就是几十 KB —— 每 token 重排它仍然要几十毫秒（实测 60K 字 ≈ 25ms/次），
+ * 主线程照样被吃满。
+ *
+ * 所以再加一道闸：**上一次花了多久，下一次就至少等多倍**（见 `streamIntervalMs`），
+ * 让流式重排最多占掉主线程的三分之一。丢几帧中间态不影响正确性：
+ * 下一个 token 一定会再来问一次，而收工时那块会被整条消息替掉。
+ */
+const STREAM_MIN_RENDER_MS = 40;
+const STREAM_MAX_RENDER_MS = 300;
+
+/**
+ * 官方组件给首行/末行加的那两个 OSC 133 标记。
+ *
+ * `assistant-message.js` 的 `render()` 把 `133;A` 拼在第一行前面、`133;B`+`133;C`
+ * 拼在最后一行前面（终端靠它们做「跳到上一个提问」）。整段一次渲染时它们只出现在
+ * 最外两端；**增量拼出来的行列表里，中间那几段的末标记必须去掉**，否则会凭空多出
+ * 一个「提问结束」边界（pi-tui 自己也是这么剥的，见 `layout.js` 的 `OSC133_ZONE_PREFIX`）。
+ */
+const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
+
+/**
+ * 增量切分器的扫面状态。
+ *
+ * 跨帧复用：每个 token 只扫**新追加的**那几个字符。不这么做的话，每 token 重扫
+ * 整段又是 O(整段回答) —— 等于把增量排版省下的钱又花回去。
+ */
+interface StreamScan {
+  /** 已经扫到哪儿了。 */
+  pos: number;
+  /** 围栏代码块：`` ` `` / `~`；空字符串 = 不在围栏里。 */
+  fence: string;
+  /** 围栏至少多长（≥ 这个数才算闭合）。 */
+  fenceLen: number;
+  /** 在 `$$` / `\[` 公式块里。 */
+  latex: boolean;
+  /** 上一行是缩进代码（4 空格或 tab）—— 那种空行不断代码块，不能拿它切。 */
+  prevIndented: boolean;
+  /** 刚看到的那个空行切点（还没定），下一行到了才知道它安不安全。 */
+  pending: number;
+}
+
+function blankScan(): StreamScan {
+  return { pos: 0, fence: '', fenceLen: 0, latex: false, prevIndented: false, pending: -1 };
+}
+
+/** 一行是不是围栏的开/闭（`\u0060\u0060\u0060` 或 `~~~`，前导空格 ≤ 3）。 */
+function fenceOf(line: string, char: string): number {
+  const trimmed = line.replace(/^ {0,3}/, '');
+  let n = 0;
+  while (n < trimmed.length && trimmed[n] === char) n += 1;
+  return n >= 3 ? n : 0;
+}
+
+/**
+ * 从 `state.pos` 往后扫，返回「最后一个可以安全切开的偏移」（切点之后是新段的开头）；
+ * 没有新的就返回 -1。
+ *
+ * ## 什么算「安全」
+ *
+ * 切点必须落在一个**段边界**（空行）之后，且**不在围栏代码块 / 公式块里**；
+ * 空行前一行不能是缩进代码（那种空行不断代码块），后一行也不能以空白开头
+ * （否则那段会以缩进开头，而官方组件会 `trim()` 掉缩进 —— 缩进代码、列表续行就这么变形）。
+ * 因为 markdown 里只有段边界处「分开渲染再拼起来」才与「整段一次渲染」等价 ——
+ * 这条等价性是拼接的地基，它错了症状就是流式时看着好好的、一转向下就变了形。
+ */
+function advanceStreamSplit(text: string, state: StreamScan): number {
+  let cut = -1;
+  let i = state.pos;
+  while (i < text.length) {
+    const nl = text.indexOf('\n', i);
+    if (nl === -1) break; // 这一行还没写完：停在行首，下次连它一起重扫
+    const line = text.slice(i, nl);
+    const trimmed = line.trim();
+    const after = nl + 1;
+
+    if (state.fence !== '') {
+      // 围栏里：只看闭围栏
+      const n = fenceOf(line, state.fence);
+      if (n >= state.fenceLen && trimmed === state.fence.repeat(n)) {
+        state.fence = '';
+        state.fenceLen = 0;
+      }
+      state.pending = -1;
+    } else if (state.latex) {
+      if (trimmed.endsWith('$$') || trimmed.endsWith('\\]')) state.latex = false;
+      state.pending = -1;
+    } else if (trimmed === '') {
+      // 段边界（候选）。上一行是缩进代码就不算 —— 那种空行不断代码块。
+      if (!state.prevIndented) state.pending = after;
+    } else {
+      // 空行能不能当切点，由**这一行**定：以空白开头的行（缩进代码、列表续行）
+      // 排在段首会被官方组件的 `text.trim()` 吃掉缩进，于是渲染成另一样东西。
+      if (state.pending !== -1) {
+        if (!/^[ \t]/.test(line)) cut = state.pending;
+        state.pending = -1;
+      }
+      const backtick = fenceOf(line, '`');
+      if (backtick > 0) {
+        state.fence = '`';
+        state.fenceLen = backtick;
+      } else {
+        const tilde = fenceOf(line, '~');
+        if (tilde > 0) {
+          state.fence = '~';
+          state.fenceLen = tilde;
+        } else if (trimmed === '$$' || trimmed === '\\[') {
+          state.latex = true;
+        }
+      }
+    }
+    state.prevIndented = /^(?: {4}|\t)/.test(line);
+    state.pos = after;
+    i = after;
+  }
+  return cut;
+}
+
+/**
+ * 把一段拼到已有行后面（见 `OSC133_ZONE_PREFIX` 与 `StreamingLines`）。
+ *
+ * - 第一段原样用（它自带首尾两个标记，与整段一次渲染的第一段逐字相同）；
+ * - 后面的段去掉自己的开头空行（那是 `Spacer(1)` 的痕迹）与末行标记；
+ * - 段与段之间补**一个整宽空行** —— 与整段一次渲染时两段之间的那一行逐字相同（实测）。
+ */
+function joinStreamPart(lines: string[], part: string[], width: number, isLast: boolean): string[] {
+  if (part.length === 0) return lines;
+  const stripTail = (rows: string[]): string[] => {
+    if (rows.length === 0) return rows;
+    const out = [...rows];
+    out[out.length - 1] = out[out.length - 1]!.replace(OSC133_ZONE_PREFIX, '');
+    return out;
+  };
+  if (lines.length === 0) return isLast ? part : stripTail(part);
+  const body = part.slice(1);
+  if (body.length === 0) return lines;
+  return [
+    ...stripTail(lines),
+    ' '.repeat(width),
+    ...(isLast ? body : stripTail(body)),
+  ];
+}
+
+/**
+ * 流式文字的**增量排版**。
+ *
+ * ## 病根
+ *
+ * 官方组件的形状是「给一段文字，让 markdown 从头排一遍」。而流式是**追加**：
+ * 每个 token 都把整段回答重新 lex 一次（profile 里 lexer 里那个 LaTeX 扩展正则一个人
+ * 就占了 19% self time）、行也全部重折一遍。实测每 token：回答 10K 字 2.4ms、
+ * 30K 字 7.8ms、60K 字 24.9ms —— 累起来是 O(n²)，主线程就此被吃满
+ * （"卡住"），每帧再造一遍整段字符串（内存尖峰）。
+ *
+ * ## 做法
+ *
+ * 按**段边界**把已经很长的回答切成「定稿的段落」与「正在长的尾巴」：
+ *
+ *   - 定稿的段落只排一次，排完就连行一起缓存（`settled` / `lines`）；
+ *   - 每帧只重排尾巴 —— 尾巴在下一个空行到来前一直很短；
+ *   - 拼接用 `joinStreamPart`，等价性由那条「段边界处分开渲染 = 整段渲染」保证。
+ *
+ * 于是每 token 的成本从 O(整段回答) 变成 O(当前这一段)；只剩「模型不写空行」
+ * 那一种情形仍会退化成 O(尾巴)，那由 `STREAM_MAX_RENDER_MS` 那道时间预算兜着。
+ *
+ * 导出是为了测（与 `TranscriptChunks` / `renderTranscript` 同一个理由：纯函数，
+ * 能直接把「增量结果 == 整段一次渲染」逐行比出来）。
+ */
+export class StreamingLines {
+  /** 缓存键（宽度 / 折叠 / 展开）—— 变了就全部重排。 */
+  private key = '';
+  /** 已经定稿并拼进 `lines` 的源文本长度。 */
+  private settled = 0;
+  /** 定稿段拼出来的行。 */
+  private lines: string[] = [];
+  /** 切分扫描的游标（只扫新追加的字符）。 */
+  private scan: StreamScan = blankScan();
+  /** 上一次算出来的源文本与结果（一模一样就直接回缓存的）。 */
+  private lastSource = '';
+  private lastLines: string[] = [];
+
+  /** 换一轮回答（或收工）：把上一轮的缓存丢掉。 */
+  reset(): void {
+    this.settled = 0;
+    this.lines = [];
+    this.scan = blankScan();
+    this.lastSource = '';
+    this.lastLines = [];
+  }
+
+  render(text: string, width: number, expanded: boolean, hideThinking: boolean): string[] {
+    const key = `${width}:${expanded}:${hideThinking}`;
+    if (key !== this.key) {
+      this.key = key;
+      this.reset();
+    }
+    if (text === this.lastSource) return this.lastLines;
+    // 文本变短（不是追加）—— 游标与缓存全部作废，从头来。
+    // 正常路径不会走到这儿（reducer 只会 `+=`，换轮会先经过 `reset()`），
+    // 但万一走了，带着旧游标算出来的切点就是错的。
+    if (text.length < this.settled) this.reset();
+
+    // 1）把新到手的段边界都推成「定稿」：每段只排一次。
+    for (let cut = advanceStreamSplit(text, this.scan); cut > this.settled; cut = advanceStreamSplit(text, this.scan)) {
+      this.lines = joinStreamPart(
+        this.lines,
+        renderAssistant([{ type: 'text', text: text.slice(this.settled, cut) }], width, true, hideThinking),
+        width,
+        false,
+      );
+      this.settled = cut;
+    }
+
+    // 2）尾巴每帧重排（它短，而且每帧都在变）。
+    const tail = text.slice(this.settled);
+    const result =
+      tail === ''
+        ? this.lines
+        : joinStreamPart(
+            this.lines,
+            renderAssistant([{ type: 'text', text: tail }], width, true, hideThinking),
+            width,
+            true,
+          );
+    this.lastSource = text;
+    this.lastLines = result;
+    return result;
+  }
+}
+
+/**
  * 对话区：**按消息分块**的增量渲染。
  *
  * ## 为什么不是「整段一个 Text」
@@ -3841,6 +4077,20 @@ export class TranscriptChunks {
   private readonly bannerBlock: Text;
   /** 正在流式生成的文字：每帧都在变，**只渲染这一条**。 */
   private readonly streamBlock: Text;
+  /** 流式那一块的增量排版（定稿段只排一次，每帧只重排尾巴）。 */
+  private readonly streamLines = new StreamingLines();
+  /** 上一次**真的**排过的那段流式文本（被时间预算跳过的那些不更新它）。 */
+  private lastStreamSource = '';
+  /** 上一次 `setText` 进去的那份行（内容一样就不碰组件，否则会把它自己的折行缓存打掉）。 */
+  private lastStreamText = '';
+  /** 上一帧的宽度 / 折叠键：变了要无条件重排（不能等时间预算）。 */
+  private lastStreamKey = '';
+  /** 上一次流式重排花了多久（ms）—— 下一次隔多久由它推（见 `streamIntervalMs`）。 */
+  private streamCostMs = 0;
+  /** 上一次流式重排的时刻。 */
+  private streamRenderedAt = 0;
+  /** 流式重排的次数（被预算挡掉的不算）。给测试与诊断看 —— 不是界面状态。 */
+  private streamRenders = 0;
   /** 重试提示 + 收工原因 + 错误提示。 */
   private readonly tail: Text;
   /**
@@ -3850,9 +4100,11 @@ export class TranscriptChunks {
   private readonly cache = new WeakMap<object, Map<string, string[]>>();
   /** 上一帧的宽度：变了就得让 pi-tui 重新折行（`Text` 自己会重算）。 */
   private lastWidth = 0;
-  /** 三个尾块上一次的内容，避免每帧都 `setText`（那会让它们的缓存失效）。 */
+  /**
+   * 两个尾块（banner / 收工原因）上一次的内容，避免每帧都 `setText`
+   * （那会让它们自己的折行缓存失效）。流式那一块走自己的路径，见 `updateStream`。
+   */
   private lastBanner = '';
-  private lastStream = '';
   private lastTail = '';
   /**
    * `/hotkeys` 那一块。
@@ -3994,14 +4246,7 @@ export class TranscriptChunks {
       banner?.text === '' || banner === undefined ? '' : `${banner.text}\n`,
       banner?.text ?? '',
     );
-    this.setIfChanged(
-      this.streamBlock,
-      'stream',
-      state.phase === 'thinking' && state.streamingText
-        ? renderAssistant([{ type: 'text', text: state.streamingText }], width, true, hideThinking).join('\n')
-        : '',
-      state.streamingText,
-    );
+    this.updateStream(state, width, hideThinking);
     this.setIfChanged(this.tail, 'tail', renderTail(state, width).join('\n'), state.error ?? '');
     // 引用比对（见字段注释）：同一份行数组就不碰组件，重排与 markdown 解析都省了。
     if (hotkeys !== this.lastHotkeysLines) {
@@ -4022,19 +4267,81 @@ export class TranscriptChunks {
   }
 
   /** 内容真变了才 `setText`（它会清掉块自己的折行缓存）。 */
-  private setIfChanged(block: Text, slot: 'banner' | 'stream' | 'tail', text: string, identity: string): void {
+  private setIfChanged(block: Text, slot: 'banner' | 'tail', text: string, identity: string): void {
     if (this.lastOf(slot) === identity) return;
     this.remember(slot, identity);
     block.setText(text);
   }
 
-  private lastOf(slot: 'banner' | 'stream' | 'tail'): string {
-    return slot === 'banner' ? this.lastBanner : slot === 'stream' ? this.lastStream : this.lastTail;
+  /**
+   * 流式那一块：**增量排版 + 时间预算**。
+   *
+   * 这是整条流式路径上最贵的一处（实测每 token 可到 25ms，而 token 间隔只有几十毫秒），
+   * 两道闸都在这儿：
+   *
+   *   1. `StreamingLines` 把「重排整段回答」变成「只重排当前这一段」；
+   *   2. 时间预算（`streamIntervalMs`）把「上一次花了多久」翻倍成下一次的最小间隔，
+   *      应付「模型不写空行」那种退化（尾巴本身就是整段）。
+   *
+   * 被预算挡掉时**什么都不动**：`lastStreamSource` 不推进，所以下一个 token 会再来问一次，
+   * 而收工（`streamingText` 变空）时无条件清空 —— 丢掉的那几帧中间态不会变成脏数据，
+   * 最终的全文本来就落在紧跟其后的那条助手消息里。
+   */
+  private updateStream(state: AgentState, width: number, hideThinking: boolean): void {
+    const text = state.phase === 'thinking' ? state.streamingText : '';
+    if (text === '') {
+      // 收工（或本来就空闲）：立刻清空并丢掉这一轮的排版缓存。
+      if (this.lastStreamSource !== '' || this.lastStreamText !== '') {
+        this.lastStreamSource = '';
+        this.lastStreamText = '';
+        this.streamLines.reset();
+        this.streamBlock.setText('');
+      }
+      return;
+    }
+    if (text === this.lastStreamSource) return;
+
+    const key = `${width}:${hideThinking}`;
+    const forced = key !== this.lastStreamKey;
+    const now = performance.now();
+    if (!forced && now - this.streamRenderedAt < this.streamIntervalMs()) return;
+
+    const t0 = performance.now();
+    const lines = this.streamLines.render(text, width, false, hideThinking);
+    this.streamCostMs = performance.now() - t0;
+    this.streamRenderedAt = performance.now();
+    this.streamRenders += 1;
+    this.lastStreamSource = text;
+    this.lastStreamKey = key;
+
+    const joined = lines.join('\n');
+    if (joined !== this.lastStreamText) {
+      this.lastStreamText = joined;
+      this.streamBlock.setText(joined);
+    }
   }
 
-  private remember(slot: 'banner' | 'stream' | 'tail', value: string): void {
+  /**
+   * 下一次流式重排的**最小间隔**：上一次花了多久的 3 倍（上下限兜住极端值）。
+   *
+   * 为什么是倍率而不是固定值：一道固定 100ms 的闸挡不住「一次重排就要 200ms」那种文本，
+   * 主线程照样被吃满。跟着实测耗时走，流式重排就最多占掉主线程的三分之一。
+   */
+  private streamIntervalMs(): number {
+    return Math.min(STREAM_MAX_RENDER_MS, Math.max(STREAM_MIN_RENDER_MS, this.streamCostMs * 3));
+  }
+
+  /** 流式重排过几次（诊断/测试用）。 */
+  get streamRenderCount(): number {
+    return this.streamRenders;
+  }
+
+  private lastOf(slot: 'banner' | 'tail'): string {
+    return slot === 'banner' ? this.lastBanner : this.lastTail;
+  }
+
+  private remember(slot: 'banner' | 'tail', value: string): void {
     if (slot === 'banner') this.lastBanner = value;
-    else if (slot === 'stream') this.lastStream = value;
     else this.lastTail = value;
   }
 
