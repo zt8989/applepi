@@ -31,6 +31,7 @@ import { stopCauseText, type AgentState } from '@ela/core/state';
 import { abortRun } from '@ela/core/run-control';
 import { isThinkingLevel } from '@ela/core/thinking-level';
 import { deriveStream, type StreamNoticeEntry } from '@ela/core/stream';
+import { expandSkillCommand, skillsInPrompt } from '@ela/core/skills';
 import {
   WEB_PROTOCOL_VERSION,
   STREAM_NOTICE_ROLE,
@@ -300,8 +301,21 @@ export class WebBridge {
   handle(message: WebClientMessage): WebServerMessage[] {
     switch (message.type) {
       case 'prompt': {
-        const text = message.text.trim();
-        if (text === '') return [];
+        const raw = message.text.trim();
+        if (raw === '') return [];
+        // `/skill:<名字>` **不是命令**，而是「把 SKILL.md 展开成 `<skill>` 块发给模型」
+        // —— 与 TUI 的 `editor.onSubmit` 同一处逻辑（共用同一个 `expandSkillCommand`）。
+        // 展开必须在服务端做：SKILL.md 在磁盘上，浏览器读不到。
+        let text = raw;
+        if (raw.startsWith('/skill:')) {
+          const state = this.options.store.getState();
+          const name = raw.slice('/skill:'.length).split(/\s+/)[0] ?? '';
+          const skills = skillsInPrompt(state);
+          if (!skills.some((skill) => skill.name === name)) {
+            return [{ type: 'notice', level: 'warn', text: `未知 skill：${name}（/skills 看清单）` }];
+          }
+          text = expandSkillCommand(raw, skills);
+        }
         const state = this.options.store.getState();
         if (state.phase !== 'idle') {
           // 跑着的时候再发就排队（与 TUI 的 steer 同一个口径），不打断当前回合。

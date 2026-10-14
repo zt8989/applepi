@@ -164,7 +164,6 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 | `GET /api/skills` | 进了 prompt 的 skill 清单 |
 | `GET /api/thinking` | 当前档位 + 这个模型支持的档位 + 默认档 |
 | `GET /api/settings` | 自动压缩 / 隐藏思考块 / 默认思考级别 |
-| `GET /api/hotkeys` | 终端界面的键位表（浏览器里只当参考看） |
 | `POST /api/model` | `{arg}` → 精确命中就换（内核的 `setModel()`） |
 | `POST /api/thinking` | `{level}` |
 | `POST /api/settings` | `{autoCompact?, hideThinking?, defaultThinkingLevel?}` |
@@ -183,7 +182,10 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 - 执行时不发给模型（`RemoteAgent.prompt` 里拦下，见 `onPrompt`）—— 与 TUI 的 `runCommand`
   同一个分工：命令是「跟界面说」的通道，消息才是「跟模型说」。
 - `/model` 弹已有的模型选择器；`/thinking` `/settings` `/scoped-models` 弹通用模态框；
-  `/skills` `/help` `/hotkeys` 是纯文本弹窗；扩展命令走 `POST /api/command`。
+  `/skills` `/help` 是纯文本弹窗；扩展命令走 `POST /api/command`。
+- `/skill:<名字> [问题]` **不是命令**（与 TUI 一致）：它要把 SKILL.md 展开成 `<skill>` 块
+  发给模型，而文件在磁盘上 —— 所以浏览器**不拦**，当普通消息发出去，
+  `bridge` 收到后用 `@ela/core/skills` 的 `expandSkillCommand()` 展开（与 TUI 同一个函数）。
 
 **只做非会话类**：`/new` `/sessions` `/resume` `/clean` `/compact` 服务端**不下发**
 （命令表里没标 `web: true`），所以浏览器里打它们会得到「浏览器里只支持非会话类命令」——

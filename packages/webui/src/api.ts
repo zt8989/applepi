@@ -11,7 +11,6 @@
 import type {
   WebActionResult,
   WebCommandInfo,
-  WebHotkeysInfo,
   WebModelsInfo,
   WebSettingsInfo,
   WebSkillInfo,
@@ -41,7 +40,6 @@ export const elaApi = {
   skills: (): Promise<WebSkillInfo[]> => request('/api/skills'),
   thinking: (): Promise<WebThinkingInfo> => request('/api/thinking'),
   settings: (): Promise<WebSettingsInfo> => request('/api/settings'),
-  hotkeys: (): Promise<WebHotkeysInfo> => request('/api/hotkeys'),
   setModel: (arg: string): Promise<WebActionResult> => post('/api/model', { arg }),
   setThinking: (level: string): Promise<WebActionResult> => post('/api/thinking', { level }),
   setSettings: (patch: {

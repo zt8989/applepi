@@ -967,7 +967,6 @@ export const SLASH_COMMANDS: ElaSlashCommand[] = [
   {
     name: 'hotkeys',
     description: '列出全部键位（键名实时解析，与 pi 的 /hotkeys 同形）',
-    web: true,
   },
   { name: 'help', description: '列出全部命令', web: true },
 ];

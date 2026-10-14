@@ -19,7 +19,6 @@ import { createKernel, type Kernel } from '@ela/core/kernel';
 import { runTui, SLASH_COMMANDS } from './app';
 import { setupTheme } from './theme';
 import { keyLabel } from './keybindings';
-import { hotkeysMarkdown } from './hotkeys';
 import { WebBridge } from './web/bridge';
 import { createWebApi } from './web/api';
 import { startWebServer, type WebServerHandle } from './web/server';
@@ -458,7 +457,6 @@ async function main(): Promise<void> {
           source: 'extension' as const,
         })),
       ],
-      hotkeys: () => hotkeysMarkdown(kernel.extensions.commands.shortcuts()).split('\n'),
       // 扩展命令的入口：内置的（`/model` 那些）在浏览器侧有各自界面，不走这里。
       runExtensionCommand: (name, arg) => {
         if (!kernel.extensions.commands.has(name)) {

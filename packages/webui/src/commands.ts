@@ -12,8 +12,9 @@
  * | `/thinking` | 弹档位列表；带参数直接 POST |
  * | `/settings` | 三项：自动压缩 / 隐藏思考块 / 默认思考级别（原位切换） |
  * | `/scoped-models` | 勾选列表，勾一下存一次 |
- * | `/skills` `/help` `/hotkeys` | 纯文本弹窗 |
+ * | `/skills` `/help` | 纯文本弹窗 |
  * | 扩展命令 | `POST /api/command`（服务端跑） |
+ * | `/skill:<名字>` | **不走这里** —— 当普通消息发出去，服务端展开成 `<skill>` 块 |
  *
  * 会话类命令（`/new` `/sessions` `/compact` …）服务端**不下发**，所以这里也不认
  * —— 前端只做服务端说能做的。
@@ -222,11 +223,6 @@ export async function runCommand(name: string, arg: string, ctx: CommandContext)
         commands.map((command) => `/${command.name}\n  ${command.description}`).join('\n'),
         'Esc 关闭',
       );
-      return true;
-    }
-    case 'hotkeys': {
-      const hotkeys = await elaApi.hotkeys();
-      showText('键位（终端界面）', hotkeys.lines.join('\n'), 'Esc 关闭');
       return true;
     }
     default: {

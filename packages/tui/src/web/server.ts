@@ -355,9 +355,6 @@ async function serveApi(
       case 'GET /api/settings':
         sendJson(res, 200, api.settings());
         return;
-      case 'GET /api/hotkeys':
-        sendJson(res, 200, api.hotkeys());
-        return;
       case 'POST /api/model':
         sendJson(res, 200, api.setModel(typeof record['arg'] === 'string' ? record['arg'] : ''));
         return;

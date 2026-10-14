@@ -154,8 +154,8 @@ export type WebClientMessage =
 export interface WebCommandInfo {
   name: string;
   description: string;
-  /** 内置还是扩展注册的。 */
-  source: 'builtin' | 'extension';
+  /** 内置 / 扩展注册 / skill（`skill:<名字>`）。 */
+  source: 'builtin' | 'extension' | 'skill';
 }
 
 /** `GET /api/models`：目录 + 作用域 + 当前模型（选择器要置顶 + 打勾）。 */
@@ -187,11 +187,6 @@ export interface WebSettingsInfo {
   autoCompact: boolean | null;
   hideThinking: boolean;
   defaultThinkingLevel: string;
-}
-
-/** `GET /api/hotkeys`：**终端界面**的键位表（浏览器里只当参考看）。 */
-export interface WebHotkeysInfo {
-  lines: string[];
 }
 
 /** `POST /api/*` 的回执。 */

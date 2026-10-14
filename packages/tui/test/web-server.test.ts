@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createAgentStore } from '@ela/core/store';
 import { createFauxRuntime, demoResponses } from '@ela/core/provider';
+import { createTraceTree } from '@ela/core/trace';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import { WebBridge, modelRefs } from '../src/web/bridge';
 import { createWebApi } from '../src/web/api';
@@ -125,7 +126,6 @@ async function start(): Promise<{
       { name: 'sessions', description: '恢复历史会话' },
       { name: 'ext-thing', description: '扩展命令', source: 'extension' },
     ],
-    hotkeys: () => ['| Ctrl+R | 轨迹 |'],
     runExtensionCommand: async () => {},
   });
 
@@ -370,13 +370,75 @@ test('web api：空目录给空列表；空作用域归一成 null（= 全开）
     autoCompactEnabled: () => null,
     setAutoCompactEnabled: () => {},
     commands: [],
-    hotkeys: () => [],
     runExtensionCommand: async () => {},
   });
   const info = api.models();
   assert.deepEqual(info.models, []);
   // `[]` 与「没配过」是同一件事（与 TUI 的 `normalizeEnabled()` 同一个口径）。
   assert.equal(info.scoped, null);
+});
+
+test('bridge：`/skill:<名字>` 展开成 <skill> 块再发（文件在服务端，浏览器读不到）', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'ela-skill-'));
+  const file = path.join(dir, 'SKILL.md');
+  writeFileSync(file, '---\nname: demo\n---\n这是 skill 正文。\n');
+  const skill = {
+    name: 'demo',
+    description: '演示用',
+    filePath: file,
+    baseDir: dir,
+    disableModelInvocation: false,
+    scope: 'user' as const,
+  };
+  const dispatched: { type?: string; text?: string }[] = [];
+  // 桥的构造函数会 snapshot() 一次（读 trace / messages / executing …），所以
+  // 假 state 也得把那些字段给全（形状照 `tui-incremental.test.ts` 的 `stateOf`）。
+  const state = {
+    trace: createTraceTree('t'),
+    messages: [],
+    prompt: { skills: [skill] },
+    phase: 'idle',
+    providerName: 'faux',
+    modelId: 'fake',
+    thinkingLevel: 'off',
+    executing: [],
+    toolNames: [],
+    stopReason: undefined,
+    stopCause: null,
+    error: null,
+    streamingText: '',
+    thinkingText: '',
+    retrying: false,
+  };
+  const store = {
+    getState: () => state,
+    dispatch: (action: { type?: string; text?: string }) => dispatched.push(action),
+    subscribe: () => () => {},
+  };
+  const bridge = new WebBridge({
+    store: store as never,
+    cwd: '/tmp/ela-web-test',
+    getSessionId: () => 's',
+    setModel: () => true,
+    newSession: () => {},
+    resolveModel: () => null,
+  });
+  try {
+    assert.deepEqual(bridge.handle({ type: 'prompt', text: '/skill:demo 帮我看下这个报错' }), []);
+    assert.equal(dispatched[0]?.type, 'user.message');
+    assert.match(dispatched[0]?.text ?? '', /^<skill name="demo"/);
+    assert.match(dispatched[0]?.text ?? '', /这是 skill 正文/);
+    assert.match(dispatched[0]?.text ?? '', /帮我看下这个报错$/);
+
+    // 不认识的 skill：回一条警示，**不** dispatch（否则会被当成普通消息发给模型）。
+    dispatched.length = 0;
+    const warn = bridge.handle({ type: 'prompt', text: '/skill:nope 你好' });
+    assert.equal(warn[0]?.type, 'notice');
+    assert.equal(dispatched.length, 0);
+  } finally {
+    bridge.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 /**

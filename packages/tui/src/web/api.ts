@@ -28,11 +28,10 @@ import {
   writeDefaultThinkingLevel,
 } from '@ela/core/thinking-level';
 import { readHideThinkingBlock, readScopedModels, writeHideThinkingBlock, writeScopedModels } from '@ela/core/model-scope';
-import { skillsInPrompt } from '@ela/core/skills';
+import { skillCommands, skillsInPrompt } from '@ela/core/skills';
 import type {
   WebActionResult,
   WebCommandInfo,
-  WebHotkeysInfo,
   WebModelsInfo,
   WebSettingsInfo,
   WebSkillInfo,
@@ -67,10 +66,8 @@ export interface WebApiOptions {
   /** 自动压缩开关；`null` = 这个装配不支持。 */
   autoCompactEnabled: () => boolean | null;
   setAutoCompactEnabled: (enabled: boolean) => void;
-  /** 内置命令表（TUI 的 `SLASH_COMMANDS`）。 */
+  /** 内置命令表（TUI 的 `SLASH_COMMANDS`）—— 标了 `web` 的才进接口。 */
   commands: readonly WebCommandSource[];
-  /** `/hotkeys` 的行（终端键位表；浏览器里只当参考看）。 */
-  hotkeys: () => readonly string[];
   /** 跑一条**扩展**命令（内置的不走这里 —— 它们的界面在浏览器侧）。 */
   runExtensionCommand: (name: string, arg: string) => Promise<void>;
 }
@@ -81,7 +78,6 @@ export interface WebApi {
   skills(): WebSkillInfo[];
   thinking(): WebThinkingInfo;
   settings(): WebSettingsInfo;
-  hotkeys(): WebHotkeysInfo;
   setModel(arg: string): WebActionResult;
   setThinking(level: string): WebActionResult;
   setSettings(patch: {
@@ -118,13 +114,19 @@ export function createWebApi(options: WebApiOptions): WebApi {
     commands() {
       // 扩展的命令一律进（它们本来就该在浏览器里也能跑）；内置的只有标了 `web` 的进
       // —— 会话类（`/new` `/sessions` `/compact` …）还在终端那边，见文件头。
-      return options.commands
+      // `/skill:<名字>` 也列进来（展开由 bridge 在收到 prompt 时做，见那里的注释）。
+      const builtin: WebCommandInfo[] = options.commands
         .filter((command) => command.source === 'extension' || command.web === true)
         .map((command) => ({
           name: command.name,
           description: command.description,
           source: command.source ?? 'builtin',
         }));
+      const skills: WebCommandInfo[] = skillCommands(skillsInPrompt(store.getState())).map((command) => ({
+        ...command,
+        source: 'skill',
+      }));
+      return [...builtin, ...skills];
     },
 
     models() {
@@ -162,10 +164,6 @@ export function createWebApi(options: WebApiOptions): WebApi {
         hideThinking: readHideThinkingBlock(cwd),
         defaultThinkingLevel: readDefaultThinkingLevel(cwd) ?? DEFAULT_THINKING_LEVEL,
       };
-    },
-
-    hotkeys() {
-      return { lines: [...options.hotkeys()] };
     },
 
     setModel(arg) {

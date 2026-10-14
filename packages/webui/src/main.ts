@@ -194,6 +194,10 @@ async function main(): Promise<void> {
     onPrompt: async (text) => {
       const parsed = parseCommand(text);
       if (parsed === null) return false;
+      // `/skill:<名字>` 例外：它不是命令，而是「把 SKILL.md 展开成 `<skill>` 块发给模型」。
+      // 展开要在服务端做（文件在磁盘上），所以**不拦**——让它当普通消息发出去，
+      // bridge 收到后展开（见 `web/bridge.ts`）。
+      if (parsed.name.startsWith('skill:')) return false;
       await runCommand(parsed.name, parsed.arg, {
         notice: (notice, tone = 'info') => pushNotice(notice, tone),
         openModelPicker: () => void openModelPickerFromApi(),
