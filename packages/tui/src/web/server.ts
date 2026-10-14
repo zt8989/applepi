@@ -63,6 +63,28 @@ export function resolveWebuiDist(): string | undefined {
   }
 }
 
+/**
+ * 一条连接最多允许压多少字节还没发出去。
+ *
+ * ## 为什么必须有上限
+ *
+ * `ws.send()` **不等对端**：写不出去（浏览器那侧慢一点）就先堆在 `bufferedAmount` 里。
+ * 而状态帧是 O(整段会话) 的 —— 一份 4MB 的状态乘上几十帧就是 GB 级，最终在服务端
+ * 变成 `FATAL ERROR: heap out of memory`（真发生过：堆 2.6GB→4.35GB 撞上限 abort）。
+ * 且这条路径**与 TUI 同一个进程**，所以堆积的不只是内存，还有 TUI 的响应。
+ *
+ * 超了就**丢旧的**，而不是无限顿：
+ *   - `state` 是可覆盖的（下一帧就是最新真相），只留最后一份；
+ *   - `event` 小、且部分不可重放（`message_end` / `agent_end`），按序留着，但给个上限。
+ */
+const MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
+
+/** 排空试探间隔。没有 `drain` 回调可等（`ws` 不转发它），一个短定时器就够。 */
+const DRAIN_RETRY_MS = 100;
+
+/** 压着的事件最多留这么多条，超了丢最老的（宁可少几帧流式更新，也不要无限长）。 */
+const MAX_QUEUED_EVENTS = 256;
+
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -175,11 +197,70 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   };
 }
 
-/** 一条 WebSocket 连接 = 一个订阅者。 */
+/**
+ * 一条 WebSocket 连接 = 一个订阅者。
+ *
+ * ## 发送带背压
+ *
+ * 直接 `ws.send(JSON.stringify(...))` 在「浏览器跟不上」时会把内存吃干（见
+ * `MAX_BUFFERED_BYTES`）。所以这里加一层小队列：
+ *
+ *   - 通畅时**直发**（不多一次 `setTimeout`，也就不给正常路径添延迟）；
+ *   - 堵了就把帧压进队列：`state` 覆盖式替换（只留最新），`event` 按序追加；
+ *   - 排空后**先补最新的 state，再按序补事件** —— 与协议「先状态后事件」一致，
+ *     也正因为状态是整份快照，丢掉中间那几帧不会漂移。
+ */
 function attach(ws: WebSocket, bridge: WebBridge): void {
-  const send = (message: WebServerMessage): void => {
-    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message));
+  /** 压着还没发的状态：只留最新一份（旧的被下一份覆盖）。 */
+  let queuedState: WebServerMessage | undefined;
+  /** 压着还没发的事件：按序，但有限长。 */
+  const queuedEvents: WebServerMessage[] = [];
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** 现在能写吗（连接还在 + 没积压到上限）。 */
+  const canSend = (): boolean =>
+    ws.readyState === ws.OPEN && ws.bufferedAmount <= MAX_BUFFERED_BYTES;
+
+  const scheduleRetry = (): void => {
+    if (retryTimer !== undefined || ws.readyState !== ws.OPEN) return;
+    retryTimer = setTimeout(() => {
+      retryTimer = undefined;
+      flushQueued();
+    }, DRAIN_RETRY_MS);
+    retryTimer.unref?.();
   };
+
+  const flushQueued = (): void => {
+    if (ws.readyState !== ws.OPEN) return;
+    if (!canSend()) {
+      scheduleRetry();
+      return;
+    }
+    const state = queuedState;
+    queuedState = undefined;
+    const events = queuedEvents.splice(0, queuedEvents.length);
+    if (state !== undefined) ws.send(JSON.stringify(state));
+    for (const event of events) ws.send(JSON.stringify(event));
+    if (queuedState !== undefined || queuedEvents.length > 0) scheduleRetry();
+  };
+
+  const send = (message: WebServerMessage): void => {
+    if (ws.readyState !== ws.OPEN) return;
+    // 通畅且队列空 → 直发；否则进队列（顺序由队列保证）。
+    if (canSend() && queuedState === undefined && queuedEvents.length === 0) {
+      ws.send(JSON.stringify(message));
+      return;
+    }
+    if (message.type === 'state') {
+      queuedState = message;
+    } else {
+      queuedEvents.push(message);
+      // 丢最老的：留下的是「最近的几件事」，而它们才是界面还在等的那几条。
+      if (queuedEvents.length > MAX_QUEUED_EVENTS) queuedEvents.shift();
+    }
+    scheduleRetry();
+  };
+
   send(bridge.hello());
 
   const unsubscribe = bridge.subscribe(send);
@@ -193,7 +274,13 @@ function attach(ws: WebSocket, bridge: WebBridge): void {
     if (message === undefined) return;
     for (const reply of bridge.handle(message)) send(reply);
   });
-  ws.on('close', unsubscribe);
+  ws.on('close', () => {
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer);
+      retryTimer = undefined;
+    }
+    unsubscribe();
+  });
   ws.on('error', unsubscribe);
 }
 

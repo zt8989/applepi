@@ -308,3 +308,164 @@ test('bridge：没给目录时 hello 给空列表；空作用域归一成 null�
     bridge.dispose();
   }
 });
+
+/**
+ * 只做「通知」的假 store。
+ *
+ * 桥关注的全是 `getState()` 的形状，不需要真的环。`reads()` 数的是 `getState()` 被调了
+ * 几次 —— 「没有浏览者就不空转」这条**只能这样验**：空转时连状态都不该读（读一次就要
+ * snapshot + stringify 一整份会话）。
+ */
+function fakeStore(state: Record<string, unknown>): {
+  store: Record<string, unknown>;
+  notify: () => void;
+  reads: () => number;
+} {
+  const listeners = new Set<() => void>();
+  let reads = 0;
+  return {
+    store: {
+      getState: () => {
+        reads += 1;
+        return state;
+      },
+      subscribe: (listener: () => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      dispatch: () => {},
+    },
+    notify: () => {
+      for (const listener of [...listeners]) listener();
+    },
+    reads: () => reads,
+  };
+}
+
+/** 桥要读的那几项（其余字段它不碰）。 */
+function fakeState(messages: unknown[]): Record<string, unknown> {
+  return {
+    phase: 'idle',
+    messages,
+    providerName: 'faux',
+    modelId: 'fake',
+    thinkingLevel: 'high',
+    streamingText: '',
+    thinkingText: '',
+    executing: [],
+    toolNames: ['bash'],
+    stopReason: null,
+    stopCause: null,
+    error: null,
+  };
+}
+
+function fakeModel(): unknown {
+  return { id: 'fake', provider: 'faux', name: 'Faux', api: 'openai-completions' };
+}
+
+/**
+ * 没有浏览者时**一个字节都不算**。
+ *
+ * 这是最常见的情形：终端里跑 ela、没开 web 界面。改之前桥照样每个 token 算一份
+ * snapshot + stringify（O(整段会话)），白造几百 MB/s 垃圾，还把 TUI 一起拖卡 ——
+ * 实测过堆尖峰 2.6GB、最后 OOM。
+ */
+test('bridge：没有浏览者时连状态都不读（更不 stringify）', () => {
+  const state = fakeState([{ role: 'user', content: '嗨' }]);
+  const fake = fakeStore(state);
+  const bridge = new WebBridge({
+    store: fake.store as never,
+    cwd: '/tmp',
+    getSessionId: () => 's',
+    setModel: () => true,
+    newSession: () => {},
+    resolveModel: () => fakeModel() as never,
+  });
+  try {
+    const before = fake.reads();
+    for (let i = 0; i < 50; i += 1) {
+      state.streamingText = `${String(state.streamingText)}x`;
+      fake.notify();
+    }
+    assert.equal(fake.reads(), before, '没人看的时候不该读状态');
+
+    // 接上来之后照样能用：第一个变化就发一帧，且带的是**当下**的状态。
+    const seen: WebServerMessage[] = [];
+    bridge.subscribe((message) => seen.push(message));
+    state.phase = 'thinking';
+    fake.notify();
+    // 第一个变化就发一帧，而且是**先状态后事件**（`message_update` 要读 isStreaming）。
+    const states = seen.filter((m) => m.type === 'state');
+    assert.equal(states.length, 1, '订阅之后的第一个变化就该发一帧整份状态');
+    const first = seen[0];
+    if (first?.type !== 'state') throw new Error('unreachable');
+    assert.equal(first.state.isStreaming, true);
+    // 空转那段攒下的 50 次变化**不该补播**：`agent_start` 只出现一次（那 50 次里
+    // 每一轮都会「开跑又收工」，补播就是几十个假回合）。
+    assert.equal(seen.filter((m) => m.type === 'event' && m.event.type === 'agent_start').length, 1);
+
+    // 一动没动的通知**不该引出任何帧**（落盘器回的 `trace.persisted` 就是这种）。
+    const after = seen.length;
+    fake.notify();
+    fake.notify();
+    assert.equal(seen.length, after, '状态没变就不该再发');
+  } finally {
+    bridge.dispose();
+  }
+});
+
+/**
+ * 流式期**整份状态按需发**，而 `message_update` 一条不漏。
+ *
+ * 这一条守的是那个把内存吃干的形状：改之前每 token 发两份整份状态（`state` +
+ * `message_update` 各 stringify 一次），一段 2MB 的会话跑 200 个 token 就是 ~880MB
+ * 字符串垃圾。现在整份状态只在「结构变了」时发，流式文本走只带自己那一小条的增量。
+ *
+ * 同时钉住「秒回的一轮也能看见流式增量」：整份状态合帧之后，一帧都没赶上的短回合
+ * 不能连 `message_update` 都丢了（浏览器那侧的流式容器就吃它）。
+ */
+test('bridge：流式期整份状态不逐 token 发，但增量一条不漏', () => {
+  const state = fakeState(
+    Array.from({ length: 50 }, (_, i) => ({ role: 'user', content: `第 ${i} 条：${'长'.repeat(200)}` })),
+  );
+  const fake = fakeStore(state);
+  const bridge = new WebBridge({
+    store: fake.store as never,
+    cwd: '/tmp',
+    getSessionId: () => 's',
+    setModel: () => true,
+    newSession: () => {},
+    resolveModel: () => fakeModel() as never,
+  });
+  try {
+    const states: WebServerMessage[] = [];
+    let updates = 0;
+    bridge.subscribe((message) => {
+      if (message.type === 'state') states.push(message);
+      else if (message.type === 'event' && message.event.type === 'message_update') updates += 1;
+    });
+
+    // 一个「秒回」的回合：开跑 → 200 个 token → 收工，全在一个 tick 里跑完。
+    state.phase = 'thinking';
+    fake.notify();
+    for (let i = 0; i < 200; i += 1) {
+      state.streamingText = `${String(state.streamingText)}模型正在思考`;
+      fake.notify();
+    }
+    state.messages = [...(state.messages as unknown[]), { role: 'assistant', content: '好了' }];
+    state.phase = 'idle';
+    state.streamingText = '';
+    fake.notify();
+
+    assert.ok(states.length <= 3, `整份状态该是按需发的，实际发了 ${states.length} 帧`);
+    assert.ok(updates >= 200, `流式增量不该被合帧吃掉（实际 ${updates} 条）`);
+    // 收工那一帧把助手消息带上了（界面靠它落地）。
+    const last = states[states.length - 1];
+    if (last?.type !== 'state') throw new Error('unreachable');
+    assert.equal(last.state.isStreaming, false);
+    assert.ok(last.state.messages.some((message) => (message as { role?: string }).role === 'assistant'));
+  } finally {
+    bridge.dispose();
+  }
+});
