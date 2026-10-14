@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { scopedKeys } from '../src/model-picker';
 import { extractText } from '../src/remote-agent';
+import { parseEditDiff } from '../src/edit-diff';
+import { parseUnifiedPatch } from '../src/split-diff';
 
 /**
  * webui 的那几个**纯函数**。
@@ -48,4 +50,78 @@ test('extractText：字符串 / `{content}` / `{content: 块}` 三种入参都�
   );
   assert.equal(extractText(undefined), '', '拿不到就给空串（调用方据此不发）');
   assert.equal(extractText({ role: 'user', content: 42 }), '');
+});
+
+// ─── `edit` 的 diff：分栏（unified patch）+ 单栏（展示 diff）两套解析 ───
+
+/** pi 的 `generateDiffString()` 真会产出的那串（见 edit-diff.ts 的文件头）。 */
+const RESULT_DIFF = ' 1 line1\n-2 line2\n+2 line2 changed\n 3 line3\n 4 line4\n   ...';
+
+test('parseEditDiff：`+`/`-`/空格标记分别折成 add / del / context（内容去掉标记）', () => {
+  assert.deepEqual(parseEditDiff(RESULT_DIFF), [
+    { kind: 'context', text: '1 line1' },
+    { kind: 'del', text: '2 line2' },
+    { kind: 'add', text: '2 line2 changed' },
+    { kind: 'context', text: '3 line3' },
+    { kind: 'context', text: '4 line4' },
+    { kind: 'skip', text: '' },
+  ]);
+});
+
+test('parseEditDiff：末尾换行不产生空行；纯空串给空数组', () => {
+  assert.equal(parseEditDiff(' 1 a\n+2 b\n').length, 2);
+  assert.deepEqual(parseEditDiff(''), []);
+});
+
+// ─── `split-diff.ts`：统一 patch → 左旧右新两列 ───
+
+/** pi 的 `generateUnifiedPatch()` 真会产出的那串（`--- a` / `+++ b` / `@@`）。 */
+const UNIFIED_PATCH = '--- demo.md\n+++ demo.md\n@@ -1,3 +1,3 @@\n l1\n-l2\n+l2 changed\n l3\n';
+
+test('parseUnifiedPatch：删/增配对成一行，旧号在新号在右，上下文两边同号', () => {
+  const files = parseUnifiedPatch(UNIFIED_PATCH);
+  assert.ok(files, '要解析出文件');
+  assert.equal(files[0]!.oldPath, 'demo.md');
+  assert.equal(files[0]!.newPath, 'demo.md');
+  // 行：context(l1) / line(l2 删 / l2 增) / context(l3)；hunk 头不画。
+  const rows = files[0]!.rows.filter((row) => row.type === 'line');
+  assert.deepEqual(rows, [
+    {
+      type: 'line',
+      left: { lineNo: 1, text: 'l1', type: 'context' },
+      right: { lineNo: 1, text: 'l1', type: 'context' },
+    },
+    {
+      type: 'line',
+      left: { lineNo: 2, text: 'l2', type: 'removed' },
+      right: { lineNo: 2, text: 'l2 changed', type: 'added' },
+    },
+    {
+      type: 'line',
+      left: { lineNo: 3, text: 'l3', type: 'context' },
+      right: { lineNo: 3, text: 'l3', type: 'context' },
+    },
+  ]);
+});
+
+test('parseUnifiedPatch：只有删没有增时右侧是空位（行号为 null）', () => {
+  const files = parseUnifiedPatch('--- a\n+++ a\n@@ -1,2 +1,1 @@\n keep\n-gone\n');
+  assert.ok(files);
+  const rows = files[0]!.rows.filter((row) => row.type === 'line');
+  assert.deepEqual(rows[1]!.left, { lineNo: 2, text: 'gone', type: 'removed' });
+  assert.deepEqual(rows[1]!.right, { lineNo: null, text: '', type: 'empty' });
+});
+
+test('parseUnifiedPatch：hunk 体内以 `--- `/`+++ ` 开头的行是内容，不当文件头', () => {
+  // 删除一行 `-- x`、加一行 `++ y`：前缀是 `-`/`+`，剩下的是 `- x` / `+ y`。
+  const files = parseUnifiedPatch('--- a\n+++ a\n@@ -1,1 +1,1 @@\n--- x\n+++ y\n');
+  assert.equal(files?.length, 1, '仍然只有一个文件');
+  const rows = files[0]!.rows.filter((row) => row.type === 'line');
+  assert.deepEqual(rows[0]!.left, { lineNo: 1, text: '-- x', type: 'removed' });
+  assert.deepEqual(rows[0]!.right, { lineNo: 1, text: '++ y', type: 'added' });
+});
+
+test('parseUnifiedPatch：不是 patch 的文本给 null', () => {
+  assert.equal(parseUnifiedPatch('随便一段中文\n没有 @@ 头'), null);
+  assert.equal(parseUnifiedPatch(''), null);
 });

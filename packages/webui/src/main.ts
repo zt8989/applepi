@@ -26,6 +26,7 @@ import { html } from 'lit';
 import { STREAM_NOTICE_ROLE } from '@ela/core/web-protocol';
 import { RemoteAgent } from './remote-agent';
 import { openModelPicker } from './model-picker';
+import { installToolMessageView } from './tool-view';
 import './app.css';
 
 /**
@@ -151,6 +152,8 @@ function currentModelRef(agent: RemoteAgent): { provider: string; id: string } |
 async function main(): Promise<void> {
   installStorage();
   registerStreamNotice();
+  // 工具卡换成折叠行视图（见 tool-view.ts）—— 必须在界面首次渲染前装好。
+  installToolMessageView();
   buildShell();
 
   const chatPanel = new ChatPanel();

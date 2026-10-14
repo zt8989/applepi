@@ -11,6 +11,14 @@
 @import '@earendil-works/pi-web-ui/app.css';
 @import 'tailwindcss';
 
+/*
+ * 深色模式由 pi-web-ui 往根节点挂 `.dark` 类来切换（不是系统偏好）—— 它自己那份
+ * 编译好的 CSS 就是这么认的（`.dark\:x:where(.dark, .dark *)`）。Tailwind v4 默认的
+ * `dark:` 是 `prefers-color-scheme` 媒体查询，两套不同步：系统浅色时我们的 `dark:`
+ * 工具类永远不生效。这里把它改成跟着 `.dark` 类走。
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
 html,
 body {
   height: 100%;
