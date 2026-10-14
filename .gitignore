@@ -10,3 +10,6 @@ node_modules/.pnpm_patches/
 
 # 会话与轨迹不再落在仓库里（在 ~/.pi/agent/），所以这里没有条目。
 .playwright-mcp/
+
+# 本地检索缓存（向量索引 + 锁），机器相关的产物。
+.zvec-grep/
