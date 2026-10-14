@@ -8,7 +8,7 @@
  * （`pi-coding-agent/dist/core/keybindings.js` 的 `KEYBINDINGS`）。两者加起来才是完整
  * 的一份键位表。
  *
- * 本项目的界面是**另一套应用层**：它有自己的开关（轨迹页、队列模式、中断），所以
+ * 本项目的界面是**另一套应用层**：它有自己的开关（轨迹页、中断），所以
  * 这里的做法是「pi 的全套 + 我们自己的几个」：
  *
  *     defs = { ...pi 的 KEYBINDINGS, ...PROJECT_KEYBINDINGS }
@@ -78,7 +78,6 @@ import { configHome, readJsonIfExists } from '@ela/core/config-home';
 declare module '@earendil-works/pi-tui' {
   interface Keybindings {
     'app.trace.toggle': true;
-    'app.queue.cycle': true;
     'app.abort': true;
   }
 }
@@ -107,8 +106,7 @@ export const PROJECT_KEYBINDINGS = {
    *   - pi 应用层的：`ctrl+g`（外部编辑器）、`ctrl+x`（复制）、`ctrl+v`（粘贴图片）、
    *     `ctrl+s`（存 thinking 级别）、`ctrl+z`（挂起）、`ctrl+p`（循环模型）——
    *     占了就是同一个键在两个应用里含义不同，同样没法用覆盖文件表达。
-   *   - 本项目已用的：`ctrl+c`（中断）、`ctrl+o`（展开工具）、`ctrl+l`（模型面板）、
-   *     `ctrl+q`（队列模式）。
+   *   - 本项目已用的：`ctrl+c`（中断）、`ctrl+o`（展开工具）、`ctrl+l`（模型面板）。
    *
    * `ctrl+r` 是剩下里语义最贴的（pi 只在**会话面板内部**用它做重命名，而面板打开时
    * 本项目的全局键整个让路，两者不会同时生效），手感上也是「切一块视图」的常见键。
@@ -118,13 +116,10 @@ export const PROJECT_KEYBINDINGS = {
    *     { "app.trace.toggle": "ctrl+shift+r" }
    */
   'app.trace.toggle': { defaultKeys: 'ctrl+r', description: '切换「对话 / 轨迹」两页' },
-  /**
-   * 切换入队模式（steer ↔ followUp）。
-   *
-   * 不复用 pi 的 `app.message.followUp`：那个是「把**这一条**消息排成 followUp」的
-   * 一次性动作，而本项目是一个**模式开关** —— 切一次之后接下来的每条都按新列走。
-   */
-  'app.queue.cycle': { defaultKeys: 'ctrl+q', description: '切换入队模式（steer / followUp）' },
+  // 排队走哪一列没有自己的键位 —— 与 pi 同一套：`Enter` → steer，
+  // `app.message.followUp`（默认 `Option+Enter`）→ followUp。
+  // 这里早先有个 `app.queue.cycle`（`ctrl+q`）切「入队模式」，已删（理由见 app.ts 的 `queue()`）。
+
   /**
    * 中断当前回合；空闲时退出。
    *

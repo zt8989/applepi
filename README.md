@@ -240,10 +240,10 @@ pnpm start --web-port 8080       # 换端口（被占就往后试，真地址会
 
 界面里：`Ctrl+R` **在「对话」与「轨迹」两页之间切换**（顶部有页签标出当前在哪页），
 `Alt+↑/↓` 或 `Ctrl+P/N` 翻当前页（半页），`Ctrl+O` 展开/收起工具输出，
-`Ctrl+T` 展开/收起模型的思考块，`Ctrl+Q` 切换入队模式，`Ctrl+L` 开模型面板。
+`Ctrl+T` 展开/收起模型的思考块，`Ctrl+L` 开模型面板。
 **pi 的整套键位都可用**（本轮补齐，冲突以 pi 为准）：`Ctrl+P`/`Shift+Ctrl+P` 循环换模型，
 `Shift+Tab` 循环思考级别，`Ctrl+G` 交给 `$EDITOR`，`Ctrl+X` 复制最后一条回答，
-`Ctrl+V` 粘贴（文件/图片/文本），`Ctrl+Z` 挂后台，`Alt+Enter` 排 follow-up，
+`Ctrl+V` 粘贴（文件/图片/文本），`Ctrl+Z` 挂后台，`Alt+Enter`（macOS `Option+Enter`）排 follow-up，
 `Alt+Up` 把排队消息还回输入框。**中断是 `Escape`，`Ctrl+C` 是清空编辑器（连按两次退出）、
 `Ctrl+D` 退出** —— 这三个与 pi 一致（不再把 `Ctrl+C` 当中断）。
 `/hotkeys` 打出完整的一份（形状与 pi 的 `/hotkeys` 相同）。
@@ -252,8 +252,8 @@ pnpm start --web-port 8080       # 换端口（被占就往后试，真地址会
 
 **键位可改**：写在 `~/.pi/agent/keybindings.json`（与 pi **同一个文件**），例如
 `{ "app.trace.toggle": "ctrl+shift+r" }`。界面上的提示行、`/hotkeys`、`--help`
-显示的都是解析后的键 —— 改完不用重启。本项目自己的 id 只有两个还默认占键
-（`app.trace.toggle` `Ctrl+R` / `app.queue.cycle` `Ctrl+Q`），其余全部复用 pi 的 id
+显示的都是解析后的键 —— 改完不用重启。本项目自己的 id 只有一个还默认占键
+（`app.trace.toggle` `Ctrl+R`），其余全部复用 pi 的 id
 （所以同一个覆盖在 pi 与本项目里都生效）。`app.abort`（旧的「`Ctrl+C` 一键中断/退出」）
 默认不绑，写进 `keybindings.json` 就能拿回那个手感。
 
@@ -282,9 +282,18 @@ pnpm start --web-port 8080       # 换端口（被占就往后试，真地址会
 | **steer**（默认） | 当前 step 的工具跑完后、**下一次 LLM 调用前** | 「等等，改用这个」「顺便查下版本」 |
 | **followUp** | 模型没有工具调用了（回合收工），然后**开一个新回合** | 「先按你说的做，弄完再说下一件事」 |
 
-两列队列各自 FIFO、互不排队。语义与 pi 的 `steer()` / `followUp()` 一致。
-`Ctrl+Q` 在两者之间切；底区会一直列着排队的消息（`Steering:` / `Follow-up:`），
-投递后自动消失——排队的消息在插进去之前模型**完全不知道它存在**，所以必须让人看得见。
+两列队列各自 FIFO、互不排队。语义与 pi 的 `steer()` / `followUp()` 一致，
+**键位也同一套**：回车 = steer，`Alt+Enter`（macOS `Option+Enter`）= followUp。
+底区会一直列着排队的消息，形状与 pi 逐行同构：
+
+```
+ ↳ Option+Up to edit all queued messages
+ Steering: 顺便看下版本
+ Follow-up: 待会儿再说
+```
+
+投递后那两行自动消失——排队的消息在插进去之前模型**完全不知道它存在**，所以必须让人看得见；
+最后一行提示按 `Alt+↑` 能把这些话**还回输入框**再改（不是重发一遍）。
 
 ### 回合（turn）与步（step）
 

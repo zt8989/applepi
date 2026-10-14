@@ -394,8 +394,8 @@ pi 里这几个面板根本不是弹窗：`interactive-mode.js` 的 `showSelecto
   理由同上：`keybindings.json` 里的覆盖要真的生效。
 - **能用 pi 的 id 就用 pi 的**：展开工具输出 = `app.tools.expand`（ctrl+o）、
   打开模型面板 = `app.model.select`（ctrl+l）。同一个 id 意味着同一份
-  `keybindings.json` 在 pi 与本项目里同时生效。本项目独有的只有三个：
-  `app.trace.toggle`（ctrl+r）、`app.queue.cycle`（ctrl+q）、`app.abort`（ctrl+c）。
+  `keybindings.json` 在 pi 与本项目里同时生效。本项目独有的只有两个：
+  `app.trace.toggle`（ctrl+r）、`app.abort`（ctrl+c）。
 - **`ctrl+t` 让给 pi**：那是 pi 的 `app.thinking.toggle`。两边共用一份键位文件，
   同一个键两个含义时，写覆盖的人没法表达「我想要哪个」—— 所以轨迹页改用 `ctrl+r`。
 - **只有一处创建**。早先 `model-picker.ts` / `session-picker.ts` 各自

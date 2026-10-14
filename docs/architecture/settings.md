@@ -35,8 +35,9 @@ telemetry、project trust……），本项目没那些功能 —— 硬摆上�
   `defaultThinkingLevel`（`/thinking` 的 `Ctrl+S`）、`theme`（手改；`setupTheme()` 只在启动读一次）、
   `externalEditor`、`packages`（扩展装载）。
 - **本项目不读**（pi 读）：`transport`、`httpIdleTimeoutMs`、`cacheWarming`、
-  `steeringMode` / `followUpMode`（注意：本项目 `Ctrl+Q` 那个「入队模式」是**另一件事** ——
-  它定的是「回车排哪种队」，而 pi 这两个键定的是**投递粒度**，所以不能拿它俩当那一行的值）、
+  `steeringMode` / `followUpMode`（这两个定的是**投递粒度**：`all` = 一次全插进去，
+  `one-at-a-time` = 一条一条来。本项目恒定「一条一条」—— 排队那两条走哪一列由**按键**
+  决定（回车 = steer，`Option+Enter` = followUp），与这两个键无关，所以不能拿它们当那一行的值）、
   `terminal.*` / `images.*`、`tuiMode` / `fullscreen*`、`mermaid`、`showCacheMissNotices`、
   `collapseChangelog`、`enableInstallTelemetry`、`defaultProjectTrust`、
   `doubleEscapeAction`、`treeFilterMode`、`quietStartup`、`warnings`。

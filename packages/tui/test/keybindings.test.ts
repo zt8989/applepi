@@ -55,16 +55,47 @@ test('本项目自己的动作都在定义表里', () => {
   for (const action of Object.keys(PROJECT_KEYBINDINGS)) {
     assert.ok(action in ALL_KEYBINDINGS, `${action} 应该合并进 ALL_KEYBINDINGS`);
   }
-  // 默认有键的那两个：键名解析得出来 = 这个 id 真的能被 `matches()` 用。
+  // 默认有键的那个：键名解析得出来 = 这个 id 真的能被 `matches()` 用。
   // 空串说明表里没有它。
   assert.notEqual(keyLabel('app.trace.toggle'), '', 'app.trace.toggle 应该有键名');
-  assert.notEqual(keyLabel('app.queue.cycle'), '', 'app.queue.cycle 应该有键名');
+  // 排队那一列**不该**再有本项目自己的键位：与 pi 同一套（回车 = steer，
+  // `app.message.followUp` = followUp）。它属于 pi 的 id，不该出现在 PROJECT_KEYBINDINGS 里。
+  assert.ok(!('app.queue.cycle' in PROJECT_KEYBINDINGS), '入队模式那个键位已删（见 app.ts 的 queue()）');
   // **`app.abort` 默认不绑**（`ctrl+c` 已归 pi 的 `app.clear`，见 `keybindings.ts`）。
   // 但它仍是一个可用的 id —— 写进 `keybindings.json` 就该生效。
   assert.equal(keyLabel('app.abort'), '', 'app.abort 默认不该有键名（ctrl+c 归 pi）');
   const rebound = createProjectKeybindings();
   rebound.setUserBindings({ 'app.abort': 'ctrl+c' });
   assert.deepEqual(rebound.getKeys('app.abort'), ['ctrl+c']);
+});
+
+/**
+ * 排队走哪一列由**按哪个键**定，与 pi 同一套：回车 = steer（编辑器提交），
+ * `Option+Enter` = `app.message.followUp`。
+ *
+ * ## 为什么这条要按字节序列测
+ *
+ * macOS 上 `Option+Enter` 在不同终端发的**不是同一串字节**：传统终端 `ESC CR`、
+ * kitty 键盘协议 `ESC[13;3u`、xterm 的 modifyOtherKeys `ESC[27;3;13~`。
+ * 少认一种，那个终端里 followUp 就「按了没反应」—— 而这正是最难归因的一类症状
+ * （用户不知道自己终端开了什么协议，只知道自己按了键没反应）。
+ *
+ * 早先本项目是 `ctrl+q` 切「入队模式」（`app.queue.cycle`），已删：模式是**状态**，
+ * 切过之后每条都按新列走，而屏幕上看不出自己现在在哪个模式里 —— 症状是
+ * 「我明明按的回车，怎么排到 followUp 去了」。
+ */
+test('排队键位与 pi 一致：Option+Enter 命中 app.message.followUp，裸回车归「提交」', () => {
+  withDefaultKeybindings(() => {
+    for (const seq of ['\u001b\r', '\u001b[13;3u', '\u001b[27;3;13~']) {
+      assert.ok(
+        actionMatches(seq, 'app.message.followUp'),
+        `${JSON.stringify(seq)} 该命中 app.message.followUp（Option+Enter）`,
+      );
+    }
+    assert.ok(!actionMatches('\r', 'app.message.followUp'), '裸回车是「提交」，不该被当成 followUp');
+    assert.ok(actionMatches('\r', 'tui.input.submit'), '裸回车要能提交（= steer）');
+    assert.ok(!('app.queue.cycle' in PROJECT_KEYBINDINGS), '入队模式那个键位已删');
+  });
 });
 
 test('冲突以 pi 为准：ctrl+c 是 pi 的 app.clear，不再是本项目的中断', () => {
@@ -239,9 +270,10 @@ test('/hotkeys：与 pi 对齐的动作都列在表里（它们现在真的能�
     // 只要行里出现这个键名就算列了 —— 直接包含整个 `` `label` `` 会漏掉合行。
     assert.ok(md.includes(label), `表里该出现 ${live}（${label}）：\n${md}`);
   }
-  // 本项目自己的两个开关也在。
+  // 本项目自己的开关也在；**入队模式那行不在**（那个键位已删 —— 表里只有
+  // `app.message.followUp` / `app.message.dequeue` 这两条与排队有关的）。
   assert.ok(md.includes(`\`${keyLabel('app.trace.toggle')}\``), md);
-  assert.ok(md.includes(`\`${keyLabel('app.queue.cycle')}\``), md);
+  assert.ok(md.includes('to edit all queued messages') === false, '卡片那句提示只在底区，不进键位表');
   // `app.abort` 默认不绑（`ctrl+c` 已归 pi 的 `app.clear`）—— 它的那一行不该出现在表里。
   assert.ok(!md.includes('app.abort'), md);
 });

@@ -143,12 +143,12 @@ export function hotkeysMarkdown(extensions: readonly HotkeyExtension[] = []): st
     actionRow('app.thinking.toggle', '展开 / 收起思考块'),
     actionRow('app.editor.external', '用外部编辑器编辑当前输入'),
     actionRow('app.message.copy', '复制选区或最后一条助手消息'),
-    actionRow('app.message.followUp', '把当前输入排成 follow-up'),
+    actionRow('app.message.followUp', '把当前输入排成 follow-up（等这一轮说完再插）'),
     actionRow('app.message.dequeue', '把排队的消息还回输入框'),
     actionRow('app.clipboard.pasteImage', '粘贴文件路径 / 图片 / 文本'),
-    // 本项目自己的两个开关（pi 没有对应语义，见 `PROJECT_KEYBINDINGS`）。
+    // 本项目自己的开关（pi 没有对应语义，见 `PROJECT_KEYBINDINGS`）。
+    // 排队那一列**不在这里** —— 与 pi 同一套：回车 = steer，`app.message.followUp`（上面那行）= followUp。
     actionRow('app.trace.toggle', '在「对话」与「轨迹」两页之间切换'),
-    actionRow('app.queue.cycle', '切换入队模式：steer / followUp'),
     rawRow('/', '斜杠命令（再按 Tab 补全命令名）'),
   ];
 

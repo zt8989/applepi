@@ -142,7 +142,6 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
   Alt+↑/↓ 或 Ctrl+P/N   翻当前页（半页）；纯 ↑↓ 是移动光标，不拿来滚
   ${keyLabel('app.tools.expand').padEnd(19)}展开/收起工具输出的完整内容（默认只留前 12 行）
   ${keyLabel('app.thinking.toggle').padEnd(19)}展开/收起模型的思考块（与 pi 的 app.thinking.toggle 同键）
-  ${keyLabel('app.queue.cycle').padEnd(19)}切换入队模式：steer（工具跑完后插进去）／followUp（说完再插）
   ${keyLabel('app.model.select').padEnd(19)}打开模型选择面板（与 pi 的 app.model.select 同键）
   ${keyLabel('app.interrupt').padEnd(19)}中断当前回合（有排队消息时先还回输入框）
   ${keyLabel('app.clear').padEnd(19)}清空编辑器（连按两次退出）；${keyLabel('app.exit')} 直接退出
@@ -155,10 +154,9 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
   /skill:<名字> [问题]  把某个 skill 的正文展开后连同你的问题一起发给模型
 
 生成中也能说话（不用等）:
-  直接敲字回车     → 按当前入队模式排队，默认 steer
-                    模型会在「本步工具跑完后」看到它
-  ${keyLabel('app.queue.cycle')} 切到 followUp 再敲 → 等模型说完、开一个新回合才插
-  底区会一直列着排队的消息（Steering: / Follow-up:），投递后自动消失
+  回车             → steer：模型会在「本步工具跑完后」看到它
+  ${keyLabel('app.message.followUp')}   → followUp：等模型说完、开一个新回合才插
+  底区会一直列着排队的消息（Steering: / Follow-up: 加一行「怎么拿回来」），投递后消失
 `;
 
 function parseArgs(argv: string[]): CliArgs {

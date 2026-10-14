@@ -1072,7 +1072,20 @@ test('renderQueuePanel：空队列不占高度', () => {
   assert.equal(renderQueuePanel(state, 80), '', '空队列返回空串');
 });
 
-test('renderQueuePanel：steer 与 followUp 分行标出，各自带前缀', () => {
+/**
+ * 底部的排队卡片：**与 pi 逐行同构**（`updatePendingMessagesDisplay`）——
+ *
+ * ```
+ *  ↳ Option+Up to edit all queued messages
+ *  Steering: 顺便看下版本
+ *  Follow-up: 待会儿再说
+ * ```
+ *
+ * 首行那个空行是 pi 的 `Spacer(1)`（把卡片与对话区隔开）；每行缩进一格是
+ * `TruncatedText(text, 1, 0)` 的 paddingX；最后那行提示是「怎么把它们拿回来」——
+ * 没有它，这两条排队消息看着像**已经发给模型了**。
+ */
+test('renderQueuePanel：steer 与 followUp 分行标出，各自带前缀 + 一行「怎么拿回来」', () => {
   let state = createInitialState({
     systemPrompt: 's', providerName: 'faux', modelId: 'f', toolNames: [], sessionId: 't',
   });
@@ -1084,12 +1097,18 @@ test('renderQueuePanel：steer 与 followUp 分行标出，各自带前缀', () 
   };
   const out = stripTerminalSequences(renderQueuePanel(state, 80));
   const lines = out.split('\n');
-  assert.equal(lines.length, 2, '两行');
-  assert.match(lines[0] ?? '', /^Steering: 顺便看下版本$/);
-  assert.match(lines[1] ?? '', /^Follow-up: 待会儿再说$/);
+  assert.equal(lines.length, 4, '空行 + 两条排队 + 提示');
+  assert.equal(lines[0]?.trim(), '', '首行是分隔用的空行（pi 的 Spacer(1)）');
+  assert.match(lines[1] ?? '', /^ Steering: 顺便看下版本$/);
+  assert.match(lines[2] ?? '', /^ Follow-up: 待会儿再说$/);
+  assert.match(
+    lines[3] ?? '',
+    /^ ↳ .+ to edit all queued messages$/,
+    '最后一行要告诉用户怎么把排队的话拿回输入框',
+  );
 });
 
-test('renderQueuePanel：多行文本压成一行（面板只有一行高）', () => {
+test('renderQueuePanel：多行文本压成一行（一条消息一行，不能把输入框顶下去）', () => {
   const state = {
     ...createInitialState({
       systemPrompt: 's', providerName: 'faux', modelId: 'f', toolNames: [], sessionId: 't',
@@ -1097,7 +1116,7 @@ test('renderQueuePanel：多行文本压成一行（面板只有一行高）', (
     steerQueue: [{ text: '第一行\n第二行', at: 1 }],
   };
   const out = stripTerminalSequences(renderQueuePanel(state, 80));
-  assert.equal(out.split('\n').length, 1, '换行被压掉');
+  assert.equal(out.split('\n').length, 3, '空行 + 一条排队 + 提示');
   assert.match(out, /第一行 第二行/);
 });
 

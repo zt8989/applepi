@@ -718,19 +718,39 @@ export function shouldIgnoreKey(data: string): boolean {
   return isKeyRelease(data);
 }
 
+/**
+ * 排队中的用户输入卡片（在输入框**之上**，一直挂着直到投递出去）。
+ *
+ * 形状与 pi 的 `updatePendingMessagesDisplay()` 逐行同构：
+ *
+ * ```
+ *  ↳ Option+Up to edit all queued messages
+ *  Steering: 顺便看下版本
+ *  Follow-up: 待会儿再说
+ * ```
+ *
+ * - 首行空行 = pi 的 `Spacer(1)`（与对话区隔开）；每行缩进一格 = pi 的
+ *   `TruncatedText(text, 1, 0)`；
+ * - 末行提示「怎么把它们拿回来」—— 没有它，这两条看着像**已经发给模型了**，
+ *   而它们其实还在本地；
+ * - **空队列时一行都不占**（返回空串 → `Text` 渲染成 `[]` → 布局里高度 0）。
+ */
 export function renderQueuePanel(state: AgentState, width: number): string {
-  const rows: string[] = [];
-  for (const item of state.steerQueue) {
-    rows.push(dim(`Steering: ${truncateToWidth(singleLine(item.text), Math.max(8, width - 12))}`));
-  }
-  for (const item of state.followUpQueue) {
-    rows.push(dim(`Follow-up: ${truncateToWidth(singleLine(item.text), Math.max(8, width - 12))}`));
-  }
-  if (rows.length === 0) return '';
+  if (state.steerQueue.length === 0 && state.followUpQueue.length === 0) return '';
+  const rows: string[] = [''];
+  for (const item of state.steerQueue) rows.push(queueRow('Steering: ', item.text, width));
+  for (const item of state.followUpQueue) rows.push(queueRow('Follow-up: ', item.text, width));
+  rows.push(dim(` ↳ ${keyLabel('app.message.dequeue')} to edit all queued messages`));
   return rows.join('\n');
 }
 
-/** 队列里那句话压成一行（队列面板只有一行高，多行会把输入框顶下去）。 */
+/** 一行排队消息：`<前缀>文本`，缩进一格，超宽后面省略号（前缀自己占的宽度要扣掉）。 */
+function queueRow(prefix: string, text: string, width: number): string {
+  const room = Math.max(8, width - 1 - prefix.length);
+  return dim(` ${prefix}${truncateToWidth(singleLine(text), room)}`);
+}
+
+/** 队列里那句话压成一行：**一条消息一行**，多行会把输入框顶下去（pi 的 `TruncatedText` 同理）。 */
 function singleLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
@@ -1514,17 +1534,6 @@ export async function runTui(options: TuiOptions): Promise<number> {
    */
   let hideThinking = readHideThinkingBlock();
   /**
-   * 入队模式：生成中提交的话，默认走哪一列。
-   *
-   * 默认 **steer**（对齐 pi）：它是最常见的意图（「等等，改用这个」），而且
-   * followUp 的语义在「说完再插」这个场景下更接近默认值。
-   *
-   * 用 `cycleQueueMode()` 切。为什么不做成「回车两次 = 先 steer 再升级成 followUp」：
-   * 那需要在队列里记住「它本来想干什么」，而实际结果往往是用户改主意了 ——
-   * 显式一个键位切换更清楚，也与 pi 的两个独立键位一致。
-   */
-  let queueMode: QueueKind = 'steer';
-  /**
    * 命令反馈：**钉进对话流的卡片**（对齐 pi 的 `showStatus`）。
    *
    * ## 与 pi 同形的三条规则
@@ -1812,6 +1821,14 @@ export async function runTui(options: TuiOptions): Promise<number> {
         cycleThinking();
         return true;
       }
+      // pi 的 `app.message.followUp`（`Option+Enter`）：**这一条**排成 followUp。
+      //
+      // 必须挂在这个全局监听器上，不能等编辑器：编辑器只认「提交」一个动作，而
+      // 「提交到哪一列」是应用层的事（pi 也是把它当 `app.*` 键处理的）。见 `queue()`。
+      if (actionMatches(data, 'app.message.followUp')) {
+        followUp();
+        return true;
+      }
       // pi 的 `app.message.dequeue`（`Alt+Up`）：把排队消息还回编辑器。
       if (actionMatches(data, 'app.message.dequeue')) {
         if (restoreQueuedToEditor() === 0) notify(dim('没有排队的消息可还回'));
@@ -1879,14 +1896,6 @@ export async function runTui(options: TuiOptions): Promise<number> {
         void writeHideThinkingBlock(hideThinking, cwd).then((ok) => {
           if (!ok) notify(yellow('思考块已切换（这次生效），但没能写进 settings.json（写权限？）'));
         });
-        return true;
-      }
-      // `app.queue.cycle`（Ctrl+Q）：切换入队模式（steer ↔ followUp）。
-      //
-      // **不用 Ctrl+S / Ctrl+U**：它们在某些终端里会被流控吃掉（Ctrl+S 是 XOFF），
-      // 按下去「什么反应都没有」—— 而那正好是最需要反馈的时刻。
-      if (actionMatches(data, 'app.queue.cycle')) {
-        cycleQueueMode();
         return true;
       }
       return false;
@@ -1957,11 +1966,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
       // 「顺便查下版本」时唯一的选择是等——或者中断（丢掉模型已经跑出来的东西）。
       // 真正的做法与 pi 一样：**排进队列**，看它什么时候插进去。
       //
-      // 用哪一列由**模式键**决定（默认 steer）：
-      // - steer：当前 step 的工具跑完后、下一次 LLM 调用前插进去（会打断延续）。
-      // - followUp：等模型说完、开一个新回合才插（不打断）。
-      // 见 `queueMode` 的注释。
-      queue(queuedInput(input));
+      // 回车 = **steer**（当前 step 的工具跑完后、下一次 LLM 调用前插进去）。
+      // 要「等它说完再插」（followUp）按 `Option+Enter` —— 与 pi 同一套键位。
+      queue(queuedInput(input), 'steer');
       return;
     }
     send(input);
@@ -1972,18 +1979,22 @@ export async function runTui(options: TuiOptions): Promise<number> {
    *
    * **入队不等于立刻插进去** —— 投递时机由 reducer 决定（见 queue.input 的注释）：
    * steer 在「工具跑完、下一次 LLM 调用前」，followUp 在「回合收工时」。
+   *
+   * ## 走哪一列由**按哪个键**定，不是一个模式开关
+   *
+   * pi 把这两件事分成两个键：回车 = `steer`，`Option+Enter` = `followUp`。
+   * 本项目早先是一个 `Ctrl+Q` 切的**模式**（`app.queue.cycle`）—— 那是坏的，因为
+   * 模式是**状态**：切过之后每条都按新列走，而屏幕上看不出自己现在在哪个模式里，
+   * 症状是「我明明按的回车，怎么排到 followUp 去了」。按键决定就没有这笔账。
+   *
+   * ## 为什么不在这里 `notify` 一句「已排队」
+   *
+   * 底部的队列卡片（`renderQueuePanel`）就是它的显示，而且**一直都在**（那一句
+   * 「排了什么」本来就在那儿，还是全宽、还是每帧同步的）。再往对话流里插一张
+   * `Steering: …` 的卡 = 同一件事说两遍，还多一行随对话滚走 —— pi 也不插。
    */
-  const queue = (item: QueuedInput): void => {
-    store.dispatch({ type: 'queue.input', text: item.text, content: item.content, as: queueMode });
-    // 提示一句去了哪一列：用户得知道「我现在说的话会不会打断它」。
-    notify(dim(`${queueMode === 'steer' ? 'Steering' : 'Follow-up'}: ${item.text}`));
-    refresh();
-  };
-
-  /** 在 steer 与 followUp 之间切模式（对应 pi 的 `app.message.steer` / `followUp` 两个键位）。 */
-  const cycleQueueMode = (): void => {
-    queueMode = queueMode === 'steer' ? 'followUp' : 'steer';
-    notify(dim(`入队模式：${queueMode === 'steer' ? 'steer（工具跑完后插进去）' : 'followUp（说完再插）'}`));
+  const queue = (item: QueuedInput, as: QueueKind): void => {
+    store.dispatch({ type: 'queue.input', text: item.text, content: item.content, as });
     refresh();
   };
 
@@ -2298,11 +2309,12 @@ export async function runTui(options: TuiOptions): Promise<number> {
   };
 
   /**
-   * pi 的 `app.message.followUp`（`Alt+Enter`）：流式时按 followUp 入队；空闲时等同回车。
+   * pi 的 `app.message.followUp`（`Option+Enter`）：流式时按 followUp 入队；空闲时等同回车。
    *
-   * 与 pi 的 `handleFollowUp()` 同口径。**为什么不复用 `queueMode`**：那个是「模式开关」
-   * （切一次之后每条都按新列走），而这个是「这一条走 followUp」的一次性动作 ——
-   * 两个键位 pi 也分得很清（`app.queue.cycle` 是我们自己的，pi 没有）。
+   * 与 pi 的 `handleFollowUp()` 同口径：空闲时**等同回车**（这时候没有「等它说完」可言，
+   * 直接发就是最贴意图的事），跑着才排队。
+   *
+   * 排队时不 `notify` —— 与 `queue()` 同一个理由：底部卡片就是它的显示。
    */
   const followUp = (): void => {
     const text = editor.getText().trim();
@@ -2313,9 +2325,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
       return;
     }
     editor.setText('');
-    store.dispatch({ type: 'queue.input', text, as: 'followUp' });
-    notify(dim(`Follow-up: ${text}`));
-    refresh();
+    queue(queuedInput(text), 'followUp');
   };
 
   /**
@@ -2848,7 +2858,11 @@ export async function runTui(options: TuiOptions): Promise<number> {
       // 给了就把高度钉死，面板里的内容一变就错位（同下面队列面板的理由）。
       ...[...widgetSlots.values()].map((component) => ({ component, minSize: 1 })),
       // 队列面板在输入框**之上** —— 用户敲完字、回车之前就该看到刚才排了什么。
-      { component: queuePanel, minSize: 1 },
+      //
+      // `minSize: 0`：**空队列时一行都不占**（`renderQueuePanel` 返回空串 → `Text` 渲染成
+      // `[]`）。pi 那边也是 `minSize: 0`（`chat-viewport.js` 的 pendingMessages）——
+      // 写 1 会常年留一条空行，看着像「底区坏了」。非空时它自己的高度就是内容高度。
+      { component: queuePanel, minSize: 0 },
       // **输入区那一格**：默认是 composer；扩展的 inline `custom()` 挂上来时换成它的
       // 组件（pi 的 `editorContainer.clear(); addChild(component)`）。
       //
