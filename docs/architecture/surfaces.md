@@ -75,6 +75,28 @@ composer 是 pi 的 `CustomEditor`（`embedWorkingStatus: true`），配色是 p
 状态文字的颜色跟**边框自己的颜色**走（`(text) => editor.borderColor(text)`）—— 与 pi
 嵌入时的做法一致；写死 `accent` 的话，边框随思考级别变色时会像两套东西拼在一起。
 
+### 输入框上面永远空一行（空隙属于「底区」，不属于编辑器）
+
+```
+（会话流最后一行）
+                        ← 这一行空隙
+── composer 上框线 ─────────────────────────
+```
+
+这行空隙在 pi 里**不在编辑器身上**，而在它上面那个 widget 容器里：
+`renderWidgetContainer(widgetContainerAbove, widgets, spacerWhenEmpty=true, leadingSpacer=true)`
+—— 没有 widget 时那个容器里**就只有一个 `Spacer(1)`**，有 widget 时 Spacer 排在它们前面。
+「输入框上面永远空一行」是那个**容器**保证的，与输入框里放了什么无关。
+
+本项目的扩展 widget 不是装在一个容器里，而是直接摊在底区那个 VStack 里，于是没有对应的
+`Spacer`。这行空隙一度是**借**来的：队列卡 `renderQueuePanel` 的首行总是一个空行，空队列时
+也还在 —— 直到队列卡改成「空队列零行」（`minSize: 0`，免得常年留一条像坏了的空行），
+借来的那行就一起没了。症状：**会话流最后一行贴着 composer 的上框线**（起一个真会话就能看到，
+启动帧反而看不出来 —— 那时最后一块是扩展清单，它自带尾随空行）。
+
+现在底区里有一格显式的 `Spacer(1)`（`app.ts` 的 `dockGap`，`basis: 1, grow: 0, minSize: 1`）：
+给 `grow` 会把空隙撑开，不给 `minSize` 会在窗口矮时被挤掉。
+
 ### 顶行是**两职合一**的（`tabLine`）
 
 ```

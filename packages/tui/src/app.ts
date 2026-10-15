@@ -19,6 +19,7 @@
 // 对话式 agent 用前者：输入框要钉在底部、对话区独立滚动，滚出去的内容不该污染终端回滚。
 import {
   ProcessTerminal,
+  Spacer,
   Text,
   ScrollView,
   TuiAltScreen,
@@ -1378,6 +1379,36 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 一共三五行的字符串，重算成本可以忽略，而增删子节点要处理很多状态。
    */
   const queuePanel = new Text('', 0, 0);
+
+  /**
+   * 会话区与输入区之间的那一行空隙 —— pi 的 `Spacer(1)`。
+   *
+   * ## 为什么它不是 composer 自带的
+   *
+   * pi 里这行空隙**不在编辑器身上**，而在它上面那个 widget 容器里：
+   * `renderWidgetContainer(widgetContainerAbove, widgets, spacerWhenEmpty=true, leadingSpacer=true)`
+   * —— 没有 widget 时那个容器里**就只有一个 `Spacer(1)`**，有 widget 时 Spacer 排在它们前面。
+   * 于是「输入框上面永远空一行」是**容器**保证的，跟输入框里放了什么无关。
+   *
+   * ## 本项目为什么丢过
+   *
+   * 本项目的扩展 widget 不是装在一个容器里，而是直接摊在 `bottom` 这个 VStack 里
+   * （见 `applyLayout`），于是那个「容器自带的 Spacer」没有对应的东西。
+   * 早先这行空隙是**借**来的：队列卡 `renderQueuePanel` 的第一行总是一个空行，
+   * 空队列时那行也还在（布局里给的是 `minSize: 1`）。队列卡改成「空队列零行」
+   * （`minSize: 0`，为了不常年留一条看着像坏了的空行）之后，那行借来的空隙就一起没了 ——
+   * 症状是**会话流最后一行贴着 composer 的上框线**。
+   *
+   * 所以这里把它显式补回来：与 pi 同形 —— 队列卡非空时卡自己还有前导空行，
+   * 于是「卡与对话区一行、卡与输入框一行」，与 pi 逐行一样（那边是 pendingMessages
+   * 自己的 `Spacer(1)` + widget 容器的 `Spacer(1)`）。
+   *
+   * ## 为什么钉死成一行
+   *
+   * `basis: 1, grow: 0, minSize: 1` —— 缺口就是**恰好一行**：不给 grow（不然窗口高时
+   * 会把空隙撑开）、不给它被 shrink 掉的机会（不然窗口矮时输入框又贴上去，等于没修）。
+   */
+  const dockGap = new Spacer(1);
 
   /**
    * 当前作用域（`Ctrl+P` 循环的候选集）——`/scoped-models` 改的就是它。
@@ -2896,6 +2927,10 @@ export async function runTui(options: TuiOptions): Promise<number> {
       // `[]`）。pi 那边也是 `minSize: 0`（`chat-viewport.js` 的 pendingMessages）——
       // 写 1 会常年留一条空行，看着像「底区坏了」。非空时它自己的高度就是内容高度。
       { component: queuePanel, minSize: 0 },
+      // 会话区与输入区之间的空隙 —— pi 的 `widgetContainerAbove` 里那个 `Spacer(1)`。
+      // 必须在这里（输入区**正上方**）而不是 widget 之前：pi 那边给空隙的是紧贴
+      // 编辑器的那个容器，所以排队卡与输入框之间也有这一行。理由见 `dockGap`。
+      { component: dockGap, basis: 1, grow: 0, minSize: 1 },
       // **输入区那一格**：默认是 composer；扩展的 inline `custom()` 挂上来时换成它的
       // 组件（pi 的 `editorContainer.clear(); addChild(component)`）。
       //
