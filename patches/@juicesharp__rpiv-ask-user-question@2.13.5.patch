@@ -1,5 +1,5 @@
 diff --git a/ask-user-question.ts b/ask-user-question.ts
-index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..d007661161663904b0ce72c8c5143f1f55b9928d 100644
+index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..5c710389723c44f738830d90c146d887943e0dc1 100644
 --- a/ask-user-question.ts
 +++ b/ask-user-question.ts
 @@ -1,5 +1,12 @@
@@ -57,23 +57,10 @@ index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..d007661161663904b0ce72c8c5143f1f
  			presentation.overlay
  				? {
  						overlay: true,
-@@ -430,18 +454,74 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
- 			// Pi's editor slot (#253); the overlay only while another questionnaire holds the slot,
- 			// or stacked when another overlay is already on screen (see below).
- 			let presentation = resolvePresentation();
--			const mount = (p: Presentation) =>
--				mountQuestionnaire({ ctx, typed, itemsByTab, collapseKey, presentation: p, Session: QuestionnaireSession });
-+			const mount = (p: Presentation, onDone?: (done: (result: QuestionnaireResult) => void) => void) =>
-+				mountQuestionnaire({
-+					ctx,
-+					typed,
-+					itemsByTab,
-+					collapseKey,
-+					presentation: p,
-+					Session: QuestionnaireSession,
-+					...(onDone !== undefined ? { onDone } : {}),
-+				});
-+
+@@ -413,12 +437,62 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
+ 				return runRpcPath(pi, ctx.ui, typed);
+ 			}
+ 
 +			// ── ela patch：宿主（浏览器那一份）────────────────────────────────
 +			// 终端这一份仍然由我们自己画（下面 mount() → ctx.ui.custom）。ela 还会在
 +			// 浏览器里画同一份问卷：它实现了一个 `externalQuestionnaire` 接缝，我们把
@@ -121,6 +108,34 @@ index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..d007661161663904b0ce72c8c5143f1f
 +					externalClosed = true;
 +				},
 +			});
++
+ 			const itemsByTab: WrappingSelectItem[][] = typed.questions.map((q) => buildItemsForQuestion(q));
+ 
+ 			// Lazy — QuestionnaireSession pulls the ~560ms view/TUI render graph;
+ 			// load it only when the tool runs, not at extension registration.
+ 			const sessionLoad = await loadQuestionnaireSession();
+ 			if (!sessionLoad.ok) {
++				// ela patch：宿主那份（浏览器）已经开着 —— 这条早退也得把它收掉。
++				if (externalStarted) external?.done?.();
+ 				return buildToolResult(sessionLoad.message, { answers: [], cancelled: true, error: sessionLoad.error });
+ 			}
+ 			const { QuestionnaireSession } = sessionLoad.module;
+@@ -430,18 +504,26 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
+ 			// Pi's editor slot (#253); the overlay only while another questionnaire holds the slot,
+ 			// or stacked when another overlay is already on screen (see below).
+ 			let presentation = resolvePresentation();
+-			const mount = (p: Presentation) =>
+-				mountQuestionnaire({ ctx, typed, itemsByTab, collapseKey, presentation: p, Session: QuestionnaireSession });
++			const mount = (p: Presentation, onDone?: (done: (result: QuestionnaireResult) => void) => void) =>
++				mountQuestionnaire({
++					ctx,
++					typed,
++					itemsByTab,
++					collapseKey,
++					presentation: p,
++					Session: QuestionnaireSession,
++					...(onDone !== undefined ? { onDone } : {}),
++				});
  
  			emitAskUserBlockedEvent(pi, true);
  			try {
@@ -136,7 +151,7 @@ index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..d007661161663904b0ce72c8c5143f1f
  				}
  
  				if (result === undefined) {
-@@ -452,6 +532,9 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
+@@ -452,6 +534,9 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
  			} finally {
  				presentation.release?.();
  				emitAskUserBlockedEvent(pi, false);
@@ -146,7 +161,7 @@ index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..d007661161663904b0ce72c8c5143f1f
  			}
  		},
  	});
-@@ -460,3 +543,82 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
+@@ -460,3 +545,82 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
  }
  
  export { buildQuestionnaireResponse, buildToolResult };
@@ -230,7 +245,7 @@ index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..d007661161663904b0ce72c8c5143f1f
 +	return { answers, cancelled: false, ...globalNote };
 +}
 diff --git a/state/i18n-bridge.ts b/state/i18n-bridge.ts
-index 96762fe1318b28fd47c2215c4088561382e9efe0..e3a25f3d443db3fcbd73f5354c824e680590a095 100644
+index 96762fe1318b28fd47c2215c4088561382e9efe0..91f13d5846d6997668854ff2d2a1a7e81870f5e1 100644
 --- a/state/i18n-bridge.ts
 +++ b/state/i18n-bridge.ts
 @@ -33,18 +33,29 @@ type I18nSDK = { scope: (namespace: string) => ScopeFn };
@@ -255,8 +270,8 @@ index 96762fe1318b28fd47c2215c4088561382e9efe0..e3a25f3d443db3fcbd73f5354c824e68
 +// 上游是 TLA（`await import("@juicesharp/rpiv-i18n")`），而 pi 的 loader 走 jiti：
 +// TLA 还没结算时，**导入这个模块的模块**拿到的 namespace 里，导出还是 undefined ——
 +// 症状是 `loadQuestionnaireSession()` 读到 `typeof mod.QuestionnaireSession !== "function"`，
-+// 于是扩展对模型说"这个工具坏了，重启 Pi"（我们实测在机器负载高时必现，而且是同一个
-+// 进程里第一次加载就中招 —— jiti 的模块图缓存随后一直带着这个坏 namespace）。
++// 于是扩展对模型说"这个工具坏了，重启 Pi"（负载高时必现，而且同一个进程里第一次加载
++// 就中招 —— jiti 的模块图缓存随后一直带着这个坏 namespace）。
 +//
 +// 改成"先给同步兜底、SDK 到了再换"：`t()` 每次调用现读 `scopeImpl`，语义与上游一致
 +// （SDK 装了就实时跟 locale），只是不再把整条模块图卡在一个 await 上。

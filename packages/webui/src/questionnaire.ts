@@ -358,13 +358,20 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
     body.append(noteField(globalNote, '整份备注（可选）', (text) => { globalNote = text; }));
   };
 
+  /**
+   * 底栏。
+   *
+   * 问题页上是**翻页**（上一页 / 下一页），提交只在**最后一页**（提交页）—— 与终端那份
+   * 的分页语义一致：答完一题自动进下一页，最后一题答完落到提交页，那里才按提交。
+   */
   const drawFooter = (): void => {
     const unanswered = snapshot.questions.length - answeredCount();
+    const last = snapshot.active >= snapshot.questions.length - 1;
     const hint = document.createElement('div');
     hint.className = 'ela-q-hint';
     hint.textContent = onSubmitTab()
-      ? 'Enter 提交 · ←/→ 切题 · Esc 放弃'
-      : '←/→ 切题 · ↑↓ 选项 · Enter 选择 · Tab 写备注 · Esc 放弃';
+      ? 'Enter 提交 · ←/→ 翻页 · Esc 放弃'
+      : '←/→ 上一页/下一页 · ↑↓ 选项 · Enter 选择 · Tab 写备注 · Esc 放弃';
     const progress = document.createElement('div');
     progress.className = unanswered === 0 ? 'ela-q-progress is-done' : 'ela-q-progress is-pending';
     progress.textContent =
@@ -376,14 +383,33 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
     cancel.className = 'ela-q-button';
     cancel.textContent = '放弃';
     cancel.addEventListener('click', () => emit({ kind: 'cancel' }));
-    const confirm = document.createElement('button');
-    confirm.type = 'button';
-    confirm.className = 'ela-q-button is-primary';
-    confirm.textContent = '提交';
-    // **留空也能提交**（扩展的信封会把它列成 `unanswered:`）—— 与它自己那份 TUI 一致。
-    confirm.addEventListener('click', submit);
-    actions.append(cancel, confirm);
+    actions.append(cancel);
+    if (onSubmitTab()) {
+      const confirm = document.createElement('button');
+      confirm.type = 'button';
+      confirm.className = 'ela-q-button is-primary';
+      confirm.textContent = '提交';
+      // **留空也能提交**（扩展的信封会把它列成 `unanswered:`）—— 与它自己那份 TUI 一致。
+      confirm.addEventListener('click', submit);
+      actions.append(confirm);
+      footer.replaceChildren(hint, progress, actions);
+      return;
+    }
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'ela-q-button';
+    back.textContent = '上一页';
+    back.disabled = snapshot.active === 0;
+    back.addEventListener('click', () => emit({ kind: 'activate', index: snapshot.active - 1 }));
+    const next = document.createElement('button');
+    next.type = 'button';
+    next.className = 'ela-q-button is-primary';
+    // 最后一题的下一页是**提交页**（不是"提交"）—— 提交只在那一页上按。
+    next.textContent = '下一页';
+    next.addEventListener('click', () => emit({ kind: 'activate', index: snapshot.active + 1 }));
+    actions.append(back, next);
     footer.replaceChildren(hint, progress, actions);
+    void last;
   };
 
   /** 终端的键位照搬一份 —— 两端同一套肌肉记忆。 */

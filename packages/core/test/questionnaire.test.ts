@@ -86,13 +86,13 @@ test('问卷：把扩展交来的题目收成本项目的形状（认不出就�
 
 // ── 状态机 ────────────────────────────────────────────────────────────────
 
-test('问卷：单选选定即下一题，多选勾完要回车才算；答完最后一题不跳提交页', () => {
+test('问卷：答完一题进下一页，最后一题 → 提交页；提交仍然要手动按', () => {
   const session = new QuestionnaireSession(QUESTIONS);
   assert.equal(session.snapshot().active, 0);
 
   session.apply({ kind: 'pick', index: 1 });
   assert.deepEqual(session.answerOf(0), { kind: 'option', index: 1 });
-  assert.equal(session.snapshot().active, 1, '单选选完就进下一题');
+  assert.equal(session.snapshot().active, 1, '单选选完就进下一页');
 
   session.apply({ kind: 'toggle', index: 0 });
   session.apply({ kind: 'toggle', index: 2 });
@@ -100,11 +100,14 @@ test('问卷：单选选定即下一题，多选勾完要回车才算；答完�
   assert.equal(session.snapshot().active, 1, '多选勾选还停在本题');
   assert.equal(session.snapshot().settled[1], false, '勾了还没回车 = 草稿，不算答定');
   session.apply({ kind: 'commit' });
-  assert.equal(session.snapshot().active, 1, '回车只把这一题答定（不跳提交页）');
+  assert.equal(
+    session.snapshot().active,
+    session.submitIndex,
+    '最后一题答完 → 落到提交页（与扩展那份 TUI 的 computeAutoAdvanceTab 同规则）',
+  );
   assert.equal(session.answeredCount, 2);
+  assert.equal(session.submitted, false, '落到提交页 ≠ 提交：提交得在那页上手动按');
 
-  // 提交页是自己切过去的：那里回车才提交。
-  session.apply({ kind: 'activate', index: session.submitIndex });
   assert.equal(session.apply({ kind: 'submit' }), true);
   assert.equal(session.submitted, true);
   assert.equal(session.apply({ kind: 'pick', index: 0 }), false, '提交之后不再接受改动');

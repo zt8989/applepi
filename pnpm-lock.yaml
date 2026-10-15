@@ -6,7 +6,7 @@ settings:
 
 patchedDependencies:
   '@earendil-works/pi-coding-agent': b26762fc59574e3c2c7c5527715027f0686b39a46ca4e84ca0f5d7020274b59e
-  '@juicesharp/rpiv-ask-user-question@2.13.5': 531900dfabcec96bce6ff5384c163bf9b30dfbe94da190e0c0029918d2540b23
+  '@juicesharp/rpiv-ask-user-question@2.13.5': b44dee6d99fdf7d78cab7a60094865645faac5c0db8dcb4784103904171ff150
 
 importers:
 
@@ -38,7 +38,7 @@ importers:
         version: 1.0.3
       '@juicesharp/rpiv-ask-user-question':
         specifier: 2.13.5
-        version: 2.13.5(patch_hash=531900dfabcec96bce6ff5384c163bf9b30dfbe94da190e0c0029918d2540b23)(@earendil-works/pi-coding-agent@1.0.3(patch_hash=b26762fc59574e3c2c7c5527715027f0686b39a46ca4e84ca0f5d7020274b59e)(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.22.0)(zod@4.6.6))(@earendil-works/pi-tui@1.0.3)(typebox@1.3.27)
+        version: 2.13.5(patch_hash=b44dee6d99fdf7d78cab7a60094865645faac5c0db8dcb4784103904171ff150)(@earendil-works/pi-coding-agent@1.0.3(patch_hash=b26762fc59574e3c2c7c5527715027f0686b39a46ca4e84ca0f5d7020274b59e)(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.22.0)(zod@4.6.6))(@earendil-works/pi-tui@1.0.3)(typebox@1.3.27)
       redux:
         specifier: ^4.2.1
         version: 4.2.1
@@ -2141,7 +2141,7 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.6.0
 
-  '@juicesharp/rpiv-ask-user-question@2.13.5(patch_hash=531900dfabcec96bce6ff5384c163bf9b30dfbe94da190e0c0029918d2540b23)(@earendil-works/pi-coding-agent@1.0.3(patch_hash=b26762fc59574e3c2c7c5527715027f0686b39a46ca4e84ca0f5d7020274b59e)(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.22.0)(zod@4.6.6))(@earendil-works/pi-tui@1.0.3)(typebox@1.3.27)':
+  '@juicesharp/rpiv-ask-user-question@2.13.5(patch_hash=b44dee6d99fdf7d78cab7a60094865645faac5c0db8dcb4784103904171ff150)(@earendil-works/pi-coding-agent@1.0.3(patch_hash=b26762fc59574e3c2c7c5527715027f0686b39a46ca4e84ca0f5d7020274b59e)(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.22.0)(zod@4.6.6))(@earendil-works/pi-tui@1.0.3)(typebox@1.3.27)':
     dependencies:
       '@earendil-works/pi-coding-agent': 1.0.3(patch_hash=b26762fc59574e3c2c7c5527715027f0686b39a46ca4e84ca0f5d7020274b59e)(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.22.0)(zod@4.6.6)
       '@earendil-works/pi-tui': 1.0.3

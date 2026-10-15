@@ -205,11 +205,6 @@ export class QuestionnaireSession {
     return this.questions.length;
   }
 
-  /** 最后一题的题号。答完一题最多前进到这里 —— **不**自动落到提交页（见 `pick`）。 */
-  get lastQuestionIndex(): number {
-    return this.questions.length - 1;
-  }
-
   get submitted(): boolean {
     return this.submittedFlag;
   }
@@ -329,11 +324,13 @@ export class QuestionnaireSession {
         if (intent.index < 0 || intent.index >= question.options.length) return false;
         this.answerList[this.activeIndex] = { kind: 'option', index: intent.index };
         this.settledFlags[this.activeIndex] = true;
-        // 单选一选定就是"这题答完了" —— 直接进下一题（与扩展自己那份的节奏一致）。
-        // **但只进到下一道题**：提交页得自己切过去。自动跳到提交页的话，刚答完最后
-        // 一题的那一下回车（或按住不放的重复）就落在提交页上成了"提交"（真发生过，
-        // 用户的原话是"我还没切过去它就自己提交了"）。
-        this.activeIndex = Math.min(this.activeIndex + 1, this.lastQuestionIndex);
+        // 单选一选定就是"这题答完了" —— 直接进**下一页**（与扩展自己那份的
+        // `computeAutoAdvanceTab` 同一条规则：最后一题答完就落到提交页）。
+        //
+        // 上一步这里只走到"最后一道题"、不跳提交页，理由是"怕回车顺手把问卷提交了"。
+        // 但那是**键盘重复**造成的（按住回车 → 第二下落在提交页上），而重复已经在两个
+        // 渲染器里都滤掉了 —— 一次回车只会推进一页，提交仍然只能在提交页上手动按。
+        this.activeIndex = Math.min(this.activeIndex + 1, this.submitIndex);
         break;
       }
       case 'toggle': {
@@ -375,8 +372,8 @@ export class QuestionnaireSession {
           ? { kind: 'multi', selected: current?.kind === 'multi' ? [...current.selected] : [], custom: text }
           : { kind: 'custom', text };
         this.settledFlags[this.activeIndex] = true;
-        // 自定义答案也是"这题答完了"（同样只进到下一道题，不跳提交页）。
-        this.activeIndex = Math.min(this.activeIndex + 1, this.lastQuestionIndex);
+        // 自定义答案也是"这题答完了"（同样进下一页，最后一题落到提交页）。
+        this.activeIndex = Math.min(this.activeIndex + 1, this.submitIndex);
         break;
       }
       case 'commit': {
@@ -398,7 +395,8 @@ export class QuestionnaireSession {
           return false;
         }
         this.settledFlags[this.activeIndex] = true;
-        this.activeIndex = Math.min(this.activeIndex + 1, this.lastQuestionIndex);
+        // 多选的"就这些"回车：进下一页（最后一题 → 提交页）。
+        this.activeIndex = Math.min(this.activeIndex + 1, this.submitIndex);
         break;
       }
       case 'note': {
