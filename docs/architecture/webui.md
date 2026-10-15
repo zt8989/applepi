@@ -208,21 +208,22 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 ## 扩展对话框（`ctx.ui.select` / `confirm` / `input`）
 
 `ask_user_question` 这类扩展按 `ctx.mode` 选路：`'tui'` 走它自己那个全屏问卷
-（`ctx.ui.custom()` 的组件），`'rpc'` 走 `ctx.ui.select/input` 的逐题回退。本项目两路都有，
-而且**同一份问卷在终端与浏览器里同时弹，谁先回答谁算数**：
+（`ctx.ui.custom()` 的组件），`'rpc'` 走 `ctx.ui.select/input` 的逐题回退。本项目选
+`'rpc'` —— 因为那两个原语是**我们**实现的，于是终端与浏览器可以吃同一份问卷。
 
 - **浏览器连上时**把扩展宿主模式切成 `'rpc'`（`extension-host.ts` 的 `setUiMode`，
-  连接进来/全断开时由 bridge 的 `onPresenceChange` 驱动），全断开时切回 `'tui'`。
-- `ctx.ui.select/confirm/input` 由 core 的 `raceDialog` 把两份并起来：
-  终端那一份是 pi 自己的 `ExtensionSelectorComponent` / `ExtensionInputComponent`，
-  挂进与 `custom()` 同一个输入区槽位；浏览器那一份走 WebSocket
-  （`ui-request` / `ui-response` / `ui-cancel`）。
-- 先回答的那一端赢，另一端立刻撤掉（终端组件卸下 / `.ela-modal` 弹窗收到 `ui-cancel` 关掉）。
-- 浏览器后连（刷新页面 / 新标签页）时，还没答的请求会**补发**给这个连接 —— 否则界面里
-  什么都看不到，而服务端还卡在那里等答案。
-
-代价：浏览器连着时终端也走逐题回退（没有多题 tab / 预览 / 备注 —— 那是
-`runRpcQuestionnaire` 固有的）。这是「两端都能答」的必然取舍。
+  连接进来/全断开时由 bridge 的 `onPresenceChange` 驱动）。
+- **问卷**（多题那种）不再逐题弹窗：core 的 `QuestionnaireSession`
+  （[questionnaire.ts](../../packages/core/src/questionnaire.ts)）持一份状态，终端那块面板与
+  浏览器那个弹窗是它的**两块屏幕**（一份进度，不是两个弹窗），提交之后把答案按扩展
+  问的顺序喂回去（`ui-questionnaire` / `ui-questionnaire-intent`）。
+- **一次一问的对话框**（别的扩展、`confirm`、问卷认领不到时的回退）仍由 core 的
+  `raceDialog` 把两份并起来：终端那一份是 pi 自己的 `ExtensionSelectorComponent` /
+  `ExtensionInputComponent`，挂进与 `custom()` 同一个输入区槽位；浏览器那一份走
+  WebSocket（`ui-request` / `ui-response` / `ui-cancel`）—— **谁先回答谁算数**，
+  另一端立刻撤掉。
+- 浏览器后连（刷新页面 / 新标签页）时，还没答的请求与**当前那份问卷快照**会补发
+  给这个连接 —— 否则界面里什么都看不到，而服务端还卡在那里等答案。
 
 ## 底栏统计行（与 TUI 逐字同形）
 

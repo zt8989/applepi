@@ -33,6 +33,7 @@ import { isThinkingLevel } from '@ela/core/thinking-level';
 import { deriveStream, type StreamNoticeEntry } from '@ela/core/stream';
 import { expandSkillCommand, skillsInPrompt } from '@ela/core/skills';
 import type { DialogHost } from '@ela/core/extension-ui';
+import type { QuestionnaireIntent } from '@ela/core/questionnaire';
 import {
   WEB_PROTOCOL_VERSION,
   STREAM_NOTICE_ROLE,
@@ -98,8 +99,9 @@ export interface WebBridgeOptions {
    * 浏览器连上 / 全断开时叫一声。
    *
    * 用来切扩展宿主模式（`setUiMode`）：有浏览器时切 `'rpc'`，`ask_user_question` 那种
-   * 按 `ctx.mode` 选路的扩展才会走 `ctx.ui.select/input` 的逐题回退 —— 而那两个方法
-   * 由本项目分发给**终端与浏览器两端**（见 `extension-ui.ts` 的 `raceDialog`）。
+   * 按 `ctx.mode` 选路的扩展才会走 `ctx.ui.select/input` —— 那两个原语由本项目实现，
+   * 所以终端与浏览器能答**同一份**问卷（逐题调用拼回多题 tab，见
+   * `@ela/core/questionnaire`；一次一问的那种走 `extension-ui.ts` 的 `raceDialog`）。
    */
   onPresenceChange?: ((connected: boolean) => void) | undefined;
 }
@@ -290,6 +292,16 @@ export class WebBridge {
   >();
   /** 对话框 id 的自增号（只需要在本进程内唯一）。 */
   private dialogSeq = 0;
+  /**
+   * 当前那份**问卷**（多题 tab）：整份快照 + 用户意图的回路。
+   *
+   * 与 `pendingDialogs` 不是一回事：那边是"一次一问、等一个答复"，这边是**常驻**的
+   * 一份表（题切了、勾选变了都要重发整份快照）。服务端是唯一状态源 —— 浏览器只推意图，
+   * 连"当前停在第几题"也由服务端拍。
+   */
+  private questionnaire:
+    | { id: string; message: WebServerMessage; onIntent: (intent: QuestionnaireIntent) => void }
+    | undefined;
 
   /**
    * 浏览器侧的对话框宿主（`ctx.ui.select/confirm/input` 走它）。
@@ -307,6 +319,28 @@ export class WebBridge {
         { method: 'input', title, ...(placeholder !== undefined ? { placeholder } : {}) },
         signal,
       ),
+    questionnaire: {
+      open: (snapshot, onIntent) => {
+        const id = `uiq-${++this.dialogSeq}`;
+        const message: WebServerMessage = { type: 'ui-questionnaire', id, snapshot };
+        this.questionnaire = { id, message, onIntent };
+        this.broadcast(message);
+        return {
+          push: (next) => {
+            // 已经关掉的那一份：晚到的 push 丢掉（否则会在新一份问卷上画旧内容）。
+            if (this.questionnaire?.id !== id) return;
+            const frame: WebServerMessage = { type: 'ui-questionnaire', id, snapshot: next };
+            this.questionnaire.message = frame;
+            this.broadcast(frame);
+          },
+          close: () => {
+            if (this.questionnaire?.id !== id) return;
+            this.questionnaire = undefined;
+            this.broadcast({ type: 'ui-questionnaire-close', id });
+          },
+        };
+      },
+    },
   };
 
   /** 广播一个对话框请求，等第一个回答（或 `signal` 中断）。 */
@@ -378,6 +412,8 @@ export class WebBridge {
     // 还没回答的对话框补发给这个新连接 —— 没有这一步的话，先弹的对话框在
     // 「刷新页面 / 后开的标签页」里根本看不到，而服务端还卡在那里等答复。
     for (const { message } of this.pendingDialogs.values()) listener(message);
+    // 问卷同理（而且它更常被刷新撞上：一填就是好几题，人在里面待得久）。
+    if (this.questionnaire !== undefined) listener(this.questionnaire.message);
     return () => {
       if (!this.listeners.delete(listener)) return;
       if (this.listeners.size === 0) this.options.onPresenceChange?.(false);
@@ -486,6 +522,11 @@ export class WebBridge {
       case 'ui-response': {
         // 第一个回答算数（`finish` 自己判重）。
         this.pendingDialogs.get(message.id)?.finish(message.cancelled === true ? undefined : message.value);
+        return [];
+      }
+      case 'ui-questionnaire-intent': {
+        // 问卷里的一个动作。只认当前那一份的 id（旧标签页拿着已关掉的问卷发东西，就当没看见）。
+        if (this.questionnaire?.id === message.id) this.questionnaire.onIntent(message.intent);
         return [];
       }
       default:

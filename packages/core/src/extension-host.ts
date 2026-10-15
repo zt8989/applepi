@@ -86,6 +86,7 @@ import {
 import { loadPiSettings } from './pi-config';
 import type { ExtensionFactory } from '@earendil-works/pi-coding-agent/dist/core/extensions/types.js';
 import { createHostUi, type ExtensionHostUi, type HostUiOptions } from './extension-ui';
+import { QuestionnaireHost } from './questionnaire';
 import { extensionModelRegistry } from './extension-models';
 import { extensionSessionManager } from './extension-sessions';
 import { installExtensionCommands, type ExtensionCommands } from './extension-commands';
@@ -510,6 +511,19 @@ const errors: string[] = [];
     extensionModelRegistry(effectiveRuntime) as never,
   );
 
+  // ── 问卷（`ask_user_question` 那类多题提问）的宿主侧状态 ──
+  //
+  // 同一个实例**两处都要**：
+  //  - 工具层（`adaptExtensionTool`）记"哪个工具在跑、入参是什么"——题目与 preview 正文的来源；
+  //  - UI 宿主（`createHostUi`）在 `select`/`input` 被调时认领并取答案。
+  //
+  // 分两个实例的话认领永远失败（一边记、一边看空的），而失败的样子是"退回逐题弹窗" ——
+  // 看上去完全正常，只是没有 tab。
+  //
+  // 视图那半边（`HostUiOptions.questionnaire`）**惰性读**：界面起来之前那份 options 还没填
+  // （与 `ctx.ui.custom()` 同一个道理）。
+  const questionnaire = new QuestionnaireHost(() => uiOptions?.().questionnaire);
+
   // ── 工具：从 runner 的注册表扫（而不是只扫装载那一刻）───
   //
   // MCP 的工具是在**服务器连上之后**才 `pi.registerTool()` 进来的，所以扫描只能包成
@@ -542,7 +556,7 @@ const errors: string[] = [];
         continue;
       }
       registrations.push({
-        tool: adaptExtensionTool(name, d, { runner, store, cwd }),
+        tool: adaptExtensionTool(name, d, { runner, store, cwd, questionnaire }),
         ...(d.exposure !== undefined ? { exposure: d.exposure } : {}),
         ...(d.namespace !== undefined ? { namespace: d.namespace } : {}),
         ...(d.annotations !== undefined ? { annotations: d.annotations } : {}),
@@ -595,7 +609,7 @@ const errors: string[] = [];
     // `as never`：官方的 `ExtensionUIContext` 有 26 个成员（`setWidget` / `setFooter` /
     // `setHeader` / RPC 弹窗……），本项目只实现那几个真的能做的。直接断言会把
     // 「缺一堆」这件事藏起来 —— 而它已经写在本文件与 `extension-ui.ts` 的注释里了。
-    hostUi = createHostUi(uiOptions);
+    hostUi = createHostUi(uiOptions, questionnaire);
     runner.setUIContext(hostUi as never, 'tui');
   }
   const setUiMode = (mode: 'tui' | 'rpc'): void => {

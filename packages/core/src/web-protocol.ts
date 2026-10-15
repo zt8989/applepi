@@ -22,14 +22,19 @@
  */
 
 import type { Api, AssistantMessage, Message, Model } from '@earendil-works/pi-ai';
+import type { QuestionnaireIntent, QuestionnaireSnapshot } from './questionnaire';
 
 /**
  * 协议版本。对不上就拒绝连接 —— 比半懂不懂地解析强。
  *
  * v3：`hello` 不再塞模型目录 / 作用域 —— 那些（以及命令表这类非会话数据）改成
  * HTTP 接口（`/api/*`，见 [api.ts](@ela/tui 的 web/api.ts)），前端按需取。
+ *
+ * v4：问卷（`ui-questionnaire` / `ui-questionnaire-intent`）—— 多题 tab 那种提问的
+ * 整份快照与意图。加消息种类也算"对不上就拒绝"（旧前端收到不认识的帧会当未知消息），
+ * 所以版本号跟着走。
  */
-export const WEB_PROTOCOL_VERSION = 3;
+export const WEB_PROTOCOL_VERSION = 4;
 
 /**
  * 聊天流里「提示」条目用的合成消息 role。
@@ -185,7 +190,17 @@ export type WebServerMessage =
       placeholder?: string;
     }
   /** 关掉那个弹窗（另一端先答了 / 整轮被中断）。客户端收到就静默关掉。 */
-  | { type: 'ui-cancel'; id: string };
+  | { type: 'ui-cancel'; id: string }
+  /**
+   * 一份**问卷**（多题 tab）的整份快照。与 `ui-request` 不同：它不是"一问一答"，
+   * 而是服务端持一份状态（`@ela/core/questionnaire`），浏览器与终端是它的**两块屏幕**。
+   *
+   * 每次变化都重发整份快照而不是增量：一份问卷就一屏内容（4 题 × 4 选项），
+   * 增量协议的复杂度换不来什么，而整份快照让"后开的标签页"天然是对的。
+   */
+  | { type: 'ui-questionnaire'; id: string; snapshot: QuestionnaireSnapshot }
+  /** 问卷结束（提交 / 取消 / 拆台）。客户端收到就把那个弹窗撤掉。 */
+  | { type: 'ui-questionnaire-close'; id: string };
 
 /** 浏览器 → 服务端的消息。 */
 export type WebClientMessage =
@@ -205,7 +220,14 @@ export type WebClientMessage =
    * 回答一个 `ui-request`。`value` 的义：`select` = 选中的选项；`input` = 文本；
    * `confirm` = `'yes'` / `'no'`。取消（关掉弹窗）给 `cancelled: true`。
    */
-  | { type: 'ui-response'; id: string; value?: string; cancelled?: boolean };
+  | { type: 'ui-response'; id: string; value?: string; cancelled?: boolean }
+  /**
+   * 问卷里的一个动作（切题 / 勾选 / 输入 / 提交 / 放弃）。
+   *
+   * 只推**意图**，不推状态：状态只有服务端一份，两边算的话必然漂（与底栏统计行
+   * 同一个理由）。
+   */
+  | { type: 'ui-questionnaire-intent'; id: string; intent: QuestionnaireIntent };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 非会话数据的 HTTP 接口（`/api/*`）
@@ -381,6 +403,47 @@ export function parseClientMessage(raw: string): WebClientMessage | undefined {
         ...(cancelled === true ? { cancelled: true } : {}),
       };
     }
+    case 'ui-questionnaire-intent': {
+      const id = (value as { id?: unknown }).id;
+      if (typeof id !== 'string') return undefined;
+      const intent = parseQuestionnaireIntent((value as { intent?: unknown }).intent);
+      return intent === undefined ? undefined : { type: 'ui-questionnaire-intent', id, intent };
+    }
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * 问卷意图的校形。
+ *
+ * 不信任客户端（浏览器可能拿着旧帧、旧代码）：不认识的 `kind`、越界的序号、
+ * 非字符串的文本一律丢掉 —— 进状态机之后它们会变成一份没人认识的状态。
+ * 序号是否越界由状态机再判一次（它才知道题有儿个）。
+ */
+function parseQuestionnaireIntent(raw: unknown): QuestionnaireIntent | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const value = raw as { kind?: unknown; index?: unknown; text?: unknown };
+  switch (value.kind) {
+    case 'activate':
+    case 'pick':
+    case 'toggle':
+      return typeof value.index === 'number' && Number.isInteger(value.index) && value.index >= 0
+        ? { kind: value.kind, index: value.index }
+        : undefined;
+    case 'custom':
+      return typeof value.index === 'number' &&
+        Number.isInteger(value.index) &&
+        value.index >= 0 &&
+        typeof value.text === 'string'
+        ? { kind: 'custom', index: value.index, text: value.text }
+        : undefined;
+    case 'commit':
+      return { kind: 'commit' };
+    case 'submit':
+      return { kind: 'submit' };
+    case 'cancel':
+      return { kind: 'cancel' };
     default:
       return undefined;
   }

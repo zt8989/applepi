@@ -23,6 +23,7 @@
  */
 
 import type { WebAgentState, WebClientMessage, WebServerMessage } from '@ela/core/web-protocol';
+import type { QuestionnaireIntent, QuestionnaireSnapshot } from '@ela/core/questionnaire';
 
 /** 宽松事件类型：pi-web-ui 只按 `type` 分支，其余字段它自己读。 */
 export interface RemoteAgentEvent {
@@ -128,6 +129,12 @@ export interface UiRequest {
   placeholder?: string | undefined;
 }
 
+/** 一份问卷的一帧（服务端是唯一状态源）。 */
+export interface UiQuestionnaire {
+  id: string;
+  snapshot: QuestionnaireSnapshot;
+}
+
 export interface RemoteAgentHooks {
   /** 状态换了之后要让界面重画（pi-web-ui 靠事件触发，状态本身不触发）。 */
   onStateApplied?: (() => void) | undefined;
@@ -147,6 +154,13 @@ export interface RemoteAgentHooks {
   onUiRequest?: ((request: UiRequest) => void) | undefined;
   /** 关掉那个弹窗（另一端先答了，或整轮被中断）。 */
   onUiCancel?: ((id: string) => void) | undefined;
+  /**
+   * 一份**问卷**（多题 tab）的整份快照 —— 它是"常驻的一份表"，不是一问一答：
+   * 切题、勾选、提交都会再发一帧（同一个 `id`）。
+   */
+  onUiQuestionnaire?: ((update: UiQuestionnaire) => void) | undefined;
+  /** 问卷结束了（提交 / 放弃 / 拆台）。 */
+  onUiQuestionnaireClose?: ((id: string) => void) | undefined;
 }
 
 export class RemoteAgent {
@@ -219,6 +233,15 @@ export class RemoteAgent {
     this.send({ type: 'ui-response', id, ...response });
   }
 
+  /**
+   * 问卷里的一个动作。
+   *
+   * 只推**意图**（切题 / 勾选 / 提交）：状态在服务端一份，两边各算必然漂。
+   */
+  respondQuestionnaire(id: string, intent: QuestionnaireIntent): void {
+    this.send({ type: 'ui-questionnaire-intent', id, intent });
+  }
+
   waitForIdle(): Promise<void> {
     return Promise.resolve();
   }
@@ -285,6 +308,12 @@ export class RemoteAgent {
         break;
       case 'ui-cancel':
         this.hooks.onUiCancel?.(message.id);
+        break;
+      case 'ui-questionnaire':
+        this.hooks.onUiQuestionnaire?.(message);
+        break;
+      case 'ui-questionnaire-close':
+        this.hooks.onUiQuestionnaireClose?.(message.id);
         break;
       case 'event':
         this.dispatch(message.event as RemoteAgentEvent);

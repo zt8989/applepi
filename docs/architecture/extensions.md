@@ -95,11 +95,22 @@ inline 那条：宿主把**输入区那一格**（composer）换成扩展的组�
 `tui.ts` 的 `requireUi()` 在界面起来之前给的就是个没有槽位的占位宿主。
 
 `select` / `confirm` / `input`（pi 给 VS Code pendant / Zed 那种宿主的「RPC 弹窗协议」）
-**也实现了**，而且是**两端各出一份、谁先回答谁算数**：终端那一份由 `tuiDialogs` 挂进
-同一个输入区槽位，浏览器那一份由 `web/bridge.ts` 的 `DialogHost` 发过去。这层分销是为
-`ask_user_question`：它按 `ctx.mode` 选路，
-浏览器连上时宿主模式切成 `'rpc'`（`extension-host.ts` 的 `setUiMode`），于是它走
-`select/input` 的逐题回退 —— 而那两个方法在**终端与浏览器里同时弹**。
+**也实现了**。这层分销是为 `ask_user_question`：它按 `ctx.mode` 选路，浏览器连上时
+宿主模式切成 `'rpc'`（`extension-host.ts` 的 `setUiMode`），于是它走 `select/input`
+的逐题回退 —— 而那两个原语是**我们**实现的，所以终端与浏览器都能答。
+
+那 N 次逐题调用**拼回一份问卷**（多题 tab / 左右切题 / 就地输入自定义答案 / 统一
+提交）由 `questionnaire.ts` 的 `QuestionnaireHost` 做：它拿"正在跑的扩展工具入参"
+与那一次 `select` 的标题前缀当证据认领（认不出就当场退回逐题对话框，与以前一样），
+提交后把答案逐个翻回扩展认识的那几个字符串（选项行原文 / 自定义原文 /
+`"1,3"`）。**不合成**扩展内部的 `QuestionnaireResult` —— 只走公开的调用语义。
+
+一份问卷一份状态、两块屏：终端那块面板（`tui/questionnaire.ts`）与浏览器那个弹窗
+（`webui/questionnaire.ts`）都是同一份快照的渲染器，各自把按键/点击变成意图交回
+来（`ui-questionnaire` / `ui-questionnaire-intent`）。剩下那些
+**一次一问**的对话框（别的扩展、`confirm`、问卷认领不到时的回退）仍由 core 的
+`raceDialog` 两份并起来：终端那一份由 `tuiDialogs` 挂进同一个输入区槽位，浏览器
+那一份由 `web/bridge.ts` 的 `DialogHost` 发过去 —— **谁先回答谁算数**。
 
 没实现的是：`setFooter` / `setHeader`（要接 pi 的应用层布局，见
 [surfaces](surfaces.md)「为什么不用 pi 自己的 InteractiveMode」）。

@@ -25,9 +25,10 @@ import {
 } from '@earendil-works/pi-web-ui';
 import { html } from 'lit';
 import { STREAM_NOTICE_ROLE } from '@ela/core/web-protocol';
-import { RemoteAgent, type UiRequest } from './remote-agent';
+import { RemoteAgent, type UiQuestionnaire, type UiRequest } from './remote-agent';
 import { openModelPicker } from './model-picker';
 import { openConfirmDialog, openInputDialog, openSelectDialog } from './dialogs';
+import { openQuestionnaireModal, type QuestionnaireModalHandle } from './questionnaire';
 import { installToolMessageView, setToolTimings } from './tool-view';
 import { installCommandPalette } from './command-palette';
 import { installContextPanels } from './context-panels';
@@ -202,6 +203,8 @@ async function main(): Promise<void> {
   const chatPanel = new ChatPanel();
   /** 现在开着的扩展对话框（id → 只拆 DOM 的 close）。 */
   const openDialogs = new Map<string, () => void>();
+  /** 开着的问卷（id → 那份弹窗的句柄）。同一份问卷会收到很多帧，所以得留着。 */
+  const openQuestionnaires = new Map<string, QuestionnaireModalHandle>();
   /** 斜杠命令与底栏三个入口共用的上下文（`commands.ts`）。 */
   const commandContext = {
     notice: (text: string, tone: 'info' | 'warn' | 'error' = 'info') => pushNotice(text, tone),
@@ -284,6 +287,32 @@ async function main(): Promise<void> {
     onUiCancel: (id: string) => {
       openDialogs.get(id)?.();
       openDialogs.delete(id);
+    },
+    // 问卷（多题 tab）：同一份表会推很多帧（切题、勾选、提交），所以是"先找现存那份再 push"。
+    // 服务端才是状态所有者 —— 这里只把点击变成一个意图发回去。
+    onUiQuestionnaire: (update: UiQuestionnaire) => {
+      const existing = openQuestionnaires.get(update.id);
+      if (existing !== undefined) {
+        existing.push(update.snapshot);
+        return;
+      }
+      // 上一个 id 的没收到 close 就来了新的（服务端同时只持一份问卷）：先把旧的收掉，
+      // 不然两块表单叠在一起，用户分不清在答哪一份。
+      for (const [id, handle] of [...openQuestionnaires]) {
+        handle.close();
+        openQuestionnaires.delete(id);
+      }
+      openQuestionnaires.set(
+        update.id,
+        openQuestionnaireModal({
+          snapshot: update.snapshot,
+          onIntent: (intent) => agent.respondQuestionnaire(update.id, intent),
+        }),
+      );
+    },
+    onUiQuestionnaireClose: (id: string) => {
+      openQuestionnaires.get(id)?.close();
+      openQuestionnaires.delete(id);
     },
     // 斜杠命令：走 HTTP 接口，不发给模型（与 TUI 的 `runCommand` 同一个分工）。
     onPrompt: async (text) => {

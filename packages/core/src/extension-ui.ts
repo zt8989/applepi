@@ -19,12 +19,17 @@
  * addChild(component)`）。
  *
  * 第二块是 `select` / `confirm` / `input`（pi 给 VS Code pendant / Zed 那种宿主的
- * 「RPC 弹窗协议」）。本项目**两个界面各出一份，谁先回答谁算数**（`raceDialog`）：
- * 终端那一份由 `tui/app.ts` 的 `tuiDialogs` 挂进同一个输入区槽位，浏览器那一份由
- * `web/bridge.ts` 的 `DialogHost` 发过去。这层双端分销是为 `ask_user_question`：
- * 它按 `ctx.mode` 选路（`'rpc'` 走 `select/input` 逐题回退），而本项目在
- * **浏览器连上时**把模式切成 `'rpc'`（见 `extension-host.ts` 的 `setUiMode`）——
- * 于是终端与浏览器都能答同一份问卷。
+ * 「RPC 弹窗协议」）。本项目在**浏览器连上时**把模式切成 `'rpc'`（见
+ * `extension-host.ts` 的 `setUiMode`），于是 `ask_user_question` 那种扩展会走这一块。
+ *
+ * 这一块分两条：
+ *
+ * - **问卷**（同一份问卷的 N 次逐题问法）交给 `QuestionnaireHost`（`questionnaire.ts`）：
+ *   认领得到就由界面那份多题表回答（终端那块面板 + 浏览器那个弹窗，**一份状态两块屏**），
+ *   答案再按扩展问的顺序翻回字符串喂回去；
+ * - 其余（别的扩展、`confirm`、认领不到的回退）是 `raceDialog`：**两端各出一份、
+ *   谁先回答谁算数** —— 终端那一份由 `tui/app.ts` 的 `tuiDialogs` 挂进同一个输入区槽位，
+ *   浏览器那一份由 `web/bridge.ts` 的 `DialogHost` 发过去。
  *
  * 刻意**不接**的：`setFooter` / `setHeader`（那要接 pi 的应用层布局，见 `surfaces.md`）。
  *
@@ -42,6 +47,12 @@
  */
 import type { Component, TUI, TuiInputListener, OverlayOptions } from '@earendil-works/pi-tui';
 import { getKeybindings, isKeyRelease, Text } from '@earendil-works/pi-tui';
+import type {
+  OpenQuestionnaireView,
+  QuestionnaireHost,
+  QuestionnaireIntent,
+  QuestionnaireSnapshot,
+} from './questionnaire';
 // Theme 是 pi 自己的（挂在 globalThis 上的 Proxy + 一堆 `fg`/`bg`/`bold` 方法），
 // 不在 pi-tui 里 —— 与 `tui/app.ts` 里 `setupTheme()` 返回的是同一个类型。
 import type { Theme } from '@earendil-works/pi-coding-agent';
@@ -83,6 +94,24 @@ export interface TuiDialogs {
 }
 
 /**
+ * 浏览器侧问卷视图的手柄：推新快照 / 关掉。
+ *
+ * `close()` 是"拆掉弹窗"，**不是**"取消问卷" —— 取消是用户的一个意图，走 `onIntent`。
+ */
+export interface QuestionnaireViewHandle {
+  push(snapshot: QuestionnaireSnapshot): void;
+  close(): void;
+}
+
+/** 浏览器侧的问卷视图（多题 tab 那份快照的渲染器）。 */
+export interface QuestionnaireView {
+  open(
+    snapshot: QuestionnaireSnapshot,
+    onIntent: (intent: QuestionnaireIntent) => void,
+  ): QuestionnaireViewHandle;
+}
+
+/**
  * **浏览器侧**的对话框宿主（`web/bridge.ts` 实现）。
  *
  * `available()` 是「现在有浏览器连着吗」—— 没有就只剩终端那一份。每个调用带一个
@@ -93,6 +122,13 @@ export interface DialogHost {
   select(title: string, options: readonly string[], signal: AbortSignal): Promise<string | undefined>;
   confirm(title: string, message: string, signal: AbortSignal): Promise<boolean>;
   input(title: string, placeholder: string | undefined, signal: AbortSignal): Promise<string | undefined>;
+  /**
+   * 问卷那一档（可缺省）：与 `select/input` 的区别是"它不是一问一答" —— 一次开一份
+   * 多题的表，用户在里面左右切题、统一提交。中途的每一次变化都由服务端 push 给它们。
+   *
+   * 不给的时候（没有浏览器一侧的宿主、旧桥）问卷就只剩终端那块屏 —— 仍然能用。
+   */
+  questionnaire?: QuestionnaireView | undefined;
 }
 
 /** 扩展能用的界面能力（比官方的 `ExtensionUIContext` 窄：只留真的能做的）。 */
@@ -166,6 +202,18 @@ export interface HostUiOptions {
    * 所以这里每次用时现读。不给 = 这个宿主没有浏览器一侧。
    */
   dialogs?: (() => DialogHost | undefined) | undefined;
+  /**
+   * 问卷的**视图**：开一份问卷（终端那份组件 + 浏览器那份弹窗）、返回拆台函数。
+   *
+   * 与 `tuiDialogs` / `dialogs` 同一类接缝：**core 定接口，界面实现**。给它的理由与
+   * `custom()` 一样 —— core 不建组件（那会把 pi-tui 拖进所有运行模式）。
+   *
+   * 两个渲染器都归这一处管，而不是分两处（终端一处、浏览器一处）：它们是**同一份状态的
+   * 两块屏幕**，分开登记就会变成"两块屏幕各画各的"（raceDialog 那种）。
+   *
+   * **可缺省**。不给 = 问卷功能关着：`select`/`input` 一档照旧（逐题弹窗）。
+   */
+  questionnaire?: OpenQuestionnaireView | undefined;
 }
 
 /**
@@ -238,7 +286,16 @@ function noticePrefix(type: string | undefined): string {
  * 界面看着「答完了却还能打字」。（pi 自己的 `showExtensionCustom` 也在 `close()` 里
  * `hideOverlay()`，同一个道理。）
  */
-export function createHostUi(source: () => HostUiOptions): ExtensionHostUi {
+export function createHostUi(
+  source: () => HostUiOptions,
+  /**
+   * 问卷宿主（题目与答案的那份状态）。内核装配时造、**同一个**同时给工具层与这里。
+   *
+   * 为什么是参数而不是 `HostUiOptions` 的成员：它属于**内核**（工具入参是内核递给我们的），
+   * 而 `HostUiOptions` 是界面层填的。界面只负责"视图"（`questionnaire` 那一项）。
+   */
+  questionnaire?: QuestionnaireHost | undefined,
+): ExtensionHostUi {
   const keybindings = getKeybindings();
 
   /** 读界面。界面还没起来时明说，而不是拿 undefined 去用。 */
@@ -342,6 +399,14 @@ export function createHostUi(source: () => HostUiOptions): ExtensionHostUi {
 
     select: (title, options, opts) => {
       const host = source();
+      // 问卷那一档：`ask_user_question` 在 rpc 模式下就是拿 select/input 逐题问的，
+      // 而我们的界面画的是"一份问卷"（多题 tab）。认领得到就由问卷回答 —— 答案在
+      // `questionnaire.ts` 里翻回扩展认识的那个字符串（选项行原文 / 自定义原文）。
+      //
+      // 认领是**同步**的（`tryServe` 直接返回 undefined 或一个 Promise）：认不出就当场
+      // 掉到下面那条逐题对话框的路上，开窗的时机与没有问卷功能时一模一样。
+      const claimed = questionnaire?.tryServe('select', title, [...options], opts?.signal);
+      if (claimed !== undefined) return claimed;
       const browser = host.dialogs?.();
       return raceDialog<string>({
         ...(host.tuiDialogs !== undefined
@@ -375,6 +440,9 @@ export function createHostUi(source: () => HostUiOptions): ExtensionHostUi {
 
     input: (title, placeholder, opts) => {
       const host = source();
+      // 多选那几题走的是 `input`（扩展自己写明的：`askMultiSelect`），所以这一档也要认领。
+      const claimed = questionnaire?.tryServe('input', title, [], opts?.signal);
+      if (claimed !== undefined) return claimed;
       const browser = host.dialogs?.();
       return raceDialog<string>({
         ...(host.tuiDialogs !== undefined

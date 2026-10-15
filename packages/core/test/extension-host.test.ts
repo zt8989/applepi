@@ -46,6 +46,7 @@ import { getTool, getTools, registerExtraTools } from '../src/tools';
 import { initTheme, theme } from '@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';
 import { TuiAltScreen, type Component } from '@earendil-works/pi-tui';
 import type { HostUiOptions } from '../src/extension-ui';
+import type { QuestionnaireSession } from '../src/questionnaire';
 
 // ── 用真配置家目录（见文件头） ──
 const realAgentDir = process.env['PI_CODING_AGENT_DIR_REAL'] ?? path.join(homedir(), '.pi', 'agent');
@@ -429,6 +430,117 @@ test('扩展：浏览器连上（mode=rpc）时问卷走 select/input 逐题回�
     assert.equal(result.details?.cancelled, false);
     assert.equal(result.details?.answers?.[0]?.answer, 'Thorough', '选的是第二个选项');
     void written;
+  } finally {
+    restoreHome();
+  }
+});
+
+test('扩展：问卷一份表画全 + 统一提交（答案按序喂回 select/input）', { skip: !hasAskUser && '没装 rpiv-ask-user-question' }, async () => {
+  useRealHome();
+  try {
+    const { store } = freshStore();
+    const tui = fakeTui([]);
+    const slot: FakeEditorSlot = { current: undefined };
+    initTheme('dark', false);
+    /** 逐题对话框被调过就说明"没认领成功" —— 这条测试要钉的就是它没被调。 */
+    const asked: string[] = [];
+    const opened: QuestionnaireSession[] = [];
+    let tornDown = 0;
+    const host = await loadExtensionHost({
+      builtins: false,
+      store,
+      cwd: process.cwd(),
+      uiOptions: () => ({
+        ...hostUiOptions(tui, [], slot),
+        // 界面层那一份视图（真界面上是 `tui/app.ts` 的 `openQuestionnaire`：一块终端
+        // 面板 + 一块浏览器弹窗）。这里只做它在真界面上会做的事：把动作变成意图。
+        questionnaire: (session) => {
+          opened.push(session);
+          // 第 1 题（单选，带 preview）：选第 2 个。
+          session.apply({ kind: 'pick', index: 1 });
+          // 第 2 题（多选）：勾 1、3，再"就这些"。
+          session.apply({ kind: 'toggle', index: 0 });
+          session.apply({ kind: 'toggle', index: 2 });
+          session.apply({ kind: 'commit' });
+          // 第 3 题（单选）：自定义答案（一个选项也不选）。
+          session.apply({ kind: 'custom', index: 0, text: '都别选，按我说的来' });
+          assert.equal(session.apply({ kind: 'submit' }), true, '三题都答了，提交该成立');
+          return () => {
+            tornDown += 1;
+          };
+        },
+        dialogs: () => ({
+          available: () => true,
+          select: async (title: string) => {
+            asked.push(title);
+            return undefined;
+          },
+          confirm: async () => true,
+          input: async () => undefined,
+        }),
+      }),
+    });
+    // 浏览器连着 → 宿主模式切到 rpc（`main.ts` 就是这么做）。
+    host.setUiMode('rpc');
+    const tool = getTool('ask_user_question');
+    assert.ok(tool, '工具应该在注册表里');
+    registerExtraTools([]);
+
+    const result = (await tool!.execute(
+      'call-q',
+      {
+        questions: [
+          {
+            question: '用哪个库？',
+            header: '库',
+            options: [
+              { label: 'sqlite', description: '单文件，零运维' },
+              { label: 'postgres', description: '要一台服务器', preview: '```sql\nselect 1;\n```' },
+            ],
+          },
+          {
+            question: '要哪些能力？',
+            header: '能力',
+            multiSelect: true,
+            options: [
+              { label: '缓存', description: '内存缓存' },
+              { label: '重试', description: '失败重试' },
+              { label: '日志', description: '结构化日志' },
+            ],
+          },
+          {
+            question: '还有什么要交代的？',
+            header: '补充',
+            options: [
+              { label: '没有', description: '就这样' },
+              { label: '有', description: '我来说' },
+            ],
+          },
+        ],
+      },
+      undefined,
+      undefined,
+    )) as {
+      content?: { type: string; text?: string }[];
+      details?: {
+        answers?: { kind?: string; answer?: string | null; preview?: string; selected?: string[] }[];
+        cancelled?: boolean;
+      };
+    };
+
+    assert.equal(opened.length, 1, '该开一份问卷（而不是三个对话框）');
+    assert.deepEqual(asked, [], `不该走逐题对话框：${asked.join('|')}`);
+    const answers = result.details?.answers ?? [];
+    assert.equal(result.details?.cancelled, false);
+    assert.equal(answers[0]?.answer, 'postgres', '选项行原文该被扩展认成第 2 个选项');
+    assert.match(answers[0]?.preview ?? '', /select 1/, 'preview 该跟着答案回给模型');
+    assert.equal(answers[1]?.kind, 'multi');
+    assert.deepEqual(answers[1]?.selected, ['缓存', '日志'], '多选交回的是 "1,3"，扩展解成这两个');
+    assert.equal(answers[2]?.kind, 'custom');
+    assert.equal(answers[2]?.answer, '都别选，按我说的来', '自定义答案是原文');
+    const text = (result.content ?? []).map((c) => c.text ?? '').join('');
+    assert.match(text, /User has answered your questions/, `模型该看到那句信封：${text}`);
+    assert.equal(tornDown, 1, '工具收尾该把视图拆掉');
   } finally {
     restoreHome();
   }

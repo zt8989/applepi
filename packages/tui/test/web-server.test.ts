@@ -13,6 +13,7 @@ import { startWebServer, type WebServerHandle } from '../src/web/server';
 import type { WebServerMessage } from '@ela/core/web-protocol';
 import { WEB_PROTOCOL_VERSION } from '@ela/core/web-protocol';
 import { findSessionFile } from '@ela/core/config-home';
+import { QuestionnaireSession } from '@ela/core/questionnaire';
 
 /**
  * web server + 桥的集成测试（**不打网络**）。
@@ -737,6 +738,81 @@ test('bridge：扩展对话框广播给所有连接，第一个回答算数', as
   } finally {
     a.close();
     b.close();
+    await ctx.dispose();
+  }
+});
+
+test('bridge：问卷整份广播、意图回同一个会话、新连接补发当前那一帧', async () => {
+  const ctx = await start();
+  const a = await connect(`${ctx.server.url.replace('http', 'ws')}ws`);
+  try {
+    await a.waitFor('hello', (m) => m.type === 'hello');
+    const session = new QuestionnaireSession([
+      {
+        question: '用哪个库？',
+        header: '库',
+        multiSelect: false,
+        options: [
+          { label: 'sqlite', description: '单文件' },
+          { label: 'postgres', description: '要一台服务器' },
+        ],
+      },
+      {
+        question: '要哪些能力？',
+        header: '能力',
+        multiSelect: true,
+        options: [
+          { label: '缓存', description: '内存缓存' },
+          { label: '日志', description: '结构化日志' },
+        ],
+      },
+    ]);
+    // 真界面上这些是 `tui/app.ts` 的 `openQuestionnaire` 做的：收到意图推进状态、
+    // 再把新快照 push 给浏览器。
+    const view = ctx.bridge.dialogs.questionnaire;
+    assert.ok(view, '桥该提供问卷那一档');
+    const intents: string[] = [];
+    const handle = view.open(session.snapshot(), (intent) => {
+      intents.push(intent.kind);
+      session.apply(intent);
+      handle.push(session.snapshot());
+    });
+
+    const first = await a.waitFor('ui-questionnaire', (m) => m.type === 'ui-questionnaire');
+    if (first.type !== 'ui-questionnaire') throw new Error('unreachable');
+    assert.equal(first.snapshot.questions.length, 2, '整份问卷一次发过去（不是一问一帧）');
+    assert.deepEqual(first.snapshot.answers, [null, null]);
+
+    // 浏览器点了一下 → 服务端状态推进 → 推回一帧。
+    a.send({ type: 'ui-questionnaire-intent', id: first.id, intent: { kind: 'pick', index: 1 } });
+    const next = await a.waitFor(
+      'ui-questionnaire',
+      (m) => m.type === 'ui-questionnaire' && m.snapshot.active === 1,
+    );
+    if (next.type !== 'ui-questionnaire') throw new Error('unreachable');
+    assert.deepEqual(intents, ['pick']);
+    assert.deepEqual(next.snapshot.answers[0], { kind: 'option', index: 1 });
+
+    // 后开的标签页：补发当前那一帧（否则它什么都看不到，而服务端还在等人答）。
+    const b = await connect(`${ctx.server.url.replace('http', 'ws')}ws`);
+    try {
+      const replay = await b.waitFor('ui-questionnaire', (m) => m.type === 'ui-questionnaire');
+      if (replay.type !== 'ui-questionnaire') throw new Error('unreachable');
+      assert.equal(replay.id, first.id);
+      assert.deepEqual(replay.snapshot.answers[0], { kind: 'option', index: 1 });
+    } finally {
+      b.close();
+    }
+
+    // 旧 id 上晚到的意图该被丢掉（已经关掉的那份问卷不能再改状态）。
+    handle.close();
+    await a.waitFor('ui-questionnaire-close', (m) => m.type === 'ui-questionnaire-close');
+    a.send({ type: 'ui-questionnaire-intent', id: first.id, intent: { kind: 'submit' } });
+    a.send({ type: 'ui-questionnaire-intent', id: first.id, intent: { kind: 'submit' } });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(intents, ['pick'], '关掉之后的意图不该再进状态机');
+  } finally {
+    a.close();
     await ctx.dispose();
   }
 });
