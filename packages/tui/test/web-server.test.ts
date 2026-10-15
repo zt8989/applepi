@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createAgentStore } from '@ela/core/store';
@@ -12,6 +12,7 @@ import { createWebApi } from '../src/web/api';
 import { startWebServer, type WebServerHandle } from '../src/web/server';
 import type { WebServerMessage } from '@ela/core/web-protocol';
 import { WEB_PROTOCOL_VERSION } from '@ela/core/web-protocol';
+import { findSessionFile } from '@ela/core/config-home';
 
 /**
  * web server + 桥的集成测试（**不打网络**）。
@@ -120,6 +121,7 @@ async function start(): Promise<{
   const api = createWebApi({
     store,
     cwd: '/tmp/ela-web-test',
+    sessionId: () => 'web-test-session',
     modelCatalog: () => [model, { ...model, id: 'fake-2', name: 'Faux 2', reasoning: false }],
     resolveModel,
     setModel: () => true,
@@ -369,6 +371,7 @@ test('web api：空目录给空列表；空作用域归一成 null（= 全开）
   const api = createWebApi({
     store,
     cwd: '/tmp/ela-web-test',
+    sessionId: () => 'web-test-session',
     modelCatalog: () => [],
     resolveModel: () => null,
     setModel: () => true,
@@ -381,6 +384,75 @@ test('web api：空目录给空列表；空作用域归一成 null（= 全开）
   assert.deepEqual(info.models, []);
   // `[]` 与「没配过」是同一件事（与 TUI 的 `normalizeEnabled()` 同一个口径）。
   assert.equal(info.scoped, null);
+});
+
+/**
+ * 顶栏那三个入口（完整历史 / 系统 / 工具）的数据源。
+ *
+ * 它们守的是同一件事：**面板上显示的就是模型这一轮收到的东西**。
+ * 所以断言的不是「接口能通」，而是「内容真的是 state 里那份」。
+ */
+test('web api：系统提示词与工具定义就是 state 里发给模型的那两份', async () => {
+  const ctx = await start();
+  try {
+    const prompt = (await (await fetch(`${ctx.server.url}api/system-prompt`)).json()) as {
+      text: string;
+      sections: Record<string, string>;
+    };
+    // `createAgentStore({ systemPrompt: 'test' })` —— store 里装的就是它。
+    assert.equal(prompt.text, 'test');
+    assert.deepEqual(prompt.sections, {}, '没装分段就是空对象（不是 undefined）');
+
+    // 这个装配一个工具都没装 → 空表（界面显示「没有启用的工具」）。
+    const tools = (await (await fetch(`${ctx.server.url}api/tools`)).json()) as unknown[];
+    assert.deepEqual(tools, []);
+  } finally {
+    await ctx.dispose();
+  }
+});
+
+test('web api：完整历史读会话文件（压缩掉的早期消息也在），没文件时退回内存', async () => {
+  const ctx = await start();
+  try {
+    // 1) 文件还没落盘（新会话）：用内存那份兜底，页面上要写明来源。
+    ctx.store.dispatch({ type: 'user.message', text: '内存里的那句话' });
+    const fallback = await fetch(`${ctx.server.url}api/history`);
+    assert.equal(fallback.status, 200);
+    assert.match(fallback.headers.get('content-type') ?? '', /text\/html/);
+    const fallbackHtml = await fallback.text();
+    assert.match(fallbackHtml, /完整历史/);
+    assert.match(fallbackHtml, /还没落盘/);
+    assert.match(fallbackHtml, /内存里的那句话/);
+
+    // 2) 真有一份会话文件时以它为准 —— 三种 entry 都进时间线。
+    //    （家目录由 `isolated-home.ts` 指到本次运行专属的临时目录，不会污染用户目录。）
+    const file = findSessionFile('web-test-session', '/tmp/ela-web-test');
+    mkdirSync(path.dirname(file), { recursive: true });
+    const stamp = new Date().toISOString();
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: 'session', version: 1, id: 'web-test-session', timestamp: stamp, cwd: '/tmp/ela-web-test' }),
+        JSON.stringify({
+          type: 'message',
+          id: 'e1',
+          parentId: null,
+          timestamp: stamp,
+          message: { role: 'user', content: '落盘的那句话', timestamp: Date.now() },
+        }),
+        JSON.stringify({ type: 'model_change', id: 'e2', parentId: 'e1', timestamp: stamp, provider: 'faux', modelId: 'fake-9' }),
+        JSON.stringify({ type: 'thinking_level_change', id: 'e3', parentId: 'e2', timestamp: stamp, thinkingLevel: 'high' }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+    const html = await (await fetch(`${ctx.server.url}api/history`)).text();
+    assert.match(html, /落盘的那句话/);
+    assert.match(html, /faux\/fake-9/, '模型切换要成为一条注记');
+    assert.match(html, /思考级别 → high/);
+    assert.ok(html.includes(file), '页面上要写明读的是哪个文件');
+  } finally {
+    await ctx.dispose();
+  }
 });
 
 test('bridge：`/skill:<名字>` 展开成 <skill> 块再发（文件在服务端，浏览器读不到）', () => {

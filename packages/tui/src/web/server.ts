@@ -26,6 +26,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { parseClientMessage, type WebServerMessage, type WebClientMessage } from '@ela/core/web-protocol';
 import type { WebBridge } from './bridge';
 import type { WebApi } from './api';
+import { renderHistoryPage } from './history';
 
 /** 默认端口：与 pi 的 web 客户端（`@agegr/pi-web`）同一个，撞上了也好认。 */
 export const DEFAULT_WEB_PORT = 30141;
@@ -321,12 +322,24 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+/** 一整页 HTML（只有「完整历史」走这条：它给人读，不给人解析）。 */
+function sendHtml(res: ServerResponse, html: string): void {
+  res.writeHead(200, {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store',
+  });
+  res.end(html);
+}
+
 /**
  * 非会话数据的 HTTP 接口。
  *
  * 路径就是方法名：`GET /api/models`、`POST /api/model`（单数 = 改，复数 = 读）。
  * 不认识的路径给 404，方法不对给 405 —— 都比默默回一份静态页强（SPA 的
  * `serveStatic` 对任何路径都回 index.html，会把写错的接口变成一个 200 的 HTML）。
+ *
+ * 例外的两条：`GET /api/history` 回的是**一整页 HTML**（给人读的完整记录，新标签页
+ * 打开），其余一律 JSON。
  */
 async function serveApi(
   api: WebApi,
@@ -336,6 +349,10 @@ async function serveApi(
   log: (line: string) => void,
 ): Promise<void> {
   const method = req.method ?? 'GET';
+  if (method === 'GET' && pathname === '/api/history') {
+    sendHtml(res, renderHistoryPage(api.history()));
+    return;
+  }
   const body = method === 'POST' ? await readJsonBody(req) : undefined;
   const record = typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : {};
   try {
@@ -354,6 +371,12 @@ async function serveApi(
         return;
       case 'GET /api/settings':
         sendJson(res, 200, api.settings());
+        return;
+      case 'GET /api/system-prompt':
+        sendJson(res, 200, api.systemPrompt());
+        return;
+      case 'GET /api/tools':
+        sendJson(res, 200, api.tools());
         return;
       case 'POST /api/model':
         sendJson(res, 200, api.setModel(typeof record['arg'] === 'string' ? record['arg'] : ''));

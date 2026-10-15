@@ -231,6 +231,60 @@ export interface WebActionResult {
   message?: string | undefined;
 }
 
+/** `GET /api/system-prompt`：模型**实际收到**的那段系统提示词（顶栏「系统」用）。 */
+export interface WebSystemPromptInfo {
+  /** 渲染好的整段 —— 进请求的就是它。空串 = 工具被禁用那种空 prompt。 */
+  text: string;
+  /**
+   * 分段（段名 → 渲染后的文本）。
+   *
+   * 老轨迹的 `prompt.init` 里没有这个字段，所以可能是空对象 —— 界面不能拿它当
+   * 「有没有 prompt」的判据（判据是 `text`）。
+   */
+  sections: Record<string, string>;
+}
+
+/**
+ * `GET /api/tools` 里的一条：模型看到的工具定义（顶栏「工具」用）。
+ *
+ * 与 `state.prompt.tools`（`PromptToolDefinition`）**同一份** —— 这里是线协议上的投影，
+ * 字段逐字一致、不加工：`description` 若被 `prepareLoadout` 重写过，那段就是模型
+ * 真正读到的（重写过的描述才是真话）。
+ */
+export interface WebToolDefinitionInfo {
+  name: string;
+  description: string;
+  /** JSON Schema（typebox 序列化的结果），原样给界面自己解析。 */
+  parameters: unknown;
+}
+
+/**
+ * `GET /api/history` 里的一行。
+ *
+ * 消息原样给（渲染是前端/服务端页面的事），配置变更降级成一条注记 —— 界面只要
+ * 「读得下去的时间线」，不需要知道轨迹里的 entry 形状。
+ */
+export type WebHistoryLine =
+  | { kind: 'message'; at: string; message: Message }
+  | { kind: 'note'; at: string; text: string };
+
+/**
+ * `GET /api/history`：**完整历史**（顶栏那个按钮打开的那一页）。
+ *
+ * ## 为什么读会话文件而不是内存里的 `messages`
+ *
+ * 内存里的那份是**压缩之后**的当前上下文：被 `/compact` 掉的早期消息在那里根本不存在，
+ * 而那一段正是「完整历史」要给人看的东西。所以首选会话文件；文件还没落盘（新会话
+ * 一句话都没说过）时才退回内存那份。
+ */
+export interface WebHistoryInfo {
+  sessionId: string;
+  cwd: string;
+  /** 会话文件路径；`null` = 还没落盘，内容来自内存。 */
+  file: string | null;
+  lines: WebHistoryLine[];
+}
+
 /** 把线协议消息解析成客户端消息；形状不对就返回 `undefined`（不认识的一律忽略）。 */
 export function parseClientMessage(raw: string): WebClientMessage | undefined {
   let value: unknown;

@@ -17,10 +17,21 @@
  *
  * 返回 `WebActionResult` 而不是抛错：写盘失败、找不到模型这些是**用户要看的信息**，
  * 不是异常（与 TUI 的 `notify(yellow(...))` 同一口径）。
+ *
+ * ## 三个只读快照（顶栏那三个入口）
+ *
+ * `systemPrompt()` / `tools()` / `history()` 严格说算会话数据（不是模型目录那种全局配置），
+ * 但它们的口径与上面一致：**与「环跑到哪一步」无关，也不该每帧推送** —— 系统提示词一大段、
+ * 工具定义一张表、完整历史一整页，都是「点开看一眼」的东西。塞进状态帧就是为了一份
+ * 不一定会被看的内容付出 O(整段) 的序列化代价。
  */
 
 import type { AgentStore } from '@ela/core/store';
 import type { Api, Model } from '@earendil-works/pi-ai';
+import { existsSync } from 'node:fs';
+import { findSessionFile } from '@ela/core/config-home';
+import { readSession } from '@ela/core/session-file';
+import { historyLines } from './history';
 import {
   DEFAULT_THINKING_LEVEL,
   isThinkingLevel,
@@ -32,10 +43,13 @@ import { skillCommands, skillsInPrompt } from '@ela/core/skills';
 import type {
   WebActionResult,
   WebCommandInfo,
+  WebHistoryInfo,
   WebModelsInfo,
   WebSettingsInfo,
   WebSkillInfo,
+  WebSystemPromptInfo,
   WebThinkingInfo,
+  WebToolDefinitionInfo,
 } from '@ela/core/web-protocol';
 import { supportedThinkingLevels } from '../pi-actions';
 import { modelRefs } from './bridge';
@@ -57,6 +71,13 @@ export interface WebCommandSource {
 export interface WebApiOptions {
   store: AgentStore;
   cwd: string;
+  /**
+   * 当前会话 id（**取值** —— `/new` 之后会变）。
+   *
+   * 「完整历史」靠它找到会话文件（`findSessionFile`），而不是拿着内存里的 `messages`
+   * 凑一份 —— 被 `/compact` 掉的早期消息只在文件里。
+   */
+  sessionId: () => string;
   /** 可用模型快照（与 TUI 的 `/model` 面板同一份）。 */
   modelCatalog: () => readonly Model<Api>[];
   /** 按 provider/id 解析模型对象；解析不到给 `null`。 */
@@ -78,6 +99,12 @@ export interface WebApi {
   skills(): WebSkillInfo[];
   thinking(): WebThinkingInfo;
   settings(): WebSettingsInfo;
+  /** 发给模型的那段系统提示词（顶栏「系统」）。 */
+  systemPrompt(): WebSystemPromptInfo;
+  /** 发给模型的工具定义（顶栏「工具」）。 */
+  tools(): WebToolDefinitionInfo[];
+  /** 完整会话记录（顶栏「完整历史」，由 server 渲染成页面）。 */
+  history(): WebHistoryInfo;
   setModel(arg: string): WebActionResult;
   setThinking(level: string): WebActionResult;
   setSettings(patch: {
@@ -163,6 +190,45 @@ export function createWebApi(options: WebApiOptions): WebApi {
         autoCompact: options.autoCompactEnabled(),
         hideThinking: readHideThinkingBlock(cwd),
         defaultThinkingLevel: readDefaultThinkingLevel(cwd) ?? DEFAULT_THINKING_LEVEL,
+      };
+    },
+
+    systemPrompt() {
+      const prompt = store.getState().prompt;
+      // 拷一份再给出去：这份东西会被 `JSON.stringify` 写到 HTTP 响应里，
+      // 而 state 是活的 —— 不拷的话以后一处原地改动会意外改到「已经发出去的那一份」。
+      return { text: prompt.systemPrompt, sections: { ...(prompt.sections ?? {}) } };
+    },
+
+    tools() {
+      // `state.prompt.tools` 就是请求里那份声明（`prepareLoadout` 重写过的描述已在里面，
+      // 见 `declaredToolset()`），所以这里不重算一遍 —— 重算会给出「现在」的工具集，
+      // 而顶部那个面板要回答的是「**这一轮**模型看到了什么」。
+      return store.getState().prompt.tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      }));
+    },
+
+    history() {
+      const sessionId = options.sessionId();
+      const file = sessionId === '' ? null : findSessionFile(sessionId, cwd);
+      const session = file !== null && existsSync(file) ? readSession(file) : null;
+      if (session !== null) {
+        return { sessionId, cwd, file, lines: historyLines(session.entries) };
+      }
+      // 还没落盘（新会话、或者文件被删了）：退回内存里那份。
+      // 它少了被压缩掉的早期消息，但比一页空白强 —— 页面上会写明「来源：内存」。
+      return {
+        sessionId,
+        cwd,
+        file: null,
+        lines: store.getState().messages.map((message) => ({
+          kind: 'message' as const,
+          at: new Date(message.timestamp).toISOString(),
+          message,
+        })),
       };
     },
 

@@ -446,6 +446,8 @@ async function main(): Promise<void> {
     const api = createWebApi({
       store: kernel.store,
       cwd: args.cwd,
+      // **取值**：`/new` 之后会话换一个，「完整历史」要跟着读新那一份文件。
+      sessionId: () => kernel.sessionId,
       // **与 TUI 的 `/model` 面板同一份**（同一个 `ModelRuntime`），否则会列出
       // pi-web-ui 自带那份 1500+ 的内置目录（本机根本没配）。
       modelCatalog: () => [...modelRuntimeFor(kernel.runtime).getAvailableSnapshot()],

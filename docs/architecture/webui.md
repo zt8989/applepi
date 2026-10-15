@@ -27,11 +27,13 @@ TUI 之外的第二块界面：**浏览器里的 pi-web-ui**，环仍然是终�
 | `web-protocol.ts` | `@ela/core` | **线协议 + HTTP 接口的形状**（前后端唯一共同语言） |
 | `web/bridge.ts` | `@ela/tui` | 内核 → 线协议：订阅 store、映射状态、派发提问/中止/换模型 |
 | `web/api.ts` | `@ela/tui` | **非会话数据的 HTTP 接口**（`/api/*`：命令表、模型目录、settings…） |
+| `web/history.ts` | `@ela/tui` | 「完整历史」那一页的服务端渲染（`GET /api/history`） |
 | `web/server.ts` | `@ela/tui` | HTTP 静态资源 + `/api/*` + `/ws`（WebSocket） |
 | `src/remote-agent.ts` | `@ela/webui` | 线协议 → pi-web-ui：`Agent` 形状的替身 |
 | `src/api.ts` | `@ela/webui` | `/api/*` 的客户端 |
 | `src/command-palette.ts` | `@ela/webui` | 输入 `/` 时的命令补全下拉 |
 | `src/commands.ts` | `@ela/webui` | `/` 命令在浏览器侧的执行（弹面板 / 调接口） |
+| `src/context-panels.ts` | `@ela/webui` | 顶栏那三个入口：完整历史 / 系统 / 工具 |
 | `src/modal.ts` | `@ela/webui` | 通用模态框（列表 / 纯文本） |
 | `src/model-picker.ts` | `@ela/webui` | 模型选择器（**接管**了 pi-web-ui 自带那个，见下） |
 | `src/main.ts` | `@ela/webui` | 挂 `ChatPanel`、铺 `AppStorage`、连 `/ws` |
@@ -164,6 +166,9 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 | `GET /api/skills` | 进了 prompt 的 skill 清单 |
 | `GET /api/thinking` | 当前档位 + 这个模型支持的档位 + 默认档 |
 | `GET /api/settings` | 自动压缩 / 隐藏思考块 / 默认思考级别 |
+| `GET /api/system-prompt` | 模型实际收到的系统提示词（`text` + `sections`） |
+| `GET /api/tools` | 模型看到的工具定义（`name` / `description` / `parameters`） |
+| `GET /api/history` | 完整会话记录 —— **一整页 HTML**（其余接口都是 JSON） |
 | `POST /api/model` | `{arg}` → 精确命中就换（内核的 `setModel()`） |
 | `POST /api/thinking` | `{level}` |
 | `POST /api/settings` | `{autoCompact?, hideThinking?, defaultThinkingLevel?}` |
@@ -222,6 +227,48 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 为什么不让浏览器自己算：`CH` 与上下文占用两段的口径都是「**最近一次**有效调用」，
 而那个「有效」的过滤条件（token>0 / 不是 aborted / 不是 error）与服务端那份必须一致 ——
 两边各算一份的结果是「同一个会话，终端与浏览器底栏对不上」。
+
+## 顶栏那三个入口（完整历史 / 系统 / 工具）
+
+照 Pi Web（github.com/agegr/pi-web）顶栏那三个按钮搬的。它们回答的是同一个问题：
+**模型这一轮到底收到了什么**。
+
+| 入口 | 给什么 | 数据从哪来 |
+| --- | --- | --- |
+| **完整历史** | 整段会话记录（含被压缩掉的早期消息），新标签页打开 | `GET /api/history`（读会话文件，服务端渲染成一页） |
+| **系统** | 模型实际收到的 system prompt | `GET /api/system-prompt`（`state.prompt.systemPrompt`） |
+| **工具** | 模型看到的工具定义：描述 + 参数（JSON Schema） | `GET /api/tools`（`state.prompt.tools`） |
+
+三者都在**打开的那一刻**取（`context-panels.ts` 调 `/api/*`），不缓存。缓存一份的坏处很具体：
+TUI 那边换了模型 / 改了工具开关，浏览器里还显示着旧的那份 —— 而这两个面板的整个意义就是
+「**现在**这一轮发出去的是什么」。
+
+「工具」拿的是 `state.prompt.tools` 而**不是**重算一遍 `declaredToolset()`：前者是请求里那份声明
+（`prepareLoadout` 重写过的描述已经在里面），重算会给出「现在」的工具集，而面板要回答的是
+「这一轮模型看到了什么」。
+
+### 为什么「完整历史」读会话文件，而不是内存里的 `messages`
+
+内存里那份是**压缩之后**的当前上下文：被 `/compact` 掉的早期消息在那里根本不存在，
+而那一段正是「完整历史」要给人看的。所以服务端用 `findSessionFile(sessionId, cwd)` 读会话文件
+（与终端、与 `pi` 是**同一份**），只认三种 entry（`message` / `model_change` /
+`thinking_level_change`）；文件还没落盘（新会话一句话都没说过）时才退回内存，页面上会写明
+「来源：还没落盘」。
+
+渲染在 `web/history.ts`，全部 `escapeHtml` —— 会话内容里 `<script>` 也好、`&` 也好，
+一个字符都不能漏出去。
+
+### 为什么是「新标签页 + 顶栏下内联面板」
+
+- **完整历史是一页文档**：要能 Ctrl-F、能打印、能和聊天区并排看 —— 所以新标签页，
+  与 Pi Web 的 `export?inline=1` 同一个形状。
+- **系统 / 工具要边看边对着聊天记录**（提示词里写了什么、模型刚才为什么那么干），
+  模态框一盖就看不见对话了。所以与 Pi Web 同形：顶栏下面摊开一块（高度封顶
+  `min(600px, 75dvh)`、自己滚），再点收起，点另一个直接换内容。
+
+面板的样式用 pi-web-ui 的**语义变量**（`--border` / `--secondary` / `--muted-foreground` /
+`--background` / `--foreground`）—— 它们在 `.dark` 下会被重定义，所以深色模式自动跟着变。
+（早先那种 `--color-*` 写法里只有 `--color-border` 真的存在，其余靠 fallback 顶着。）
 
 ## 启动与端口
 

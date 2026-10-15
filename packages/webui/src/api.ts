@@ -6,6 +6,9 @@
  *
  * 与流式状态的分工：**这些接口只回答「现在是什么」**，流式状态（消息、thinking、
  * 工具）仍然走 WebSocket（那一份必须推送）。
+ *
+ * 一个例外：**完整历史**（`/api/history`）不是 JSON，而是服务端渲染的一页 HTML ——
+ * 它不是这个模块取的，由顶栏那个按钮直接 `window.open` 打开（见 `context-panels.ts`）。
  */
 
 import type {
@@ -14,7 +17,9 @@ import type {
   WebModelsInfo,
   WebSettingsInfo,
   WebSkillInfo,
+  WebSystemPromptInfo,
   WebThinkingInfo,
+  WebToolDefinitionInfo,
 } from '@ela/core/web-protocol';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -40,6 +45,10 @@ export const elaApi = {
   skills: (): Promise<WebSkillInfo[]> => request('/api/skills'),
   thinking: (): Promise<WebThinkingInfo> => request('/api/thinking'),
   settings: (): Promise<WebSettingsInfo> => request('/api/settings'),
+  /** 顶栏「系统」：模型实际收到的系统提示词。 */
+  systemPrompt: (): Promise<WebSystemPromptInfo> => request('/api/system-prompt'),
+  /** 顶栏「工具」：模型看到的工具定义。 */
+  tools: (): Promise<WebToolDefinitionInfo[]> => request('/api/tools'),
   setModel: (arg: string): Promise<WebActionResult> => post('/api/model', { arg }),
   setThinking: (level: string): Promise<WebActionResult> => post('/api/thinking', { level }),
   setSettings: (patch: {

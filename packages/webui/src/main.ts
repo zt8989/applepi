@@ -8,7 +8,8 @@
  *   2. 造一个 `RemoteAgent`（见 remote-agent.ts）当 `session`；
  *   3. 连上 tui 的 `/ws`，把状态与事件交给 `ChatPanel` 渲染。
  *
- * 界面外壳（顶栏 / 提示行）刻意很小：真正的聊天界面是 pi-web-ui 的组件。
+ * 界面外壳（顶栏 / 提示行）刻意很小：真正的聊天界面是 pi-web-ui 的组件。顶栏右侧那三个
+ * 入口（完整历史 / 系统 / 工具）在 `context-panels.ts`。
  */
 
 import {
@@ -29,6 +30,7 @@ import { openModelPicker } from './model-picker';
 import { openConfirmDialog, openInputDialog, openSelectDialog } from './dialogs';
 import { installToolMessageView } from './tool-view';
 import { installCommandPalette } from './command-palette';
+import { installContextPanels } from './context-panels';
 import { installStatsView } from './stats';
 import { elaApi } from './api';
 import { parseCommand, runCommand } from './commands';
@@ -54,13 +56,13 @@ function registerStreamNotice(): void {
             ? 'text-yellow-600 dark:text-yellow-400'
             : tone === 'config'
               ? 'text-sky-600 dark:text-sky-400'
-              : 'text-muted-foreground';
+              : 'ela-muted';
       const detail =
         notice.detail !== undefined && notice.detail !== notice.title ? notice.detail : '';
       return html`
         <div class="px-1 text-sm leading-relaxed">
           <span class="font-medium ${cls}">${notice.title ?? ''}</span>
-          ${detail === '' ? '' : html`<span class="ml-2 text-xs text-muted-foreground">${detail}</span>`}
+          ${detail === '' ? '' : html`<span class="ml-2 text-xs ela-muted">${detail}</span>`}
         </div>
       `;
     },
@@ -98,13 +100,15 @@ function buildShell(): void {
   app.innerHTML = `
     <header class="flex items-center gap-3 px-4 py-2 border-b border-border shrink-0">
       <span class="text-sm font-semibold">ela</span>
-      <span id="ela-session" class="text-xs text-muted-foreground"></span>
-      <span id="ela-status" class="text-xs text-muted-foreground ml-auto">连接中…</span>
+      <span id="ela-session" class="text-xs ela-muted"></span>
+      <div id="ela-context-actions" class="flex items-center gap-1 ml-auto"></div>
+      <span id="ela-status" class="text-xs ela-muted">连接中…</span>
       <button id="ela-new" type="button"
         class="text-xs px-2 py-1 rounded border border-border hover:bg-secondary transition-colors">
         新会话
       </button>
     </header>
+    <div id="ela-context-panels" class="shrink-0"></div>
     <div id="ela-notices" class="px-4 text-xs shrink-0"></div>
     <div id="ela-chat" class="flex-1 min-h-0 overflow-hidden"></div>
   `;
@@ -124,7 +128,7 @@ function pushNotice(text: string, tone: 'info' | 'warn' | 'error' = 'info'): voi
       ? 'text-destructive truncate'
       : tone === 'warn'
         ? 'text-yellow-600 dark:text-yellow-400 truncate'
-        : 'text-muted-foreground truncate';
+        : 'ela-muted truncate';
   line.title = text;
   line.textContent = text;
   noticeEl().append(line);
@@ -141,6 +145,13 @@ function setSession(id: string, cwd: string): void {
   if (el) el.textContent = id === '' ? '' : `${id} · ${cwd}`;
 }
 
+/** 取一个**已经建好**的容器（`buildShell()` 刚铺过）。null 就是铺错了，直接抛。 */
+function requireElement(id: string): HTMLElement {
+  const el = document.getElementById(id);
+  if (el === null) throw new Error(`#${id} 不存在`);
+  return el;
+}
+
 function wsUrl(): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${protocol}//${window.location.host}/ws`;
@@ -154,6 +165,11 @@ async function main(): Promise<void> {
   installToolMessageView();
   installStatsView();
   buildShell();
+  installContextPanels({
+    actionsHost: requireElement('ela-context-actions'),
+    panelHost: requireElement('ela-context-panels'),
+    notice: (text, tone = 'info') => pushNotice(text, tone),
+  });
 
   /**
    * 打开模型选择器：目录 / 作用域从 HTTP 接口现取。

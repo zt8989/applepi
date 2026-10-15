@@ -4,6 +4,7 @@ import { scopedKeys } from '../src/model-picker';
 import { extractText } from '../src/remote-agent';
 import { parseEditDiff } from '../src/edit-diff';
 import { parseUnifiedPatch } from '../src/split-diff';
+import { toolParameterFields } from '../src/context-panels';
 
 /**
  * webui 的那几个**纯函数**。
@@ -124,4 +125,44 @@ test('parseUnifiedPatch：hunk 体内以 `--- `/`+++ ` 开头的行是内容，�
 test('parseUnifiedPatch：不是 patch 的文本给 null', () => {
   assert.equal(parseUnifiedPatch('随便一段中文\n没有 @@ 头'), null);
   assert.equal(parseUnifiedPatch(''), null);
+});
+test('toolParameterFields：JSON Schema 摊成参数表（必填 / 枚举 / 数组 / 联合类型 / $ref）', () => {
+  // 顶栏「工具」面板右侧那一段：参数名、类型、必填、可选值、默认值。
+  // 工具的 schema 来自扩展（typebox 各种写法都有），所以这里钉的是「看不懂的降级成
+  // unknown 而不是抛」以及几种真会遇到的形状。
+  const fields = toolParameterFields({
+    type: 'object',
+    required: ['path'],
+    properties: {
+      path: { type: 'string', description: '文件路径' },
+      mode: { type: 'string', enum: ['replace', 'append'], default: 'replace' },
+      lines: { type: 'array', items: { type: 'string' } },
+      timeout: { anyOf: [{ type: 'number' }, { type: 'null' }] },
+      options: { $ref: '#/$defs/Options' },
+    },
+  });
+
+  assert.deepEqual(fields.map((field) => field.name), [
+    'path',
+    'mode',
+    'lines',
+    'timeout',
+    'options',
+  ]);
+  assert.equal(fields[0]?.required, true);
+  assert.equal(fields[0]?.type, 'string');
+  assert.equal(fields[0]?.description, '文件路径');
+  assert.equal(fields[1]?.required, false);
+  assert.equal(fields[1]?.allowedValues, 'replace, append');
+  assert.equal(fields[1]?.defaultValue, 'replace');
+  assert.equal(fields[2]?.type, 'string[]');
+  assert.equal(fields[3]?.type, 'number | null');
+  assert.equal(fields[4]?.type, 'Options', '`$ref` 取最后一段当类型名');
+});
+
+test('toolParameterFields：不是对象 schema 就给空表（不抛）', () => {
+  assert.deepEqual(toolParameterFields(undefined), []);
+  assert.deepEqual(toolParameterFields(null), []);
+  assert.deepEqual(toolParameterFields('字符串'), []);
+  assert.deepEqual(toolParameterFields({ type: 'object' }), []);
 });
