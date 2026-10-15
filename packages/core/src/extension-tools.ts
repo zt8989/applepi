@@ -18,7 +18,6 @@ import type { AgentTool, AgentToolResult } from './agent-tool';
 import { activeToolNames, declaredToolset, setActiveToolNames } from './tools';
 import type { PromptToolDefinition } from './actions';
 import type { AgentStore } from './store';
-import type { QuestionnaireHost } from './questionnaire';
 import type { ExtensionRunner } from '@earendil-works/pi-coding-agent/dist/core/extensions/runner.js';
 import type { AgentState } from './state';
 
@@ -53,15 +52,6 @@ export interface AdaptOptions {
   runner: ExtensionRunner;
   store: AgentStore;
   cwd: string;
-  /**
-   * 问卷宿主（可缺省）。**记下正在跑的工具入参**是它的需求：
-   * `ask_user_question` 的题目与 `preview` 正文只在工具入参里（`ctx.ui.select` 那几次
-   * 调用只给当前这一题），而问卷视图**一次要画全**（否则没有 tab）。
-   *
-   * 记的是"正在跑"这个状态而不是"谁调了 select"：认领时拿入参的结构 + 标题前缀
-   * 当证据（见 `questionnaire.ts` 的 `QuestionnaireHost`）。
-   */
-  questionnaire?: QuestionnaireHost | undefined;
 }
 
 /**
@@ -89,26 +79,17 @@ export function adaptExtensionTool(
       : {}),
     async execute(toolCallId, params, signal, onUpdate) {
       const ctx = toolContext(host, toolCallId, signal);
-      // 记一下"这个工具正在跑、入参是什么"—— 问卷的题目与 preview 正文就从这里来。
-      host.questionnaire?.noteToolCall(toolCallId, name, params);
-      let result: { content?: unknown[]; details?: unknown };
-      try {
-        result = await definition.execute(
-          toolCallId,
-          params,
-          signal,
-          onUpdate === undefined
-            ? undefined
-            : // 官方 update 的形状与本项目 `AgentToolUpdate` 同形（都是「当前完整结果」），
-              // 只是来自不同包 —— cast 即可，运行时无差别。
-              (onUpdate as unknown as (u: { content: unknown[]; details?: unknown }) => void),
-          ctx,
-        );
-      } finally {
-        // 收尾要**成功失败都记**：抛了还留着那条记录的话，下一次 `select` 会认领到一份
-        // 已经死掉的问卷。
-        host.questionnaire?.settleToolCall(toolCallId);
-      }
+      const result = await definition.execute(
+        toolCallId,
+        params,
+        signal,
+        onUpdate === undefined
+          ? undefined
+          : // 官方 update 的形状与本项目 `AgentToolUpdate` 同形（都是「当前完整结果」），
+            // 只是来自不同包 —— cast 即可，运行时无差别。
+            (onUpdate as unknown as (u: { content: unknown[]; details?: unknown }) => void),
+        ctx,
+      );
       return normalizeResult(result);
     },
   };

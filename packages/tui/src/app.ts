@@ -125,7 +125,6 @@ import { contextLabels, extensionLabels } from './resource-labels';
 import { contextFilePaths } from '@ela/core/system-prompt';
 import type { DialogHost, HostUiOptions, TuiDialogs } from '@ela/core/extension-ui';
 import type { QuestionnaireSession } from '@ela/core/questionnaire';
-import { QuestionnairePanel } from './questionnaire';
 import type { ExtensionCommands } from '@ela/core/extension-commands';
 import type { ExtensionEntry } from '@ela/core/extension-host';
 import { expandSkillCommand, parseSkillMessage, skillCommands, skillsInPrompt, type SkillInfo } from '@ela/core/skills';
@@ -3058,55 +3057,25 @@ export async function runTui(options: TuiOptions): Promise<number> {
   };
 
   /**
-   * 开一份**问卷**（多题 tab）：终端这块屏 + 浏览器那块屏，**一份状态**。
+   * 开一份**问卷的浏览器那一份**（终端那一份由扩展自己的组件画 —— 见
+   * `@ela/core/questionnaire` 的文件头）。
    *
-   * 与 `tuiDialogs` 的区别：那三个是"一次一问"的原语，这里是"整份表" —— 扩展在
-   * rpc 模式下拿 `select`/`input` 逐题问，问题是同一份问卷的 N 个问法（认领逻辑在
-   * `@ela/core/questionnaire` 的 `QuestionnaireHost` 里）。
+   * 这里只做三件事：把桥当渲染器开起来、把状态机的每一帧推过去、把桥回来的意图交回状态机。
+   * 没有浏览器连着时 `open()` 仍然返回句柄（帧先广播给零个订阅者，浏览器一接上就补发当前
+   * 那一帧）—— 终端那边照常能答完，谁先答都算数。
    *
-   * 两块屏的**输入都交回同一个 session**：浏览器点了一下、终端按了一下，都是同一个
-   * `apply(intent)`。终端这半边不用 refresh 整段对话 —— 那份面板自己就是一棵组件树，
-   * `tui.requestRender()` 就够了（刷新整段对话是按消息数算成本的，见 `restoreSession` 那段）。
-   *
-   * ## 已知的边界：输入区槽位只有一格
-   *
-   * 问卷开着时若**别的扩展**又弹一次一问一答的对话框，那个对话框会把面板从槽位里顶掉
-   * （pi 的 editor slot 本来就是这个语义），面板不会自己回来 —— 但问卷没丢（状态在
-   * core 的 session 里），浏览器连着的话那块屏仍然能答完。环在跑的时候同时开别的扩展
-   * 工具才会碰到，属于罕见路。
+   * 拆台由内核调：提交/取消之后它已经拿到答案；终端先答完（或工具结束）时它也会叫我们。
    */
   const openQuestionnaire = (session: QuestionnaireSession): (() => void) => {
-    const panel = new QuestionnairePanel(session, {
-      terminalRows: () => tui.terminal.rows,
-      onIntent: (intent) => {
-        session.apply(intent);
-      },
-    });
-    // 挂进与 `custom()` 同一个输入区槽位：焦点、存/还 composer 里那行字都由它管。
-    const unmount = mountDialog(panel);
-    let handle = options.dialogs?.()?.questionnaire?.open(session.snapshot(), (intent) => {
+    const handle = options.dialogs?.()?.questionnaire?.open(session.snapshot(), (intent) => {
       session.apply(intent);
     });
-    let finished = false;
-    let unsubscribe: () => void = () => {};
-    const finish = (): void => {
-      if (finished) return;
-      finished = true;
+    if (handle === undefined) return () => {};
+    const unsubscribe = session.subscribe((snapshot) => handle.push(snapshot));
+    return () => {
       unsubscribe();
-      handle?.close();
-      handle = undefined;
-      unmount();
+      handle.close();
     };
-    unsubscribe = session.subscribe((snapshot) => {
-      handle?.push(snapshot);
-      // 提交/放弃：答案已经在 session 里了，这块屏可以撤（后面那几问由 session 现成回答）。
-      if (snapshot.submitted || snapshot.cancelled) {
-        finish();
-        return;
-      }
-      tui.requestRender();
-    });
-    return finish;
   };
 
   // 把活着的界面交给扩展宿主：内核装扩展时界面还没起来（那时只拿到一个待填的引用），

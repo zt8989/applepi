@@ -1,0 +1,276 @@
+diff --git a/ask-user-question.ts b/ask-user-question.ts
+index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..d007661161663904b0ce72c8c5143f1f55b9928d 100644
+--- a/ask-user-question.ts
++++ b/ask-user-question.ts
+@@ -1,5 +1,12 @@
+ import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+-import { isKeyRelease, isKeyRepeat, matchesKey, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
++import {
++	getKeybindings,
++	isKeyRelease,
++	isKeyRepeat,
++	matchesKey,
++	type OverlayHandle,
++	type TUI,
++} from "@earendil-works/pi-tui";
+ import {
+ 	COLLAPSE_KEY_OFF,
+ 	formatKeySpecForDisplay,
+@@ -32,6 +39,7 @@ import {
+ 	MAX_OPTIONS,
+ 	MAX_QUESTIONS,
+ 	MIN_OPTIONS,
++	type QuestionAnswer,
+ 	type QuestionData,
+ 	type QuestionnaireError,
+ 	type QuestionnaireResult,
+@@ -269,6 +277,8 @@ async function mountQuestionnaire(config: {
+ 	collapseKey: string;
+ 	presentation: Presentation;
+ 	Session: SessionModule["QuestionnaireSession"];
++	/** ela patch：把这次的 `done` 交出去 —— 宿主（浏览器那份）先答时要用它收掉这一次挂载。 */
++	onDone?: (done: (result: QuestionnaireResult | undefined) => void) => void;
+ }): Promise<QuestionnaireResult | undefined> {
+ 	const { ctx, collapseKey, presentation } = config;
+ 	const sessionRef: SessionRef = { current: null };
+@@ -281,8 +291,22 @@ async function mountQuestionnaire(config: {
+ 	// back to the visible one-line row.
+ 	const canReopenWhileHidden = removeOverlayInputListener !== undefined;
+ 	try {
++		// ela patch：包一层工厂，把 `done` 抓手留给上面那个回调（宿主先答时从外面收掉它）。
++		const factory = makeSessionFactory({ ...config, canReopenWhileHidden, sessionRef });
++		const wrapped =
++			config.onDone === undefined
++				? factory
++				: (
++						tui: TUI,
++						theme: Theme,
++						keybindings: ReturnType<typeof getKeybindings>,
++						done: (result: QuestionnaireResult) => void,
++					) => {
++						config.onDone?.(done);
++						return factory(tui, theme, keybindings, done);
++					};
+ 		return await ctx.ui.custom<QuestionnaireResult>(
+-			makeSessionFactory({ ...config, canReopenWhileHidden, sessionRef }),
++			wrapped,
+ 			presentation.overlay
+ 				? {
+ 						overlay: true,
+@@ -430,18 +454,74 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
+ 			// Pi's editor slot (#253); the overlay only while another questionnaire holds the slot,
+ 			// or stacked when another overlay is already on screen (see below).
+ 			let presentation = resolvePresentation();
+-			const mount = (p: Presentation) =>
+-				mountQuestionnaire({ ctx, typed, itemsByTab, collapseKey, presentation: p, Session: QuestionnaireSession });
++			const mount = (p: Presentation, onDone?: (done: (result: QuestionnaireResult) => void) => void) =>
++				mountQuestionnaire({
++					ctx,
++					typed,
++					itemsByTab,
++					collapseKey,
++					presentation: p,
++					Session: QuestionnaireSession,
++					...(onDone !== undefined ? { onDone } : {}),
++				});
++
++			// ── ela patch：宿主（浏览器那一份）────────────────────────────────
++			// 终端这一份仍然由我们自己画（下面 mount() → ctx.ui.custom）。ela 还会在
++			// 浏览器里画同一份问卷：它实现了一个 `externalQuestionnaire` 接缝，我们把
++			// 题目交出去（形状耦合留在包内 —— 它只回 label / selected / notes 这些表面
++			// 东西），并给它两个动作：
++			//
++			//   answer(raw)  浏览器先答 → 用它把这一次挂载收掉（当作终端那边答完了）
++			//   done()       终端这一份结束了（答了 / 放弃了 / 拆了）→ 宿主收掉浏览器那份
++			//
++			// 谁先答都算数，两边都不用猜对方的状态。宿主没有这个接缝时（别的宿主、
++			// 老版本）全是 undefined，下面一切照旧。
++			//
++			// 为什么绕这一圈而不是让宿主直接 resolve 我们的 promise：那样宿主得猜
++			// "紧随其后的那次 ctx.ui.custom 是不是这份问卷的"——并行工具调用一来就会认错。
++			// 这里由我们自己收自己的挂载，宿主只负责画与答。
++			let finish: ((result: QuestionnaireResult) => void) | undefined;
++			let heldExternal: QuestionnaireResult | undefined;
++			let externalClosed = false;
++			const applyHeld = (): void => {
++				if (heldExternal === undefined || finish === undefined) return;
++				const result = heldExternal;
++				heldExternal = undefined;
++				finish(result);
++			};
++			const claimDone = (done: (result: QuestionnaireResult) => void): void => {
++				finish = done;
++				applyHeld();
++			};
++			const externalHost = (
++				ctx.ui as {
++					externalQuestionnaire?: (
++						handoff: ExternalQuestionnaireHandoff,
++					) => ExternalQuestionnaireBridge | undefined;
++				}
++			).externalQuestionnaire;
++			const externalStarted = externalHost !== undefined;
++			const external = externalHost?.({
++				params: typed,
++				answer: (raw) => {
++					if (externalClosed) return;
++					heldExternal = toExternalResult(raw, typed);
++					applyHeld();
++				},
++				done: () => {
++					externalClosed = true;
++				},
++			});
+ 
+ 			emitAskUserBlockedEvent(pi, true);
+ 			try {
+ 				emitTerminalAttention();
+-				let result = await mount(presentation);
++				let result = await mount(presentation, claimDone);
+ 				if (result === YIELD_TO_OVERLAY) {
+ 					// Another overlay was on screen: stack on top of it instead (see mustYieldInlineSlot).
+ 					presentation.release?.();
+ 					presentation = STACKED_OVERLAY_PRESENTATION;
+-					result = await mount(presentation);
++					result = await mount(presentation, claimDone);
+ 				}
+ 
+ 				if (result === undefined) {
+@@ -452,6 +532,9 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
+ 			} finally {
+ 				presentation.release?.();
+ 				emitAskUserBlockedEvent(pi, false);
++				// 终端那一份结束了（答了 / 放弃了 / 报错了）—— 让宿主把浏览器那份收掉。
++				// 幂等：浏览器先答时这一步是空转。
++				if (externalStarted) external?.done?.();
+ 			}
+ 		},
+ 	});
+@@ -460,3 +543,82 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
+ }
+ 
+ export { buildQuestionnaireResponse, buildToolResult };
++
++// ── ela patch：宿主（浏览器那一份界面）能给的答案 ────────────────────────────
++//
++// 刻意做得"表面"一点：宿主只说它问了第几题、答的是哪个 label / 哪几个 label /
++// 自定义原文、以及备注，**不需要**知道 QuestionnaireResult 长什么样。preview 这类
++// 只有题目里才有的东西由这里回填（单选选项带 preview 时，envelope 会多一段
++// `selected preview:`，那条是给模型看的，不能在浏览器那条路上丢掉）。
++//
++// 留空也是合法的：没答的题压根不出现在 `answers` 里 —— 信封那边会把它们列成
++// `unanswered:`（partial submit），与扩展自己那份 TUI 对齐。
++
++/** 一道题的表面答案。 */
++export interface ExternalQuestionAnswer {
++	questionIndex: number;
++	kind: "option" | "custom" | "multi";
++	/** `option` = 选项 label；`custom` = 自定义原文；`multi` 不用（看 selected）。 */
++	answer?: string | null;
++	/** `multi` 选中的那些 label。 */
++	selected?: string[];
++	/** 用户写的备注（可空）。 */
++	notes?: string;
++}
++
++/** 宿主交给我们的答案（整份）。 */
++export interface ExternalQuestionnaireAnswer {
++	answers: ExternalQuestionAnswer[];
++	/** 用户放弃整份问卷。 */
++	cancelled?: boolean;
++	/** 提交页上那句"整份备注"。 */
++	globalNote?: string;
++}
++
++/** `externalQuestionnaire` 接缝的载荷。 */
++export interface ExternalQuestionnaireHandoff {
++	params: QuestionParams;
++	/** 浏览器先答：把答案给过来（简单形状），我们自己收掉终端那份并继续。 */
++	answer: (raw: ExternalQuestionnaireAnswer) => void;
++	/** 终端那一份结束了：宿主把浏览器那份收掉。幂等。 */
++	done: () => void;
++}
++
++/** 宿主那次调用拿到的东西（现在什么也不用回，留着给以后加能力）。 */
++export interface ExternalQuestionnaireBridge {
++	done?: () => void;
++}
++
++/** 把表面答案翻成 `QuestionnaireResult`（preview 从题目里回填）。 */
++export function toExternalResult(raw: ExternalQuestionnaireAnswer, params: QuestionParams): QuestionnaireResult {
++	const note = (text: string | undefined): { notes?: string } =>
++		text !== undefined && text.trim() !== "" ? { notes: text } : {};
++	const globalNote =
++		raw.globalNote !== undefined && raw.globalNote.trim() !== "" ? { globalNote: raw.globalNote } : {};
++	if (raw.cancelled === true) {
++		return { answers: [], cancelled: true, ...globalNote };
++	}
++	const answers: QuestionAnswer[] = [];
++	for (const item of raw.answers ?? []) {
++		const question = params.questions[item.questionIndex];
++		if (question === undefined) continue;
++		const base = { questionIndex: item.questionIndex, question: question.question, ...note(item.notes) };
++		if (item.kind === "multi") {
++			answers.push({ ...base, kind: "multi", answer: null, selected: item.selected ?? [] });
++			continue;
++		}
++		if (item.kind === "custom") {
++			answers.push({ ...base, kind: "custom", answer: item.answer ?? "" });
++			continue;
++		}
++		const option = question.options.find((o) => o.label === item.answer);
++		if (option === undefined) continue;
++		answers.push({
++			...base,
++			kind: "option",
++			answer: option.label,
++			...(option.preview !== undefined && option.preview.length > 0 ? { preview: option.preview } : {}),
++		});
++	}
++	return { answers, cancelled: false, ...globalNote };
++}
+diff --git a/state/i18n-bridge.ts b/state/i18n-bridge.ts
+index 96762fe1318b28fd47c2215c4088561382e9efe0..e3a25f3d443db3fcbd73f5354c824e680590a095 100644
+--- a/state/i18n-bridge.ts
++++ b/state/i18n-bridge.ts
+@@ -33,18 +33,29 @@ type I18nSDK = { scope: (namespace: string) => ScopeFn };
+ // rpiv-i18n), the dynamic import fails, every t(key, fallback) returns the
+ // canonical English literal, and the extension stays online.
+ //
+-// Top-level await is required so a synchronous `t(...)` call from any
+-// downstream module sees the resolved scope; ESM module loading awaits this
+-// before evaluating any importer.
+-let scopeImpl: ScopeFn;
+-try {
+-	const sdk = (await import("@juicesharp/rpiv-i18n")) as I18nSDK;
+-	scopeImpl = sdk.scope(I18N_NAMESPACE);
+-} catch {
+-	scopeImpl = (_key, fallback) => fallback;
+-}
++// ela patch: 上游这里写着"必须有顶层 await，否则下游的同步 t(...) 看不到已解析的
++// scope"—— 在真 ESM 里成立，但 pi 的 loader 走 jiti，TLA 反而会让导入方读到
++// undefined（见下面那段注释）。这里用"先兜底、再替换"达到同一个目的。
++// ela patch：这里**不能**用顶层 await。
++//
++// 上游是 TLA（`await import("@juicesharp/rpiv-i18n")`），而 pi 的 loader 走 jiti：
++// TLA 还没结算时，**导入这个模块的模块**拿到的 namespace 里，导出还是 undefined ——
++// 症状是 `loadQuestionnaireSession()` 读到 `typeof mod.QuestionnaireSession !== "function"`，
++// 于是扩展对模型说"这个工具坏了，重启 Pi"（我们实测在机器负载高时必现，而且是同一个
++// 进程里第一次加载就中招 —— jiti 的模块图缓存随后一直带着这个坏 namespace）。
++//
++// 改成"先给同步兜底、SDK 到了再换"：`t()` 每次调用现读 `scopeImpl`，语义与上游一致
++// （SDK 装了就实时跟 locale），只是不再把整条模块图卡在一个 await 上。
++let scopeImpl: ScopeFn = (_key, fallback) => fallback;
++void import("@juicesharp/rpiv-i18n")
++	.then((sdk) => {
++		scopeImpl = (sdk as I18nSDK).scope(I18N_NAMESPACE);
++	})
++	.catch(() => {
++		// 没装 SDK：保持英文兜底（与上游同一条降级路）。
++	});
+ 
+-export const t: ScopeFn = scopeImpl;
++export const t: ScopeFn = (key, fallback) => scopeImpl(key, fallback);
+ 
+ export function displayLabel(kind: SentinelKind): string {
+ 	return t(`sentinel.${kind}`, ROW_INTENT_META[kind].label);

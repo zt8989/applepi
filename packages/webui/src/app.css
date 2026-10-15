@@ -619,6 +619,36 @@ body {
   font-size: 0.8125rem;
 }
 
+.ela-q-note {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding: 0.3rem 0.5rem;
+  border-top: 1px dashed var(--color-border, #e5e5e5);
+}
+
+.ela-q-noteinput {
+  flex: 1;
+  padding: 0.15rem 0.35rem;
+  border: 1px solid transparent;
+  border-radius: 0.25rem;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font-size: 0.8125rem;
+}
+
+.ela-q-noteinput:focus {
+  border-color: var(--color-border, #e5e5e5);
+}
+
+.ela-q-summary-note {
+  margin: 0 0 0.25rem 1.25rem;
+  color: var(--color-muted-foreground, #6b7280);
+  font-size: 0.75rem;
+}
+
 .ela-q-preview {
   margin: 0.75rem 0 0;
   padding: 0.5rem 0.6rem;

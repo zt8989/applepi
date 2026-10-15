@@ -90,8 +90,6 @@ async function start(bridgeOptions: {
   bridge: WebBridge;
   store: ReturnType<typeof createAgentStore>;
   dist: string;
-  /** `onPresenceChange` 收到的序列（浏览器连上 / 全断开）。 */
-  presence: boolean[];
   dispose(): Promise<void>;
 }> {
   const faux = createFauxRuntime();
@@ -113,7 +111,6 @@ async function start(bridgeOptions: {
   } as unknown as Model<Api>;
 
   const resolveModel = (provider: string): Model<Api> | null => (provider === 'faux' ? model : null);
-  const presence: boolean[] = [];
   const bridge = new WebBridge(
     {
       store,
@@ -122,7 +119,6 @@ async function start(bridgeOptions: {
       ...(bridgeOptions.resumeSession !== undefined ? { resumeSession: bridgeOptions.resumeSession } : {}),
       ...(bridgeOptions.cwdLabel !== undefined ? { cwdLabel: bridgeOptions.cwdLabel } : {}),
       resolveModel,
-      onPresenceChange: (connected) => presence.push(connected),
     },
     ['测试诊断一行'],
   );
@@ -153,7 +149,6 @@ async function start(bridgeOptions: {
     bridge,
     store,
     dist,
-    presence,
     dispose: async () => {
       await server.close();
       bridge.dispose();
@@ -838,21 +833,6 @@ test('bridge：对话框被 abort 时回 undefined 并发 ui-cancel（终端先�
     client.close();
     await ctx.dispose();
   }
-});
-
-test('bridge：第一个连接 → true、最后一个断开 → false（用来切扩展宿主模式）', async () => {
-  const ctx = await start();
-  const a = await connect(`${ctx.server.url.replace('http', 'ws')}ws`);
-  await a.waitFor('hello', (m) => m.type === 'hello');
-  const b = await connect(`${ctx.server.url.replace('http', 'ws')}ws`);
-  await b.waitFor('hello', (m) => m.type === 'hello');
-  assert.deepEqual(ctx.presence, [true], '第二个连接不该再叫一次 true');
-  a.close();
-  b.close();
-  // 断开是异步的，给它一拍。
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  assert.deepEqual(ctx.presence, [true, false]);
-  await ctx.dispose();
 });
 
 /**

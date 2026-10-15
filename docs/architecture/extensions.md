@@ -95,22 +95,43 @@ inline 那条：宿主把**输入区那一格**（composer）换成扩展的组�
 `tui.ts` 的 `requireUi()` 在界面起来之前给的就是个没有槽位的占位宿主。
 
 `select` / `confirm` / `input`（pi 给 VS Code pendant / Zed 那种宿主的「RPC 弹窗协议」）
-**也实现了**。这层分销是为 `ask_user_question`：它按 `ctx.mode` 选路，浏览器连上时
-宿主模式切成 `'rpc'`（`extension-host.ts` 的 `setUiMode`），于是它走 `select/input`
-的逐题回退 —— 而那两个原语是**我们**实现的，所以终端与浏览器都能答。
+**也实现了**，是 core 的 `raceDialog`：**两端各出一份、谁先回答谁算数** —— 终端那一份
+由 `tuiDialogs` 挂进同一个输入区槽位，浏览器那一份由 `web/bridge.ts` 的 `DialogHost`
+发过去。别的扩展（`pi-web-access` 的面板之类）与 `confirm` 走的就是这条。
 
-那 N 次逐题调用**拼回一份问卷**（多题 tab / 左右切题 / 就地输入自定义答案 / 统一
-提交）由 `questionnaire.ts` 的 `QuestionnaireHost` 做：它拿"正在跑的扩展工具入参"
-与那一次 `select` 的标题前缀当证据认领（认不出就当场退回逐题对话框，与以前一样），
-提交后把答案逐个翻回扩展认识的那几个字符串（选项行原文 / 自定义原文 /
-`"1,3"`）。**不合成**扩展内部的 `QuestionnaireResult` —— 只走公开的调用语义。
+### `ask_user_question`：内置扩展 + patch，终端归它、浏览器归我们
 
-一份问卷一份状态、两块屏：终端那块面板（`tui/questionnaire.ts`）与浏览器那个弹窗
-（`webui/questionnaire.ts`）都是同一份快照的渲染器，各自把按键/点击变成意图交回
-来（`ui-questionnaire` / `ui-questionnaire-intent`）。剩下那些
-**一次一问**的对话框（别的扩展、`confirm`、问卷认领不到时的回退）仍由 core 的
-`raceDialog` 两份并起来：终端那一份由 `tuiDialogs` 挂进同一个输入区槽位，浏览器
-那一份由 `web/bridge.ts` 的 `DialogHost` 发过去 —— **谁先回答谁算数**。
+它**不再**走上面那条逐题回退。这个包是本仓库的 pinned 依赖（`@juicesharp/rpiv-ask-user-question`）
+加一份 `patches/@juicesharp__rpiv-ask-user-question@2.13.5.patch`，由
+`extension-host.ts` 当**内置扩展**按路径装载（`settings.json` 里那一份会被换成我们这份 ——
+同名工具是"先注册者优先"，两份都在的话生效的可能是没打补丁的那份）。
+
+补丁只做两件事：
+
+1. `execute()` 里多一个 `ctx.ui.externalQuestionnaire?.({ params, answer, done })` 握手段 ——
+   把归一化后的题目交给宿主（它只回 label / selected / notes 这些**表面**东西，翻成
+   `QuestionnaireResult` 的活儿留在包内）；
+2. `state/i18n-bridge.ts` 去掉顶层 await —— 上游那句 TLA 在 jiti 下会让**导入它的模块**
+   拿到 `undefined` 导出，症状是"这个工具坏了，请重启"（负载高时必现）。
+
+于是两边**同时开着、谁先答都算数**：
+
+```
+扩展 execute()
+  ├─ 把题目交给宿主（externalQuestionnaire） → 我们：开浏览器那份弹窗
+  ├─ 挂它自己的组件（ctx.ui.custom）          → 终端那份（多题 tab / 预览 / 备注 / 折叠）
+  ├─ 浏览器先答 → handoff.answer(raw)  → 扩展收掉自己的组件、用这份答案继续
+  │  终端先答   → 扩展 finally 里 handoff.done() → 我们收掉浏览器那份
+  └─ buildQuestionnaireResponse(result, typed) → 模型看到的信封
+```
+
+宿主侧那份状态在 `questionnaire.ts`（`QuestionnaireSession` + `QuestionnaireHost`），
+浏览器界面在 `webui/questionnaire.ts`（帧走 `ui-questionnaire` /
+`ui-questionnaire-intent`）。**留空**的题不出现在答案里（信封会列成 `unanswered:`），
+每题备注与整份备注都带着 —— 与扩展自己那份 TUI 的能力对齐。
+
+`ctx.mode` 本项目**恒为 `'tui'`**：终端确实是这一侧的交互方，浏览器是同一份状态的
+另一块屏（早先那套"浏览器连着就切 `'rpc'`"的做法已删）。
 
 没实现的是：`setFooter` / `setHeader`（要接 pi 的应用层布局，见
 [surfaces](surfaces.md)「为什么不用 pi 自己的 InteractiveMode」）。

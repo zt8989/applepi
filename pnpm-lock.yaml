@@ -6,6 +6,7 @@ settings:
 
 patchedDependencies:
   '@earendil-works/pi-coding-agent': b26762fc59574e3c2c7c5527715027f0686b39a46ca4e84ca0f5d7020274b59e
+  '@juicesharp/rpiv-ask-user-question@2.13.5': 531900dfabcec96bce6ff5384c163bf9b30dfbe94da190e0c0029918d2540b23
 
 importers:
 
@@ -35,6 +36,9 @@ importers:
       '@earendil-works/pi-tui':
         specifier: ^1.0.2
         version: 1.0.3
+      '@juicesharp/rpiv-ask-user-question':
+        specifier: 2.13.5
+        version: 2.13.5(patch_hash=531900dfabcec96bce6ff5384c163bf9b30dfbe94da190e0c0029918d2540b23)(@earendil-works/pi-coding-agent@1.0.3(patch_hash=b26762fc59574e3c2c7c5527715027f0686b39a46ca4e84ca0f5d7020274b59e)(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.22.0)(zod@4.6.6))(@earendil-works/pi-tui@1.0.3)(typebox@1.3.27)
       redux:
         specifier: ^4.2.1
         version: 4.2.1
@@ -490,6 +494,22 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@juicesharp/rpiv-ask-user-question@2.13.5':
+    resolution: {integrity: sha512-D4j32b/JWiNEb2JK9nxWr13aVn/Md1ylRIPzreSzmcJWV6oKjyquBswEg830hPky4W6V65TbKs2mJXywbqYRPg==}
+    peerDependencies:
+      '@earendil-works/pi-coding-agent': '*'
+      '@earendil-works/pi-tui': '*'
+      '@juicesharp/rpiv-i18n': '*'
+      typebox: '*'
+    peerDependenciesMeta:
+      '@juicesharp/rpiv-i18n':
+        optional: true
+
+  '@juicesharp/rpiv-config@2.13.8':
+    resolution: {integrity: sha512-fNzUmtGHRYbPQ3PWnfwyk0ukBxUgIwFLUhzRQV8U47IMhSZAEfoutqOZ31UCPPEpCgWgF+WATJ3+jn7NwJUotg==}
+    peerDependencies:
+      typebox: '*'
 
   '@lit-labs/ssr-dom-shim@1.6.0':
     resolution: {integrity: sha512-VHb0ALPMTlgKjM6yIxxoQNnpKyUKLD04VzeQdsiXkMqkvYlAHxq9glGLmgbb889/1GsohSOAjvQYoiBppXFqrQ==}
@@ -2120,6 +2140,17 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.6.0
+
+  '@juicesharp/rpiv-ask-user-question@2.13.5(patch_hash=531900dfabcec96bce6ff5384c163bf9b30dfbe94da190e0c0029918d2540b23)(@earendil-works/pi-coding-agent@1.0.3(patch_hash=b26762fc59574e3c2c7c5527715027f0686b39a46ca4e84ca0f5d7020274b59e)(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.22.0)(zod@4.6.6))(@earendil-works/pi-tui@1.0.3)(typebox@1.3.27)':
+    dependencies:
+      '@earendil-works/pi-coding-agent': 1.0.3(patch_hash=b26762fc59574e3c2c7c5527715027f0686b39a46ca4e84ca0f5d7020274b59e)(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.22.0)(zod@4.6.6)
+      '@earendil-works/pi-tui': 1.0.3
+      '@juicesharp/rpiv-config': 2.13.8(typebox@1.3.27)
+      typebox: 1.3.27
+
+  '@juicesharp/rpiv-config@2.13.8(typebox@1.3.27)':
+    dependencies:
+      typebox: 1.3.27
 
   '@lit-labs/ssr-dom-shim@1.6.0': {}
 

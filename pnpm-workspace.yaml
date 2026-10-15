@@ -23,3 +23,4 @@ allowBuilds:
   protobufjs: true
 patchedDependencies:
   '@earendil-works/pi-coding-agent': patches/@earendil-works__pi-coding-agent.patch
+  '@juicesharp/rpiv-ask-user-question@2.13.5': patches/@juicesharp__rpiv-ask-user-question@2.13.5.patch

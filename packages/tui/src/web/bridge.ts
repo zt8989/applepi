@@ -95,15 +95,6 @@ export interface WebBridgeOptions {
    * 不给就退回裸 cwd。
    */
   cwdLabel?: ((state: AgentState) => string) | undefined;
-  /**
-   * 浏览器连上 / 全断开时叫一声。
-   *
-   * 用来切扩展宿主模式（`setUiMode`）：有浏览器时切 `'rpc'`，`ask_user_question` 那种
-   * 按 `ctx.mode` 选路的扩展才会走 `ctx.ui.select/input` —— 那两个原语由本项目实现，
-   * 所以终端与浏览器能答**同一份**问卷（逐题调用拼回多题 tab，见
-   * `@ela/core/questionnaire`；一次一问的那种走 `extension-ui.ts` 的 `raceDialog`）。
-   */
-  onPresenceChange?: ((connected: boolean) => void) | undefined;
 }
 
 /** 零用量：流式中的部分消息还没账可算。 */
@@ -405,7 +396,6 @@ export class WebBridge {
     if (this.listeners.size === 0) {
       this.resync();
       this.listeners.add(listener);
-      this.options.onPresenceChange?.(true);
     } else {
       this.listeners.add(listener);
     }
@@ -415,8 +405,7 @@ export class WebBridge {
     // 问卷同理（而且它更常被刷新撞上：一填就是好几题，人在里面待得久）。
     if (this.questionnaire !== undefined) listener(this.questionnaire.message);
     return () => {
-      if (!this.listeners.delete(listener)) return;
-      if (this.listeners.size === 0) this.options.onPresenceChange?.(false);
+      this.listeners.delete(listener);
     };
   }
 

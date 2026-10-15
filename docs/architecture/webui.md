@@ -205,25 +205,24 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 （命令表里没标 `web: true`），所以浏览器里打它们会得到「浏览器里只支持非会话类命令」——
 那几件要动会话本身（换文件、删历史、整份换 messages），它们的界面还在终端那边。
 
-## 扩展对话框（`ctx.ui.select` / `confirm` / `input`）
+## 扩展对话框（`ctx.ui.select` / `confirm` / `input`）与问卷
 
-`ask_user_question` 这类扩展按 `ctx.mode` 选路：`'tui'` 走它自己那个全屏问卷
-（`ctx.ui.custom()` 的组件），`'rpc'` 走 `ctx.ui.select/input` 的逐题回退。本项目选
-`'rpc'` —— 因为那两个原语是**我们**实现的，于是终端与浏览器可以吃同一份问卷。
-
-- **浏览器连上时**把扩展宿主模式切成 `'rpc'`（`extension-host.ts` 的 `setUiMode`，
-  连接进来/全断开时由 bridge 的 `onPresenceChange` 驱动）。
-- **问卷**（多题那种）不再逐题弹窗：core 的 `QuestionnaireSession`
-  （[questionnaire.ts](../../packages/core/src/questionnaire.ts)）持一份状态，终端那块面板与
-  浏览器那个弹窗是它的**两块屏幕**（一份进度，不是两个弹窗），提交之后把答案按扩展
-  问的顺序喂回去（`ui-questionnaire` / `ui-questionnaire-intent`）。
-- **一次一问的对话框**（别的扩展、`confirm`、问卷认领不到时的回退）仍由 core 的
-  `raceDialog` 把两份并起来：终端那一份是 pi 自己的 `ExtensionSelectorComponent` /
-  `ExtensionInputComponent`，挂进与 `custom()` 同一个输入区槽位；浏览器那一份走
-  WebSocket（`ui-request` / `ui-response` / `ui-cancel`）—— **谁先回答谁算数**，
-  另一端立刻撤掉。
+- **一次一问的对话框**由 core 的 `raceDialog` 把两份并起来：终端那一份是 pi 自己的
+  `ExtensionSelectorComponent` / `ExtensionInputComponent`（挂进与 `custom()` 同一个
+  输入区槽位），浏览器那一份走 WebSocket（`ui-request` / `ui-response` / `ui-cancel`）
+  —— **谁先回答谁算数**，另一端立刻撤掉。
+- **问卷**（`ask_user_question`，多题那种）另走一条：它现在本项目的**内置扩展**（带
+  patch，见 [extensions](extensions.md) 那一节）。**终端那份由扩展自己的组件画**
+  （多题 tab / 预览 / 备注 / 折叠都是它的），**浏览器这份由我们画**：
+  扩展把题目交给宿主（`ctx.ui.externalQuestionnaire`），宿主开一个弹窗
+  （`webui/questionnaire.ts`），两边同时开着、谁先答都算数。帧走
+  `ui-questionnaire` / `ui-questionnaire-intent`：服务端持那份状态
+  （[questionnaire.ts](../../packages/core/src/questionnaire.ts) 的 `QuestionnaireSession`），
+  浏览器只把点击/按键变成**意图**发回去 —— 「现在停在第几题」「哪几题留空」都由服务端拍。
 - 浏览器后连（刷新页面 / 新标签页）时，还没答的请求与**当前那份问卷快照**会补发
   给这个连接 —— 否则界面里什么都看不到，而服务端还卡在那里等答案。
+- 留空也能提交（信封里列成 `unanswered:`）、每题有备注、提交页有整份备注 —— 与扩展
+  自己那份 TUI 对齐。
 
 ## 底栏统计行（与 TUI 逐字同形）
 

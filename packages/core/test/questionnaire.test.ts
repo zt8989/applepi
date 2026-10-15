@@ -4,16 +4,18 @@ import {
   parseQuestionnaire,
   QuestionnaireHost,
   QuestionnaireSession,
-  titleMatches,
+  type QuestionnaireAnswerPayload,
   type QuestionnaireQuestion,
 } from '../src/questionnaire';
 
 /**
- * 问卷状态机 + 宿主侧的认领/翻译。
+ * 问卷在**宿主这一侧**的两块东西：
  *
- * 这一层写错的样子很隐蔽：界面画得好好的，交回扩展的字符串却认不出来 ——
- * 于是模型收到的是"用户拒绝了"而不是答案。所以每一条**运输格式**都要钉住：
- * 选项行原文、自定义答案原文、多选的 `"1,3"`、取消的 `undefined`。
+ * 1. `QuestionnaireSession` —— 浏览器那份界面的状态机（点了什么 → 变成什么答案）；
+ * 2. `QuestionnaireHost` —— 接扩展交过来的题目、开浏览器那份视图、把答案回给扩展。
+ *
+ * 这一层写错的样子很隐蔽：界面画得好好的，交回去的东西却对不上（label 写成了序号、
+ * 备注丢了、留空的题把整份弄成"拒绝"）。所以每一条**运输形状**都钉住。
  */
 
 const QUESTIONS: QuestionnaireQuestion[] = [
@@ -38,6 +40,7 @@ const QUESTIONS: QuestionnaireQuestion[] = [
   },
 ];
 
+/** 扩展那边交给我们的东西（补丁里的 `QuestionParams` 形状）。 */
 const PARAMS = {
   questions: QUESTIONS.map((question) => ({
     question: question.question,
@@ -47,7 +50,7 @@ const PARAMS = {
   })),
 };
 
-test('问卷：认形状（认不出就退回逐题弹窗，不猜）', () => {
+test('问卷：把扩展交来的题目收成本项目的形状（认不出就整份不要）', () => {
   const ok = parseQuestionnaire({
     questions: [
       {
@@ -75,37 +78,15 @@ test('问卷：认形状（认不出就退回逐题弹窗，不猜）', () => {
     '只有一个选项 = 不是问卷',
   );
   assert.equal(
-    parseQuestionnaire({ questions: [{ question: '', options: [{ label: 'A' }, { label: 'B' }] }] }),
-    undefined,
-    '空题干认不出',
-  );
-  assert.equal(
     parseQuestionnaire({ questions: new Array(5).fill({ question: 'Q', options: [] }) }),
     undefined,
     '超过 4 题越界',
   );
 });
 
-test('问卷：标题前缀对得上（认领那一次 select 的唯一证据）', () => {
-  const question = QUESTIONS[0]!;
-  assert.equal(titleMatches(question, '[库] 用哪个库？'), true);
-  assert.equal(
-    titleMatches(question, '[库] 用哪个库？\n\n--- 2. postgres preview ---\n…'),
-    true,
-    '预览块挂在后面不影响',
-  );
-  assert.equal(titleMatches(question, '用哪个库？'), false);
-  assert.equal(titleMatches(question, '[别的] 用哪个库？'), false);
-  assert.equal(titleMatches(question, '[库] 换一个说法？'), false);
-  assert.equal(titleMatches({ ...question, header: '' }, '用哪个库？'), true, '没有 header 时标题就是题干本身');
-  assert.equal(
-    titleMatches({ ...question, question: '用哪个\r\n库？' }, '[库] 用哪个\n库？'),
-    true,
-    '行终止符两边同规则归一',
-  );
-});
+// ── 状态机 ────────────────────────────────────────────────────────────────
 
-test('问卷：单选选定即下一题，多选勾完要回车才算', () => {
+test('问卷：单选选定即下一题，多选勾完要回车才算；答完最后一题不跳提交页', () => {
   const session = new QuestionnaireSession(QUESTIONS);
   assert.equal(session.snapshot().active, 0);
 
@@ -117,39 +98,24 @@ test('问卷：单选选定即下一题，多选勾完要回车才算', () => {
   session.apply({ kind: 'toggle', index: 2 });
   assert.deepEqual(session.answerOf(1), { kind: 'multi', selected: [0, 2] });
   assert.equal(session.snapshot().active, 1, '多选勾选还停在本题');
-  assert.equal(session.complete, false, '勾了还没回车 = 草稿，不算答定');
+  assert.equal(session.snapshot().settled[1], false, '勾了还没回车 = 草稿，不算答定');
   session.apply({ kind: 'commit' });
-  assert.equal(session.snapshot().active, 2, '回车才进提交页');
-  assert.equal(session.complete, true);
+  assert.equal(session.snapshot().active, 1, '回车只把这一题答定（不跳提交页）');
+  assert.equal(session.answeredCount, 2);
 
+  // 提交页是自己切过去的：那里回车才提交。
+  session.apply({ kind: 'activate', index: session.submitIndex });
   assert.equal(session.apply({ kind: 'submit' }), true);
   assert.equal(session.submitted, true);
   assert.equal(session.apply({ kind: 'pick', index: 0 }), false, '提交之后不再接受改动');
-});
-
-test('问卷：多选一个不勾也能提交（扩展那边由空串表达）', () => {
-  const session = new QuestionnaireSession([QUESTIONS[1]!]);
-  session.apply({ kind: 'commit' });
-  assert.deepEqual(session.answerOf(0), { kind: 'multi', selected: [] });
-  assert.equal(session.complete, true);
-  assert.equal(session.apply({ kind: 'submit' }), true);
-});
-
-test('问卷：没答完不许提交（未答的题没有"空答案"这种表示）', () => {
-  const session = new QuestionnaireSession(QUESTIONS);
-  session.apply({ kind: 'pick', index: 0 });
-  assert.deepEqual(session.unanswered(), [1]);
-  assert.equal(session.apply({ kind: 'submit' }), false);
-  assert.equal(session.submitted, false);
 });
 
 test('问卷：离开一道题时草稿落地（否则会卡在"还有 1 题没答"）', () => {
   const session = new QuestionnaireSession(QUESTIONS);
   session.apply({ kind: 'activate', index: 1 });
   session.apply({ kind: 'toggle', index: 0 });
-  assert.equal(session.complete, false);
+  assert.deepEqual(session.unanswered(), [0, 1]);
   session.apply({ kind: 'activate', index: 2 });
-  assert.equal(session.complete, false, '第 0 题本来就还没答');
   assert.equal(session.snapshot().settled[1], true, '切走 = 这一题按当前勾选答定');
   assert.deepEqual(session.unanswered(), [0]);
 });
@@ -170,126 +136,178 @@ test('问卷：自定义答案 / 清空答案 / 多选上的自定义', () => {
   assert.deepEqual(session.answerOf(1), { kind: 'multi', selected: [1], custom: '其实我想要别的' });
 });
 
-test('问卷：取消 = 整份放弃（等着的问法全都拿到 undefined）', async () => {
+test('问卷：备注与整份备注都不影响"答没答"', () => {
   const session = new QuestionnaireSession(QUESTIONS);
-  const waiting = session.waitFor(0);
-  session.apply({ kind: 'cancel' });
-  assert.equal(await waiting, undefined);
-  assert.equal(session.cancelled, true);
+  session.apply({ kind: 'note', index: 0, text: '部署脚本也要改' });
+  assert.equal(session.noteOf(0), '部署脚本也要改');
+  assert.deepEqual(session.unanswered(), [0, 1], '只写了备注不算答过');
+  session.apply({ kind: 'globalNote', text: '整体上随便' });
+  assert.equal(session.globalNote, '整体上随便');
+  assert.equal(session.snapshot().notes[0], '部署脚本也要改');
+  // 清空备注
+  session.apply({ kind: 'note', index: 0, text: '   ' });
+  assert.equal(session.noteOf(0), undefined);
+  assert.equal(session.snapshot().notes[0], null);
 });
 
-test('问卷：waitFor 只等**这一题**（草稿不算，答定才算）', async () => {
+test('问卷：留空也能提交（信封那边会列成 unanswered）', () => {
   const session = new QuestionnaireSession(QUESTIONS);
-  const first = session.waitFor(0);
-  let secondSettled = false;
-  const second = session.waitFor(1).then((answer) => {
-    secondSettled = true;
-    return answer;
-  });
+  session.apply({ kind: 'pick', index: 0 });
+  assert.deepEqual(session.unanswered(), [1]);
+  assert.equal(session.apply({ kind: 'submit' }), true, '留空也允许提交');
+  assert.equal(session.submitted, true);
+});
+
+// ── 交给扩展的答案 ──────────────────────────────────────────────────────────
+
+test('问卷：答案是**表面**形状（label / selected / 自定义原文 / 备注），留空的不出现', () => {
+  const session = new QuestionnaireSession(QUESTIONS);
   session.apply({ kind: 'pick', index: 1 });
-  assert.deepEqual(await first, { kind: 'option', index: 1 });
-  assert.equal(secondSettled, false, '第 1 题还停在草稿上，不该放行');
-  session.apply({ kind: 'toggle', index: 0 });
-  await Promise.resolve();
-  assert.equal(secondSettled, false, '勾了一下还是草稿');
+  session.apply({ kind: 'note', index: 0, text: '要一起改部署' });
+  session.apply({ kind: 'toggle', index: 2 });
   session.apply({ kind: 'commit' });
-  assert.deepEqual(await second, { kind: 'multi', selected: [0] });
+  session.apply({ kind: 'note', index: 1, text: '顺手' });
+  session.apply({ kind: 'globalNote', text: '别的没有了' });
+  session.apply({ kind: 'submit' });
+  assert.deepEqual(session.payload(), {
+    answers: [
+      { questionIndex: 0, kind: 'option', answer: 'postgres', notes: '要一起改部署' },
+      { questionIndex: 1, kind: 'multi', selected: ['日志'], notes: '顺手' },
+    ],
+    globalNote: '别的没有了',
+  });
 });
 
-/** 造一个宿主：内存里挂一次"正在跑的工具调用"，并记下界面层拿到的那个 session。 */
-function makeHost(params: unknown) {
-  const opened: QuestionnaireSession[] = [];
-  let tornDown = 0;
+test('问卷：留空提交时 payload 里压根没有那几题', () => {
+  const session = new QuestionnaireSession(QUESTIONS);
+  session.apply({ kind: 'pick', index: 0 });
+  session.apply({ kind: 'submit' });
+  assert.deepEqual(session.payload(), {
+    answers: [{ questionIndex: 0, kind: 'option', answer: 'sqlite' }],
+  });
+});
+
+test('问卷：多选上的自定义原文跟在选中项后面（扩展那边只有 selected 一个位置）', () => {
+  const session = new QuestionnaireSession(QUESTIONS);
+  session.apply({ kind: 'pick', index: 0 });
+  session.apply({ kind: 'toggle', index: 0 });
+  session.apply({ kind: 'custom', index: 1, text: '其实都不需要' });
+  session.apply({ kind: 'submit' });
+  assert.deepEqual(session.payload(), {
+    answers: [
+      { questionIndex: 0, kind: 'option', answer: 'sqlite' },
+      { questionIndex: 1, kind: 'multi', selected: ['缓存', '其实都不需要'] },
+    ],
+  });
+});
+
+test('问卷：取消 → `cancelled: true`（整份备注还带着）', () => {
+  const session = new QuestionnaireSession(QUESTIONS);
+  session.apply({ kind: 'pick', index: 0 });
+  session.apply({ kind: 'globalNote', text: '先不问了' });
+  session.apply({ kind: 'cancel' });
+  assert.deepEqual(session.payload(), { answers: [], cancelled: true, globalNote: '先不问了' });
+});
+
+// ── 宿主（握手 / 视图） ──────────────────────────────────────────────────────
+
+/** 造一个宿主：记下它开的视图（以及拆台几次），并收集回给扩展的答案。 */
+function makeHost() {
+  const views: { session: QuestionnaireSession; closed: number }[] = [];
   const host = new QuestionnaireHost(() => (session) => {
-    opened.push(session);
+    const entry = { session, closed: 0 };
+    views.push(entry);
     return () => {
-      tornDown += 1;
+      entry.closed += 1;
     };
   });
-  host.noteToolCall('call-1', 'ask_user_question', params);
-  return { host, opened, session: () => opened[0], tornDown: () => tornDown };
+  const answers: QuestionnaireAnswerPayload[] = [];
+  let dones = 0;
+  const handoff = (params: unknown) => ({
+    params,
+    answer: (raw: QuestionnaireAnswerPayload) => answers.push(raw),
+    done: () => {
+      dones += 1;
+    },
+  });
+  return {
+    host,
+    views,
+    answers,
+    dones: () => dones,
+    session: () => views[0]?.session,
+    closed: () => views[0]?.closed ?? 0,
+    handoff,
+  };
 }
 
-const SELECT_OPTIONS = ['1. sqlite — 单文件', '2. postgres — 要一台服务器', '3. Type something.'];
-
-test('宿主：认不出就当场返回 undefined（不推迟别的扩展的对话框一个微任务）', () => {
-  const { host } = makeHost(PARAMS);
-  assert.equal(host.tryServe('select', '别的东西', SELECT_OPTIONS), undefined);
-  assert.equal(host.tryServe('input', '[库] 用哪个库？', SELECT_OPTIONS), undefined, '单选题不该由 input 认领');
-  const bare = new QuestionnaireHost(undefined);
-  bare.noteToolCall('call-1', 'ask_user_question', PARAMS);
-  assert.equal(bare.tryServe('select', '[库] 用哪个库？', SELECT_OPTIONS), undefined, '没有视图的宿主不认领');
-});
-
-test('宿主：单选交回**那一行原文**（扩展靠自己拼的选项行认选项）', async () => {
-  const { host, session } = makeHost(PARAMS);
-  const answer = host.tryServe('select', '[库] 用哪个库？', SELECT_OPTIONS);
-  assert.notEqual(answer, undefined);
-  session()?.apply({ kind: 'pick', index: 1 });
-  assert.equal(await answer, '2. postgres — 要一台服务器');
-});
-
-test('宿主：自定义答案交回原文（不匹配任何选项行 → 扩展判成 custom）', async () => {
-  const { host, session } = makeHost(PARAMS);
-  const answer = host.tryServe('select', '[库] 用哪个库？', SELECT_OPTIONS);
-  session()?.apply({ kind: 'custom', index: 0, text: '都不对，用 duckdb' });
-  assert.equal(await answer, '都不对，用 duckdb');
-});
-
-test('宿主：多选交回序号（"1,3"）', async () => {
-  const { host, session } = makeHost(PARAMS);
-  // 先答第 0 题（单选），把 ask 推到第 1 题。
-  const first = host.tryServe('select', '[库] 用哪个库？', SELECT_OPTIONS);
-  session()?.apply({ kind: 'pick', index: 0 });
-  assert.equal(await first, '1. sqlite — 单文件');
-
-  const second = host.tryServe('input', '[能力] 要哪些能力？', []);
-  session()?.apply({ kind: 'toggle', index: 0 });
-  session()?.apply({ kind: 'toggle', index: 2 });
-  session()?.apply({ kind: 'commit' });
-  assert.equal(await second, '1,3');
-});
-
-test('宿主：多选一个不勾交回空串（扩展那边是"故意空提交"）', async () => {
-  const { host, session } = makeHost(PARAMS);
-  const first = host.tryServe('select', '[库] 用哪个库？', SELECT_OPTIONS);
-  session()?.apply({ kind: 'pick', index: 0 });
-  await first;
-  const second = host.tryServe('input', '[能力] 要哪些能力？', []);
-  session()?.apply({ kind: 'commit' });
-  assert.equal(await second, '');
-});
-
-test('宿主：取消交回 undefined（扩展的语义 = 用户放弃整份问卷）', async () => {
-  const { host, session } = makeHost(PARAMS);
-  const answer = host.tryServe('select', '[库] 用哪个库？', SELECT_OPTIONS);
-  session()?.apply({ kind: 'cancel' });
-  assert.equal(await answer, undefined);
-});
-
-test('宿主：提交之后还在按顺序问 —— 从已答的会话里取，不再弹窗', async () => {
-  const { host, session } = makeHost(PARAMS);
-  const first = host.tryServe('select', '[库] 用哪个库？', SELECT_OPTIONS);
-  const one = session()!;
-  one.apply({ kind: 'pick', index: 1 });
-  assert.equal(await first, '2. postgres — 要一台服务器');
-
-  const second = host.tryServe('input', '[能力] 要哪些能力？', []);
-  assert.notEqual(second, undefined, '提交之后第二问仍归这份问卷（而不是退回逐题弹窗）');
-  one.apply({ kind: 'toggle', index: 1 });
-  one.apply({ kind: 'commit' });
-  one.apply({ kind: 'submit' });
-  assert.equal(await second, '2');
-});
-
-test('宿主：工具收尾就把整份收掉（视图拆台、下次从零认领）', async () => {
-  const { host, session, tornDown } = makeHost(PARAMS);
-  const answer = host.tryServe('select', '[库] 用哪个库？', SELECT_OPTIONS);
-  session()?.apply({ kind: 'pick', index: 0 });
-  await answer;
+test('宿主：扩展交来题目 → 开浏览器那份视图；浏览器提交 → 答案回给扩展、视图拆掉', () => {
+  const { host, session, answers, closed, handoff } = makeHost();
+  const bridge = host.open(handoff(PARAMS));
+  assert.equal(session()?.questions.length, 2, '题目进了状态机');
   assert.notEqual(host.current(), undefined);
-  assert.equal(tornDown(), 0, '还在跑的时候不该拆台');
-  host.settleToolCall('call-1');
+
+  session()?.apply({ kind: 'pick', index: 0 });
+  session()?.apply({ kind: 'toggle', index: 1 });
+  session()?.apply({ kind: 'commit' });
+  assert.deepEqual(answers, [], '还没提交就不该回答案');
+  session()?.apply({ kind: 'activate', index: session()!.submitIndex });
+  session()?.apply({ kind: 'submit' });
+
+  assert.deepEqual(answers, [
+    {
+      answers: [
+        { questionIndex: 0, kind: 'option', answer: 'sqlite' },
+        { questionIndex: 1, kind: 'multi', selected: ['重试'] },
+      ],
+    },
+  ]);
+  assert.equal(closed(), 1, '提交完就把浏览器那份拆掉');
   assert.equal(host.current(), undefined);
-  assert.equal(tornDown(), 1, '工具收尾 = 拆视图');
+  // 扩展那边收尾会再叫一次 done（幂等）。
+  bridge.done?.();
+  assert.equal(closed(), 1, 'done 不该再拆一次');
+});
+
+test('宿主：扩展交来题目 → 终端先答完（done）→ 视图拆掉、不回答案', () => {
+  const { host, answers, closed, dones, handoff } = makeHost();
+  const bridge = host.open(handoff(PARAMS));
+  bridge.done?.();
+  assert.equal(closed(), 1, '终端答完 = 收掉浏览器那份');
+  assert.deepEqual(answers, [], '终端那份的答案由扩展自己送信封，我们不该再插一脚');
+  assert.equal(dones(), 0);
+});
+
+test('宿主：取消（浏览器里按 Esc）→ cancelled 回给扩展', () => {
+  const { host, session, answers, closed, handoff } = makeHost();
+  host.open(handoff(PARAMS));
+  session()?.apply({ kind: 'cancel' });
+  assert.deepEqual(answers, [{ answers: [], cancelled: true }]);
+  assert.equal(closed(), 1);
+});
+
+test('宿主：认不出的题目不开视图（也不接管收尾）', () => {
+  const { host, views, answers, dones, handoff } = makeHost();
+  host.open(handoff({ questions: 'nope' }));
+  assert.equal(views.length, 0);
+  assert.deepEqual(answers, []);
+  assert.equal(dones(), 0);
+});
+
+test('宿主：上一份收了之后，旧的那次 done 不该关掉新的一份', () => {
+  const { host, session, answers, closed, handoff } = makeHost();
+  const first = host.open(handoff(PARAMS));
+  session()?.apply({ kind: 'pick', index: 0 });
+  session()?.apply({ kind: 'activate', index: session()!.submitIndex });
+  session()?.apply({ kind: 'submit' });
+  assert.equal(answers.length, 1);
+  // 模型又问了一份（同一个宿主）。
+  const second = host.open(handoff(PARAMS));
+  const secondSession = session();
+  assert.notEqual(secondSession, undefined);
+  first.done?.();
+  assert.notEqual(host.current(), undefined, '新那份还在');
+  assert.equal(closed(), 1, '只拆过第一份（第二次 open 用的是新视图）');
+  second.done?.();
+  assert.equal(host.current(), undefined);
 });

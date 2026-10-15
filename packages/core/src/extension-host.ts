@@ -87,6 +87,7 @@ import { loadPiSettings } from './pi-config';
 import type { ExtensionFactory } from '@earendil-works/pi-coding-agent/dist/core/extensions/types.js';
 import { createHostUi, type ExtensionHostUi, type HostUiOptions } from './extension-ui';
 import { QuestionnaireHost } from './questionnaire';
+import { createRequire } from 'node:module';
 import { extensionModelRegistry } from './extension-models';
 import { extensionSessionManager } from './extension-sessions';
 import { installExtensionCommands, type ExtensionCommands } from './extension-commands';
@@ -191,17 +192,6 @@ export interface ExtensionHost {
     input: Record<string, unknown>,
     options?: { parentToolCallId?: string | undefined; signal?: AbortSignal | undefined },
   ): Promise<{ block?: boolean; reason?: string | undefined; input: Record<string, unknown> }>;
-  /**
-   * 切扩展宿主的「模式」（官方 `ctx.mode`）：`'tui'` = 终端是交互方，`'rpc'` = 有个
-   * 非终端宿主在驱动。
-   *
-   * 为什么要有它：`ask_user_question` 这类扩展按 `ctx.mode` 选路 —— `'tui'` 走它自己的
-   * 全屏问卷（`ctx.ui.custom()`），`'rpc'` 走 `ctx.ui.select/input` 的逐题回退。本项目
-   * 想让**浏览器**也能答，就得在浏览器连上时切到 `'rpc'`（那时两端都由我们的
-   * `select/input` 驱动，见 `extension-ui.ts` 的 `raceDialog`）；浏览器全断开再切回。
-   */
-  setUiMode(mode: 'tui' | 'rpc'): void;
-
   dispose(): void;
 }
 
@@ -278,7 +268,6 @@ function emptyHost(errors: readonly string[] = []): ExtensionHost {
     errors,
     entries: [],
     loaded: 0,
-    setUiMode: () => {},
     beforeAgentStart: async () => {},
     startSession: async () => {},
     collectPromptSections: async () => ({}),
@@ -305,6 +294,30 @@ function emptyCommands(): ExtensionCommands {
 interface ResolvedExtensionEntry {
   path: string;
   metadata: PathMetadata;
+}
+
+/**
+ * 本项目内置的 `ask_user_question` 入口（`@juicesharp/rpiv-ask-user-question` 的
+ * pinned 依赖 + `patches/*.patch`）。
+ *
+ * 为什么按路径而不是 `import`：它是给 pi 的 loader 写的源码（peer 依赖 `typebox` /
+ * pi-tui / pi-coding-agent，其中 `typebox` 只由 loader 以**虚拟模块**注入）——
+ * 直接静态 import 会在这里解析不到 `typebox`。
+ *
+ * 取不到（依赖没装、被 prune 掉）就给 `undefined` 并留一条诊断：那时候
+ * `/sessions` 那种"模型看不到这个工具"的降级比崩了好。
+ */
+function askUserQuestionEntryPath(): string | undefined {
+  try {
+    return createRequire(import.meta.url).resolve('@juicesharp/rpiv-ask-user-question');
+  } catch {
+    return undefined;
+  }
+}
+
+/** 某一个 resolved 扩展是不是那份 npm 装的 `ask_user_question`（要排掉的那个）。 */
+function isAskUserQuestionSource(source: string): boolean {
+  return source.includes('rpiv-ask-user-question');
 }
 
 /**
@@ -431,24 +444,41 @@ const errors: string[] = [];
   const onExtensionError = (where: string, message: string): void => {
     errors.push(`扩展 ${where}：${message}`);
   };
-  const entries = await resolveExtensionEntries(cwd, errors);
   const withBuiltins = options.builtins !== false;
+  // 我们那份 `ask_user_question`（pinned 依赖 + `patches/*.patch`）。
+  const askUserQuestion = askUserQuestionEntryPath();
+  const entries = await resolveExtensionEntries(cwd, errors);
+  // settings 里写 `npm:@juicesharp/rpiv-ask-user-question` 的那一条（pi 自己装到
+  // `~/.pi/agent/npm` 的那份）换成**我们这个仓库里 patch 过的版本**：
+  //
+  // - 工具表是"同名先注册者优先"，两份都在的话生效的可能是**没补丁**的那份，
+  //   而症状只是"浏览器那份问卷不出现"，看不出哪里不对；
+  // - 包信息（metadata）留着，开场清单里报的还是那个包名，不是 `index.ts`。
+  //
+  // 我们的版本取不到时（依赖被 prune）保持原样：那种情况下问卷少一半（没有浏览器
+  // 那份），但工具还能用 —— 比整个工具消失强。
+  const resolvedEntries =
+    askUserQuestion === undefined
+      ? entries
+      : entries.map((e) =>
+          isAskUserQuestionSource(e.metadata.source) ? { ...e, path: askUserQuestion } : e,
+        );
   // 一个都没有（也没内置）就不必建 runner 了 —— 与之前同一个早退。
-  if (entries.length === 0 && !withBuiltins) return emptyHost(errors);
+  if (resolvedEntries.length === 0 && !withBuiltins) return emptyHost(errors);
 
   const eventBus = createEventBus();
   // **共享一个 runtime**：内置扩展与文件扩展必须挂在同一个 runtime 上，否则
   // `pi.registerMcpServer()` 写进的注册表、runner 绑定的 refreshTools 会是两份。
   const runtimeHandle = createExtensionRuntime();
   const loaded = await loadExtensions(
-    entries.map((e) => e.path),
+    resolvedEntries.map((e) => e.path),
     cwd,
     eventBus,
     runtimeHandle,
   );
   // `loadExtensions` 只知道「一个文件」，包信息在这一步补上（理由见
   // `resolveExtensionEntries` 与 `applyExtensionSourceInfo` 的注释）。
-  applyExtensionSourceInfo(loaded.extensions, entries);
+  applyExtensionSourceInfo(loaded.extensions, resolvedEntries);
   for (const e of loaded.errors) errors.push(`扩展 ${shortPath(e.path)}：${e.error}`);
 
   // ── pi 的内置扩展（MCP + codemode）───
@@ -484,6 +514,22 @@ const errors: string[] = [];
         errors.push(`内置扩展 ${builtin.path}：${msg(error)}`);
       }
     }
+    // `ask_user_question` 也是内置的，但它**不是**一个 factory：它是
+    // `@juicesharp/rpiv-ask-user-question`（本仓库的 pinned 依赖 + `patches/*.patch`），
+    // 入口是包里的 `.ts` 文件，得走 loader 才拿得到它的虚拟依赖（`typebox` / pi-tui 是
+    // pi 注入的，不在我们 node_modules 里）。所以按**路径**交给同一个 `loadExtensions`。
+    //
+    // settings 里列了它时上面那一步已经换过路径、装过了（这里就别装两遍）；没列也装上
+    // —— 它不是一个可选能力，是模型用来问东西的那条路。
+    if (askUserQuestion !== undefined && !resolvedEntries.some((e) => e.path === askUserQuestion)) {
+      try {
+        const built = await loadExtensions([askUserQuestion], cwd, eventBus, runtimeHandle);
+        for (const e of built.errors) errors.push(`内置扩展 ask-user-question：${e.error}`);
+        loaded.extensions.push(...built.extensions);
+      } catch (error) {
+        errors.push(`内置扩展 ask-user-question：${msg(error)}`);
+      }
+    }
   }
   if (loaded.extensions.length === 0) return emptyHost(errors);
 
@@ -511,14 +557,10 @@ const errors: string[] = [];
     extensionModelRegistry(effectiveRuntime) as never,
   );
 
-  // ── 问卷（`ask_user_question` 那类多题提问）的宿主侧状态 ──
+  // ── 问卷的**浏览器那一份**（终端那一份由扩展自己的组件画）──
   //
-  // 同一个实例**两处都要**：
-  //  - 工具层（`adaptExtensionTool`）记"哪个工具在跑、入参是什么"——题目与 preview 正文的来源；
-  //  - UI 宿主（`createHostUi`）在 `select`/`input` 被调时认领并取答案。
-  //
-  // 分两个实例的话认领永远失败（一边记、一边看空的），而失败的样子是"退回逐题弹窗" ——
-  // 看上去完全正常，只是没有 tab。
+  // `createHostUi` 把它挂成 `ctx.ui.externalQuestionnaire`：扩展（patch 过的那份）
+  // 在画自己的终端组件之前把题目交过来，我们开浏览器那份弹窗。两边谁先答都算数。
   //
   // 视图那半边（`HostUiOptions.questionnaire`）**惰性读**：界面起来之前那份 options 还没填
   // （与 `ctx.ui.custom()` 同一个道理）。
@@ -556,7 +598,7 @@ const errors: string[] = [];
         continue;
       }
       registrations.push({
-        tool: adaptExtensionTool(name, d, { runner, store, cwd, questionnaire }),
+        tool: adaptExtensionTool(name, d, { runner, store, cwd }),
         ...(d.exposure !== undefined ? { exposure: d.exposure } : {}),
         ...(d.namespace !== undefined ? { namespace: d.namespace } : {}),
         ...(d.annotations !== undefined ? { annotations: d.annotations } : {}),
@@ -602,20 +644,14 @@ const errors: string[] = [];
   // 扩展会把交互式工具从清单里摘掉。理由见 `LoadExtensionHostOptions.uiOptions` ——
   // 给一个空 UI 会让扩展在 `custom()` 里撞上 undefined 的 tui，比没有界面更糟。
   //
-  // 存住这个实例：`setUiMode()` 要拿**同一个**重新 `setUIContext` —— 官方是按
-  // `uiContext` 的引用判 `hasUI` 的，每次新建一个都会把那个判断搅乱。
-  let hostUi: ExtensionHostUi | undefined;
+  // 存住这个实例：`ctx.hasUI` 是按 `uiContext` 的**引用**判的（官方的口径），
+  // 每次新建一个会把那个判断搅乱。
   if (uiOptions !== undefined) {
     // `as never`：官方的 `ExtensionUIContext` 有 26 个成员（`setWidget` / `setFooter` /
     // `setHeader` / RPC 弹窗……），本项目只实现那几个真的能做的。直接断言会把
     // 「缺一堆」这件事藏起来 —— 而它已经写在本文件与 `extension-ui.ts` 的注释里了。
-    hostUi = createHostUi(uiOptions, questionnaire);
-    runner.setUIContext(hostUi as never, 'tui');
+    runner.setUIContext(createHostUi(uiOptions, questionnaire) as never, 'tui');
   }
-  const setUiMode = (mode: 'tui' | 'rpc'): void => {
-    if (hostUi === undefined) return;
-    runner.setUIContext(hostUi as never, mode);
-  };
 
   // 先绑 core（它把 `runtime.refreshTools` 接上），再扫一次。
   bindCore({
@@ -661,7 +697,6 @@ const errors: string[] = [];
     promptTools,
     commands,
     errors,
-    setUiMode,
     // **只报用户装的扩展**（内置的 mcp / codemode 不算「你装了扩展」），与 pi 的开场口径一致。
     entries: loaded.extensions
       .filter((ext) => !ext.path.startsWith('builtin:'))

@@ -26,6 +26,10 @@ pi 那边这两个都是**内置扩展**（`createMcpExtension()` / `createCodem
 pi 的内置扩展一共四个（还有 `llama.cpp`）。本项目装三个：`mcp` / `codemode` /
 **`tool-search`**（不装 `llama.cpp` —— 那是本地模型跑的，见 `provider.md`）。
 
+> 另外还有一个**本项目自己的**内置扩展：`ask_user_question`（`@juicesharp/rpiv-ask-user-question`
+> 的 pinned 依赖 + `patches/`，终端归它画、浏览器归我们画）—— 见
+> [extensions](extensions.md) 的「ask_user_question：内置扩展 + patch」一节。
+
 `tool_search` 干的事就一件：BM25 搜 `codemode` / `deferred` 暴露的工具，命中的走
 `setActiveTools()` 装载成 declared，下一轮模型就能直接调。
 

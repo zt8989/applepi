@@ -374,7 +374,7 @@ test('扩展：给真 UI 时 custom() 把问卷挂进输入区槽位（inline �
   }
 });
 
-test('扩展：浏览器连上（mode=rpc）时问卷走 select/input 逐题回退', { skip: !hasAskUser && '没装 rpiv-ask-user-question' }, async () => {
+test('内置扩展：终端那份由扩展自己画，浏览器那份由我们的视图答（谁先答都算数）', { skip: !hasAskUser && '没装 rpiv-ask-user-question' }, async () => {
   useRealHome();
   try {
     const { store } = freshStore();
@@ -382,112 +382,29 @@ test('扩展：浏览器连上（mode=rpc）时问卷走 select/input 逐题回�
     const tui = fakeTui(written);
     const slot: FakeEditorSlot = { current: undefined };
     initTheme('dark', false);
-    /** 假的浏览器对话框：记下问了什么，直接选第二个选项。 */
-    const asked: string[] = [];
-    const host = await loadExtensionHost({
-      builtins: false,
-      store,
-      cwd: process.cwd(),
-      uiOptions: () => ({
-        ...hostUiOptions(tui, [], slot),
-        dialogs: () => ({
-          available: () => true,
-          select: async (title: string, choices: readonly string[]) => {
-            asked.push(title);
-            return choices[1];
-          },
-          confirm: async () => true,
-          input: async () => undefined,
-        }),
-      }),
-    });
-    // 浏览器连着 → 宿主模式切到 rpc（`main.ts` 就是这么做）。
-    host.setUiMode('rpc');
-    const tool = getTool('ask_user_question');
-    assert.ok(tool, '工具应该在注册表里');
-    registerExtraTools([]);
-
-    const result = (await tool!.execute(
-      'call-rpc',
-      {
-        questions: [
-          {
-            question: 'Which approach?',
-            header: 'Approach',
-            options: [
-              { label: 'Minimal', description: 'Only what was asked.' },
-              { label: 'Thorough', description: 'Refactor neighbours too.' },
-            ],
-          },
-        ],
-      },
-      undefined,
-      undefined,
-    )) as { details?: { answers?: { answer?: string }[]; cancelled?: boolean } };
-
-    assert.equal(asked.length, 1, `该走一次 select（而不是 TUI 的 custom）：${asked.join('|')}`);
-    assert.equal(slot.current, undefined, 'rpc 那条路不该往输入区槽位挂组件');
-    assert.equal(result.details?.cancelled, false);
-    assert.equal(result.details?.answers?.[0]?.answer, 'Thorough', '选的是第二个选项');
-    void written;
-  } finally {
-    restoreHome();
-  }
-});
-
-test('扩展：问卷一份表画全 + 统一提交（答案按序喂回 select/input）', { skip: !hasAskUser && '没装 rpiv-ask-user-question' }, async () => {
-  useRealHome();
-  try {
-    const { store } = freshStore();
-    const tui = fakeTui([]);
-    const slot: FakeEditorSlot = { current: undefined };
-    initTheme('dark', false);
-    /** 逐题对话框被调过就说明"没认领成功" —— 这条测试要钉的就是它没被调。 */
-    const asked: string[] = [];
+    /** 我们给的浏览器那一份视图（真界面上是 `tui/app.ts` 的 `openQuestionnaire`）。 */
     const opened: QuestionnaireSession[] = [];
-    let tornDown = 0;
-    const host = await loadExtensionHost({
+    let closedViews = 0;
+    await loadExtensionHost({
       builtins: false,
       store,
       cwd: process.cwd(),
       uiOptions: () => ({
         ...hostUiOptions(tui, [], slot),
-        // 界面层那一份视图（真界面上是 `tui/app.ts` 的 `openQuestionnaire`：一块终端
-        // 面板 + 一块浏览器弹窗）。这里只做它在真界面上会做的事：把动作变成意图。
         questionnaire: (session) => {
           opened.push(session);
-          // 第 1 题（单选，带 preview）：选第 2 个。
-          session.apply({ kind: 'pick', index: 1 });
-          // 第 2 题（多选）：勾 1、3，再"就这些"。
-          session.apply({ kind: 'toggle', index: 0 });
-          session.apply({ kind: 'toggle', index: 2 });
-          session.apply({ kind: 'commit' });
-          // 第 3 题（单选）：自定义答案（一个选项也不选）。
-          session.apply({ kind: 'custom', index: 0, text: '都别选，按我说的来' });
-          assert.equal(session.apply({ kind: 'submit' }), true, '三题都答了，提交该成立');
           return () => {
-            tornDown += 1;
+            closedViews += 1;
           };
         },
-        dialogs: () => ({
-          available: () => true,
-          select: async (title: string) => {
-            asked.push(title);
-            return undefined;
-          },
-          confirm: async () => true,
-          input: async () => undefined,
-        }),
       }),
     });
-    // 浏览器连着 → 宿主模式切到 rpc（`main.ts` 就是这么做）。
-    host.setUiMode('rpc');
     const tool = getTool('ask_user_question');
     assert.ok(tool, '工具应该在注册表里');
     registerExtraTools([]);
 
-    const result = (await tool!.execute(
-      'call-q',
+    const pending = tool!.execute(
+      'call-both',
       {
         questions: [
           {
@@ -504,43 +421,111 @@ test('扩展：问卷一份表画全 + 统一提交（答案按序喂回 select/
             multiSelect: true,
             options: [
               { label: '缓存', description: '内存缓存' },
-              { label: '重试', description: '失败重试' },
               { label: '日志', description: '结构化日志' },
-            ],
-          },
-          {
-            question: '还有什么要交代的？',
-            header: '补充',
-            options: [
-              { label: '没有', description: '就这样' },
-              { label: '有', description: '我来说' },
             ],
           },
         ],
       },
       undefined,
       undefined,
-    )) as {
+    );
+    pending.catch(() => undefined);
+
+    // 补丁把题目交给了宿主（浏览器那一份），扩展自己那份组件也挂进了输入区槽位。
+    await waitFor(() => opened.length === 1, 20_000, '扩展该把题目交给宿主（浏览器那一份）');
+    await waitFor(() => slot.current !== undefined, 20_000, '扩展自己的组件该挂进输入区槽位');
+    const session = opened[0]!;
+    assert.equal(session.questions.length, 2, '题目一次性都在（浏览器那份才能画 tab）');
+
+    // 浏览器那份先答：选第二项（带 preview）、写条备注、留空第二题，然后提交。
+    session.apply({ kind: 'pick', index: 1 });
+    session.apply({ kind: 'note', index: 0, text: '记得一起改部署脚本' });
+    session.apply({ kind: 'activate', index: session.submitIndex });
+    session.apply({ kind: 'submit' });
+
+    const result = (await pending) as {
       content?: { type: string; text?: string }[];
       details?: {
-        answers?: { kind?: string; answer?: string | null; preview?: string; selected?: string[] }[];
+        answers?: { answer?: string | null; preview?: string; notes?: string; kind?: string }[];
         cancelled?: boolean;
+        unanswered?: number[];
       };
     };
-
-    assert.equal(opened.length, 1, '该开一份问卷（而不是三个对话框）');
-    assert.deepEqual(asked, [], `不该走逐题对话框：${asked.join('|')}`);
-    const answers = result.details?.answers ?? [];
     assert.equal(result.details?.cancelled, false);
-    assert.equal(answers[0]?.answer, 'postgres', '选项行原文该被扩展认成第 2 个选项');
-    assert.match(answers[0]?.preview ?? '', /select 1/, 'preview 该跟着答案回给模型');
-    assert.equal(answers[1]?.kind, 'multi');
-    assert.deepEqual(answers[1]?.selected, ['缓存', '日志'], '多选交回的是 "1,3"，扩展解成这两个');
-    assert.equal(answers[2]?.kind, 'custom');
-    assert.equal(answers[2]?.answer, '都别选，按我说的来', '自定义答案是原文');
+    assert.equal(result.details?.answers?.[0]?.answer, 'postgres', '选项 label 该被扩展认成那个选项');
+    assert.match(result.details?.answers?.[0]?.preview ?? '', /select 1/, 'preview 跟着答案回给模型');
+    assert.equal(result.details?.answers?.[0]?.notes, '记得一起改部署脚本', '备注一路带到信封');
+    assert.deepEqual(result.details?.unanswered, [1], '留空那题由扩展列成 unanswered');
     const text = (result.content ?? []).map((c) => c.text ?? '').join('');
-    assert.match(text, /User has answered your questions/, `模型该看到那句信封：${text}`);
-    assert.equal(tornDown, 1, '工具收尾该把视图拆掉');
+    assert.match(text, /User has answered your questions/);
+    assert.match(text, /unanswered:/, `留空要在信封里说出来：${text}`);
+
+    assert.equal(closedViews, 1, '浏览器先答 → 我们那份视图收掉');
+    assert.equal(slot.current, undefined, '浏览器先答 → 扩展那份组件也该被收掉');
+    void written;
+  } finally {
+    restoreHome();
+  }
+});
+
+test('内置扩展：终端先答（扩展自己的组件）→ 浏览器那份被收掉', { skip: !hasAskUser && '没装 rpiv-ask-user-question' }, async () => {
+  useRealHome();
+  try {
+    const { store } = freshStore();
+    const tui = fakeTui([]);
+    const slot: FakeEditorSlot = { current: undefined };
+    initTheme('dark', false);
+    const opened: QuestionnaireSession[] = [];
+    let closedViews = 0;
+    await loadExtensionHost({
+      builtins: false,
+      store,
+      cwd: process.cwd(),
+      uiOptions: () => ({
+        ...hostUiOptions(tui, [], slot),
+        questionnaire: (session) => {
+          opened.push(session);
+          return () => {
+            closedViews += 1;
+          };
+        },
+      }),
+    });
+    const tool = getTool('ask_user_question');
+    registerExtraTools([]);
+    const pending = tool!.execute(
+      'call-tui',
+      {
+        questions: [
+          {
+            question: 'Which approach?',
+            header: 'Approach',
+            options: [
+              { label: 'Minimal', description: 'Only what was asked.' },
+              { label: 'Thorough', description: 'Refactor neighbours too.' },
+            ],
+          },
+        ],
+      },
+      undefined,
+      undefined,
+    );
+    pending.catch(() => undefined);
+
+    await waitFor(() => slot.current !== undefined, 20_000, '扩展的问卷该挂进输入区槽位');
+    assert.equal(opened.length, 1, '浏览器那一份也开着（两边同时在等人答）');
+    // 终端那份：回车 = 选第一个选项（扩展自己的组件）。
+    slot.current?.handleInput?.('\r');
+
+    const result = (await pending) as {
+      content?: { type: string; text?: string }[];
+      details?: { answers?: { answer?: string | null }[]; cancelled?: boolean };
+    };
+    assert.equal(result.details?.cancelled, false);
+    assert.equal(result.details?.answers?.[0]?.answer, 'Minimal');
+    assert.equal(closedViews, 1, '终端答完 → 浏览器那份收掉');
+    // 等一拍：拆台在扩展的 finally 里。
+    await waitFor(() => slot.current === undefined, 5_000, '答完该把 composer 还回去');
   } finally {
     restoreHome();
   }

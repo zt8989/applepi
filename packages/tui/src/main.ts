@@ -447,10 +447,13 @@ async function main(): Promise<void> {
           return kernel.restoreSession(file);
         },
         resolveModel,
-        // 浏览器连上/全断开 → 切扩展宿主模式。有浏览器时 `ask_user_question` 那种
-        // 按 `ctx.mode` 选路的扩展才会走 `ctx.ui.select/input` 的逐题回退 —— 而那两个
-        // 方法由本项目同时发给**终端与浏览器**（见 `extension-ui.ts` 的 `raceDialog`）。
-        onPresenceChange: (connected) => kernel.extensions.setUiMode(connected ? 'rpc' : 'tui'),
+        // 这里**不再**有 `onPresenceChange`（原来拿它切扩展宿主模式到 `'rpc'`）。
+        //
+        // 早先那一步是为了让 `ask_user_question` 走 `ctx.ui.select/input` 的逐题回退，
+        // 好让浏览器也答得上。现在问卷是本项目的**内置扩展**（带 patch，见 `patches/`）：
+        // 终端那一份由扩展自己画、浏览器那一份走 `ctx.ui.externalQuestionnaire` 交给我们，
+        // 两边同时开着、谁先答都算数 —— 不需要把宿主装成非终端宿主（那反而会把扩展
+        // 自己那份 TUI 问卷整个关掉）。
         // 底栏那一行（与终端**逐字同形**）：`↑362k ↓310k R121M CH99.9% 52%/1.0M`。
         // 浏览器那边 pi-web-ui 自带的 `formatUsage` 只到 `R`/`W` —— 所以由服务端
         // 算好整行发过去，而不是让它再算一份（口径一漂，两端对不上）。

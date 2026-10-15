@@ -19,17 +19,14 @@
  * addChild(component)`）。
  *
  * 第二块是 `select` / `confirm` / `input`（pi 给 VS Code pendant / Zed 那种宿主的
- * 「RPC 弹窗协议」）。本项目在**浏览器连上时**把模式切成 `'rpc'`（见
- * `extension-host.ts` 的 `setUiMode`），于是 `ask_user_question` 那种扩展会走这一块。
+ * 「RPC 弹窗协议」）与**问卷**那一份接缝：
  *
- * 这一块分两条：
- *
- * - **问卷**（同一份问卷的 N 次逐题问法）交给 `QuestionnaireHost`（`questionnaire.ts`）：
- *   认领得到就由界面那份多题表回答（终端那块面板 + 浏览器那个弹窗，**一份状态两块屏**），
- *   答案再按扩展问的顺序翻回字符串喂回去；
- * - 其余（别的扩展、`confirm`、认领不到的回退）是 `raceDialog`：**两端各出一份、
- *   谁先回答谁算数** —— 终端那一份由 `tui/app.ts` 的 `tuiDialogs` 挂进同一个输入区槽位，
- *   浏览器那一份由 `web/bridge.ts` 的 `DialogHost` 发过去。
+ * - `select` / `confirm` / `input` 是 `raceDialog`：**两端各出一份、谁先回答谁算数** ——
+ *   终端那一份由 `tui/app.ts` 的 `tuiDialogs` 挂进同一个输入区槽位，浏览器那一份由
+ *   `web/bridge.ts` 的 `DialogHost` 发过去；
+ * - **问卷**（`ask_user_question`）另走一条：它是本项目的内置扩展（带 patch），
+ *   终端那一份由扩展自己的组件画，浏览器那一份走 `externalQuestionnaire` 交给我们
+ *   （`questionnaire.ts` 的 `QuestionnaireHost` + `HostUiOptions.questionnaire`）。
  *
  * 刻意**不接**的：`setFooter` / `setHeader`（那要接 pi 的应用层布局，见 `surfaces.md`）。
  *
@@ -48,6 +45,8 @@
 import type { Component, TUI, TuiInputListener, OverlayOptions } from '@earendil-works/pi-tui';
 import { getKeybindings, isKeyRelease, Text } from '@earendil-works/pi-tui';
 import type {
+  ExternalQuestionnaireBridge,
+  ExternalQuestionnaireHandoff,
   OpenQuestionnaireView,
   QuestionnaireHost,
   QuestionnaireIntent,
@@ -135,6 +134,16 @@ export interface DialogHost {
 export interface ExtensionHostUi {
   custom<T>(factory: CustomFactory<T>, options?: CustomOptions): Promise<T>;
   /**
+   * **问卷的浏览器那一份**（扩展补丁里的接缝，见 `patches/`）。
+   *
+   * `ask_user_question` 在画它自己那份终端组件之前调这里，把归一化后的题目交出来；
+   * 我们拿它开浏览器那份弹窗。谁先答都算数：浏览器先答走 `handoff.answer`（扩展那边
+   * 收掉自己的组件），终端先答走扩展 finally 里的 `done()`（我们收掉浏览器那份）。
+   *
+   * 返回的 `done` 就是"终端那一份结束了"的入口。
+   */
+  externalQuestionnaire?(handoff: ExternalQuestionnaireHandoff): ExternalQuestionnaireBridge;
+  /**
    * 选项列表对话框。**终端与浏览器各出一份，谁先回答谁算数**。
    *
    * 两端都可用是刻意的：终端那边在看、浏览器那边在点，都可能先给出答案。
@@ -203,15 +212,13 @@ export interface HostUiOptions {
    */
   dialogs?: (() => DialogHost | undefined) | undefined;
   /**
-   * 问卷的**视图**：开一份问卷（终端那份组件 + 浏览器那份弹窗）、返回拆台函数。
+   * 问卷在**浏览器**里的那一份视图（终端那一份由扩展自己的组件画 —— 见
+   * `questionnaire.ts` 文件头）。返回拆台函数。
    *
    * 与 `tuiDialogs` / `dialogs` 同一类接缝：**core 定接口，界面实现**。给它的理由与
    * `custom()` 一样 —— core 不建组件（那会把 pi-tui 拖进所有运行模式）。
    *
-   * 两个渲染器都归这一处管，而不是分两处（终端一处、浏览器一处）：它们是**同一份状态的
-   * 两块屏幕**，分开登记就会变成"两块屏幕各画各的"（raceDialog 那种）。
-   *
-   * **可缺省**。不给 = 问卷功能关着：`select`/`input` 一档照旧（逐题弹窗）。
+   * **可缺省**。不给 = 没有浏览器那一份（终端那份照旧，扩展自己画）。
    */
   questionnaire?: OpenQuestionnaireView | undefined;
 }
@@ -399,14 +406,6 @@ export function createHostUi(
 
     select: (title, options, opts) => {
       const host = source();
-      // 问卷那一档：`ask_user_question` 在 rpc 模式下就是拿 select/input 逐题问的，
-      // 而我们的界面画的是"一份问卷"（多题 tab）。认领得到就由问卷回答 —— 答案在
-      // `questionnaire.ts` 里翻回扩展认识的那个字符串（选项行原文 / 自定义原文）。
-      //
-      // 认领是**同步**的（`tryServe` 直接返回 undefined 或一个 Promise）：认不出就当场
-      // 掉到下面那条逐题对话框的路上，开窗的时机与没有问卷功能时一模一样。
-      const claimed = questionnaire?.tryServe('select', title, [...options], opts?.signal);
-      if (claimed !== undefined) return claimed;
       const browser = host.dialogs?.();
       return raceDialog<string>({
         ...(host.tuiDialogs !== undefined
@@ -440,9 +439,6 @@ export function createHostUi(
 
     input: (title, placeholder, opts) => {
       const host = source();
-      // 多选那几题走的是 `input`（扩展自己写明的：`askMultiSelect`），所以这一档也要认领。
-      const claimed = questionnaire?.tryServe('input', title, [], opts?.signal);
-      if (claimed !== undefined) return claimed;
       const browser = host.dialogs?.();
       return raceDialog<string>({
         ...(host.tuiDialogs !== undefined
@@ -522,6 +518,17 @@ export function createHostUi(
 
       throw new Error('setWidget 只接 string[] 或组件工厂（那是官方的两种形状）');
     },
+
+    // 问卷在**浏览器**那一份的接缝（扩展的补丁会调它，见 `questionnaire.ts` 文件头）。
+    //
+    // 只在真的有问卷宿主时才提供：没有的话扩展那边读到的就是 undefined，它只画
+    // 终端那一份 —— 与没有这个功能之前一模一样（老版本、别的宿主都走这条）。
+    ...(questionnaire === undefined
+      ? {}
+      : {
+          externalQuestionnaire: (handoff: ExternalQuestionnaireHandoff): ExternalQuestionnaireBridge =>
+            questionnaire.open(handoff),
+        }),
 
     // ── 明确不支持 ──
     // 这些方法故意**不在**返回类型里（`ExtensionHostUi` 只声明了真能做的三个）：

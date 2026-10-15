@@ -1,22 +1,21 @@
 /**
- * 问卷（多题 tab）在浏览器里的呈现 —— 与终端那份 `questionnaire.ts` **同一份状态**。
+ * 问卷（多题 tab）在浏览器里的呈现 —— 终端那一份的**镜像**。
  *
- * ## 为什么不是"每题一个弹窗"
+ * ## 分工
  *
- * 扩展在 rpc 模式下是拿 `ctx.ui.select` / `ctx.ui.input` 逐题问的；照原样弹就是一串
- * 单题对话框：不能切题、看不到还有几题、自定义答案还要再点开一个输入框。这里把它
- * 拼回一份表：上面 tab（左右切题）、中间选项（单选点一下、多选打勾）、选中带 preview
- * 的选项时右/下面给预览、最后一屏是提交汇总。
+ * 终端那份由扩展自己的组件画（`ask_user_question` 是本项目的内置扩展，见
+ * `patches/`），这里画的是**浏览器这一份**：两边同时开着同一份问卷，谁先答完都算数
+ * （扩展补丁里的握手段 `externalQuestionnaire`，见 `@ela/core/questionnaire` 的文件头）。
  *
  * ## 它不是状态的所有者
  *
- * 服务端（`@ela/core/questionnaire` 的 `QuestionnaireSession`）才是。这里做两件事：
- * 把快照画出来、把点击变成**意图**发回去（`activate` / `pick` / `toggle` / `custom` /
- * `commit` / `submit` / `cancel`）。所以终端那边改了，这块屏下一帧就跟上。
+ * 答案属于服务端（`@ela/core/questionnaire` 的 `QuestionnaireSession`）。这里做两件事：
+ * 把快照画出来、把点击/按键变成**意图**发回去（`activate` / `pick` / `toggle` / `custom` /
+ * `commit` / `note` / `globalNote` / `submit` / `cancel`）。
  *
- * **只有两样东西是本地的**：光标停在哪个选项上，以及正在输入的自定义答案草稿。
- * 前者是"这块屏看到哪儿"，后者是"还没按回车、不算答案"。它们不进快照，也不该进 ——
- * 否则两端会互相抢光标。
+ * **本地只有两样东西**：光标停在哪个选项上，以及**还没提交的备注草稿**
+ * （备注在提交时一次性发过去 —— 每敲一个字发一条 WebSocket 太啰嗦；草稿丢了也只是
+ * 少一句备注，不影响答案）。
  */
 import type { QuestionnaireIntent, QuestionnaireSnapshot } from '@ela/core/questionnaire';
 
@@ -32,7 +31,7 @@ export interface QuestionnaireModalHandle {
   close(): void;
 }
 
-/** 一题里的"行"：某个选项 / 自定义输入行 / 多选的"就这些"行（与终端同一套）。 */
+/** 一题里的"行"：某个选项 / 自定义输入 / 多选的"就这些"。 */
 type Row = { kind: 'option'; index: number } | { kind: 'custom' } | { kind: 'commit' };
 
 const OTHER_LABEL = 'Type something.';
@@ -41,9 +40,11 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
   let snapshot = options.snapshot;
   /** 每题自己的光标（切回来时"我上次停在第 3 项"还在）。 */
   const cursors: number[] = snapshot.questions.map(() => 0);
-  /** 每题的草稿（没按回车之前不算答案）。 */
+  /** 每题自定义答案的草稿（没按回车之前不算答案）。 */
   const drafts: string[] = snapshot.questions.map(() => '');
-  let editing = false;
+  /** 每题备注的草稿（提交时一次性发过去）。 */
+  const notes: string[] = snapshot.questions.map((_, index) => snapshot.notes[index] ?? '');
+  let globalNote = snapshot.globalNote;
 
   const backdrop = document.createElement('div');
   backdrop.className = 'ela-modal-backdrop';
@@ -76,7 +77,7 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
   const rowsFor = (index: number): Row[] => {
     const question = snapshot.questions[index];
     if (question === undefined) return [];
-    const rows: Row[] = question.options.map((_, index) => ({ kind: 'option', index }));
+    const rows: Row[] = question.options.map((_, i) => ({ kind: 'option', index: i }));
     rows.push({ kind: 'custom' });
     // 多选要一行"就这些"：勾选是草稿，回车/点它才算这一题答完（与终端一致）。
     if (question.multiSelect) rows.push({ kind: 'commit' });
@@ -98,25 +99,40 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
     return answer?.kind === 'multi' ? answer.selected : [];
   };
 
-  /** 当前是不是停在那条自定义行上（终端那边同理：`Type something.`）。 */
-  const onCustomRow = (): boolean => {
-    if (onSubmitTab()) return false;
-    const row = rowsFor(snapshot.active)[cursor()];
-    return row?.kind === 'custom';
+  /** 备注输入框（每题一个 + 提交页一个整份的）。`onChange` 只更新草稿。 */
+  const noteField = (value: string, placeholder: string, onChange: (text: string) => void): HTMLElement => {
+    const box = document.createElement('div');
+    box.className = 'ela-q-note';
+    const mark = document.createElement('span');
+    mark.className = 'ela-q-box';
+    mark.textContent = '✎';
+    const input = document.createElement('input');
+    input.className = 'ela-q-noteinput';
+    input.type = 'text';
+    input.spellcheck = false;
+    input.placeholder = placeholder;
+    input.value = value;
+    input.addEventListener('input', () => onChange(input.value));
+    box.append(mark, input);
+    return box;
   };
 
-  const confirmCustom = (): void => {
-    const text = drafts[snapshot.active] ?? '';
-    if (text.trim() === '') return;
-    editing = false;
-    emit({ kind: 'custom', index: snapshot.active, text });
+  /** 提交：把备注草稿一并交出去（顺序就是它们的发送顺序）。 */
+  const submit = (): void => {
+    notes.forEach((text, index) => {
+      if (text.trim() !== '') emit({ kind: 'note', index, text });
+    });
+    if (globalNote.trim() !== '') emit({ kind: 'globalNote', text: globalNote });
+    emit({ kind: 'submit' });
   };
 
   const draw = (): void => {
     if (closed) return;
     // 焦点与草稿要在重画前后自己接住（重画是整块 body 换掉）。
-    const focusedDraft = document.activeElement instanceof HTMLInputElement && body.contains(document.activeElement);
-    const caret = focusedDraft ? (document.activeElement as HTMLInputElement).selectionStart : null;
+    const focused = document.activeElement;
+    const caret = focused instanceof HTMLInputElement ? focused.selectionStart : null;
+    const wasNote = focused instanceof HTMLInputElement && focused.classList.contains('ela-q-noteinput');
+    const wasCustom = focused instanceof HTMLInputElement && focused.classList.contains('ela-q-input');
 
     tabs.replaceChildren();
     snapshot.questions.forEach((question, index) => {
@@ -140,8 +156,9 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
     else drawQuestion();
     drawFooter();
 
-    if (focusedDraft) {
-      const input = body.querySelector<HTMLInputElement>('input.ela-q-input');
+    if (wasCustom || wasNote) {
+      const selector = wasCustom ? 'input.ela-q-input' : 'input.ela-q-noteinput';
+      const input = body.querySelector<HTMLInputElement>(selector);
       if (input !== null) {
         input.focus();
         if (caret !== null) input.setSelectionRange(caret, caret);
@@ -169,20 +186,22 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
       if (focused) line.classList.add('is-focused');
       if (row.kind === 'option') {
         const picked =
-          answer?.kind === 'option' ? answer.index === row.index : answer?.kind === 'multi' ? selected().includes(row.index) : false;
+          answer?.kind === 'option'
+            ? answer.index === row.index
+            : answer?.kind === 'multi'
+              ? selected().includes(row.index)
+              : false;
         if (picked) line.classList.add('is-picked');
         const box = document.createElement('span');
         box.className = 'ela-q-box';
         box.textContent = question.multiSelect ? (picked ? '[x]' : '[ ]') : `${row.index + 1}.`;
-        const text = document.createElement('span');
         const label = document.createElement('span');
         label.className = 'ela-q-label';
         label.textContent = question.options[row.index]?.label ?? '';
         const description = document.createElement('span');
         description.className = 'ela-q-desc';
         description.textContent = question.options[row.index]?.description ?? '';
-        text.append(label, description);
-        line.append(box, text);
+        line.append(box, label, description);
         line.addEventListener('click', () => {
           cursors[snapshot.active] = rowIndex;
           emit(question.multiSelect ? { kind: 'toggle', index: row.index } : { kind: 'pick', index: row.index });
@@ -191,10 +210,10 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
         const box = document.createElement('span');
         box.className = 'ela-q-box';
         box.textContent = '✓';
-        const text = document.createElement('span');
-        text.className = 'ela-q-label';
-        text.textContent = '就这些（回车）';
-        line.append(box, text);
+        const label = document.createElement('span');
+        label.className = 'ela-q-label';
+        label.textContent = '就这些（回车）';
+        line.append(box, label);
         line.addEventListener('click', () => {
           cursors[snapshot.active] = rowIndex;
           emit({ kind: 'commit' });
@@ -211,11 +230,16 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
         input.value = drafts[snapshot.active] ?? '';
         input.addEventListener('input', () => {
           drafts[snapshot.active] = input.value;
-          editing = true;
         });
         input.addEventListener('focus', () => {
           cursors[snapshot.active] = rowIndex;
-          editing = true;
+        });
+        input.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter') return;
+          event.preventDefault();
+          const text = input.value.trim();
+          if (text === '') return;
+          emit({ kind: 'custom', index: snapshot.active, text });
         });
         line.append(box, input);
       }
@@ -223,8 +247,15 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
     });
     body.append(list);
 
-    const previewIndex =
-      rows[at]?.kind === 'option' ? (rows[at] as { index: number }).index : undefined;
+    // 每题一句备注（可空）—— 与终端那份的 `n` 是同一个东西。
+    body.append(
+      noteField(notes[snapshot.active] ?? '', '这一题的备注（可选）', (text) => {
+        notes[snapshot.active] = text;
+      }),
+    );
+
+    const previewRow = rows[at];
+    const previewIndex = previewRow?.kind === 'option' ? previewRow.index : undefined;
     const preview = previewIndex === undefined ? '' : question.options[previewIndex]?.preview ?? '';
     if (preview !== '') {
       const pane = document.createElement('pre');
@@ -251,7 +282,7 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
       const answer = snapshot.answers[index];
       if (snapshot.settled[index] !== true || answer == null) {
         value.className = 'ela-q-warn';
-        value.textContent = '（还没答）';
+        value.textContent = '（留空——会作为 unanswered 告诉模型）';
       } else if (answer.kind === 'custom') {
         value.textContent = answer.text;
       } else if (answer.kind === 'multi') {
@@ -266,8 +297,16 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
       }
       line.append(label, value);
       list.append(line);
+      const note = notes[index] ?? '';
+      if (note.trim() !== '') {
+        const noteLine = document.createElement('div');
+        noteLine.className = 'ela-q-summary-note';
+        noteLine.textContent = `✎ ${note}`;
+        list.append(noteLine);
+      }
     });
     body.append(list);
+    body.append(noteField(globalNote, '整份备注（可选）', (text) => { globalNote = text; }));
   };
 
   const drawFooter = (): void => {
@@ -276,7 +315,7 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
     hint.className = 'ela-q-hint';
     hint.textContent = onSubmitTab()
       ? 'Enter 提交 · ←/→ 切题 · Esc 放弃'
-      : '←/→ 切题 · ↑↓ 选项 · Enter 选择 · Esc 放弃';
+      : '←/→ 切题 · ↑↓ 选项 · Enter 选择 · Tab 写备注 · Esc 放弃';
     const progress = document.createElement('div');
     progress.className = unanswered === 0 ? 'ela-q-progress is-done' : 'ela-q-progress';
     progress.textContent = unanswered === 0 ? '已答完' : `未答 ${unanswered}/${snapshot.questions.length}`;
@@ -287,32 +326,40 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
     cancel.className = 'ela-q-button';
     cancel.textContent = '放弃';
     cancel.addEventListener('click', () => emit({ kind: 'cancel' }));
-    const submit = document.createElement('button');
-    submit.type = 'button';
-    submit.className = 'ela-q-button is-primary';
-    submit.textContent = '提交';
-    submit.disabled = unanswered !== 0;
-    submit.addEventListener('click', () => emit({ kind: 'submit' }));
-    actions.append(cancel, submit);
+    const confirm = document.createElement('button');
+    confirm.type = 'button';
+    confirm.className = 'ela-q-button is-primary';
+    confirm.textContent = '提交';
+    // **留空也能提交**（扩展的信封会把它列成 `unanswered:`）—— 与它自己那份 TUI 一致。
+    confirm.addEventListener('click', submit);
+    actions.append(cancel, confirm);
     footer.replaceChildren(hint, progress, actions);
   };
 
   /** 终端的键位照搬一份 —— 两端同一套肌肉记忆。 */
   function onKeyDown(event: KeyboardEvent): void {
     if (closed) return;
-    if (editing && document.activeElement instanceof HTMLInputElement) {
-      // 输入态：Esc/回车归这个输入框，别的（切题）先不让动，免得打到一半跑掉。
+    // 按住不放的重复不算又一次操作（与终端那边同一个理由）。
+    if (event.repeat) return;
+    // 焦点在我们某个输入框里：只有 Esc / 回车归我们管，别的字让输入框自己收。
+    const active = document.activeElement;
+    if (active instanceof HTMLInputElement) {
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
-        editing = false;
-        focusPanel();
+        active.blur();
         return;
       }
       if (event.key === 'Enter') {
         event.preventDefault();
         event.stopPropagation();
-        confirmCustom();
+        // 自定义答案：回车 = 交这一题；备注：回车 = 收起来（草稿留着，提交时带走）。
+        if (active.classList.contains('ela-q-input')) {
+          const text = active.value.trim();
+          if (text !== '') emit({ kind: 'custom', index: snapshot.active, text });
+        } else {
+          active.blur();
+        }
         return;
       }
       return;
@@ -335,7 +382,7 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
     if (onSubmitTab()) {
       if (event.key === 'Enter') {
         event.preventDefault();
-        emit({ kind: 'submit' });
+        submit();
       }
       return;
     }
@@ -367,10 +414,7 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
         return;
       }
       const input = body.querySelector<HTMLInputElement>('input.ela-q-input');
-      if (input !== null) {
-        editing = true;
-        input.focus();
-      }
+      if (input !== null) input.focus();
       return;
     }
     // 在别的行上直接打字：跳进自定义输入行（与终端那边同一个手感）。
@@ -380,19 +424,12 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
       draw();
       const input = body.querySelector<HTMLInputElement>('input.ela-q-input');
       if (input !== null) {
-        editing = true;
         input.focus();
         input.value = event.key;
         drafts[snapshot.active] = event.key;
       }
     }
   }
-
-  const focusPanel = (): void => {
-    const first = body.querySelector<HTMLInputElement>('input.ela-q-input');
-    if (first !== null && onCustomRow()) first.focus();
-    else backdrop.focus();
-  };
 
   backdrop.addEventListener('mousedown', (event) => {
     if (event.target === backdrop) {
@@ -409,10 +446,8 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
 
   return {
     push(next) {
-      const activeChanged = next.active !== snapshot.active;
       snapshot = next;
-      if (activeChanged) editing = false;
-      // 编辑态里服务端推来的帧不该把字吃掉：草稿是本地那份，重画只换外框。
+      // 服务端推来的帧不该把草稿吃掉（答案与备注草稿是两回事）。
       draw();
     },
     close,

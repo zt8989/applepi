@@ -438,6 +438,15 @@ function parseQuestionnaireIntent(raw: unknown): QuestionnaireIntent | undefined
         typeof value.text === 'string'
         ? { kind: 'custom', index: value.index, text: value.text }
         : undefined;
+    case 'note':
+      return typeof value.index === 'number' &&
+        Number.isInteger(value.index) &&
+        value.index >= 0 &&
+        typeof value.text === 'string'
+        ? { kind: 'note', index: value.index, text: value.text }
+        : undefined;
+    case 'globalNote':
+      return typeof value.text === 'string' ? { kind: 'globalNote', text: value.text } : undefined;
     case 'commit':
       return { kind: 'commit' };
     case 'submit':
