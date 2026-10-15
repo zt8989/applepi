@@ -167,6 +167,10 @@ kernel.restore(messages);      // 只灌（消息已读出来时）
 → 关旧 sink。反过来的话，`conversation.reset` 一发生，旧记录器还会把「清空」当成一次状态
 变化去写旧文件。
 
+`conversation.reset` 带 id 时，`state.session.id` 也跟着换（reducer 用
+`createInitialState({ sessionId, cwd })` 重建那一块）—— 于是 TUI 与浏览器同时看到新 id，
+不需要任何一方去问内核。见 [kernel](kernel.md) 的「会话身份住在状态里」。
+
 同理 `restoreSession()` 也换 id —— 之后的消息要追加进**那个**会话的文件。
 
 ## 界面的入口

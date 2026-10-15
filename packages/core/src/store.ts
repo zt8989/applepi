@@ -214,6 +214,10 @@ export function createAgentStoreWith(options: CreateAgentStoreOptions): AgentSto
     modelId: runtime.model.id,
     // 工具按 cwd 建（官方工具用它做路径边界检查）。
     toolNames: getTools(options.cwd ?? process.cwd()).map((tool) => tool.name),
+    // 会话身份里的 cwd 与上面建工具用的是同一个（`state.session.cwd`）——
+    // 界面上显示的「工作目录」、工具的边界、`/api` 读 settings 的作用域，
+    // 三者必须是同一个值。
+    cwd: options.cwd ?? process.cwd(),
     ...(maxTurns !== undefined ? { maxTurns } : {}),
     ...(options.llmTimeoutMs !== undefined ? { llmTimeoutMs: options.llmTimeoutMs } : {}),
     ...(options.maxLlmAttempts !== undefined

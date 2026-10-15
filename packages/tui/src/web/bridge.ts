@@ -54,15 +54,18 @@ import type {
   Usage,
 } from '@earendil-works/pi-ai';
 
-/** 桥要内核给的几个回调 —— 都是内核独有的能力（TUI 拿到的也是同一批）。 */
+/** 桥要内核给的几个回调 —— 都是内核独有的能力（TUI 拿到的也是同一批）。
+ *
+ * ## 会话身份（id / cwd）不在这里
+ *
+ * 早先这两个是从外面递进来的：`cwd` 一份常量、`getSessionId` 一个函数。
+ * 现在它们在 **store 里**（`state.session`）—— 与 TUI 读的是同一个地方。
+ * 桥只负责把它们转上线协议。
+ */
 export interface WebBridgeOptions {
   store: AgentStore;
-  /** 工具的工作目录（界面上显示用）。 */
-  cwd: string;
   /** 按 provider/modelId 解析出真的模型对象；解析不到给 `null`。 */
   resolveModel: (provider: string, id: string) => Model<Api> | null;
-  /** 当前会话 id（**取值**，`/new` 之后会变）。 */
-  getSessionId: () => string;
   /** 换模型（内核的 `setModel()`：一条 `model.changed`）。 */
   setModel: (provider: string, id: string) => boolean;
   /** 开新会话（换 id → 换文件）。 */
@@ -471,8 +474,9 @@ export class WebBridge {
           : stopCauseText(state.stopCause)
         : null;
     return {
-      sessionId: this.options.getSessionId(),
-      cwd: this.options.cwd,
+      // 会话身份从 **store** 里读（与 TUI 同一个地方）—— 不再各自去问内核。
+      sessionId: state.session.id,
+      cwd: state.session.cwd,
       messages: streamItems(state),
       model,
       thinkingLevel: state.thinkingLevel,
@@ -554,7 +558,7 @@ export class WebBridge {
   private readStructure(): StateStructure {
     const state = this.options.store.getState();
     return {
-      sessionId: this.options.getSessionId(),
+      sessionId: state.session.id,
       messages: state.messages,
       phase: state.phase,
       providerName: state.providerName,

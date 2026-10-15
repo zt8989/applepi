@@ -49,6 +49,11 @@ TUI 之外的第二块界面：**浏览器里的 pi-web-ui**，环仍然是终�
 
 ## 桥的映射
 
+会话身份（`sessionId` / `cwd`）**不在桥的构造参数里** —— 它从 `state.session` 读，
+与 TUI 同一个地方。早先是桥自己接一个 `getSessionId` 回调、`cwd` 用启动目录的常量，
+于是「两端共享一个 store」在会话身份上并不成立（症状：浏览器点了新会话，另一边还是
+老 id）。见 [kernel](kernel.md) 的「会话身份住在状态里」。
+
 pi-web-ui 只有两个落点（见它 `components/AgentInterface.js`）：
 
 - **稳定列表** `session.state.messages` —— 每条消息渲染一次；

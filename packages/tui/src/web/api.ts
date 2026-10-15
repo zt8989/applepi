@@ -70,14 +70,6 @@ export interface WebCommandSource {
 
 export interface WebApiOptions {
   store: AgentStore;
-  cwd: string;
-  /**
-   * 当前会话 id（**取值** —— `/new` 之后会变）。
-   *
-   * 「完整历史」靠它找到会话文件（`findSessionFile`），而不是拿着内存里的 `messages`
-   * 凑一份 —— 被 `/compact` 掉的早期消息只在文件里。
-   */
-  sessionId: () => string;
   /** 可用模型快照（与 TUI 的 `/model` 面板同一份）。 */
   modelCatalog: () => readonly Model<Api>[];
   /** 按 provider/id 解析模型对象；解析不到给 `null`。 */
@@ -123,7 +115,17 @@ function busyResult(): WebActionResult {
 }
 
 export function createWebApi(options: WebApiOptions): WebApi {
-  const { store, cwd } = options;
+  const { store } = options;
+
+  /**
+   * 会话身份（id / cwd）—— **从 store 现取**。
+   *
+   * 不从这里往外递：TUI、桥、这几个接口读的都是 `state.session` 那一份。
+   * 「完整历史」靠 id 找会话文件（`findSessionFile`）—— 不拿内存里的 `messages` 凑，
+   * 被 `/compact` 掉的早期消息只在文件里；作用域 / settings 那一堆读写靠 cwd。
+   */
+  const session = () => store.getState().session;
+  const cwd = (): string => session().cwd;
 
   /** 当前模型的 Model 对象（档位、能力都从它读）。 */
   const currentModel = (): Model<Api> | null => {
@@ -133,7 +135,7 @@ export function createWebApi(options: WebApiOptions): WebApi {
 
   /** 作用域归一：**空数组也当全开**（与 TUI 的 `readScopedModels` 同一口径）。 */
   const scopedIds = (): string[] | null => {
-    const ids = readScopedModels(cwd);
+    const ids = readScopedModels(cwd());
     return ids === null || ids.length === 0 ? null : ids;
   };
 
@@ -181,15 +183,15 @@ export function createWebApi(options: WebApiOptions): WebApi {
       return {
         current: store.getState().thinkingLevel,
         levels: supportedThinkingLevels(currentModel() ?? undefined),
-        default: readDefaultThinkingLevel(cwd) ?? DEFAULT_THINKING_LEVEL,
+        default: readDefaultThinkingLevel(cwd()) ?? DEFAULT_THINKING_LEVEL,
       };
     },
 
     settings() {
       return {
         autoCompact: options.autoCompactEnabled(),
-        hideThinking: readHideThinkingBlock(cwd),
-        defaultThinkingLevel: readDefaultThinkingLevel(cwd) ?? DEFAULT_THINKING_LEVEL,
+        hideThinking: readHideThinkingBlock(cwd()),
+        defaultThinkingLevel: readDefaultThinkingLevel(cwd()) ?? DEFAULT_THINKING_LEVEL,
       };
     },
 
@@ -212,17 +214,17 @@ export function createWebApi(options: WebApiOptions): WebApi {
     },
 
     history() {
-      const sessionId = options.sessionId();
-      const file = sessionId === '' ? null : findSessionFile(sessionId, cwd);
-      const session = file !== null && existsSync(file) ? readSession(file) : null;
-      if (session !== null) {
-        return { sessionId, cwd, file, lines: historyLines(session.entries) };
+      const { id: sessionId, cwd: historyCwd } = session();
+      const file = sessionId === '' ? null : findSessionFile(sessionId, historyCwd);
+      const sessionFile = file !== null && existsSync(file) ? readSession(file) : null;
+      if (sessionFile !== null) {
+        return { sessionId, cwd: historyCwd, file, lines: historyLines(sessionFile.entries) };
       }
       // 还没落盘（新会话、或者文件被删了）：退回内存里那份。
       // 它少了被压缩掉的早期消息，但比一页空白强 —— 页面上会写明「来源：内存」。
       return {
         sessionId,
-        cwd,
+        cwd: historyCwd,
         file: null,
         lines: store.getState().messages.map((message) => ({
           kind: 'message' as const,
@@ -263,9 +265,9 @@ export function createWebApi(options: WebApiOptions): WebApi {
       if (store.getState().phase !== 'idle') return busyResult();
       if (patch.autoCompact !== undefined) options.setAutoCompactEnabled(patch.autoCompact);
       const writes: Promise<boolean>[] = [];
-      if (patch.hideThinking !== undefined) writes.push(writeHideThinkingBlock(patch.hideThinking, cwd));
+      if (patch.hideThinking !== undefined) writes.push(writeHideThinkingBlock(patch.hideThinking, cwd()));
       if (patch.defaultThinkingLevel !== undefined && isThinkingLevel(patch.defaultThinkingLevel)) {
-        writes.push(writeDefaultThinkingLevel(patch.defaultThinkingLevel, cwd));
+        writes.push(writeDefaultThinkingLevel(patch.defaultThinkingLevel, cwd()));
       }
       const results = await Promise.all(writes);
       return results.every(Boolean)
@@ -276,7 +278,7 @@ export function createWebApi(options: WebApiOptions): WebApi {
     async setScopedModels(ids) {
       if (store.getState().phase !== 'idle') return busyResult();
       const normalized = ids === null || ids.length === 0 ? null : [...ids];
-      const ok = writeScopedModels(normalized, cwd);
+      const ok = writeScopedModels(normalized, cwd());
       return ok
         ? { ok: true }
         : { ok: false, message: '没能写进 settings.json（写权限？），作用域没变' };

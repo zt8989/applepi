@@ -7,7 +7,8 @@
 ```ts
 export function createKernel(options: KernelOptions): Kernel {
   // 1. runtime（真 provider，或 demo 的 faux）
-  // 2. sessionId（决定 traces/<时间戳>_<id>.jsonl 的文件名）
+  // 2. 会话身份（sessionId + cwd）→ 进 store 的 `state.session`
+  //    文件名由 id 决定：traces/<时间戳>_<id>.jsonl、sessions/<cwd>/<时间戳>_<id>.jsonl
   // 3. 落盘 sink（traceDir === null 则完全不落盘）
   // 4. createPersistentStore({...})  ← 环在这里诞生
   return { store, runtime, sessionId, persistence, dispose };
@@ -16,6 +17,21 @@ export function createKernel(options: KernelOptions): Kernel {
 
 它返回的就是 `createPersistentStore` 的结果加上 `runtime` / `sessionId` / `dispose`，
 没有额外的包装层。界面（`packages/tui/src/`）调它，没有第二处装配。
+
+## 会话身份（id / cwd）住在状态里
+
+`state.session = { id, cwd }` 是**唯一真相**：TUI、浏览器（桥）、`/api/*` 都读它。
+
+早先这两样不在状态里 —— id 住在内核闭包里（`current.sessionId`，那是**资源句柄**：
+轨迹 sink 与会话文件绑在哪个 id 上），cwd 是内核常量加上桥构造时抄的一份。于是
+「同一个进程里两个界面共享一个 store」在**会话身份**这里并不成立：谁要 id 就各自去问
+内核、谁要 cwd 就各自抄一份 —— 抄的时间不对，症状就是「浏览器点了新会话，另一边还是
+老 id」，而两处都看不出原因。
+
+现在内核里那对 `current` 仍然管文件（换会话要换 sink / 记录器），但**对外只暴露 store
+里那一份**：`kernel.sessionId` 也只是 `store.getState().session.id` 的转发。开新会话 /
+恢复历史走 `conversation.reset` / `conversation.restored`（两者都带 id），reducer 通过
+`createInitialState({ sessionId, cwd })` 重建 `state.session`。
 
 ## 为什么不能有两个环
 
@@ -45,7 +61,8 @@ createKernel
 
 ## 工具的工作目录
 
-`KernelOptions.cwd` 决定工具的路径边界，一路传到 `getTools(cwd)`。
+`KernelOptions.cwd` 决定工具的路径边界，一路传到 `getTools(cwd)`，同时进
+`state.session.cwd`（界面上显示的那个工作目录就是它）。
 
 官方工具（`createReadTool(cwd)` 等）在**构造时**就把 cwd 烤进闭包，所以 `packages/core/src/tools.ts` 的注册表
 **按 cwd 缓存**（key 是 `path.resolve(cwd)`）：同一个 cwd 复用同一批实例，换 cwd 必须重建，

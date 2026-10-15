@@ -92,7 +92,12 @@ async function start(): Promise<{
 }> {
   const faux = createFauxRuntime();
   faux.setResponses(demoResponses());
-  const store = createAgentStore({ runtime: faux.runtime, systemPrompt: 'test' });
+  const store = createAgentStore({
+    runtime: faux.runtime,
+    systemPrompt: 'test',
+    sessionId: 'web-test-session',
+    cwd: '/tmp/ela-web-test',
+  });
 
   const model = {
     id: 'fake',
@@ -108,8 +113,6 @@ async function start(): Promise<{
   const bridge = new WebBridge(
     {
       store,
-      cwd: '/tmp/ela-web-test',
-      getSessionId: () => 'web-test-session',
       setModel: () => true,
       newSession: () => {},
       resolveModel,
@@ -120,8 +123,6 @@ async function start(): Promise<{
   // 非会话数据的 HTTP 接口：命令表 / 模型目录 / settings 都从这里出。
   const api = createWebApi({
     store,
-    cwd: '/tmp/ela-web-test',
-    sessionId: () => 'web-test-session',
     modelCatalog: () => [model, { ...model, id: 'fake-2', name: 'Faux 2', reasoning: false }],
     resolveModel,
     setModel: () => true,
@@ -267,6 +268,33 @@ test('bridge：hello 带版本与诊断，浏览器 → 服务端 → 浏览器 
   }
 });
 
+test('bridge：会话身份（id / cwd）住在 store 里 —— 桥跟着 store 走', async () => {
+  const ctx = await start();
+  try {
+    // 初始那份来自 `createAgentStore({ sessionId, cwd })`。
+    assert.deepEqual(ctx.store.getState().session, {
+      id: 'web-test-session',
+      cwd: '/tmp/ela-web-test',
+    });
+
+    // 换会话（`/new` 与浏览器的「新会话」走的都是这条 action）—— 桥发出去的
+    // sessionId 必须是**换过的那个**，而且 cwd 不跟着变（它在内核启动时定）。
+    ctx.store.dispatch({ type: 'conversation.reset', sessionId: 'web-test-next' });
+    assert.equal(ctx.store.getState().session.id, 'web-test-next');
+    assert.equal(ctx.store.getState().session.cwd, '/tmp/ela-web-test');
+    const hello = ctx.bridge.hello();
+    if (hello.type !== 'hello') throw new Error('unreachable');
+    assert.equal(hello.state.sessionId, 'web-test-next');
+    assert.equal(hello.state.cwd, '/tmp/ela-web-test');
+
+    // 不带 id 的 reset 只清对话，会话身份不动。
+    ctx.store.dispatch({ type: 'conversation.reset' });
+    assert.equal(ctx.store.getState().session.id, 'web-test-next');
+  } finally {
+    await ctx.dispose();
+  }
+});
+
 test('bridge：提问后能看见流式事件与最终助手消息（走完整条环）', async () => {
   const ctx = await start();
   const client = await connect(`${ctx.server.url.replace('http', 'ws')}ws`);
@@ -369,11 +397,14 @@ test('bridge：错误从轨迹派生成合成提示（ela-notice）进线协议�
 test('web api：空目录给空列表；空作用域归一成 null（= 全开）', () => {
   const faux = createFauxRuntime();
   faux.setResponses(demoResponses());
-  const store = createAgentStore({ runtime: faux.runtime, systemPrompt: 'test' });
+  const store = createAgentStore({
+    runtime: faux.runtime,
+    systemPrompt: 'test',
+    sessionId: 'web-test-session',
+    cwd: '/tmp/ela-web-test',
+  });
   const api = createWebApi({
     store,
-    cwd: '/tmp/ela-web-test',
-    sessionId: () => 'web-test-session',
     modelCatalog: () => [],
     resolveModel: () => null,
     setModel: () => true,
@@ -506,6 +537,8 @@ test('bridge：`/skill:<名字>` 展开成 <skill> 块再发（文件在服务�
     messages: [],
     prompt: { skills: [skill] },
     phase: 'idle',
+    // 会话身份现在住在状态里（`state.session`）—— 桥的 `snapshot()` 会读它。
+    session: { id: 's', cwd: '/tmp/ela-web-test' },
     providerName: 'faux',
     modelId: 'fake',
     thinkingLevel: 'off',
@@ -525,8 +558,6 @@ test('bridge：`/skill:<名字>` 展开成 <skill> 块再发（文件在服务�
   };
   const bridge = new WebBridge({
     store: store as never,
-    cwd: '/tmp/ela-web-test',
-    getSessionId: () => 's',
     setModel: () => true,
     newSession: () => {},
     resolveModel: () => null,
@@ -649,6 +680,7 @@ function fakeStore(state: Record<string, unknown>): {
 function fakeState(messages: unknown[]): Record<string, unknown> {
   return {
     phase: 'idle',
+    session: { id: 's', cwd: '/tmp' },
     messages,
     providerName: 'faux',
     modelId: 'fake',
@@ -679,8 +711,6 @@ test('bridge：没有浏览者时连状态都不读（更不 stringify）', () =
   const fake = fakeStore(state);
   const bridge = new WebBridge({
     store: fake.store as never,
-    cwd: '/tmp',
-    getSessionId: () => 's',
     setModel: () => true,
     newSession: () => {},
     resolveModel: () => fakeModel() as never,
@@ -735,8 +765,6 @@ test('bridge：流式期整份状态不逐 token 发，但增量一条不漏', (
   const fake = fakeStore(state);
   const bridge = new WebBridge({
     store: fake.store as never,
-    cwd: '/tmp',
-    getSessionId: () => 's',
     setModel: () => true,
     newSession: () => {},
     resolveModel: () => fakeModel() as never,

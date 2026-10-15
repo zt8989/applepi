@@ -549,9 +549,16 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   return {
     store,
     runtime,
-    /** 当前会话 id。**会变**（`newSession()` / 恢复历史），所以是取值而不是常量。 */
+    /**
+     * 当前会话 id。**会变**（`newSession()` / 恢复历史），所以是取值而不是常量。
+     *
+     * 读的是 **store 里那一个**（`state.session.id`）—— 它才是「会话身份」的真相，
+     * 而 `current.sessionId` 是内核自己的**资源句柄**（轨迹 sink / 会话文件绑在哪个 id 上）。
+     * 两者在每次 dispatch 之后一致（`conversation.reset` / `conversation.restored` 都带 id），
+     * 但对外只暴露 store 那份：TUI 与 web 都从同一个地方取值。
+     */
     get sessionId(): string {
-      return current.sessionId;
+      return store.getState().session.id;
     },
     persistence,
     /** 当前会话记录器（换会话后指向新的那个）。 */

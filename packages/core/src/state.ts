@@ -240,8 +240,37 @@ export interface ModelState {
   seeded: boolean;
 }
 
+/**
+ * 会话身份：这一轮对话属于哪个会话、边界在哪。
+ *
+ * ## 为什么它必须在 `AgentState` 里
+ *
+ * 同一个进程里有**两个界面**（TUI 与 web），它们都要回答「现在是哪个会话」。
+ * 早先这两样东西不在状态里：
+ *
+ *   - `sessionId` 住在内核闭包里（`current.sessionId`，那是**资源句柄**——
+ *     轨迹 sink / 会话文件绑在哪个 id 上），界面只能通过一个 getter 去问内核；
+ *   - `cwd` 是内核常量 + `WebBridge` **构造时**抄的一份，开着就不再变。
+ *
+ * 于是「共享同一个 store」在**会话身份**这里不成立：两端各自去问、或者各自抄一份，
+ * 只要有一处忘了跟（或抄的时间不对），症状就是「浏览器点了新会话，另一边还是老 id」
+ * —— 而那类不同步在界面上看不出原因。
+ *
+ * 放进状态后只剩一个真相：谁要 id / cwd 都读它（`state.session`）。内核里那对
+ * `current` 仍然是资源句柄（它管文件），但**不再是对外的会话身份**。
+ */
+export interface SessionState {
+  /** 会话 id（开新会话与恢复历史时会变）；会话文件名由它决定。 */
+  id: string;
+  /** 工具的工作目录（= 文件边界）。与内核的 `cwd` 同一份。 */
+  cwd: string;
+}
+
 export interface AgentState {
   phase: Phase;
+
+  /** 会话身份（id / cwd）—— 界面与桥都读它，不再各自去问内核。 */
+  session: SessionState;
 
   // ── prompt 侧（与 model 分开，因为 system prompt 后面要挂 Hooks） ──
   prompt: PromptState;
@@ -495,6 +524,8 @@ export interface InitialStateOptions {
   maxLlmAttempts?: number | undefined;
   /** 注入会话 id（测试用；默认按时间生成）。 */
   sessionId?: string | undefined;
+  /** 工具的工作目录（会话边界）；不给则用 `process.cwd()`。 */
+  cwd?: string | undefined;
   /** 注入已存在的轨迹（从 JSONL 回放时用）。 */
   trace?: TraceTree | undefined;
 }
@@ -502,6 +533,9 @@ export interface InitialStateOptions {
 export const DEFAULT_LLM_TIMEOUT_MS = 120_000;
 
 export function createInitialState(options: InitialStateOptions): AgentState {
+  // 会话 id 只生成**一次**：轨迹树的 id 与会话身份必须是同一个 —— 分两次
+  // `newSessionId()` 会让两者错开（症状：会话文件一个名、轨迹文件另一个名）。
+  const sessionId = options.sessionId ?? newSessionId();
   // 初始值就是「空的 prompt / model 块」—— 内核随后会 dispatch prompt.init 与 model.init
   // 把真值装进去。构造函数只负责给形状，不负责装载。
   const emptyPrompt: PromptState = {
@@ -526,6 +560,10 @@ export function createInitialState(options: InitialStateOptions): AgentState {
   };
   return {
     phase: 'idle',
+    // 会话身份一开始就有（新会话也属于一个会话）—— 它的取值只有这一个地方：
+    // 开新会话 / 恢复历史走 `conversation.reset` / `conversation.restored`，
+    // 两者都通过 `createInitialState({ sessionId })` 重建它。
+    session: { id: sessionId, cwd: options.cwd ?? process.cwd() },
     prompt: emptyPrompt,
     model: emptyModel,
     systemPrompt: options.systemPrompt,
@@ -566,7 +604,7 @@ export function createInitialState(options: InitialStateOptions): AgentState {
     stopCauseDetail: null,
     retrying: false,
     aborted: false,
-    trace: options.trace ?? createTraceTree(options.sessionId ?? newSessionId()),
+    trace: options.trace ?? createTraceTree(sessionId),
     traceBegun: false,
     modelTraceDirty: false,
     openLlmNodeId: null,

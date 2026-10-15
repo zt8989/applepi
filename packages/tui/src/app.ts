@@ -1090,10 +1090,6 @@ export interface TuiOptions {
    * 当前会话 id。`/clean` 要**放行**它 —— 记录器正开着那个文件，删了等于写到虚空里。
    */
   sessionId?: (() => string) | undefined;
-  /**
-   * 工作目录（底栏显示用）。传了就显示，不传就 `process.cwd()`。
-   */
-  cwd?: string | undefined;
 }
 
 /**
@@ -1232,7 +1228,10 @@ export function jumpToLatestHint(theme: Theme): string {
 export async function runTui(options: TuiOptions): Promise<number> {
   const { store, prompt, newSession, sessionId, restoreSession: restoreHook } = options;
   const beforeAgentStartHook = options.beforeAgentStart;
-  const cwd = options.cwd ?? process.cwd();
+  // 工作目录**从 store 读**（`state.session.cwd`）—— 与浏览器那边（桥、`/api/*`）
+  // 是同一个地方。它不是一个「界面的选项」：内核启动时就定了，换会话也不变
+  // （见 docs/architecture/kernel.md 的「会话身份住在状态里」）。
+  const cwd = store.getState().session.cwd;
   /**
    * 当前会话**文件路径**（picker 用它把「正在用的这条」标出来并拒绝删除）。
    *
@@ -2798,7 +2797,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
       return;
     }
     const messages = loadSessionMessages(session);
-    if (store.getState().trace.sessionId === session.id) {
+    // 会话身份读 `state.session.id`（与桥 / TUI 别处同一个地方）。
+    if (store.getState().session.id === session.id) {
       // 恢复的就是当前会话：直接一条灌回去（重复灌一遍内容相同的消息，但没有别的问题）。
       store.dispatch({
         type: 'conversation.restored',
@@ -2811,7 +2811,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
     }
     store.dispatch({
       type: 'conversation.restored',
-      sessionId: store.getState().trace.sessionId,
+      sessionId: store.getState().session.id,
       messages,
     } as AgentAction);
     notify(

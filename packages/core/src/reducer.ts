@@ -1582,6 +1582,9 @@ const transitions: TransitionHandlers = {
       llmTimeoutMs: state.llmTimeoutMs,
       maxLlmAttempts: state.maxLlmAttempts,
       sessionId: action.sessionId ?? state.trace.sessionId,
+      // 换会话不换工作目录（cwd 是内核启动时定的，恢复跳目录也不改）——
+      // 但会话身份得带着走，否则 `state.session` 会被重建成 `process.cwd()`。
+      cwd: state.session.cwd,
     });
     return {
       ...fresh,
@@ -2052,6 +2055,7 @@ function restoredConversationState(
     llmTimeoutMs: state.llmTimeoutMs,
     maxLlmAttempts: state.maxLlmAttempts,
     sessionId,
+    cwd: state.session.cwd,
   });
   return {
     ...fresh,

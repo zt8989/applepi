@@ -384,7 +384,17 @@ async function main(): Promise<void> {
   // 就得真恢复 —— 否则那行提示就是谎话，而用户看不出区别（界面起来了、只是空空如也）。
   //
   // 用 `findSessionFile` 而不是拼路径：文件名带时间戳（与 pi 一致），只有扫目录才找得到；
-  // 它同时认旧名（`<id>.jsonl`）。找不到 = 新会话，什么都不做。
+  // 它同时认旧名（`<id>.jsonl`）。
+  //
+  // ## 找不到时为什么必须出声
+  //
+  // `findSessionFile` 只在**当前目录**对应的会话目录里找（`sessions/<cwd 编码>/`）。
+  // 而 `ela --session <id>` 完全可能是**在别的目录**里跑的（那个会话其实是别的项目
+  // 的）—— 此时静默降级的结果是：id 还是那个 id，但对话是空的，看上去就像「恢复了
+  // 一个新会话」，而没有任何地方提到过原因（真发生过，排查了半天）。
+  //
+  // 所以这里把事实说清楚：文件不在这里 → 告诉用户它可能在哪个目录的会话里，
+  // 以及本次会当成新会话（用同一个 id）接着写。
   if (args.sessionId !== undefined) {
     const file = findSessionFile(args.sessionId, args.cwd);
     if (existsSync(file)) {
@@ -397,6 +407,12 @@ async function main(): Promise<void> {
           `恢复 ${args.sessionId} 失败（当成新会话继续）：${String(error instanceof Error ? error.message : error)}\n`,
         );
       }
+    } else {
+      process.stderr.write(
+        `没有在 ${args.cwd} 的会话目录里找到 ${args.sessionId} —— 当成新会话继续` +
+          `（若那个会话是别的工作目录下的，进那个目录再 \`ela --session ${args.sessionId}\`，` +
+          `或在本目录用 \`/sessions\` 选它）\n`,
+      );
     }
   }
 
@@ -421,8 +437,7 @@ async function main(): Promise<void> {
     bridge = new WebBridge(
       {
         store: kernel.store,
-        cwd: args.cwd,
-        getSessionId: () => kernel.sessionId,
+        // 会话 id / cwd **不在这里递** —— 它们在 `state.session` 里（见那一块的注释）。
         setModel: (provider, id) => kernel.setModel(provider, id),
         newSession: () => kernel.newSession(),
         resolveModel,
@@ -445,9 +460,7 @@ async function main(): Promise<void> {
     // 服务端，浏览器不抄一份。命令表 = 内置的（带 `web` 标记）+ 扩展注册的。
     const api = createWebApi({
       store: kernel.store,
-      cwd: args.cwd,
-      // **取值**：`/new` 之后会话换一个，「完整历史」要跟着读新那一份文件。
-      sessionId: () => kernel.sessionId,
+      // 同上：会话身份从 store 读，不从参数递。
       // **与 TUI 的 `/model` 面板同一份**（同一个 `ModelRuntime`），否则会列出
       // pi-web-ui 自带那份 1500+ 的内置目录（本机根本没配）。
       modelCatalog: () => [...modelRuntimeFor(kernel.runtime).getAvailableSnapshot()],
@@ -492,8 +505,7 @@ async function main(): Promise<void> {
   const prompt = args.prompt ?? (args.demo ? '算一下 (3+4)*6' : undefined);
   process.exitCode = await runTui({
     store: kernel.store,
-    // 底栏显示工作目录（与工具的文件边界同一个）。
-    cwd: args.cwd,
+    // 工作目录不在这里传：它从 `store.getState().session.cwd` 读（与浏览器同一个地方）。
     // 把内核的「开新会话」交进去 —— TUI 只拿 store，换 id（于是换文件）要内核出手。
     newSession: () => kernel.newSession(),
     // 恢复历史：也必须走内核（换 id + 记录器游标对齐），界面自己做会把历史重写一遍。
@@ -514,8 +526,9 @@ async function main(): Promise<void> {
     // 它与 `createRuntime` 装的是同一个对象，面板看到的模型目录与实际发请求的目录同源。
     runtime: kernel.runtime,
     // 当前会话 id 也要给：`/clean` 删历史时得放行它（记录器正开着那个文件）。
-    // 注意它是**取值**不是常量：开新会话后 id 会变。
-    sessionId: () => kernel.sessionId,
+    // **从 store 读**（`state.session.id`）—— 与浏览器那边同一个地方；
+    // 开新会话 / 恢复历史后它会变，所以是取值不是常量。
+    sessionId: () => kernel.store.getState().session.id,
     // 扩展的 `before_agent_start`（内核持有的那个宿主）。
     beforeAgentStart: (text) => kernel.extensions.beforeAgentStart(text),
     // 扩展的斜杠命令与快捷键（补全、`runCommand` 兜底、raw input）。
