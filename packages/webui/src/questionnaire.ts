@@ -45,6 +45,8 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
   /** 每题备注的草稿（提交时一次性发过去）。 */
   const notes: string[] = snapshot.questions.map((_, index) => snapshot.notes[index] ?? '');
   let globalNote = snapshot.globalNote;
+  /** 预览是不是被"点开看全"了（默认按行数截断，与终端那份一致）。 */
+  let previewExpanded = false;
 
   const backdrop = document.createElement('div');
   backdrop.className = 'ela-modal-backdrop';
@@ -126,6 +128,36 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
     emit({ kind: 'submit' });
   };
 
+  /** 预览最多先给几行（终端那份是按终端高度算的，这里给个固定值）。 */
+  const PREVIEW_LINES = 12;
+
+  /**
+   * 预览块：默认只给 `PREVIEW_LINES` 行，尾巴上留一行"还有 N 行（点开看全）"——
+   * 与终端那份同一个做法（那边是 `… 预览还有 N 行`）。
+   */
+  const previewPane = (text: string): HTMLElement => {
+    const box = document.createElement('div');
+    box.className = 'ela-q-previewbox';
+    const lines = text.split('\n');
+    const shown = previewExpanded ? lines : lines.slice(0, Math.max(1, PREVIEW_LINES - 1));
+    const pane = document.createElement('pre');
+    pane.className = 'ela-q-preview';
+    pane.textContent = shown.join('\n');
+    box.append(pane);
+    if (!previewExpanded && lines.length > shown.length) {
+      const more = document.createElement('button');
+      more.type = 'button';
+      more.className = 'ela-q-more';
+      more.textContent = `… 预览还有 ${lines.length - shown.length} 行（点开看全）`;
+      more.addEventListener('click', () => {
+        previewExpanded = true;
+        draw();
+      });
+      box.append(more);
+    }
+    return box;
+  };
+
   const draw = (): void => {
     if (closed) return;
     // 焦点与草稿要在重画前后自己接住（重画是整块 body 换掉）。
@@ -141,7 +173,10 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
       const answered = snapshot.settled[index] === true;
       tab.className = `ela-q-tab${index === snapshot.active ? ' is-active' : ''}${answered ? ' is-done' : ''}`;
       tab.textContent = `${answered ? '✓' : index + 1} ${question.header === '' ? `第 ${index + 1} 题` : question.header}`;
-      tab.addEventListener('click', () => emit({ kind: 'activate', index }));
+      tab.addEventListener('click', () => {
+        previewExpanded = false;
+        emit({ kind: 'activate', index });
+      });
       tabs.append(tab);
     });
     const submitTab = document.createElement('button');
@@ -173,6 +208,13 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
     questionText.className = 'ela-q-question';
     questionText.textContent = question.question;
     body.append(questionText);
+    // 宽屏时左右并排（与终端那份同一个形状）：左边选项、右边预览。
+    const main = document.createElement('div');
+    main.className = 'ela-q-main';
+    const left = document.createElement('div');
+    left.className = 'ela-q-left';
+    body.append(main);
+    main.append(left);
 
     const list = document.createElement('div');
     list.className = 'ela-q-options';
@@ -192,9 +234,19 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
               ? selected().includes(row.index)
               : false;
         if (picked) line.classList.add('is-picked');
-        const box = document.createElement('span');
+        // 多选用**真 checkbox**（用户报过：`[ ]` 那种写法宽度不够会自己换行，而且它不是
+        // checkbox）。交互仍然由整行接管：`pointer-events: none` + `tabindex="-1"`，
+        // 表单控件只负责"长什么样"。
+        const box = question.multiSelect ? document.createElement('input') : document.createElement('span');
         box.className = 'ela-q-box';
-        box.textContent = question.multiSelect ? (picked ? '[x]' : '[ ]') : `${row.index + 1}.`;
+        if (box instanceof HTMLInputElement) {
+          box.type = 'checkbox';
+          box.checked = picked;
+          box.tabIndex = -1;
+          box.setAttribute('aria-hidden', 'true');
+        } else {
+          box.textContent = `${row.index + 1}.`;
+        }
         const label = document.createElement('span');
         label.className = 'ela-q-label';
         label.textContent = question.options[row.index]?.label ?? '';
@@ -245,11 +297,11 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
       }
       list.append(line);
     });
-    body.append(list);
+    left.append(list);
 
-    // 每题一句备注（可空）—— 与终端那份的 `n` 是同一个东西。
-    body.append(
-      noteField(notes[snapshot.active] ?? '', '这一题的备注（可选）', (text) => {
+    // 每题一句备注（可空）—— 与终端那份的 `n` 是同一个东西（这里 Tab 就能到）。
+    left.append(
+      noteField(notes[snapshot.active] ?? '', '这一题的备注（可选，Tab 到这里）', (text) => {
         notes[snapshot.active] = text;
       }),
     );
@@ -258,10 +310,7 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
     const previewIndex = previewRow?.kind === 'option' ? previewRow.index : undefined;
     const preview = previewIndex === undefined ? '' : question.options[previewIndex]?.preview ?? '';
     if (preview !== '') {
-      const pane = document.createElement('pre');
-      pane.className = 'ela-q-preview';
-      pane.textContent = preview;
-      body.append(pane);
+      main.append(previewPane(preview));
     }
   };
 
@@ -317,8 +366,9 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
       ? 'Enter 提交 · ←/→ 切题 · Esc 放弃'
       : '←/→ 切题 · ↑↓ 选项 · Enter 选择 · Tab 写备注 · Esc 放弃';
     const progress = document.createElement('div');
-    progress.className = unanswered === 0 ? 'ela-q-progress is-done' : 'ela-q-progress';
-    progress.textContent = unanswered === 0 ? '已答完' : `未答 ${unanswered}/${snapshot.questions.length}`;
+    progress.className = unanswered === 0 ? 'ela-q-progress is-done' : 'ela-q-progress is-pending';
+    progress.textContent =
+      unanswered === 0 ? '已答完' : `未答 ${unanswered}/${snapshot.questions.length}（留空也能提交）`;
     const actions = document.createElement('div');
     actions.className = 'ela-q-actions';
     const cancel = document.createElement('button');
@@ -364,6 +414,14 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
       }
       return;
     }
+    if (event.key === 'Tab') {
+      // 底栏写着"Tab 写备注"——那就得真的到得了（浏览器的默认 Tab 顺序会先落在 tab 按钮上）。
+      event.preventDefault();
+      const target = event.shiftKey ? 'input.ela-q-input' : 'input.ela-q-noteinput';
+      const input = body.querySelector<HTMLInputElement>(target);
+      if (input !== null) input.focus();
+      return;
+    }
     if (event.key === 'Escape') {
       event.preventDefault();
       emit({ kind: 'cancel' });
@@ -371,12 +429,18 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
     }
     if (event.key === 'ArrowLeft') {
       event.preventDefault();
-      if (snapshot.active > 0) emit({ kind: 'activate', index: snapshot.active - 1 });
+      if (snapshot.active > 0) {
+        previewExpanded = false;
+        emit({ kind: 'activate', index: snapshot.active - 1 });
+      }
       return;
     }
     if (event.key === 'ArrowRight') {
       event.preventDefault();
-      if (snapshot.active < snapshot.questions.length) emit({ kind: 'activate', index: snapshot.active + 1 });
+      if (snapshot.active < snapshot.questions.length) {
+        previewExpanded = false;
+        emit({ kind: 'activate', index: snapshot.active + 1 });
+      }
       return;
     }
     if (onSubmitTab()) {

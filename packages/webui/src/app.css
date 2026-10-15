@@ -598,6 +598,16 @@ body {
   font-size: 0.75rem;
 }
 
+/* 多选那一列是真 checkbox：整行接管点击，控件只管长什么样（也不参与 Tab 顺序）。 */
+input.ela-q-box {
+  width: 0.9rem;
+  height: 0.9rem;
+  margin: 0;
+  pointer-events: none;
+  accent-color: var(--color-foreground, #111);
+  align-self: center;
+}
+
 .ela-q-label {
   font-size: 0.8125rem;
 }
@@ -617,6 +627,59 @@ body {
   background: transparent;
   color: inherit;
   font-size: 0.8125rem;
+}
+
+/* 宽屏：选项在左、预览在右（与终端那份同一个形状）；窄屏仍是上下。 */
+.ela-q-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.ela-q-left {
+  min-width: 0;
+}
+
+@media (min-width: 900px) {
+  .ela-q-main {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+
+  .ela-q-left {
+    flex: 0 0 47%;
+  }
+
+  .ela-q-previewbox {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .ela-q-preview {
+    margin-top: 0;
+  }
+}
+
+.ela-q-previewbox {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+/* 被截断的预览：一行"还有 N 行"（点开看全），与终端那份的做法一致。 */
+.ela-q-more {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-muted-foreground, #6b7280);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.ela-q-more:hover {
+  text-decoration: underline;
 }
 
 .ela-q-note {
@@ -703,6 +766,11 @@ body {
 
 .ela-q-progress.is-done {
   color: #15803d;
+}
+
+/* 还没答完：告警色（与终端的黄字一个意思）。 */
+.ela-q-progress.is-pending {
+  color: #b45309;
 }
 
 .ela-q-actions {
