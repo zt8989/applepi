@@ -228,6 +228,18 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 而那个「有效」的过滤条件（token>0 / 不是 aborted / 不是 error）与服务端那份必须一致 ——
 两边各算一份的结果是「同一个会话，终端与浏览器底栏对不上」。
 
+顺带两处「数字」的口径：
+
+- **不逐条显示用量**。pi-web-ui 的 `assistant-message` 会给每条带 `usage` 的助手消息
+  渲染一行 `↑186 ↓1.2k R164k`（它自己的 `formatUsage()`），而底栏那一行是服务端按
+  `statsLine()` 算的整行 —— 两个口径同时挂着只会让人对不上账。所以 `remote-agent.ts`
+  在收到快照时把助手消息的 `usage` 抹掉（ `stripAssistantUsage()`；服务端照发，线协议不动）。
+- **工具耗时不在浏览器里计**。工具在服务端跑，浏览器只看到「开始 / 结束」两条消息，
+  相减得到的是传输延迟（恢复历史时更是连起点都没有）。所以用内核的
+  `state.toolTimings`（见 [tools](tools.md)），经线协议发过去（`WebAgentState.toolTimings`），
+  `tool-view.ts` 按 `toolCallId` 查；文案格式照 Pi Web 的 `formatToolDuration`（`1.2s`）。
+  工具跑着的时候表里还没这一条，那一格就留给转圈的状态图标。
+
 ## 顶栏那三个入口（完整历史 / 系统 / 工具）
 
 照 Pi Web（github.com/agegr/pi-web）顶栏那三个按钮搬的。它们回答的是同一个问题：

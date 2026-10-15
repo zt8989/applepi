@@ -7,10 +7,14 @@
  * 甚至把参数与结果各打一段 JSON）：一轮里十几次工具调用会把对话冲走。这里照
  * **Pi Web**（github.com/agegr/pi-web）的做法重画：
  *
- *   - 默认**折叠**成一行：工具名 + 参数预览 + 状态 + 箭头；
+ *   - 默认**折叠**成一行：工具名 + 参数预览 + **耗时** + 状态 + 箭头；
  *   - 展开后也**扁平精简**：`edit` 是左右分栏 diff（`split-diff.ts`）、`bash` 是
  *     命令 + 输出、其它工具是输入 JSON + 输出文本；
  *   - 成功 / 失败的边框与底色只差一点色相（绿 / 红），不抢对话的视线。
+ *
+ * 耗时（`1.2s`）不在浏览器里算：工具在服务端跑，浏览器只看到「开始 / 结束」两条
+ * 消息，相减得到的是传输延迟；恢复历史时更是连起点都没有。所以用内核的
+ * `state.toolTimings`（见 `setToolTimings()` 的注释）。
  *
  * ## 为什么要替换 `tool-message` 的 render
  *
@@ -182,6 +186,43 @@ function setToolExpanded(toolCallId: string, expanded: boolean): void {
 }
 
 /**
+ * 工具耗时（`toolCallId` → 毫秒），由 `main.ts` 在每次状态帧到达时喂进来。
+ *
+ * ## 为什么走这条侧信道
+ *
+ * `tool-message` 是 pi-web-ui 的组件，它不认识「耗时」这个字段 —— 我们只换掉了它的
+ * `render()`，能传给 `ela-tool-view` 的只有它本来就有的那几个属性（tool / toolCall /
+ * result / pending）。所以要显示耗时，得从外面把表交给它：数据由服务端算好
+ * （`state.toolTimings`，内核 reducer 记的 —— 见 `@ela/core/web-protocol`），
+ * 组件渲染时按 id 查。
+ *
+ * 放在模块级而不是组件里：同一张工具卡在流式期与定稿后会**重新挂载**，
+ * 组件字段会跟着丢（与 `expandedToolCalls` 同一个理由）。
+ */
+let toolTimings: Readonly<Record<string, number>> = {};
+
+/** 换掉那张表（下一个渲染帧生效）。 */
+export function setToolTimings(timings: Readonly<Record<string, number>>): void {
+  toolTimings = timings;
+}
+
+/**
+ * 耗时文案：`1.2s` / `1m 5s` / `1h 3m 2s`。
+ *
+ * 与 Pi Web 的 `formatToolDuration` 同一个口径（它那边也只是「给人一眼看出量级」，
+ * 不需要更精确）。
+ */
+export function formatToolDuration(ms: number): string {
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const totalSeconds = Math.floor(seconds);
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainder = totalSeconds % 60;
+  if (minutes < 60) return `${minutes}m ${remainder}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m ${remainder}s`;
+}
+
+/**
  * 一张折叠的工具卡。**浅 DOM**（`createRenderRoot` 返回 `this`）—— 样式走
  * pi-web-ui 那份全局 Tailwind，shadow root 里拿不到。
  */
@@ -227,13 +268,20 @@ export class ElaToolView extends LitElement {
     const error = this.result?.isError === true;
     const expanded = isToolExpanded(this.toolCallId);
     const preview = toolPreview(this.params);
-    // 状态图标：跑着转圈、失败打叉、成功打勾（我们没有耗时，用状态兜住）。
+    // 耗时：工具跑完后才有（内核在 `tool.result` 那一刻记下）—— 跑着的就是 undefined，
+    // 那一格留给状态图标自己转。
+    const durationMs = toolTimings[this.toolCallId];
+    const timing =
+      durationMs === undefined
+        ? nothing
+        : html`<span class="shrink-0 font-mono text-[11px] tabular-nums ela-muted">${formatToolDuration(durationMs)}</span>`;
+    // 状态图标：跑着转圈、失败打叉、成功打勾。
     const status = this.running
       ? html`<span class="shrink-0 text-muted-foreground">${SPINNER}</span>`
       : error
         ? html`<span class="shrink-0 text-red-400">${CROSS}</span>`
         : html`<span class="shrink-0 text-green-600 dark:text-green-500">${CHECK}</span>`;
-    return html`<div class="overflow-hidden rounded-[7px] border text-[12px] ${error ? 'border-red-400/45 bg-red-400/5' : 'border-green-500/25 bg-green-500/5'}"><button type="button" class="flex w-full items-center gap-[7px] px-2.5 py-1.5 text-left text-muted-foreground transition-colors hover:text-foreground" @click=${this.toggle}><span class="shrink-0 font-mono text-[11px] font-semibold ${error ? 'text-red-400' : 'text-green-600 dark:text-green-500'}">${name}</span><span class="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">${preview}</span>${status}<span class="shrink-0 text-muted-foreground transition-transform ${expanded ? 'rotate-180' : ''}">${CHEVRON}</span></button>${expanded ? this.renderBody(name, error) : nothing}</div>`;
+    return html`<div class="overflow-hidden rounded-[7px] border text-[12px] ${error ? 'border-red-400/45 bg-red-400/5' : 'border-green-500/25 bg-green-500/5'}"><button type="button" class="flex w-full items-center gap-[7px] px-2.5 py-1.5 text-left text-muted-foreground transition-colors hover:text-foreground" @click=${this.toggle}><span class="shrink-0 font-mono text-[11px] font-semibold ${error ? 'text-red-400' : 'text-green-600 dark:text-green-500'}">${name}</span><span class="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">${preview}</span>${timing}${status}<span class="shrink-0 text-muted-foreground transition-transform ${expanded ? 'rotate-180' : ''}">${CHEVRON}</span></button>${expanded ? this.renderBody(name, error) : nothing}</div>`;
   }
 
   private renderBody(name: string, error: boolean): TemplateResult | typeof nothing {

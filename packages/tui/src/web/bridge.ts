@@ -226,6 +226,7 @@ interface StateStructure {
   thinkingLevel: AgentState['thinkingLevel'];
   executing: readonly unknown[];
   toolNames: readonly string[];
+  toolTimings: Readonly<Record<string, number>>;
   stopReason: AgentState['stopReason'];
   stopCause: AgentState['stopCause'];
   error: string | null;
@@ -480,6 +481,9 @@ export class WebBridge {
       pendingToolCalls: state.executing.map((tool) => tool.call.id),
       errorMessage,
       toolNames: [...state.toolNames],
+      // 拷一份：`state.toolTimings` 是活的对象（下一次 `tool.result` 会换成新的），
+      // 而这一份会被 `JSON.stringify` 写进帧里 —— 拷一次就不怕以后被原地改到。
+      toolTimings: { ...state.toolTimings },
       statsText: stats?.text ?? '',
       statsLevel: stats?.level ?? 'none',
     };
@@ -558,6 +562,7 @@ export class WebBridge {
       thinkingLevel: state.thinkingLevel,
       executing: state.executing,
       toolNames: state.toolNames,
+      toolTimings: state.toolTimings,
       stopReason: state.stopReason,
       stopCause: state.stopCause,
       error: state.error,
@@ -577,6 +582,7 @@ export class WebBridge {
       last.thinkingLevel !== now.thinkingLevel ||
       last.executing !== now.executing ||
       last.toolNames !== now.toolNames ||
+      last.toolTimings !== now.toolTimings ||
       last.stopReason !== now.stopReason ||
       last.stopCause !== now.stopCause ||
       last.error !== now.error

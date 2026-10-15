@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { scopedKeys } from '../src/model-picker';
-import { extractText } from '../src/remote-agent';
+import { extractText, stripAssistantUsage } from '../src/remote-agent';
 import { parseEditDiff } from '../src/edit-diff';
 import { parseUnifiedPatch } from '../src/split-diff';
 import { toolParameterFields } from '../src/context-panels';
+import { formatToolDuration } from '../src/tool-view';
 
 /**
  * webui 的那几个**纯函数**。
@@ -165,4 +166,34 @@ test('toolParameterFields：不是对象 schema 就给空表（不抛）', () =>
   assert.deepEqual(toolParameterFields(null), []);
   assert.deepEqual(toolParameterFields('字符串'), []);
   assert.deepEqual(toolParameterFields({ type: 'object' }), []);
+});
+
+test('formatToolDuration：秒 / 分 / 小时三档', () => {
+  // 工具卡上那个 `1.2s`。与 Pi Web 的 formatToolDuration 同一个口径。
+  assert.equal(formatToolDuration(0), '0.0s');
+  assert.equal(formatToolDuration(1234), '1.2s');
+  assert.equal(formatToolDuration(59_900), '59.9s');
+  assert.equal(formatToolDuration(60_000), '1m 0s');
+  assert.equal(formatToolDuration(65_400), '1m 5s');
+  assert.equal(formatToolDuration(3_723_000), '1h 2m 3s');
+});
+
+test('stripAssistantUsage：只剥助手消息的 usage，其余原样且不改原数组', () => {
+  // pi-web-ui 会给每条带 usage 的助手消息渲染一行 `↑186 ↓1.2k R164k`；
+  // 那个口径与底栏（服务端算的 statsLine）不同，所以界面不要它。
+  const usage = { input: 186, output: 1200, cacheRead: 164_000 };
+  const messages = [
+    { role: 'user', content: '嗨' },
+    { role: 'assistant', content: [], usage },
+    { role: 'toolResult', toolCallId: 'c1', content: [], usage },
+  ];
+  const stripped = stripAssistantUsage(messages);
+  assert.equal((stripped[0] as { usage?: unknown }).usage, undefined, '本来就没有 usage');
+  assert.equal((stripped[1] as { usage?: unknown }).usage, undefined, '助手消息的 usage 被抹掉');
+  assert.equal(
+    (stripped[2] as { usage?: unknown }).usage,
+    usage,
+    '工具结果不动（`assistant-message` 只读助手消息）',
+  );
+  assert.equal(messages[1]!.usage, usage, '剥的是拷贝，原数组一个字节不动');
 });

@@ -106,6 +106,19 @@ export interface WebAgentState {
   /** 工具名（展示用）。 */
   toolNames: string[];
   /**
+   * 每个工具调用的耗时（`toolCallId` → 毫秒）—— 工具卡上那个 `1.2s`。
+   *
+   * 取自内核的 `state.toolTimings`。
+   *
+   * ## 为什么不让浏览器自己计时
+   *
+   * 工具在**服务端**跑，浏览器只看到「开始 / 结束」两条消息 —— 拿这两个时刻相减，
+   * 算进去的是**传输延迟 + 渲染延迟**，而不是命令本身跑了多久。恢复历史时更糟：
+   * 早跑完的工具连「开始」那条消息都没有。reducer 那边（`tool/start` / `tool.result`）
+   * 是唯一同时拿得到开始时刻与结束时刻的地方。
+   */
+  toolTimings: Record<string, number>;
+  /**
    * 底栏那一行统计（与 TUI 的 `statsLine()` **逐字同形**）：
    * `↑362k ↓310k R121M CH99.9% 52%/1.0M`。
    *

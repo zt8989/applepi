@@ -194,6 +194,8 @@ test('bridge：hello 带版本与诊断，浏览器 → 服务端 → 浏览器 
     assert.equal(hello.state.isStreaming, false);
     assert.equal(hello.state.model?.provider, 'faux');
     assert.deepEqual(hello.state.messages, []);
+    // 工具耗时表随状态一起来（工具卡上那个 `1.2s`）；没跑过工具就是空表。
+    assert.deepEqual(hello.state.toolTimings, {});
 
     // 模型目录 / 作用域改走 HTTP 接口（不再随 hello 来）。
     const modelsInfo = (await (await fetch(`${ctx.server.url}api/models`)).json()) as {
@@ -392,6 +394,35 @@ test('web api：空目录给空列表；空作用域归一成 null（= 全开）
  * 它们守的是同一件事：**面板上显示的就是模型这一轮收到的东西**。
  * 所以断言的不是「接口能通」，而是「内容真的是 state 里那份」。
  */
+test('bridge：工具耗时随状态发出去（工具卡上那个 `1.2s` 靠它）', async () => {
+  const ctx = await start();
+  try {
+    ctx.store.dispatch({
+      type: 'tool/start',
+      call: { type: 'toolCall', id: 'c1', name: 'bash', arguments: { command: 'echo hi' } },
+    });
+    ctx.store.dispatch({
+      type: 'tool.result',
+      message: {
+        role: 'toolResult',
+        toolCallId: 'c1',
+        toolName: 'bash',
+        content: [{ type: 'text', text: 'hi' }],
+        isError: false,
+        timestamp: Date.now(),
+      },
+    });
+    const hello = ctx.bridge.hello();
+    if (hello.type !== 'hello') throw new Error('unreachable');
+    // 耗时不进消息、也不进会话文件，只在这张表里（界面用）。
+    const elapsed = hello.state.toolTimings['c1'];
+    assert.equal(typeof elapsed, 'number', 'reducer 在 `tool.result` 那一刻记下耗时');
+    assert.ok((elapsed ?? -1) >= 0);
+  } finally {
+    await ctx.dispose();
+  }
+});
+
 test('web api：系统提示词与工具定义就是 state 里发给模型的那两份', async () => {
   const ctx = await start();
   try {

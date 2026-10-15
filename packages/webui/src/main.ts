@@ -28,7 +28,7 @@ import { STREAM_NOTICE_ROLE } from '@ela/core/web-protocol';
 import { RemoteAgent, type UiRequest } from './remote-agent';
 import { openModelPicker } from './model-picker';
 import { openConfirmDialog, openInputDialog, openSelectDialog } from './dialogs';
-import { installToolMessageView } from './tool-view';
+import { installToolMessageView, setToolTimings } from './tool-view';
 import { installCommandPalette } from './command-palette';
 import { installContextPanels } from './context-panels';
 import { installStatsView } from './stats';
@@ -202,6 +202,9 @@ async function main(): Promise<void> {
   const agent = new RemoteAgent({
     // pi-web-ui 只在**事件**上重画；服务端推来的整份状态不会触发它 —— 这里补一次。
     onStateApplied: () => {
+      // 工具耗时表先喂再重画：工具卡渲染时按 toolCallId 查它（见 `tool-view.ts`），
+      // 顺序反了这一帧就会用上一帧的耗时。
+      setToolTimings(agent.state.toolTimings);
       chatPanel.agentInterface?.requestUpdate();
       setSession(agent.state.sessionId, agent.state.cwd);
     },

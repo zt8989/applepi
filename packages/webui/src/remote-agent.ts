@@ -84,7 +84,7 @@ export class RemoteAgentState {
 
   /** 服务端快照 → 本地。**绕过 setter**（见类注释）。 */
   apply(state: WebAgentState): void {
-    this.messages = state.messages;
+    this.messages = stripAssistantUsage(state.messages);
     this.currentModel = state.model;
     this.currentThinking = state.thinkingLevel;
     this.isStreaming = state.isStreaming;
@@ -92,6 +92,7 @@ export class RemoteAgentState {
     this.pendingToolCalls = new Set(state.pendingToolCalls);
     this.errorMessage = state.errorMessage ?? undefined;
     this.toolNames = state.toolNames;
+    this.toolTimings = state.toolTimings;
     this.statsText = state.statsText;
     this.statsLevel = state.statsLevel;
     this.sessionId = state.sessionId;
@@ -99,6 +100,12 @@ export class RemoteAgentState {
   }
 
   toolNames: readonly string[] = [];
+  /**
+   * 工具调用的耗时（`toolCallId` → 毫秒），服务端算好发来的（见 `tool-view.ts`）。
+   *
+   * 与 TUI 同一个来源：内核的 `state.toolTimings`。
+   */
+  toolTimings: Readonly<Record<string, number>> = {};
   /** 底栏统计行（与 TUI **逐字同形**）—— 服务端算好发来的。 */
   statsText = '';
   /** 统计行的告警级别（上下文占用 >70% / >90%）。 */
@@ -293,8 +300,7 @@ export class RemoteAgent {
   }
 }
 
-/** 从 pi-web-ui 传来的入参里抠出文本（字符串 / `{content}` / `{content: blocks}`）。 */
-export function extractText(input: unknown): string {
+/** 从 pi-web-ui 传来的入参里抠出文本（字符串 / `{content}` / `{content: blocks}`）。 */export function extractText(input: unknown): string {
   if (typeof input === 'string') return input;
   if (typeof input !== 'object' || input === null) return '';
   const content = (input as { content?: unknown }).content;
@@ -312,4 +318,25 @@ export function extractText(input: unknown): string {
       .join('\n');
   }
   return '';
+}
+
+/**
+ * 抹掉助手消息上的 `usage` —— 界面不显示 pi-web-ui 那行逐条用量。
+ *
+ * ## 为什么要抹
+ *
+ * pi-web-ui 的 `assistant-message` 会给**每条**带 `usage` 的助手消息渲染一行
+ * `↑186 ↓1.2k R164k`（它自己的 `formatUsage()`）。而底栏那一行（`statsText`）是服务端
+ * 按 `statsLine()` 算的整行，含 `CH`（缓存命中率）与上下文占用。**两个口径同时挂着
+ * 只会让人对不上账**（逐条那份是「最后一次调用」还是「这条」？），所以只留底栏那份。
+ *
+ * 剥掉的是「给浏览器的那一份」：服务端照发，线协议一个字节不动 —— 哪天要显示它
+ * （比如逐条成本面板）直接把这层去掉就行。
+ */
+export function stripAssistantUsage(messages: readonly unknown[]): unknown[] {
+  return messages.map((message) => {
+    const record = message as { role?: unknown; usage?: unknown } | null;
+    if (record === null || record.role !== 'assistant' || record.usage === undefined) return message;
+    return { ...record, usage: undefined };
+  });
 }
