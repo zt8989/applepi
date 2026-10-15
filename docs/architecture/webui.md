@@ -36,7 +36,10 @@ TUI 之外的第二块界面：**浏览器里的 pi-web-ui**，环仍然是终�
 | `src/context-panels.ts` | `@ela/webui` | 顶栏那三个入口：完整历史 / 系统 / 工具 |
 | `src/modal.ts` | `@ela/webui` | 通用模态框（列表 / 纯文本） |
 | `src/model-picker.ts` | `@ela/webui` | 模型选择器（**接管**了 pi-web-ui 自带那个，见下） |
-| `src/main.ts` | `@ela/webui` | 挂 `ChatPanel`、铺 `AppStorage`、连 `/ws` |
+| `src/stats.ts` | `@ela/webui` | composer 下面那一行：左端工作目录、右端统计（两段都由服务端算好） |
+| `src/sidebar.ts` | `@ela/webui` | 左侧边栏：历史会话（按 cwd 分组）+ 新建 / 搜索 + 底栏三个入口 |
+| `src/format.ts` | `@ela/webui` | 界面上的纯格式化（相对时间、路径末段） |
+| `src/main.ts` | `@ela/webui` | 外壳（侧边栏 + 主区）、挂 `ChatPanel`、铺 `AppStorage`、连 `/ws` |
 
 数据流（一次提问）：
 
@@ -168,6 +171,7 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 | --- | --- |
 | `GET /api/commands` | `/` 补全下拉念的命令表（内置的标了 `web` 的 + 扩展注册的） |
 | `GET /api/models` | 目录 + 作用域 + 当前模型 |
+| `GET /api/sessions` | 侧边栏那份会话列表（每个 cwd 的历史会话，见下） |
 | `GET /api/skills` | 进了 prompt 的 skill 清单 |
 | `GET /api/thinking` | 当前档位 + 这个模型支持的档位 + 默认档 |
 | `GET /api/settings` | 自动压缩 / 隐藏思考块 / 默认思考级别 |
@@ -245,6 +249,63 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
   `tool-view.ts` 按 `toolCallId` 查；文案格式照 Pi Web 的 `formatToolDuration`（`1.2s`）。
   工具跑着的时候表里还没这一条，那一格就留给转圈的状态图标。
 
+## 侧边栏：历史会话（按 cwd）+ 恢复
+
+Pi Web 那种左侧栏：**每个 cwd 的历史会话**列一列，点一条就恢复它；底栏三个入口
+（模型 / 技能 / 设置）。它与顶栏那三个入口不是一类东西：那些是**只读快照**，这个要
+**改会话本身**（换 id、换文件），所以恢复必须走内核。
+
+```
+GET  /api/sessions                    → WebSessionRef[]（id / cwd / title / 时间 / 条数）
+   ↑ 服务端用 @ela/core 的 listSessions() 扫 sessions/，标题 = 名字 → 第一句话 → id
+WS   {type:'resumeSession', id, cwd}  → bridge → 内核的 restoreSession(file)
+   ↑ 只传 id + cwd：路径由 main.ts 用 findSessionFile() 拼（浏览器不知道也不需要知道磁盘布局）
+```
+
+几条口径：
+
+- **分组在浏览器**（`sidebar.ts` 的 `groupSessions()`）。服务端只给一份平列表 ——
+  「哪几个 cwd 算同一组」（大小写、尾分隔符）那条归一化只该有一份，它在服务端的
+  `normalizeCwd()` 里；浏览器按拿到的 `cwd` 字符串归堆就够。
+- **子会话（子代理）不列**：`parentSession` 有值的那些属于某个父会话，单独列出来只会把
+  列表塞满。（顺带修了 `listSessions()` 一个漏字段：`parentSession` 从 header 读到了却
+  没放进返回值，见 `config-home.ts`。）
+- **标题**只读文件头 64KB（`readJsonlHead`）。读整个文件（`sessionTitle`）对列表是不可接受
+  的 —— 一个 18MB 的目录就是 18MB 的解析，而那正是 `sessions.md` 里已经付过代价的那类事。
+- **环在跑时整列与「新建」一起锁上**：换会话会把正在写的那个文件丢掉，所以那段时间
+  每行都 `aria-disabled`（点了给一句提示，不静默）。服务端还有第二道闸 —— `bridge`
+  收到 `resumeSession` / `newSession` 时判 `phase !== 'idle'` 并回一条警示
+  （TUI 的 `/sessions` `/new` 也是同一条规矩）。
+- **恢复不换工作目录**：`cwd` 是内核启动时定的（reducer 的 `conversation.reset` 带
+  `state.session.cwd` 过去，见 [kernel](kernel.md)）。所以跨目录恢复时**工具仍在原来的
+  目录里跑** —— 这件事由服务端在提示里说清楚（「它的目录是 X；工具仍在 Y 里跑」），
+  不说的话用户会以为「点了 beta 的会话就是在 beta 里干活」。
+- 列表在**连上、一轮跑完、恢复之后**刷新（`main.ts` 的 `onStatus` / `onStateApplied`）。
+  不做轮询：`listSessions()` 要读每个会话的头部与尾部，没有理由每几秒来一次。
+
+## 外壳（会话 id 不显示，cwd 在输入框左下）
+
+- 顶栏只剩：侧边栏开关、那三个入口、连接状态。**会话 id 不显示** ——
+  它是内部身份，人认的是标题（侧边栏那一列）。早先它是 `id · cwd` 一行；
+  品牌 `ela` 也搬进了侧边栏顶栏（照 Pi Web：一行 36px 的格子条 —— 左边品牌，
+  右边「＋新建」与搜索两个格子，中间一条竖线分隔），侧边栏收起时品牌随之不见。
+- 两栏的顶栏是**同一条线**：高度都由 `.ela-layout` 上的 `--ela-header-height`
+  （36px）定，底边是同一种 `--border` —— 各写一个数就会差几像素。
+- 顶栏那些入口也是**同一种格子**（`.ela-top-btn`）：图标 + 文字、格子之间一条竖线、
+  顶上一条 2px 的线（打开时变强调色）。侧边栏开关是一个 36px 的方格子。
+- **工作目录那一行在 composer 下面那一行的左端**（`stats.ts`）：`~/proj (main)` ——
+  家目录缩 `~`、括号里是 git 分支。它与右端的统计**同一行**（终端底栏同形状）。
+  这一行由服务端算（`WebAgentState.cwdText`，桥的 `cwdLabel` 回调走 TUI 的
+  `cwdLine()` + `gitBranch()`）：`~` 要服务端的家目录才缩得对，分支要读 `.git/HEAD`；
+  与 `statsText` 同一个理由 —— 两端各算一份迟早会漂。
+- **cwd 搬到输入框左下**（`main.ts` 的 `installComposerCwd()`）：插进 pi-web-ui 的
+  `message-editor` 那一行左端（附件 / 思考级别旁边），显示目录名、全路径在 `title` 里。
+  插进去的是一个只读 `span`，lit 重画那一行时可能被抹掉，所以**每一帧状态**上补一次
+  （状态帧本来就每秒都有，代价是一次 `querySelector`）。
+- **开场那条「已装扩展：…」不再进浏览器**（`main.ts` 不再把它放进桥的 notices）。
+  扩展清单是终端那边的开场信息（`[Extensions]`），在 web 里一条盖一条只占地方；
+  装载**诊断**（加载失败）照旧发 —— 那是要人看见的。
+
 ## 顶栏那三个入口（完整历史 / 系统 / 工具）
 
 照 Pi Web（github.com/agegr/pi-web）顶栏那三个按钮搬的。它们回答的是同一个问题：
@@ -280,8 +341,12 @@ TUI 那边换了模型 / 改了工具开关，浏览器里还显示着旧的那�
 - **完整历史是一页文档**：要能 Ctrl-F、能打印、能和聊天区并排看 —— 所以新标签页，
   与 Pi Web 的 `export?inline=1` 同一个形状。
 - **系统 / 工具要边看边对着聊天记录**（提示词里写了什么、模型刚才为什么那么干），
-  模态框一盖就看不见对话了。所以与 Pi Web 同形：顶栏下面摊开一块（高度封顶
-  `min(600px, 75dvh)`、自己滚），再点收起，点另一个直接换内容。
+  模态框一盖就看不见对话了。所以与 Pi Web 同形：顶栏下面**浮**出一层
+  （绝对定位在顶栏正下方，高度封顶 `min(600px, 75dvh)`、自己滚），再点收起，
+  点另一个直接换内容，**点面板外面也收起**。
+  它是 `.ela-panel-host` 的绝对定位层，所以展开与收起**不改变对话区与 composer 的
+  布局**（内联展开会把它们顶下去 —— 读一句话就要重新找位置）。空的时候宿主是
+  `hidden`：不占位、也不吃指针事件。
 
 面板的样式用 pi-web-ui 的**语义变量**（`--border` / `--secondary` / `--muted-foreground` /
 `--background` / `--foreground`）—— 它们在 `.dark` 下会被重定义，所以深色模式自动跟着变。

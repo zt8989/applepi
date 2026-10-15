@@ -6,6 +6,8 @@ import { parseEditDiff } from '../src/edit-diff';
 import { parseUnifiedPatch } from '../src/split-diff';
 import { toolParameterFields } from '../src/context-panels';
 import { formatToolDuration } from '../src/tool-view';
+import { pathBase, relativeTime } from '../src/format';
+import { groupSessions, matchesQuery } from '../src/sidebar';
 
 /**
  * webui 的那几个**纯函数**。
@@ -196,4 +198,62 @@ test('stripAssistantUsage：只剥助手消息的 usage，其余原样且不改�
     '工具结果不动（`assistant-message` 只读助手消息）',
   );
   assert.equal(messages[1]!.usage, usage, '剥的是拷贝，原数组一个字节不动');
+});
+
+
+// ─── 侧边栏那几块（`src/format.ts` / `src/sidebar.ts`）──
+
+test('relativeTime：分钟 / 小时 / 天 / 月 / 年各一档，认不出来就不显示', () => {
+  const now = Date.UTC(2026, 0, 10, 12, 0, 0);
+  assert.equal(relativeTime(now - 10_000, now), '刚刚');
+  assert.equal(relativeTime(now - 5 * 60_000, now), '5 分钟前');
+  assert.equal(relativeTime(now - 3 * 3_600_000, now), '3 小时前');
+  assert.equal(relativeTime(now - 2 * 86_400_000, now), '2 天前');
+  assert.equal(relativeTime(now - 40 * 86_400_000, now), '1 个月前');
+  assert.equal(relativeTime(now - 400 * 86_400_000, now), '1 年前');
+  // 0 / NaN（「还没落盘」那条会话）给空串，不是「1970 年前」。
+  assert.equal(relativeTime(0, now), '');
+  assert.equal(relativeTime(Number.NaN, now), '');
+  // 未来一点（浏览器与服务的时钟差）算「刚刚」，不算负数分钟。
+  assert.equal(relativeTime(now + 60_000, now), '刚刚');
+});
+
+test('pathBase：取末段，尾斜杠不算，取不到就原样回', () => {
+  assert.equal(pathBase('/Users/me/proj'), 'proj');
+  assert.equal(pathBase('/Users/me/proj/'), 'proj');
+  assert.equal(pathBase('C:\\Users\\me\\proj'), 'proj');
+  assert.equal(pathBase('/'), '/');
+  assert.equal(pathBase(''), '');
+});
+
+const session = (id: string, cwd: string, lastActivityMs: number) => ({
+  id,
+  cwd,
+  title: id,
+  lastActivityMs,
+  messageCount: 1,
+});
+
+test('groupSessions：按 cwd 归堆，组内与组间都按最后说话时间倒序', () => {
+  const groups = groupSessions([
+    session('a-old', '/work/a', 100),
+    session('b-new', '/work/b', 900),
+    session('a-new', '/work/a', 500),
+  ]);
+  assert.deepEqual(groups.map((group) => group.cwd), ['/work/b', '/work/a'], '组按各自最新那条排');
+  assert.deepEqual(groups[1]!.sessions.map((s) => s.id), ['a-new', 'a-old'], '组内也倒序');
+  // 时间一样时按 id 兜底（否则顺序随目录遍历，每次刷新都在跳）。
+  const tied = groupSessions([session('z', '/work/a', 100), session('a', '/work/a', 100)]);
+  assert.deepEqual(tied[0]!.sessions.map((s) => s.id), ['a', 'z']);
+  // cwd 缺失的会话也有一堆（不能丢）。
+  assert.deepEqual(groupSessions([session('x', '', 1)]).map((group) => group.cwd), ['（未知目录）']);
+});
+
+test('matchesQuery：标题 / cwd / id 三个面都能命中，空查询全过', () => {
+  const one = { ...session('sess-1', '/work/alpha', 1), title: '修一个 bug' };
+  assert.ok(matchesQuery(one, ''));
+  assert.ok(matchesQuery(one, 'BUG'), '大小写不敏感');
+  assert.ok(matchesQuery(one, 'alpha'));
+  assert.ok(matchesQuery(one, 'sess-1'));
+  assert.equal(matchesQuery(one, 'beta'), false);
 });

@@ -71,6 +71,14 @@ export interface WebBridgeOptions {
   /** 开新会话（换 id → 换文件）。 */
   newSession: () => void;
   /**
+   * 恢复一个历史会话（侧边栏里点一条）；没接就拒绝并说一声。
+   *
+   * 与 `newSession` 同一类：**必须由内核出手** —— 换 id、换文件、把记录器游标对齐，
+   * 三件事在一起才是对的恢复（见 `kernel.ts` 的 `restoreSession`）。桥只传 id + cwd，
+   * 路径由 main.ts 那边拼（`findSessionFile`）。
+   */
+  resumeSession?: ((id: string, cwd: string) => Promise<{ restored: number }>) | undefined;
+  /**
    * 底栏统计行（TUI 的 `statsLine()`）。给了才发 `statsText` / `statsLevel`。
    *
    * 走回调而不是在桥里 import `app.ts` 的 `statsLine`：桥是「内核状态 → 线协议」那一
@@ -78,6 +86,14 @@ export interface WebBridgeOptions {
    * `--no-web` 之外的所有情形（含测试探针）都会被构造。
    */
   stats?: ((state: AgentState) => { text: string; level: 'none' | 'warn' | 'error' }) | undefined;
+  /**
+   * 底栏那一行工作目录（TUI 的 `cwdLine()`：家目录缩 `~` + git 分支）。
+   *
+   * 与 `stats` 同一个理由走回调：那一行由 `app.ts` 的两个函数算（`cwdLine` /
+   * `gitBranch`），而桥不该 import `app.ts`（它会拉进一整棵 pi-tui 的渲染图）。
+   * 不给就退回裸 cwd。
+   */
+  cwdLabel?: ((state: AgentState) => string) | undefined;
   /**
    * 浏览器连上 / 全断开时叫一声。
    *
@@ -435,7 +451,50 @@ export class WebBridge {
         return [];
       }
       case 'newSession': {
+        // 环在跑时不能换会话（正在写消息）—— 与 TUI 的 `/new` 同一条规矩。
+        // 桥这边是第二道闸：侧边栏已经把「新建」锁上了（
+        // `sidebar.ts`），但浏览器可能拿着旧的一帧（另一个标签页刚发的命令）。
+        if (this.options.store.getState().phase !== 'idle') {
+          return [{ type: 'notice', level: 'warn', text: '上一回合还没结束，先中断再开新会话' }];
+        }
         this.options.newSession();
+        return [];
+      }
+      case 'resumeSession': {
+        // 环在跑时不能换会话（消息还在往当前那个文件里写）—— 与 TUI 的 `/sessions`
+        // 同一口径：拒绝并说一声，不静默。
+        if (this.options.store.getState().phase !== 'idle') {
+          return [{ type: 'notice', level: 'warn', text: '上一回合还没结束，先中断再恢复历史' }];
+        }
+        const resume = this.options.resumeSession;
+        if (resume === undefined) {
+          return [{ type: 'notice', level: 'warn', text: '这个装配不能恢复历史会话' }];
+        }
+        // 恢复是异步的（要读文件、要读轨迹树）—— 先回一个“开始”，好了再广播一条。
+        // 不等着它：`handle` 是同步的，而阻塞在这里会让这条连接的其他消息排队。
+        void resume(message.id, message.cwd)
+          .then((result) => {
+            // 恢复**不换工作目录**（cwd 是内核启动时定的，见 reducer 的
+            // `conversation.reset`）：跨目录恢复时工具仍在原来那个目录里跑。
+            // 不说清楚的话，用户会以为“点了 beta 的会话就是在 beta 里干活”。
+            const here = this.options.store.getState().session.cwd;
+            const elsewhere =
+              message.cwd !== '' && message.cwd !== here
+                ? `（它的目录是 ${message.cwd}；工具仍在 ${here} 里跑）`
+                : '';
+            this.broadcast({
+              type: 'notice',
+              level: 'info',
+              text: `已恢复 ${message.id}（${result.restored} 条消息，未重跑模型）${elsewhere}`,
+            });
+          })
+          .catch((error: unknown) => {
+            this.broadcast({
+              type: 'notice',
+              level: 'error',
+              text: `恢复失败：${error instanceof Error ? error.message : String(error)}`,
+            });
+          });
         return [];
       }
       case 'ui-response': {
@@ -477,6 +536,7 @@ export class WebBridge {
       // 会话身份从 **store** 里读（与 TUI 同一个地方）—— 不再各自去问内核。
       sessionId: state.session.id,
       cwd: state.session.cwd,
+      cwdText: this.options.cwdLabel?.(state) ?? state.session.cwd,
       messages: streamItems(state),
       model,
       thinkingLevel: state.thinkingLevel,

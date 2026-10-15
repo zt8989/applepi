@@ -16,14 +16,13 @@ import { findSessionFile } from '@ela/core/config-home';
 import { defaultProviderSpec, providerNames } from '@ela/core/provider';
 import { THINKING_LEVELS, isThinkingLevel } from '@ela/core/thinking-level';
 import { createKernel, type Kernel } from '@ela/core/kernel';
-import { runTui, SLASH_COMMANDS, statsLine } from './app';
+import { cwdLine, gitBranch, runTui, SLASH_COMMANDS, statsLine } from './app';
 import { setupTheme } from './theme';
 import { keyLabel } from './keybindings';
 import { WebBridge } from './web/bridge';
 import { createWebApi } from './web/api';
 import { startWebServer, type WebServerHandle } from './web/server';
 import { modelRuntimeFor } from './model-picker';
-import { extensionLabels } from './resource-labels';
 import type { Theme } from '@earendil-works/pi-coding-agent';
 // pi 的 theme 是 globalThis 上的一个 Proxy —— initTheme() 之后一直可读。
 // 直接 import（不缓存）是为了「initTheme 可能被再调」时读到的是当时那个。
@@ -440,6 +439,13 @@ async function main(): Promise<void> {
         // 会话 id / cwd **不在这里递** —— 它们在 `state.session` 里（见那一块的注释）。
         setModel: (provider, id) => kernel.setModel(provider, id),
         newSession: () => kernel.newSession(),
+        // 侧边栏点一条历史会话：内核换 id、换文件、对齐记录器游标（见 bridge 的注释）。
+        // 路径在这里拼 —— 桥拿到的只有 id + cwd（浏览器不知道、也不需要知道磁盘布局）。
+        resumeSession: async (id, cwd) => {
+          const file = findSessionFile(id, cwd);
+          if (!existsSync(file)) throw new Error(`找不到会话文件 ${id}`);
+          return kernel.restoreSession(file);
+        },
         resolveModel,
         // 浏览器连上/全断开 → 切扩展宿主模式。有浏览器时 `ask_user_question` 那种
         // 按 `ctx.mode` 选路的扩展才会走 `ctx.ui.select/input` 的逐题回退 —— 而那两个
@@ -449,10 +455,14 @@ async function main(): Promise<void> {
         // 浏览器那边 pi-web-ui 自带的 `formatUsage` 只到 `R`/`W` —— 所以由服务端
         // 算好整行发过去，而不是让它再算一份（口径一漂，两端对不上）。
         stats: (state) => statsLine(state),
+        // 底栏左端那一行（与终端底栏逐字同形）：家目录缩 `~` + git 分支。
+        cwdLabel: (state) => cwdLine(state.session.cwd, gitBranch(state.session.cwd)),
       },
       // 开场诊断与终端那边同一个口径：装了哪些扩展 + 装载失败。
       [
-        ...extensionLabels(kernel.extensions.entries).map((label) => `已装扩展：${label}`),
+        // 只报装载**诊断**：开场那条「已装扩展：…」不进浏览器 —— 侧边栏已经能看出
+        // 有哪些会话在用哪些 cwd，而扩展清单是终端那边的开场信息（`[Extensions]`），
+        // 它在 web 里一条盖一条只占地方。
         ...kernel.extensions.errors.map((error) => `扩展装载诊断：${error}`),
       ],
     );

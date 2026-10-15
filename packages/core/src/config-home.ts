@@ -483,6 +483,11 @@ export function listSessions(filter?: { cwd?: string }): SessionSummary[] {
         mtimeMs,
         createdAt,
         entries: countLines(full),
+        // header 里那个分叉来源要带上：`readSessionMeta` **读不到它**（它走
+        // `readJsonlHead`，而那里把 `session` 那一行单独拿出去当 header 了，不进 `content`）
+        // —— 早先这里漏了，于是 `parentSession` 永远是 undefined，而字段文档写着
+        // 「header 的 `parentSession`」。子会话（子代理那些）靠它从列表里排掉。
+        ...(parentSession !== undefined ? { parentSession } : {}),
         ...(readSessionMeta(full) ?? {}),
         lastActivityMs: readJsonlTail(full, TAIL_BYTES).lastActivityMs || mtimeMs,
       });

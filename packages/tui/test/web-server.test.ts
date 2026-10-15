@@ -81,7 +81,10 @@ function connect(url: string): Promise<Client> {
 }
 
 /** 起一个「内核 + 桥 + server」的最小装配。 */
-async function start(): Promise<{
+async function start(bridgeOptions: {
+  resumeSession?: (id: string, cwd: string) => Promise<{ restored: number }>;
+  cwdLabel?: (state: ReturnType<ReturnType<typeof createAgentStore>['getState']>) => string;
+} = {}): Promise<{
   server: WebServerHandle;
   bridge: WebBridge;
   store: ReturnType<typeof createAgentStore>;
@@ -115,6 +118,8 @@ async function start(): Promise<{
       store,
       setModel: () => true,
       newSession: () => {},
+      ...(bridgeOptions.resumeSession !== undefined ? { resumeSession: bridgeOptions.resumeSession } : {}),
+      ...(bridgeOptions.cwdLabel !== undefined ? { cwdLabel: bridgeOptions.cwdLabel } : {}),
       resolveModel,
       onPresenceChange: (connected) => presence.push(connected),
     },
@@ -514,6 +519,137 @@ test('web api：完整历史读会话文件（压缩掉的早期消息也在）�
     assert.ok(html.includes(file), '页面上要写明读的是哪个文件');
   } finally {
     await ctx.dispose();
+  }
+});
+
+/**
+ * composer 下面那一行的左端（工作目录那一行）。
+ *
+ * 它**由服务端算**（与 `statsText` 同一个理由）：`~` 要服务端的家目录才缩得对，
+ * git 分支要读 `.git/HEAD` —— 浏览器两样都碰不到。桥只负责把它上线。
+ */
+test('bridge：cwdText 走 cwdLabel 回调；不给就退回裸 cwd', () => {
+  const faux = createFauxRuntime();
+  faux.setResponses(demoResponses());
+  const store = createAgentStore({
+    runtime: faux.runtime,
+    systemPrompt: 'test',
+    sessionId: 'web-test-session',
+    cwd: '/tmp/ela-web-test',
+  });
+  const labelled = new WebBridge({
+    store,
+    setModel: () => true,
+    newSession: () => {},
+    resolveModel: () => null,
+    cwdLabel: (state) => `~/proj (main) @${state.session.cwd}`,
+  });
+  const plain = new WebBridge({ store, setModel: () => true, newSession: () => {}, resolveModel: () => null });
+  try {
+    const withLabel = labelled.hello();
+    const without = plain.hello();
+    if (withLabel.type !== 'hello' || without.type !== 'hello') throw new Error('unreachable');
+    assert.equal(withLabel.state.cwdText, '~/proj (main) @/tmp/ela-web-test');
+    assert.equal(without.state.cwdText, '/tmp/ela-web-test', '没接回调就退回 state 里那个 cwd');
+  } finally {
+    labelled.dispose();
+    plain.dispose();
+  }
+});
+
+/**
+ * 侧边栏那一列会话（每个 cwd 的历史会话）。
+ *
+ * 守的是三件事：**标题**是给人认的那句话（而不是 id）、**按 cwd 分得开**（两个目录
+ * 各一条）、**子会话不单列**（它们属于父会话，单独列出来只会把列表塞满）。
+ */
+test('web api：/api/sessions 给每个 cwd 的历史会话（标题 / cwd / 条数）', async () => {
+  const ctx = await start();
+  try {
+    const write = (id: string, cwd: string, firstLine: string, extra: Record<string, unknown> = {}): void => {
+      const file = findSessionFile(id, cwd);
+      mkdirSync(path.dirname(file), { recursive: true });
+      const stamp = new Date().toISOString();
+      writeFileSync(
+        file,
+        [
+          JSON.stringify({ type: 'session', version: 1, id, timestamp: stamp, cwd, ...extra }),
+          JSON.stringify({
+            type: 'message',
+            id: 'e1',
+            parentId: null,
+            timestamp: stamp,
+            message: { role: 'user', content: firstLine, timestamp: Date.now() },
+          }),
+        ].join('\n') + '\n',
+        'utf8',
+      );
+    };
+    write('sess-alpha', '/tmp/ela-web-alpha', '看看 alpha 的那个 bug');
+    write('sess-beta', '/tmp/ela-web-beta', 'beta 的部署脚本');
+    // 子代理会话（`parentSession`）：不进侧边栏。
+    write('sess-child', '/tmp/ela-web-alpha', '子代理的一条', { parentSession: 'sess-alpha' });
+
+    const info = (await (await fetch(`${ctx.server.url}api/sessions`)).json()) as {
+      sessions: { id: string; cwd: string; title: string; messageCount: number }[];
+    };
+    const byId = new Map(info.sessions.map((session) => [session.id, session]));
+    assert.equal(byId.has('sess-child'), false, '子会话不单列');
+    assert.equal(byId.get('sess-alpha')?.cwd, '/tmp/ela-web-alpha');
+    assert.equal(byId.get('sess-alpha')?.title, '看看 alpha 的那个 bug', '标题是第一句话，不是 id');
+    assert.equal(byId.get('sess-beta')?.cwd, '/tmp/ela-web-beta');
+    assert.equal(byId.get('sess-beta')?.title, 'beta 的部署脚本');
+    assert.equal(typeof byId.get('sess-alpha')?.messageCount, 'number');
+  } finally {
+    await ctx.dispose();
+  }
+});
+
+/**
+ * 侧边栏点一条 = 恢复它 —— 而这件事**只能由内核出手**（换 id、换文件、对齐记录器
+ * 游标），所以桥只把「用户点了哪一条」转给装配它的那一方。
+ */
+test('bridge：resumeSession 交给内核回调；环在跑时先拒绝', async () => {
+  const calls: { id: string; cwd: string }[] = [];
+  const ctx = await start({
+    resumeSession: async (id, cwd) => {
+      calls.push({ id, cwd });
+      return { restored: 3 };
+    },
+  });
+  try {
+    assert.deepEqual(ctx.bridge.handle({ type: 'resumeSession', id: 'sess-a', cwd: '/tmp/a' }), []);
+    // 恢复是异步的：给那个 promise 一个落地的机会。
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(calls, [{ id: 'sess-a', cwd: '/tmp/a' }], 'id + cwd 原样传给内核');
+
+    // 环在跑时换会话会把正在写的那个文件丢掉：拒绝，并说一声（不静默）。
+    ctx.store.dispatch({ type: 'user.message', text: '跑起来' });
+    assert.notEqual(ctx.store.getState().phase, 'idle');
+    const refused = ctx.bridge.handle({ type: 'resumeSession', id: 'sess-b', cwd: '/tmp/b' });
+    assert.equal(refused[0]?.type, 'notice');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(calls.length, 1, '跑着的时候一次都没转给内核');
+  } finally {
+    await ctx.dispose();
+  }
+});
+
+test('bridge：没接内核的装配拒绝恢复（说不出来为什么，也不假装成功）', () => {
+  const faux = createFauxRuntime();
+  faux.setResponses(demoResponses());
+  const store = createAgentStore({
+    runtime: faux.runtime,
+    systemPrompt: 'test',
+    sessionId: 'web-test-session',
+    cwd: '/tmp/ela-web-test',
+  });
+  const bridge = new WebBridge({ store, setModel: () => true, newSession: () => {}, resolveModel: () => null });
+  try {
+    const refused = bridge.handle({ type: 'resumeSession', id: 'sess-a', cwd: '/tmp/a' });
+    assert.equal(refused[0]?.type, 'notice');
+  } finally {
+    bridge.dispose();
   }
 });
 

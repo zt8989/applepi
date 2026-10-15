@@ -363,6 +363,9 @@ async function serveApi(
       case 'GET /api/models':
         sendJson(res, 200, api.models());
         return;
+      case 'GET /api/sessions':
+        sendJson(res, 200, api.sessions());
+        return;
       case 'GET /api/skills':
         sendJson(res, 200, api.skills());
         return;

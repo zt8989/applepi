@@ -87,6 +87,15 @@ export interface WebAgentState {
   /** 工具的工作目录（界面上显示用）。 */
   cwd: string;
   /**
+   * 底栏那一行工作目录（与 TUI 的 `cwdLine()` **逐字同形**）：`~/proj (main)`，
+   * 家目录缩成 `~`、括号里是 git 分支（不在仓库里就没有括号）。
+   *
+   * 为什么由服务端算而不是浏览器拼：`~` 要**服务端的家目录**才缩得对，而分支要读
+   * `.git/HEAD`（浏览器碰不到文件系统）。与 `statsText` 同一个理由 —— 两套算法各写
+   * 一份，口径迟早会漂（终端与浏览器显示同一个会话的两个目录形状）。
+   */
+  cwdText: string;
+  /**
    * 发给模型的对话历史（user / assistant / toolResult），**从轨迹派生**，
    * 并按锚点把提示条目插在正确的消息之间。
    */
@@ -186,6 +195,13 @@ export type WebClientMessage =
   | { type: 'setThinking'; level: string }
   | { type: 'newSession' }
   /**
+   * 恢复一个历史会话（侧边栏里点一条）。
+   *
+   * **只传 id + cwd**，不传文件路径：路径由服务端自己拼（`findSessionFile`）——
+   * 浏览器拿不到、也不需要知道磁盘布局。
+   */
+  | { type: 'resumeSession'; id: string; cwd: string }
+  /**
    * 回答一个 `ui-request`。`value` 的义：`select` = 选中的选项；`input` = 文本；
    * `confirm` = `'yes'` / `'no'`。取消（关掉弹窗）给 `cancelled: true`。
    */
@@ -198,6 +214,24 @@ export type WebClientMessage =
 // 让前端不必把服务端的事实抄一份（模型目录、命令表、作用域、settings 都在服务端）。
 // 形状定义在这里，因为它与线协议一样是**前后端唯一共同语言**。
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** `GET /api/sessions` 里的一条：侧边栏列表要的**紧凑投影**。 */
+export interface WebSessionRef {
+  id: string;
+  /** 会话自己的工作目录 —— 侧边栏按它分组（「历史 cwd 的会话」）。 */
+  cwd: string;
+  /** 列表里那行文字：用户起的名字，没有就用第一句话，再没有就用 id。 */
+  title: string;
+  /** 最后一次说话的时间（ms）—— 排序与「多久之前」用它。 */
+  lastActivityMs: number;
+  /** 消息条数（数行数，不解析）。 */
+  messageCount: number;
+}
+
+/** `GET /api/sessions`：侧边栏要的那份列表（按 cwd 分组是前端的事）。 */
+export interface WebSessionsInfo {
+  sessions: WebSessionRef[];
+}
 
 /** `GET /api/commands` 里的一条：`/` 补全下拉念它。 */
 export interface WebCommandInfo {
@@ -328,6 +362,13 @@ export function parseClientMessage(raw: string): WebClientMessage | undefined {
     }
     case 'newSession':
       return { type: 'newSession' };
+    case 'resumeSession': {
+      const id = (value as { id?: unknown }).id;
+      const cwd = (value as { cwd?: unknown }).cwd;
+      return typeof id === 'string' && id !== '' && typeof cwd === 'string'
+        ? { type: 'resumeSession', id, ...(cwd === '' ? { cwd: '' } : { cwd }) }
+        : undefined;
+    }
     case 'ui-response': {
       const id = (value as { id?: unknown }).id;
       if (typeof id !== 'string') return undefined;

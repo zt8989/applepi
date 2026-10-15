@@ -50,6 +50,8 @@ export class RemoteAgentState {
   tools: unknown[] = [];
   sessionId = '';
   cwd = '';
+  /** 底栏那一行工作目录（服务端算好的 `~/proj (main)`，见 `stats.ts`）。 */
+  cwdText = '';
 
   /** pi-web-ui 写 `state.model` 时回调（由 RemoteAgent 接到「发给服务端」）。 */
   onModelSelected: ((provider: string, id: string) => void) | undefined;
@@ -97,6 +99,7 @@ export class RemoteAgentState {
     this.statsLevel = state.statsLevel;
     this.sessionId = state.sessionId;
     this.cwd = state.cwd;
+    this.cwdText = state.cwdText;
   }
 
   toolNames: readonly string[] = [];
@@ -239,6 +242,16 @@ export class RemoteAgent {
   /** 新会话（界面上的按钮用）。 */
   startNewSession(): void {
     this.send({ type: 'newSession' });
+  }
+
+  /**
+   * 恢复一个历史会话（侧边栏里点一条）。
+   *
+   * 只发 id + cwd：路径由服务端拼（`findSessionFile`），浏览器不需要知道磁盘布局。
+   * 服务端那边还要判一次「环在不在跑」（侧边栏自己也锁了，见 `sidebar.ts`）。
+   */
+  resumeSession(id: string, cwd: string): void {
+    this.send({ type: 'resumeSession', id, cwd });
   }
 
   private send(message: WebClientMessage): void {

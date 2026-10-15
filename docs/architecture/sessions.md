@@ -181,6 +181,10 @@ kernel.restore(messages);      // 只灌（消息已读出来时）
 `session-file.readSessionMessages()`，**零 token**。适配层在 `packages/tui/src/session-picker.ts`，
 理由写在那个文件的头注释里。
 
+浏览器那边还有一个更轻的入口：**侧边栏的历史会话**（`GET /api/sessions` +
+WS 的 `resumeSession`）—— 同一个 `listSessions()`，但只读文件头 **64KB** 找第一句话，
+分组与恢复的细节见 [webui](webui.md) 的「侧边栏」。
+
 面板的完整交互（与 pi 逐行一致）：
 
 | 键 | 作用 |
@@ -223,6 +227,7 @@ kernel.restore(messages);      // 只灌（消息已读出来时）
 | 标题 | 只读开头 512KB，且**命中第一条 user 消息就停**（`readJsonlHead({stopAfter})`） | 读多少只与「第一个问题有多长」有关，与聊了多久无关 |
 | 名字（`session_info`） | 扫开头 512KB，**不提前停** | 改名可以反复发生，要的是**最后**一条（见下） |
 | 最后说话时间 | 只读**末尾** 256KB（`readJsonlTail`） | 消息 timestamp 在每行里，但最后那次几乎总在末尾 |
+| 分叉来源（`parentSession`） | header 那一行（`readHead`） | 子会话（子代理）靠它从列表里排掉；`readSessionMeta` 读不到它（header 那一行不进 `content`） |
 
 早先这里是「每个会话都 `readSession` 整份再 parse 一遍」：124 个会话、18MB 的目录，
 光列列表就要 524ms（其中 `listSessions` 286ms + 标题 238ms）。现在整条弹窗路径 128ms。

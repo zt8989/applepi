@@ -32,6 +32,7 @@ import { installToolMessageView, setToolTimings } from './tool-view';
 import { installCommandPalette } from './command-palette';
 import { installContextPanels } from './context-panels';
 import { installStatsView } from './stats';
+import { installSidebar, type Sidebar } from './sidebar';
 import { elaApi } from './api';
 import { parseCommand, runCommand } from './commands';
 import './app.css';
@@ -93,24 +94,31 @@ function installStorage(): void {
   setAppStorage(new AppStorage(settings, providerKeys, sessions, customProviders, backend));
 }
 
-/** 顶栏 + 提示行 + 聊天区。聊天区里放 pi-web-ui 的 ChatPanel。 */
+/**
+ * 外壳：**左侧边栏 + 右侧主区**。主区里依次是顶栏、面板、提示行、聊天区。
+ *
+ * 侧边栏（`sidebar.ts`）装的是历史会话与底部那三个入口；顶栏左侧那个按钮收放它，
+ * 状态存在浏览器里（与 `sidebar.ts` 同一个 key）。会话 id **不显示**：它是内部身份，
+ * 而人认的是标题（侧边栏那一列）。工作目录那一行（`~/proj (main)`）在 **composer 下面
+ * 那一行的左端**，右端是统计 —— 与终端底栏同形状，见 `stats.ts`。
+ */
 function buildShell(): void {
   const app = document.getElementById('app');
   if (!app) throw new Error('#app 不存在');
   app.innerHTML = `
-    <header class="flex items-center gap-3 px-4 py-2 border-b border-border shrink-0">
-      <span class="text-sm font-semibold">ela</span>
-      <span id="ela-session" class="text-xs ela-muted"></span>
-      <div id="ela-context-actions" class="flex items-center gap-1 ml-auto"></div>
-      <span id="ela-status" class="text-xs ela-muted">连接中…</span>
-      <button id="ela-new" type="button"
-        class="text-xs px-2 py-1 rounded border border-border hover:bg-secondary transition-colors">
-        新会话
-      </button>
-    </header>
-    <div id="ela-context-panels" class="shrink-0"></div>
-    <div id="ela-notices" class="px-4 text-xs shrink-0"></div>
-    <div id="ela-chat" class="flex-1 min-h-0 overflow-hidden"></div>
+    <div class="ela-layout">
+      <aside id="ela-sidebar" class="ela-sidebar"></aside>
+      <div class="ela-main">
+        <header class="ela-main-header">
+          <button id="ela-sidebar-toggle" type="button" class="ela-top-btn ela-top-icon" title="收起 / 展开侧边栏" aria-label="收起 / 展开侧边栏" aria-expanded="true">☰</button>
+          <div id="ela-context-actions" class="ela-context-actions"></div>
+          <span id="ela-status" class="ela-status">连接中…</span>
+        </header>
+        <div id="ela-context-panels" class="ela-panel-host"></div>
+        <div id="ela-notices" class="px-4 text-xs shrink-0"></div>
+        <div id="ela-chat" class="flex-1 min-h-0 overflow-hidden"></div>
+      </div>
+    </div>
   `;
 }
 
@@ -138,11 +146,6 @@ function pushNotice(text: string, tone: 'info' | 'warn' | 'error' = 'info'): voi
 function setStatus(text: string): void {
   const el = document.getElementById('ela-status');
   if (el) el.textContent = text;
-}
-
-function setSession(id: string, cwd: string): void {
-  const el = document.getElementById('ela-session');
-  if (el) el.textContent = id === '' ? '' : `${id} · ${cwd}`;
 }
 
 /** 取一个**已经建好**的容器（`buildShell()` 刚铺过）。null 就是铺错了，直接抛。 */
@@ -199,6 +202,19 @@ async function main(): Promise<void> {
   const chatPanel = new ChatPanel();
   /** 现在开着的扩展对话框（id → 只拆 DOM 的 close）。 */
   const openDialogs = new Map<string, () => void>();
+  /** 斜杠命令与底栏三个入口共用的上下文（`commands.ts`）。 */
+  const commandContext = {
+    notice: (text: string, tone: 'info' | 'warn' | 'error' = 'info') => pushNotice(text, tone),
+    openModelPicker: () => void openModelPickerFromApi(),
+  };
+  /**
+   * 侧边栏。先声明、后赋值：agent 的回调里要用它，而侧边栏的钩子又要用 agent
+   * （两向引用 —— 先建哪一个都会撞上「used before its declaration」）。
+   */
+  let sidebar: Sidebar | undefined;
+  /** 上一帧在不在跑：用来认出「跑完了一轮」（那时刷新一次列表最值）。 */
+  let wasStreaming = false;
+
   const agent = new RemoteAgent({
     // pi-web-ui 只在**事件**上重画；服务端推来的整份状态不会触发它 —— 这里补一次。
     onStateApplied: () => {
@@ -206,7 +222,14 @@ async function main(): Promise<void> {
       // 顺序反了这一帧就会用上一帧的耗时。
       setToolTimings(agent.state.toolTimings);
       chatPanel.agentInterface?.requestUpdate();
-      setSession(agent.state.sessionId, agent.state.cwd);
+      sidebar?.sync({
+        sessionId: agent.state.sessionId,
+        cwd: agent.state.cwd,
+        busy: agent.state.isStreaming,
+      });
+      // 一轮跑完 → 列表里那一行的标题/时间变了（第一条就是新会话的标题）。
+      if (wasStreaming && !agent.state.isStreaming) sidebar?.refresh();
+      wasStreaming = agent.state.isStreaming;
     },
     onNotices: (notices) => {
       for (const notice of notices) pushNotice(notice);
@@ -214,6 +237,8 @@ async function main(): Promise<void> {
     onNotice: (level, text) => pushNotice(text, level === 'info' ? 'info' : level === 'warn' ? 'warn' : 'error'),
     onStatus: (status) => {
       setStatus(status === 'open' ? '已连接' : status === 'connecting' ? '连接中…' : '断开，重连中…');
+      // 重连 / 新开一个标签页：列表可能已经变了（终端那边开了会话）。
+      if (status === 'open') sidebar?.refresh();
     },
     // 扩展的对话框（`ctx.ui.select/confirm/input`）—— 与终端**各出一份**，谁先回答
     // 谁算数（服务端 core 的 `raceDialog`）。终端那边先答了会发 `ui-cancel`，这里关掉。
@@ -268,16 +293,31 @@ async function main(): Promise<void> {
       // 展开要在服务端做（文件在磁盘上），所以**不拦**——让它当普通消息发出去，
       // bridge 收到后展开（见 `web/bridge.ts`）。
       if (parsed.name.startsWith('skill:')) return false;
-      await runCommand(parsed.name, parsed.arg, {
-        notice: (notice, tone = 'info') => pushNotice(notice, tone),
-        openModelPicker: () => void openModelPickerFromApi(),
-      });
+      await runCommand(parsed.name, parsed.arg, commandContext);
       return true;
     },
   });
 
   // 输入 `/` 时的命令补全（命令表同样来自 HTTP 接口）。
   installCommandPalette(() => elaApi.commands());
+
+  // 侧边栏（钩子要用 agent，所以到这里才建）。
+  sidebar = installSidebar(requireElement('ela-sidebar'), {
+    onResume: (id, cwd) => agent.resumeSession(id, cwd),
+    onNew: () => agent.startNewSession(),
+    ...commandContext,
+    // 底栏的「技能」「设置」跑的是与 `/skills` `/settings` 同一个命令（同一个弹窗）。
+    openSkills: () => void runCommand('skills', '', commandContext),
+    openSettings: () => void runCommand('settings', '', commandContext),
+  });
+  const sidebarToggle = requireElement('ela-sidebar-toggle');
+  const syncToggle = (): void =>
+    sidebarToggle.setAttribute('aria-expanded', sidebar?.isOpen() === true ? 'true' : 'false');
+  syncToggle();
+  sidebarToggle.addEventListener('click', () => {
+    sidebar?.toggle();
+    syncToggle();
+  });
 
   await chatPanel.setAgent(agent as never, {
     // 密钥在服务端。这里返回 true 只是让 pi-web-ui 的「没 key 就不发」那道闸放行。
@@ -290,8 +330,6 @@ async function main(): Promise<void> {
   const chat = document.getElementById('ela-chat');
   if (!chat) throw new Error('#ela-chat 不存在');
   chat.appendChild(chatPanel);
-
-  document.getElementById('ela-new')?.addEventListener('click', () => agent.startNewSession());
 
   agent.connect(wsUrl());
 }

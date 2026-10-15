@@ -29,8 +29,8 @@
 import type { AgentStore } from '@ela/core/store';
 import type { Api, Model } from '@earendil-works/pi-ai';
 import { existsSync } from 'node:fs';
-import { findSessionFile } from '@ela/core/config-home';
-import { readSession } from '@ela/core/session-file';
+import { findSessionFile, listSessions, type SessionSummary } from '@ela/core/config-home';
+import { readSession, readJsonlHead } from '@ela/core/session-file';
 import { historyLines } from './history';
 import {
   DEFAULT_THINKING_LEVEL,
@@ -45,6 +45,8 @@ import type {
   WebCommandInfo,
   WebHistoryInfo,
   WebModelsInfo,
+  WebSessionRef,
+  WebSessionsInfo,
   WebSettingsInfo,
   WebSkillInfo,
   WebSystemPromptInfo,
@@ -88,6 +90,8 @@ export interface WebApiOptions {
 export interface WebApi {
   commands(): WebCommandInfo[];
   models(): WebModelsInfo;
+  /** 侧边栏的会话列表（每个 cwd 的历史会话）。 */
+  sessions(): WebSessionsInfo;
   skills(): WebSkillInfo[];
   thinking(): WebThinkingInfo;
   settings(): WebSettingsInfo;
@@ -112,6 +116,69 @@ export interface WebApi {
 /** 「环在跑」时不能改的东西，统一回这一句（与 TUI 各面板同一口径）。 */
 function busyResult(): WebActionResult {
   return { ok: false, message: '上一回合还没结束，先中断再改' };
+}
+
+/**
+ * 列表阶段为了一个标题最多读文件头多少字节。
+ *
+ * 读整个文件（`sessionTitle`）对列表来说是不可接受的：一个 18MB 的目录就是 18MB 的
+ * 解析。而第一句话几乎总在头几 KB 里 —— 也就够了。读不到的（超长首条、或没有用户
+ * 消息）退到 id，不为了一个标题去扫全文（见 `readJsonlHead` 的注释）。
+ */
+const TITLE_HEAD_BYTES = 64 * 1024;
+const TITLE_MAX_LENGTH = 60;
+
+/** 消息内容 → 纯文本（与 `session-file.ts` 的 `contentToText` 同一口径，但它不对外）。 */
+function contentText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((block) =>
+      typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'text'
+        ? String((block as { text?: unknown }).text ?? '')
+        : ' ', // 图片块占一个词，不把前后文粘在一起
+    )
+    .join(' ');
+}
+
+/**
+ * 侧边栏一行显示什么：用户起的名字 → 第一句话 → id。
+ *
+ * 名字在 `SessionSummary` 里（`listSessions` 已经读过头部 512KB 的 `session_info`）；
+ * 第一句话只能自己从头读一段找 —— 见 `TITLE_HEAD_BYTES`。
+ */
+function sessionListTitle(summary: SessionSummary): string {
+  if (summary.name !== undefined && summary.name !== '') return summary.name;
+  const { content } = readJsonlHead(summary.file, TITLE_HEAD_BYTES);
+  for (const entry of content) {
+    const message = (entry as { message?: { role?: unknown; content?: unknown } }).message;
+    if (message?.role !== 'user') continue;
+    const line = contentText(message.content).trim().split('\n')[0]?.trim() ?? '';
+    if (line === '') continue;
+    return line.length > TITLE_MAX_LENGTH ? `${line.slice(0, TITLE_MAX_LENGTH - 1)}…` : line;
+  }
+  return summary.id;
+}
+
+/**
+ * 侧边栏那份列表：**每个 cwd 的历史会话**，按最后说话时间倒序（`listSessions` 已排好）。
+ *
+ * 分组是前端的事（`sidebar.ts`）：这里只给一份 [WebSessionRef](@ela/core/web-protocol)，
+ * 浏览器按 `cwd` 归堆 —— 「哪几个 cwd 算同一组」（大小写、尾分隔符）那条归一化只该有
+ * 一份，而它在服务端（`normalizeCwd`）。
+ *
+ * 代理子会话不列：它们属于某个主会话（`parentSession`），单独列出来只会把侧边栏塞满。
+ */
+function sessionRefs(): WebSessionRef[] {
+  return listSessions()
+    .filter((session) => session.parentSession === undefined)
+    .map((session) => ({
+      id: session.id,
+      cwd: session.cwd,
+      title: sessionListTitle(session),
+      lastActivityMs: session.lastActivityMs,
+      messageCount: session.entries,
+    }));
 }
 
 export function createWebApi(options: WebApiOptions): WebApi {
@@ -168,6 +235,10 @@ export function createWebApi(options: WebApiOptions): WebApi {
             ? null
             : { provider: state.providerName, id: state.modelId },
       };
+    },
+
+    sessions() {
+      return { sessions: sessionRefs() };
     },
 
     skills() {

@@ -15,6 +15,7 @@ import type {
   WebActionResult,
   WebCommandInfo,
   WebModelsInfo,
+  WebSessionsInfo,
   WebSettingsInfo,
   WebSkillInfo,
   WebSystemPromptInfo,
@@ -42,6 +43,8 @@ function post<T>(path: string, body: unknown): Promise<T> {
 export const elaApi = {
   commands: (): Promise<WebCommandInfo[]> => request('/api/commands'),
   models: (): Promise<WebModelsInfo> => request('/api/models'),
+  /** 侧边栏：每个 cwd 的历史会话（恢复走 WebSocket，见 `sidebar.ts`）。 */
+  sessions: (): Promise<WebSessionsInfo> => request('/api/sessions'),
   skills: (): Promise<WebSkillInfo[]> => request('/api/skills'),
   thinking: (): Promise<WebThinkingInfo> => request('/api/thinking'),
   settings: (): Promise<WebSettingsInfo> => request('/api/settings'),

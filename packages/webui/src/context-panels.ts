@@ -11,11 +11,12 @@
  *   - **系统**：模型实际收到的那段 system prompt；
  *   - **工具**：模型看到的工具定义（名字 / 描述 / 参数的 JSON Schema）。
  *
- * ## 为什么是「顶栏下面内联展开」而不是弹窗
+ * ## 为什么是「顶栏下面盖一层」而不是弹窗、也不是内联展开
  *
- * 这些内容要能**边看边对着聊天记录**：提示词里写了什么、模型刚才为什么那么干 —— 弹窗
- * 一盖就看不见对话了。所以与 Pi Web 同形：点一下在顶栏下面摊开一块（高度封顶、
- * 自己滚），再点收起；点另一个按钮直接换内容。
+ * 这些内容要能**边看边对着聊天记录**：提示词里写了什么、模型刚才为什么那么干 —— 居中
+ * 的模态框一盖就看不见对话了。而**内联展开会把对话与 composer 顶下去**（读一句话就要
+ * 重新找位置）。所以与 Pi Web 同形：点一下在顶栏下面**浮**出一块（绝对定位、自己滚、
+ * 高度封顶），再点收起，点另一个直接换内容，点面板外面也收起。
  *
  * ## 数据一律现取，不缓存
  *
@@ -314,6 +315,7 @@ export function installContextPanels(options: ContextPanelsOptions): void {
     buttonHtml('system', '系统', '模型实际收到的系统提示词') +
     buttonHtml('tools', '工具', '模型看到的工具定义');
 
+  panelHost.hidden = true;
   let open: PanelKind | null = null;
   /** 每次打开都换一个 token：慢的那次回来时若已经切走，就别再往 DOM 里塞。 */
   let token = 0;
@@ -323,15 +325,21 @@ export function installContextPanels(options: ContextPanelsOptions): void {
     button?.setAttribute('aria-pressed', pressed ? 'true' : 'false');
   };
 
+  /**
+   * 面板是**叠加层**（`.ela-panel-host` 绝对定位在顶栏下面）：展开不改变对话区与
+   * composer 的布局，只是盖在它们上面 —— 与 Pi Web 的顶栏面板同一手法。
+   */
   const close = (): void => {
     if (open !== null) setPressed(open, false);
     open = null;
     token += 1;
     panelHost.replaceChildren();
+    panelHost.hidden = true;
   };
 
   const show = (kind: PanelKind, content: HTMLElement): void => {
     panelHost.replaceChildren(content);
+    panelHost.hidden = false;
   };
 
   const openPanel = async (kind: PanelKind): Promise<void> => {
@@ -394,4 +402,19 @@ export function installContextPanels(options: ContextPanelsOptions): void {
     if (document.querySelector('.ela-modal-backdrop') !== null) return;
     close();
   });
+
+  // 点面板外面收起（它是一层浮在上面的东西，点穿过去就等于认了它「弹出来」的语义）。
+  // 点在面板里或那两个按钮上不算：按钮自己要切面板（点同一个就是收起）。
+  document.addEventListener(
+    'pointerdown',
+    (event) => {
+      if (open === null) return;
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (panelHost.contains(target)) return;
+      if (actionsHost.contains(target)) return;
+      close();
+    },
+    true,
+  );
 }

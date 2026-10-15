@@ -37,6 +37,379 @@ body {
   height: 100%;
 }
 
+/* ── 外壳：左侧边栏 + 右侧主区（`src/main.ts` 的 `buildShell()`） ── */
+
+.ela-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  /* 侧边栏顶栏与主区顶栏是同一条线（高度 + 同一种底边）：只此一处定义，
+     两边引用 —— 各写一个数就会像早先那样差 4px。 */
+  --ela-header-height: 36px;
+}
+
+/*
+ * 主区顶栏。与侧边栏顶栏同高、同一条底线（`--ela-header-height`），
+ * 所以两栏之间那条横线在视觉上是**一条**。
+ *
+ * 它也是一条**格子条**（与侧边栏那一行同一种格子，见 `.ela-sidebar-new`）：
+ * 每个入口占一格、格里是「图标 + 文字」、格子之间一条竖线、顶上一条 2px 的线
+ * （打开时变强调色）。所以 `align-items: stretch`，格子自己撑满 36px。
+ */
+.ela-main-header {
+  display: flex;
+  align-items: stretch;
+  flex: none;
+  height: var(--ela-header-height);
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border, #e5e5e5);
+  overflow: hidden;
+}
+
+/* 顶栏右侧那几个入口（`context-panels.ts` 往里塞按钮），推到最右。 */
+.ela-context-actions {
+  display: flex;
+  align-items: stretch;
+  margin-left: auto;
+}
+
+/*
+ * 这一组的**左界**：格子的竖线都画在右边（与侧边栏那一行同一种读法），最左边那个
+ * 格子没有左边的邻居来提供这条线，所以自己带一条 —— 否则「完整历史」左边是敞着的。
+ */
+.ela-context-actions > .ela-top-btn:first-child {
+  border-left: 1px solid var(--border, #e5e5e5);
+}
+
+/* 连接状态：不是格子（没有边框），只是右端一格文字。 */
+.ela-status {
+  display: flex;
+  align-items: center;
+  flex: none;
+  padding: 0 12px;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+.ela-main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  flex-direction: column;
+  /* 定位容器：系统 / 工具那两块面板绝对定位在它里面（顶栏正下方）。 */
+  position: relative;
+}
+
+/* ── 侧边栏（`src/sidebar.ts`）：历史会话按 cwd 分组 + 底部三个入口 ── */
+
+.ela-sidebar {
+  display: flex;
+  flex: 0 0 260px;
+  min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--border, #e5e5e5);
+  background: var(--background, #fff);
+  transition: flex-basis 0.18s ease, border-right-width 0.18s ease;
+}
+
+/* 收起就是一个 0 宽的列（不是 display:none：宽度过渡才看得见动）。 */
+.ela-sidebar.is-collapsed {
+  flex-basis: 0;
+  border-right-width: 0;
+}
+
+/*
+ * 一行 36px 的「格子」条（照 Pi Web 的侧边栏顶栏）：左边是品牌，右边两个格子
+ * ——「新建」与搜索。格子之间用一条竖线分，各自顶上一条 2px 的线（激活时变强调色）。
+ */
+.ela-sidebar-head {
+  display: flex;
+  align-items: stretch;
+  flex: none;
+  height: var(--ela-header-height);
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--border, #e5e5e5);
+}
+
+/* 品牌不是一个格子：没有边框、没有底线，只是那一行的排版锚点。 */
+.ela-sidebar-brand {
+  align-self: center;
+  flex: none;
+  margin-left: 9px;
+  padding: 2px 4px;
+  color: var(--foreground, #111);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: normal;
+  white-space: nowrap;
+}
+
+.ela-sidebar-head-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+.ela-sidebar-new,
+.ela-sidebar-search-toggle {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 0;
+  border-top: 2px solid transparent;
+  background: transparent;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+/* 「新建」两侧都有线：它与搜索读起来是相邻的两个格子。 */
+.ela-sidebar-new {
+  border-left: 1px solid var(--border, #e5e5e5);
+  border-right: 1px solid var(--border, #e5e5e5);
+  font-weight: 500;
+}
+
+.ela-sidebar-new svg,
+.ela-sidebar-search-toggle svg {
+  flex: none;
+}
+
+.ela-sidebar-search-toggle {
+  width: 36px;
+  padding: 0;
+}
+
+.ela-sidebar-new:not(.is-locked):hover,
+.ela-sidebar-search-toggle:hover {
+  background: var(--secondary, #f4f4f5);
+  color: var(--foreground, #111);
+}
+
+.ela-sidebar-search-toggle.is-active {
+  /* pi-web-ui 那套 theme 里 `--accent` 是浅灰的**悬停底色**，强调色是 `--primary`
+     （浅色下近黑、深色下近白）—— 顶上那条线要的是后者。 */
+  border-top-color: var(--primary, currentColor);
+  background: var(--secondary, #f4f4f5);
+  color: var(--foreground, #111);
+}
+
+/* 运行中：看得见、点得动，但只给一句提示（见 sidebar.ts 的 refuseWhileRunning）。 */
+.ela-sidebar-new.is-locked {
+  color: var(--muted-foreground, #6b7280);
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.ela-sidebar-search {
+  flex: none;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--border, #e5e5e5);
+}
+
+.ela-sidebar-search-input {
+  width: 100%;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--border, #e5e5e5);
+  border-radius: 0.375rem;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font-size: 0.75rem;
+}
+
+.ela-sidebar-sessions {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.35rem 0.4rem;
+}
+
+.ela-sidebar-empty {
+  padding: 0.6rem 0.5rem;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 0.72rem;
+  font-style: italic;
+}
+
+.ela-session-group + .ela-session-group {
+  margin-top: 0.35rem;
+}
+
+.ela-session-group-head {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* 组头那一行目录名：不是全路径（全路径在 title 里）。 */
+.ela-session-group-toggle {
+  flex: 1;
+  min-width: 0;
+  padding: 0.25rem 0.35rem;
+  border: 0;
+  border-radius: 0.3rem;
+  background: none;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.ela-session-group-toggle::before {
+  content: '▾ ';
+}
+
+.ela-session-group-toggle.is-collapsed::before {
+  content: '▸ ';
+}
+
+.ela-session-group-toggle:hover {
+  background: var(--secondary, #f4f4f5);
+  color: var(--foreground, #111);
+}
+
+.ela-session-group-count {
+  flex: none;
+  padding-right: 0.25rem;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 0.65rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 一行会话：标题占满，时间在右。 */
+.ela-session-row {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.3rem 0.45rem 0.3rem 0.9rem;
+  border: 0;
+  border-radius: 0.3rem;
+  background: none;
+  color: var(--foreground, #111);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ela-session-row:hover {
+  background: var(--secondary, #f4f4f5);
+}
+
+.ela-session-row.is-current {
+  background: var(--secondary, #f4f4f5);
+  box-shadow: inset 2px 0 0 var(--primary, currentColor);
+}
+
+/* 运行时列表锁上：看得见、点不动（点了给一句提示，见 sidebar.ts）。 */
+.ela-session-row.is-locked {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.ela-session-row.is-locked:hover {
+  background: none;
+}
+
+.ela-session-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.75rem;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ela-session-meta {
+  flex: none;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 0.65rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 底栏：模型 / 技能 / 设置。 */
+.ela-sidebar-foot {
+  display: flex;
+  flex: none;
+  align-items: stretch;
+  gap: 0.25rem;
+  padding: 0.4rem;
+  border-top: 1px solid var(--border, #e5e5e5);
+}
+
+.ela-sidebar-key {
+  flex: 1;
+  padding: 0.35rem 0;
+  border: 0;
+  border-radius: 0.3rem;
+  background: none;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.ela-sidebar-key:hover {
+  background: var(--secondary, #f4f4f5);
+  color: var(--foreground, #111);
+}
+
+/*
+ * 窄屏：侧边栏是**盖上来**的一层（挤出去会把对话列压到没法看）。
+ * 它默认收起（`main.ts` 不强制），点顶栏那个按钮展开。
+ */
+@media (max-width: 768px) {
+  .ela-sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 40;
+    flex-basis: 0;
+    width: 78vw;
+    max-width: 320px;
+    border-right-width: 1px;
+    box-shadow: 0 0 24px rgb(0 0 0 / 0.18);
+    transform: translateX(-100%);
+    transition: transform 0.18s ease;
+  }
+
+  .ela-sidebar.is-collapsed {
+    flex-basis: 0;
+  }
+
+  .ela-sidebar:not(.is-collapsed) {
+    transform: translateX(0);
+  }
+}
+
+/*
+ * composer 下面那一行的左端：工作目录（`~/proj (main)`，服务端按 TUI 的 `cwdLine()`
+ * 算好，见 `stats.ts`）。右端是统计。窄的时候先挤它（截断成 `…`），统计不动。
+ */
+.ela-stats-cwd {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  user-select: text;
+}
+
 /* ── 模型选择器（`src/model-picker.ts` 造 DOM，纯样式在这一里） ── */
 
 .ela-modal-backdrop {
@@ -206,21 +579,33 @@ body {
  * `--muted-foreground` / `--background` / `--foreground`）：它们在 `.dark` 下会被
  * pi-web-ui 重定义，所以深色模式自动跟着变。早先那些 `--color-*` 写法里只有
  * `--color-border` 真的存在，其余靠 fallback 顶着 —— 新代码不再用它们。
+ *
+ * `--primary` 是那套 theme 里的**强调色**（浅色下近黑、深色下近白）；
+ * `--accent` 是浅灰的悬停底色，不是强调色。
  */
 .ela-top-btn {
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
-  padding: 0.25rem 0.5rem;
-  border: 1px solid transparent;
-  border-radius: 0.375rem;
-  background: none;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 0;
+  border-top: 2px solid transparent;
+  border-right: 1px solid var(--border, #e5e5e5);
+  background: transparent;
   color: var(--muted-foreground, #6b7280);
-  font-size: 0.7rem;
-  line-height: 1.2;
+  font-size: 12px;
+  line-height: 1;
   white-space: nowrap;
   cursor: pointer;
-  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  transition: background 0.12s, color 0.12s;
+}
+
+/* 只有图标的那一格（侧边栏开关）：一个 36px 的方格子。 */
+.ela-top-icon {
+  width: 36px;
+  padding: 0;
+  font-size: 15px;
 }
 
 .ela-top-btn:hover {
@@ -228,8 +613,9 @@ body {
   color: var(--foreground, #111);
 }
 
+/* 打开的那个面板：顶上那条线亮起来（与侧边栏的「搜索」同一个记法）。 */
 .ela-top-btn[aria-pressed='true'] {
-  border-color: var(--border, #e5e5e5);
+  border-top-color: var(--primary, currentColor);
   background: var(--secondary, #f4f4f5);
   color: var(--foreground, #111);
 }
@@ -239,7 +625,26 @@ body {
   color: var(--muted-foreground, #6b7280);
 }
 
-/* ── 面板本体 ── */
+/* ── 面板本体（系统 / 工具）── */
+
+/*
+ * 宿主是**叠加层**：绝对定位在顶栏正下方，盖在对话区上 —— 展开/收起都不改变
+ * 对话区与 composer 的布局（内联展开会把它们顶下去）。
+ * 空的时候（没有面板）`hidden`，不占位、也不吃指针事件。
+ */
+.ela-panel-host {
+  position: absolute;
+  top: var(--ela-header-height);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+}
+
+.ela-panel-host[hidden] {
+  display: none;
+}
 
 .ela-panel {
   display: flex;
@@ -249,6 +654,9 @@ body {
   overflow: hidden;
   border-bottom: 1px solid var(--border, #e5e5e5);
   background: var(--background, #fff);
+  /* 它是浮在对话上的，要有影子才读得出「这层在上面」。
+     浅色下 pi-web-ui 的 --background 是白的、深色下是近黑 —— 影子两种下都够看。 */
+  box-shadow: 0 14px 36px rgb(0 0 0 / 0.22);
 }
 
 .ela-panel-scroll {
