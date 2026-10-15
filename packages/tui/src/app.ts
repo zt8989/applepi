@@ -2814,15 +2814,10 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // 先走内核那条，而且**先**判断再读文件：内核的 restoreSession(file) 自己会读，
     // 这里要是先 loadSessionMessages 就等于把 1MB 多的文件读两遍。
     if (restoreHook) {
-      // **要等**：内核要读 `traces/<id>.jsonl` 才能把轨迹树带回来。
-      // 不等的话 notify 会先弹「已恢复」，而那棵树还没灌进 state ——
-      // 症状是「提示说恢复了，轨迹面板却还是空的」。
-      void restoreHook(session.file).then((result) => {
-        notify(
-          dim(
-            `已恢复 ${result.id}（${result.restored} 条消息，未重跑模型；之后的消息继续写进它）`,
-          ),
-        );
+      // **要等**：内核要读 `traces/<id>.jsonl` 才能把轨迹树带回来，
+      // 不等就 refresh 的话，症状是「界面重渲染了，轨迹面板却还是空的」。
+      // 恢复成功不弹提示：恢复了哪一段，自己点的自己清楚。
+      void restoreHook(session.file).then(() => {
         refresh();
       });
       return;

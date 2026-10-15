@@ -470,25 +470,11 @@ export class WebBridge {
         if (resume === undefined) {
           return [{ type: 'notice', level: 'warn', text: '这个装配不能恢复历史会话' }];
         }
-        // 恢复是异步的（要读文件、要读轨迹树）—— 先回一个“开始”，好了再广播一条。
+        // 恢复是异步的（要读文件、要读轨迹树），且恢复**不换工作目录**
+        // （cwd 是内核启动时定的，见 reducer 的 `conversation.reset`）。
         // 不等着它：`handle` 是同步的，而阻塞在这里会让这条连接的其他消息排队。
-        void resume(message.id, message.cwd)
-          .then((result) => {
-            // 恢复**不换工作目录**（cwd 是内核启动时定的，见 reducer 的
-            // `conversation.reset`）：跨目录恢复时工具仍在原来那个目录里跑。
-            // 不说清楚的话，用户会以为“点了 beta 的会话就是在 beta 里干活”。
-            const here = this.options.store.getState().session.cwd;
-            const elsewhere =
-              message.cwd !== '' && message.cwd !== here
-                ? `（它的目录是 ${message.cwd}；工具仍在 ${here} 里跑）`
-                : '';
-            this.broadcast({
-              type: 'notice',
-              level: 'info',
-              text: `已恢复 ${message.id}（${result.restored} 条消息，未重跑模型）${elsewhere}`,
-            });
-          })
-          .catch((error: unknown) => {
+        // 成功不提示（恢复的是哪一段，点的人自己清楚；恢复完界面自会重渲染）。
+        void resume(message.id, message.cwd).catch((error: unknown) => {
             this.broadcast({
               type: 'notice',
               level: 'error',
