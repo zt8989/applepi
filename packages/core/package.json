@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --import ../../test-support/isolated-home.ts --test test/*.test.ts",
     "config:migrate": "node --import tsx scripts/migrate-config-dir.ts",
-    "models:migrate": "node --import tsx scripts/migrate-models.ts"
+    "models:migrate": "node --import tsx scripts/migrate-models.ts",
+    "repatch:ask-user-question": "node --import tsx scripts/repatch-ask-user-question.ts"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "^1.0.2",

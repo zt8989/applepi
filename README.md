@@ -135,11 +135,14 @@ patch 丢了或 pnpm 升级后没重新应用，这些 import 会全部变成
 
 另一份 patch（`patches/@juicesharp__rpiv-ask-user-question@*.patch`）改的是内置的
 `ask_user_question` 扩展（终端那份归它渲染、浏览器那份交给我们），它的**可复现来源**是
-`scripts/repatch-ask-user-question.py`：
+`packages/core/scripts/repatch-ask-user-question.ts`：
 
 ```
-python3 scripts/repatch-ask-user-question.py     # npm pack → 应用改动 → pnpm patch-commit
+pnpm repatch:ask-user-question     # npm pack → 应用改动 → pnpm patch-commit
 ```
+
+脚本在 `packages/core/scripts/repatch-ask-user-question.ts`（与 `config:migrate` 同一套：
+`node --import tsx`，也被 core 的 typecheck 盯着）。
 
 升级上游只需改 `packages/core/package.json` 里的版本再跑一遍；上游动过我们 patch 的地方
 会对不上，脚本会指名道姓地说出是哪一处。
@@ -422,6 +425,5 @@ packages/*/test/          离线测试（按包分）
 test-support/             测试共享脚手架（配置家目录隔离 + 守卫）
 docs/architecture/        架构现状（浏览器界面见 webui.md）
 patches/                  pnpm patch：打开 pi-coding-agent 的内部子路径 + 内置的 ask_user_question
-scripts/                  重建上面那份 ask_user_question patch（repatch-ask-user-question.py）
 ~/.pi/agent/              运行时状态：配置 / 会话 / 轨迹（与 pi 共用，不在仓库里）
 ```

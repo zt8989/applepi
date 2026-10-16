@@ -106,7 +106,7 @@ inline 那条：宿主把**输入区那一格**（composer）换成扩展的组�
 `extension-host.ts` 当**内置扩展**按路径装载（`settings.json` 里那一份会被换成我们这份 ——
 同名工具是"先注册者优先"，两份都在的话生效的可能是没打补丁的那份）。
 
-补丁做三件事（可复现来源：`scripts/repatch-ask-user-question.py`，跑一遍就重建那份 patch）：
+补丁做三件事（可复现来源：`packages/core/scripts/repatch-ask-user-question.ts`，跑一遍就重建那份 patch）：
 
 1. `execute()` 里多一个 `ctx.ui.externalQuestionnaire?.({ params, answer, note, done })`
    握手段 —— 把归一化后的题目交给宿主（它只回 label / selected / notes 这些**表面**

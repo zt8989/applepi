@@ -21,7 +21,7 @@
 
     "config:migrate": "pnpm --filter @ela/core config:migrate",
     "models:migrate": "pnpm --filter @ela/core models:migrate",
-    "repatch:ask-user-question": "python3 scripts/repatch-ask-user-question.py"
+    "repatch:ask-user-question": "pnpm --filter @ela/core repatch:ask-user-question"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
