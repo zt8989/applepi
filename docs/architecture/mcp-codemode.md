@@ -192,6 +192,28 @@ MCP 的 `tool_call` handler 做一件很具体的事：**codemode 脚本点名�
 - **MCP 工具不进权限确认**：本项目还没有权限扩展那一层，`tool_call` 的 `block` 已经把口子
   留好了（`beforeToolCall` 的返回值），但还没有谁用它。
 
+## 退出时怎么收子进程
+
+MCP 的 stdio 服务器是**子进程**，握着事件循环。一次性模式（`-p`）跑完那一刻如果还有
+一个**连到一半**的（`npx -y rea-agents` 还在解析 / 下载 / 握手），进程会被它**卡死**
+（实测卡到 600s 超时）—— 优雅的 `session_shutdown` 收不掉它：那一刻它的 client 还没挂到
+connection 上，`close()` 是空转。
+
+收尾因此分两层：
+
+1. `ExtensionHost.dispose()` / `Kernel.dispose()` **可等待**，退出路径上 `await` 它们 ——
+   让已经连上的服务器走完 `session_shutdown` 的正常关闭。给 5s 上限：某个服务器赖着
+   不走时不再等，免得把退出反过来挂死。
+2. `main.ts` 末尾等 stdout 排空后**显式 `process.exit()`**。官方 stdio 传输自己装了
+   `process.on('exit')` 钩子：进程退出时把还活着的服务器**进程组**一并杀掉。上面那个
+   连到一半的就靠这一层收。
+
+交互模式不走这条 —— `runTui` 挂在 `await new Promise(() => {})` 上，退出走 `app.ts` 的
+`process.exit(0)`，同样会触发那个钩子。
+
+回归测试：`packages/tui/test/mcp-exit.test.ts`（真的拉起 `main.ts -p` + 一个握手永不返回的
+fixture，断言进程自己退出、子进程被收掉）。
+
 ## 代码在哪
 
 | 文件 | 干什么 |

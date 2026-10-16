@@ -240,7 +240,16 @@ export interface Kernel {
     modelId: string,
     options?: { thinkingLevel?: string | undefined },
   ): boolean;
-  dispose(): void;
+  /**
+   * 收掉内核：摘订阅器、flush 会话与轨迹、关扩展宿主（含 MCP 的 stdio 子进程）。
+   *
+   * **可等待**：扩展宿主那一半要等 `session_shutdown` 关掉子进程，而子进程会握着
+   * 事件循环 —— 不等它们，一次性模式的进程退不出去（见 `extension-host.ts` 的
+   * `dispose()` 与 `main.ts` 的退出路径）。调用方不 await 也照旧工作（异步收尾照跑）。
+   *
+   * 幂等：重复调用只生效一次。
+   */
+  dispose(): Promise<void>;
 }
 
 /**
@@ -581,7 +590,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     // 已经退出过了（`dispose()` 早于装载完成）：这个宿主没人管了，就地收掉 ——
     // 否则 MCP 的子进程会挂在事件循环上（症状是「Ctrl+C 之后进程不退」）。
     if (disposed) {
-      extensionHost.dispose();
+      await extensionHost.dispose();
       return;
     }
     // ── 发 `session_start`：MCP 靠它读 `mcp.json` 并开始连服务器 ──
@@ -948,17 +957,26 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     },
     extensions: extensionView,
     ready,
-    dispose(): void {
+    async dispose(): Promise<void> {
+      if (disposed) return;
       disposed = true;
       unsubscribeStart();
       unsubscribeAgentLifecycle();
       autoCompact?.dispose();
       current.recorder?.dispose();
       persistence?.dispose();
-      if (current.sink?.close) void current.sink.close();
-      // **活视图**的那个：`deferExtensions` 下界面上跑着的就是它（后台装载可能还在跑，
-      // 那一路在 `assembleExtensions` 里自己看 `disposed` 收尾）。
-      extensionView.dispose();
+      // flush 轨迹落盘：**要等**（一次性模式末尾紧接着 `process.exit()`，不等会截断还没写下去的字节）。
+      const sinkClosed = current.sink?.close?.();
+      // **扩展宿主要等**：MCP 的 stdio 子进程握着事件循环，不等它们关掉进程退不出去
+      // （一次性模式尤其明显，见 `Kernel.dispose()` 的接口注释）。
+      // `deferExtensions` 下这里收的是占位宿主；后台装载那一路拿到真宿主后会看到
+      // `disposed` 并自己收（见 `assembleExtensions`）。
+      await extensionView.dispose();
+      try {
+        await sinkClosed;
+      } catch {
+        // 关不干净不该让退出卡住。
+      }
     },
   };
 }
