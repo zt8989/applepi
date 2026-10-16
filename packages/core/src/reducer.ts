@@ -187,6 +187,26 @@ function closeTurnNode(
 }
 
 /**
+ * 开一个新回合时**必须归零**的那几个计数器。
+ *
+ * 新回合有三个入口 —— 正常输入（`user.message`）与两条 followUp 路
+ * （`turn.end` / `queue.delivered` 的迁移）。各写一遍必然漂移，而漂移的症状很隐蔽：
+ * followUp 进来的那一回合，这几个数还是上一回合的。
+ *
+ * - `turns`：`maxTurns` 的判据。不归零 = 上限变成**整个会话**累计 ——
+ *   聊着聊着就莫名其妙停了，而界面上看不到任何原因。
+ * - `llmAttempts` / `retrying`：重试预算。不归零 = 新回合的第一步就被标成「重试」，
+ *   而且第一次失败直接耗尽额度（正常入口这一步从 0 起）。
+ * - `stepIndex` / `turnSteps`：每个回合从头数（`turnIndex` 是会话级的，不归零）。
+ */
+function newTurnCounters(): Pick<
+  AgentState,
+  'turns' | 'llmAttempts' | 'retrying' | 'stepIndex' | 'turnSteps'
+> {
+  return { turns: 0, llmAttempts: 0, retrying: false, stepIndex: 0, turnSteps: 0 };
+}
+
+/**
  * 失败：在 attempt 下挂一个 error 节点。
  *
  * 注意 error 节点**不推进 tip**（见 trace.ts 的 TIP_ADVANCING_KINDS）—— 所以下一次重试开的新 attempt，
@@ -756,20 +776,13 @@ const transitions: TransitionHandlers = {
       stopReason: null,
       stopCause: null,
       stopCauseDetail: null,
-      retrying: false,
       aborted: false,
-      llmAttempts: 0,
-      // `turns` 也必须归零，否则 maxTurns 变成「整个会话累计」的上限。
-      // 归零前这里必须是 0 起步：一次提问 = 一个 turn = 一条 react 循环（LLM→工具→LLM…）。
-      // 漏了这一行，第二次提问就只剩「25 减去前几次累计」那么点额度，于是聊着聊着就停了。
-      turns: 0,
+      // 新回合的计数器归零（turns / llmAttempts / retrying / step 计数）。
+      // 三个新回合入口共用同一份 —— 理由见 `newTurnCounters()`。
+      ...newTurnCounters(),
       // **`turnIndex` 不在这里加**：那是 `turn.start` 的活。
       // 两处都加会让第一个回合就变成「回合 2」（实测），而且没有任何报错 ——
       // 界面只是每个回合都从 2 开始报。
-      //
-      // `stepIndex` / `turnSteps` 每个新回合都从头数。
-      stepIndex: 0,
-      turnSteps: 0,
       streamingText: '',
       thinkingText: '',
       pendingToolCalls: [],
@@ -909,8 +922,8 @@ const transitions: TransitionHandlers = {
       // 容器已经换过了，所以序号也同步 —— `step.start` 靠它判断「有没有旧容器待收尾」。
       openTurnSeq: closed.turnIndex + 1,
       turnIndex: closed.turnIndex + 1,
-      stepIndex: 0,
-      turnSteps: 0,
+      // 与正常入口同一份计数器归零（见 `newTurnCounters()`）。
+      ...newTurnCounters(),
     };
   },
 
@@ -1012,8 +1025,9 @@ const transitions: TransitionHandlers = {
       openTurnNodeId: opened.node.id,
       openTurnSeq: closed.turnIndex + 1,
       turnIndex: closed.turnIndex + 1,
-      stepIndex: 0,
-      turnSteps: 0,
+      // followUp 新回合的计数器与正常入口一样归零（见 `newTurnCounters()`）——
+      // 否则新回合的第一步会被标成「重试」，`turns` 也会跨回合累计。
+      ...newTurnCounters(),
       messages: [...closed.messages, message],
       followUpQueue: closed.followUpQueue.slice(1),
       // 新的一句话 = 上一回合的收工理由作废。
@@ -1930,10 +1944,16 @@ export function loopWiring(table: {
 
     'turn.end': (_action, state) => {
       // **关回合之后还有可能继续**：followUp 的定义就是「模型说完了接着聊」。
-      // 队列里有货就开一个新回合（`turn.start` 会自己带起 startStep），
-      // 没有就真收工 —— 这时相位已是 idle，一条 Cmd 都不发。
-      if (peekQueued(false, state) === null) return [];
-      return [redispatch({ type: 'turn.start' })];
+      //
+      // 新回合容器与那条 followUp 消息**已经由 `turn.end` 的迁移开好、插好了**
+      // （为什么必须在迁移里做，见那条迁移的注释）。所以这里只剩一件事：让它跑起来。
+      //
+      // 判据必须看 **`openTurnNodeId`**，不能看队列 —— 迁移已经把那条 followUp 从队列里
+      // 取走了，`peekQueued(false, state)` 在「只有一条 followUp」（最常见的情形）时恒为
+      // null，于是 `turn.start` 永远不发：症状正是「新回合开了、消息也插了，模型永远不被
+      // 调用」，而相位停在 thinking —— 环再也不转，且没有任何报错。
+      if (state.openTurnNodeId === null) return [];
+      return [startStep()];
     },
 
     // step.start 只开容器；调 LLM 的 Cmd 在 startStep() 里与它一起发出。
@@ -1966,26 +1986,22 @@ export function loopWiring(table: {
      *
      * - `steer`：投递完**紧接着开下一步**。因为 steer 的投递点就是「工具跑完、
      *   下一次 LLM 调用前」—— 此刻模型还没看到新的话，必须马上跑一次。
-     * - `followUp`：投递完**不开新回合**，而是先把刚开着的回合收尾。
+     * - `followUp`：投递完**接着开一个新回合**（旧回合收尾 + 新容器 + 那条消息
+     *   一起在 `queue.delivered` 的**迁移**里做，见上面那段注释）。
      *   因为 followUp 的定义是「回合收工时才插」，它属于**下一个**回合；
      *   若不开新回合，那条消息就成了「说完了又冒出来一句话，却没人回」。
-     *   开新回合的那一步由 wiring 的 `queue.input` 那行接（空队列入队 → 转 user.message
-     *   → turn.start），不在这条里。
      */
     'queue.delivered': (action, state) => {
       const as = (action as { as: 'steer' | 'followUp' }).as;
       if (as === 'steer') return [startStep()];
-      // followUp：**开启一个新回合**，由 `turn.start` 发出去。
-      //
-      // 容器为什么在这里（而不是接线里）：folllowUp 到达时通常**正有一个容器开着**
-      // （它就是「刚说完话」那个回合），而 `turn.start` 的防重入守卫是「容器开着就返回」。
-      // 接线不能自己关它（wiring 是纯函数，只发 Cmd）—— 所以关闭旧容器这件事
-      // 已经写在 `queue.delivered` 的**迁移**里（见上面那段注释），到这里容器已空。
+      // followUp：新回合容器与那条 user 消息**已经由迁移开好 / 插好了**，这里只剩「让它
+      // 跑起来」。判据与 `turn.end` 那条完全相同 —— 看容器，不看队列：迁移已经把这条
+      // followUp 从队列里取走了，再看队列会把它漏掉（见 `turn.end` 的注释）。
       //
       // 一串 followUp 会连着开好几个回合 —— 每投递一条就开一个，这是对的：
       // 它们本来就是「模型说完 → 我说一句 → 它再说」的每一轮。
-      if (peekQueued(false, state) === null) return [];
-      return [redispatch({ type: 'turn.start' })];
+      if (state.deliveringInput !== null) return []; // 被防重入挡住，什么都没发生
+      return state.openTurnNodeId === null ? [] : [startStep()];
     },
 
     // 流开始前先发一条 action：UI 靠它把「正在生成」的点亮，而不是等第一个 delta。
