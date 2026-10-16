@@ -46,7 +46,7 @@
 | --- | --- | --- |
 | 文件名 | `<时间戳>_<id>.jsonl` | `<时间戳>_<id>.jsonl` |
 | id | UUIDv7 | UUIDv7 |
-| header `version` | `1` | `3` |
+| header `version` | `3` | `3` |
 
 文件名里的时间戳是 ISO 串把 `:` `.` 都换成 `-`（`2026-10-12T05-44-28-468Z`），与 pi 同一
 规则；id 是 UUIDv7。于是把我们的 id 粘给 `pi --session <id>` 能直接恢复 —— 但我们退出时
@@ -54,25 +54,43 @@
 
 仍然会读**旧名**（`<id>.jsonl`，改名之前建的会话）—— 按 id 找文件时扫目录比对
 `_<id>.jsonl` 后缀，找不到再试精确的 `<id>.jsonl`（见 `config-home.ts` 的 `findFileById`）。
-version 那边 pi 会自动把 v1 升到 v3（`migrateV1ToV2` 补 `id`/`parentId` 树、`migrateV2ToV3`
-把 `hookMessage` 改成 `custom`）并重写文件；那些字段我们写的时候本来就有，所以升级不丢东西。
+version 写的是**当前 pi 的 3** —— 不再让 pi 现场升级：v3 多出来的两样（开头的
+`model_change` 与 head system 消息）现在我们自己就写（见下），pi 直接读即可。
+老文件若是 v1，pi 仍会自动升（`migrateV1ToV2` 补 `id`/`parentId` 树、`migrateV2ToV3`
+把 `hookMessage` 改成 `custom`）；那些字段我们写的时候本来就有，升级不丢东西。
 
 ## 会话文件的形状
 
-首行 header，其后每行一条 entry：
+首行 header，其后每行一条 entry。**一份新会话**开头这几条（与 pi v3 同形）：
 
 ```json
-{"type":"session","version":1,"id":"…","timestamp":"…","cwd":"…"}
-{"type":"message","id":"e1","parentId":null,"timestamp":"…","message":{…}}
-{"type":"message","id":"e2","parentId":"e1","timestamp":"…","message":{…}}
+{"type":"session","version":3,"id":"…","timestamp":"…","cwd":"…"}
+{"type":"model_change","id":"e1","parentId":null,"timestamp":"…","provider":"…","modelId":"…"}
+{"type":"thinking_level_change","id":"e2","parentId":"e1","timestamp":"…","thinkingLevel":"…"}
+{"type":"message","id":"e3","parentId":"e2","timestamp":"…","message":{"role":"system","content":"","sections":{…},"toolsAdded":[…]}}
+{"type":"message","id":"e4","parentId":"e3","timestamp":"…","message":{"role":"user","content":…}}
 ```
 
-`id` / `parentId` 串成链（pi 用这条链做 session tree）。另有两种 entry 现在也写：
-`model_change`（换模型）、`thinking_level_change`（换思考级别）—— 都是**变了才追加**，
-而不是每帧补一条（记录器是 store 订阅器，每帧都跑）。
+`id` / `parentId` 串成链（pi 用这条链做 session tree）。续写一个已存在的会话时，记录器从
+文件里**最后一条 entry** 接着编号、并把它当 `parentId` —— 不然新写的会和已有的撞 id、链也接
+不上（pi 会把这半段当成另一棵树，恢复时只看得到后半段）。
 
-`thinking_level_change` 的读回在 [thinking](thinking.md#五会话往返)：恢复会话时用它决定这一档，
-老会话缺这一条时在**下一次真要写文件**时回填一条（为什么不在恢复的那一刻就写，见那节的「时间差」）。
+开头那三样各有来头：
+
+- `model_change`：会话用什么模型（pi 会话一开头也写一条）。我们**空会话不建文件**，所以
+  推迟到第一条消息真落盘时补写；之后再换模型才追加 —— 都是**变了才追加**，不是每帧补一条
+  （记录器是 store 订阅器，每帧都跑）。
+- `thinking_level_change`：会话用什么思考档位。同上的推迟写法，读回见
+  [thinking](thinking.md#五会话往返)（老会话缺这一条时在**下一次真要写文件**时回填，为什么不在
+  恢复的那一刻就写，见那节的「时间差」）。
+- **head system 消息**：`sections`（system prompt 各段）+ `toolsAdded`（装载时那批工具的完整
+  声明）—— 就是每轮发给 provider 的那个头部（`prompt-head.ts`）。pi 恢复时靠它
+  `_restoreToolsFromTranscript()` 把工具表装回来、并回放 system prompt 的各段。**只写新会话**：
+  恢复时要么文件里已有，要么是 v1 老文件（本来就没有）—— 都不该在**文件末尾**补一条（head 必须
+  在最前面，append 补不到那儿）。
+
+读回来时（`sessionMessages`）会**跳过**开头这条 head：它不是对话消息，而是「请求头部」——
+本项目那份由 `state.prompt` 每轮重建、前置，读回来会变成两条 head（前缀也对不上）。
 
 字段名与 pi 的 `SessionHeader` / `SessionEntryBase` 一致，所以同址之后两边能互相读到对方的
 会话（差异见上面的「与 pi 的会话互通」）。

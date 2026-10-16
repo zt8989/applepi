@@ -22,8 +22,9 @@
  * 订阅 store —— 和轨迹落盘器一样的形状。**每条消息只在第一次出现时写一次**
  * （用已写条数做游标），否则流式更新会把同一条 message 写几十遍。
  */
-import { createSessionHeader, resetEntrySeq, entrySeqValue, SessionWriter } from './session-file';
-import type { Message } from '@earendil-works/pi-ai';
+import { createSessionHeader, SessionWriter } from './session-file';
+import { buildPromptHead, declaredToolSchemas } from './prompt-head';
+import type { Message, SystemMessage } from '@earendil-works/pi-ai';
 import type { AgentState } from './state';
 import type { AgentAction } from './actions';
 
@@ -60,6 +61,22 @@ export interface SessionRecorder {
 }
 
 /**
+ * pi v3 会话开头那条 **system 消息**：system prompt（`sections`）+ 工具（`toolsAdded`）。
+ *
+ * 形状与发给 provider 的 head 一模一样（`buildPromptHead`，见 `prompt-head.ts`）——
+ * pi 恢复会话时正是靠它 `_restoreToolsFromTranscript()` 把工具表装回来，并回放出
+ * system prompt 的各段。用**装载时**那批工具（`headTools`，不可变历史），不是「当前」那份。
+ */
+function sessionHead(state: AgentState): SystemMessage {
+  const head = buildPromptHead({
+    systemPrompt: state.prompt.systemPrompt,
+    ...(state.prompt.sections !== undefined ? { sections: state.prompt.sections } : {}),
+    tools: declaredToolSchemas(state.prompt.headTools ?? state.prompt.tools),
+  });
+  return { ...head, timestamp: Date.now() };
+}
+
+/**
  * 挂一个会话记录器到 store 上。
  *
  * 恢复已有会话时传 `resumeFrom`：那之后的旧消息已经在文件里，游标要接着算，
@@ -78,24 +95,29 @@ export function createSessionRecorder(
   writer.start(createSessionHeader({ id: options.sessionId, cwd: options.cwd }));
 
   let written = options.resumeFrom ?? 0;
-  // 恢复的会话接着往下编 entry id，不能从头再来（会和文件里已有的撞）。
-  if (options.resumeFrom !== undefined && options.resumeFrom > 0) {
-    resetEntrySeq(options.resumeFrom);
-  }
+  /**
+   * 是不是**新会话**（不是恢复已有文件）。
+   *
+   * 只有新会话才产出开头的两样 v3 内容：`model_change` 与 head system 消息。
+   * 恢复时那两样要么已经在文件里（pi/我们写的 v3），要么压根没有（v1 老文件）——
+   * 无论哪种都不该在**文件末尾**补一条（head 必须是最前面那条，append 补不到那儿）。
+   */
+  const isNewSession = options.resumeFrom === undefined;
 
   /**
-   * 已在盘上的「上一次模型」是什么。
+   * 上一次**已经写进文件**的模型（用来判断「换没换」）。
    *
    * **建表时就记成「当前那个」**（而不是 `null`）：`model_change` 的语义是
-   * 「**换**成了什么」，而不是「这个会话用的是什���」。开机那个模型从来没换过，
-   * 写一条等于谎报。恢复场景（`resumeFrom > 0`）同样如此 —— 那一段的
-   * `model_change` 已经在文件里了。
+   * 「**换**成了什么」。新会话开头那条初始 `model_change` 由 `pendingInitialModel`
+   * 单独负责（pi 也在开头写一条）；这里只管「后来了又换过」。
    *
    * 不去重会怎样：订阅器**每帧**都跑，一次 `/model` 能写出几百条 —— 而会话文件
    * 恰好是「打开 `/sessions` 面板要扫」的那些文件之一。
    */
   const modelKeyOf = (s: AgentState): string => `${s.model.provider}\0${s.model.modelId}`;
   let lastModelKey = modelKeyOf(store.getState());
+  // 新会话开头补一条初始 `model_change`（与 pi 一样）。恢复时不补（文件里已有或本来就没有）。
+  let pendingInitialModel = isNewSession;
 
   /**
    * 这个会话**开始时**用哪一档，以及「这条记录还没写进文件」。
@@ -103,23 +125,42 @@ export function createSessionRecorder(
    * pi 在会话建立那一刻就把「这个会话用哪一档」写进文件（`core/sdk.js:279-290`），
    * 而本项目**空会话不建文件**（见 `SessionWriter.start`：header 推迟到第一条消息）。
    * 所以这里记着它、推迟到真的要写文件时再落 —— 文件内容与 pi 同形
-   * （header → `thinking_level_change` → 消息），而「进来看一眼就退出」仍然不留垃圾文件。
+   * （header → `model_change` → `thinking_level_change` → head → 消息），
+   * 而「进来看一眼就退出」仍然不留垃圾文件。
    */
   let lastThinkingLevel = store.getState().model.thinkingLevel;
   const initialThinkingLevel = lastThinkingLevel;
   let pendingInitialThinking = options.hasThinkingEntry !== true;
+  // 新会话开头补一条 head（system prompt + tools）—— pi 的 v3 形状。恢复时不补（见 isNewSession）。
+  let pendingHead = isNewSession;
 
   const flush = (): void => {
     const state = store.getState();
     const thinkingLevel = state.model.thinkingLevel;
     const thinkingChanged = thinkingLevel !== lastThinkingLevel;
     const pendingMessages = state.messages.length > written;
-    // 回填 / 初次落盘：只在「反正要写文件」的时机写 —— 马上要写消息、或档位真的变了。
-    // 都不是就不写：纯空会话不建文件（恢复一个老会话也不动它，见 `hasThinkingEntry`
-    // 里那条「恢复不写盘」）。
-    if (pendingInitialThinking && (pendingMessages || thinkingChanged)) {
-      writer.appendThinkingChange(initialThinkingLevel);
-      pendingInitialThinking = false;
+    const modelKey = modelKeyOf(state);
+    const modelChanged = modelKey !== lastModelKey;
+
+    // 初始化段（model_change / 回填档位 / head）只在「反正要写文件」时一次写全 ——
+    // 马上要写消息、或档位/模型真的变了。都不是就不写：纯空会话不建文件
+    // （恢复一个老会话也不动它，见 `hasThinkingEntry` 里那条「恢复不写盘」）。
+    //
+    // 顺序与 pi 一致：`model_change` → `thinking_level_change` → head。
+    if (pendingMessages || thinkingChanged || modelChanged) {
+      if (pendingInitialModel) {
+        writer.appendModelChange(state.model.provider, state.model.modelId);
+        lastModelKey = modelKey;
+        pendingInitialModel = false;
+      }
+      if (pendingInitialThinking) {
+        writer.appendThinkingChange(initialThinkingLevel);
+        pendingInitialThinking = false;
+      }
+      if (pendingHead) {
+        writer.appendMessage(sessionHead(state));
+        pendingHead = false;
+      }
     }
     // 级别变了要记一条（与 pi 同一个 entry type，pi 恢复时也认）。
     // 为什么在**这里**而不在键盘处理里：`thinking.changed` 有四个入口（Shift+Tab、
@@ -135,7 +176,6 @@ export function createSessionRecorder(
     // 没人调的（没有调用方传它），于是「换模型」这个事实**从来没进过会话文件** ——
     // 恢复历史时看到的是一串消息，却不知道中间哪一段用的哪个模型。有一条能真跑的
     // 路之后，回调字段就多余了，删掉比留一个永远不触发的钩子诚实。
-    const modelKey = modelKeyOf(state);
     if (modelKey !== lastModelKey) {
       writer.appendModelChange(state.model.provider, state.model.modelId);
       lastModelKey = modelKey;
@@ -157,8 +197,6 @@ export function createSessionRecorder(
     written: () => written,
     dispose(): void {
       unsubscribe();
-      // 结束时把 entry 游标对齐到实际写入数（resumeFrom 时尤其重要）。
-      resetEntrySeq(Math.max(entrySeqValue(), written));
     },
   };
 }

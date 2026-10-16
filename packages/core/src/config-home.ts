@@ -40,10 +40,10 @@
  * 目录名（`--<cwd>--` 编码）、**文件名**（`<ISO 时间戳>_<id>.jsonl`）与 header 形状与 pi 一致，
  * 所以 pi 的 `/resume` 能看到我们的会话，我们的 `/sessions` 也能看到 pi 的。
  * session id 也是同一个形状（UUIDv7）—— 于是把我们的 id 粘给 pi 的 `--session <id>`
- * 能直接恢复。一个已知差异，不影响读：
- *   - **version**：我们写 `1`，pi 当前是 `3`。pi 会把 v1 升到 v3（补 `id`/`parentId`
- *     树、把 `hookMessage` 改成 `custom`）并重写文件；那些字段我们写的时候本来就有，
- *     所以升完不会丢东西。
+ * 能直接恢复。**header 的 `version` 写的是当前 pi 的 `3`**：v3 多出来的两样（开头的
+ * `model_change` 与 head system 消息）我们自己就写（见 session-file.ts / session-recorder.ts），
+ * 不再让 pi 现场升级。老文件若是 v1，pi 仍会自动升（补 `id`/`parentId` 树、把 `hookMessage`
+ * 改成 `custom`）；那些字段我们写的时候本来就有，所以升完不会丢东西。
  *
  * 早先我们的文件名是 `<id>.jsonl`（且 id 形如 `s<base36>`）。改成与 pi 一致后，
  * 按 id 找文件需要扫目录比对 `_<id>.jsonl` 后缀（见 `findFileById()`）；老的 `<id>.jsonl`

@@ -278,10 +278,17 @@ test('记录器：resumeFrom 让恢复的会话**不重写**已有消息', async
       ['旧的甲', [{ type: 'text', text: '旧的乙' }], '新的丙'],
       '两条旧的在文件里各只有一份，新的追加在后',
     );
-    // 文件里 entry id 不能撞
+    // 文件里 entry id 不能撞，且**续写要接上链**：新写的那些 id 从文件里最后一条接着数、
+    // parentId 依次指向前一条 —— 否则 pi 用 id/parentId 建的树会断成两棵，恢复时只看得到后半段。
     const session = readSession(rec.file);
     const ids = session?.entries.map((e) => e.id) ?? [];
     assert.equal(new Set(ids).size, ids.length, 'entry id 不重复');
+    assert.deepEqual(ids, ['e1', 'e2', 'e3', 'e4'], '续写的 id 从已有的后面接着数（e3 是回填的档位，e4 是新的那条）');
+    assert.deepEqual(
+      session?.entries.map((e) => e.parentId),
+      [null, 'e1', 'e2', 'e3'],
+      '链一路接上（没有 null 断点）—— pi 恢复时靠它把新旧连成一棵树',
+    );
   });
 });
 
@@ -560,15 +567,18 @@ test('记录器：换模型会写一条 model_change（之前那个字段声明�
     const session = readSession(rec.file);
     assert.ok(session);
     const changes = session.entries.filter((e) => e.type === 'model_change');
-    assert.equal(changes.length, 1, `只该有一条 model_change，实际 ${changes.length}：${JSON.stringify(changes)}`);
-    assert.equal(changes[0]?.modelId, 'cn:deepseek-v4.1-flash');
-    assert.equal(changes[0]?.provider, 'workbuddy');
+    // 两条：开头那条初始 model_change（会话用什么模型，pi v3 的形状），加上换的那一条。
+    assert.equal(changes.length, 2, `该有初始 + 换模型两条 model_change，实际 ${changes.length}：${JSON.stringify(changes)}`);
+    assert.equal(changes[0]?.modelId, 'cn:space-bunny');
+    assert.equal(changes[1]?.modelId, 'cn:deepseek-v4.1-flash');
+    assert.equal(changes[1]?.provider, 'workbuddy');
   });
 });
 
 test('记录器：没换模型时不写 model_change（不能每帧补一条）', async () => {
-  // 与上一条同一个机制的反面：不换就不该有任何 model_change。
-  // 漏了去重的话，这个文件会按帧增长 —— 而它恰好是「打开面板要扫」的那些文件之一。
+  // 与上一条同一个机制的反面：不换就不该有**多出来**的 model_change。
+  // 开头那条初始 model_change 是 pi v3 的形状（会话用什么模型），只有一条；
+  // 漏了去重的话，50 次 llm.delta 会各补一条 —— 而它恰好是「打开面板要扫」的那些文件之一。
   await withHome(async () => {
     const reducer = createAgentReducer({});
     let state: AgentState = createInitialState({
@@ -600,10 +610,87 @@ test('记录器：没换模型时不写 model_change（不能每帧补一条）'
     rec.dispose();
     const session = readSession(rec.file);
     assert.ok(session);
-    assert.equal(
-      session.entries.filter((e) => e.type === 'model_change').length,
-      0,
-      '没换模型就不该有 model_change',
+    const changes = session.entries.filter((e) => e.type === 'model_change');
+    assert.equal(changes.length, 1, `只有开头那条初始 model_change，实际 ${changes.length}`);
+    assert.equal(changes[0]?.modelId, 'cn:space-bunny');
+  });
+});
+
+// ── pi v3 形状：新会话开头那三样 ──
+
+test('记录器：新会话产出 pi v3 形状（model_change + thinking + head system 消息）', async () => {
+  // 把「pi 能直接读我们的会话」钉在**形状**上：v3 比早先的 v1 多出来的两样 —— 开头的
+  // model_change 与开头那条 system 消息（system prompt 分段 + toolsAdded）—— 由我们
+  // 自己写出来，pi 的 `/resume` 才能原样捞回这一段（工具表靠 `_restoreToolsFromTranscript`）。
+  await withHome(async () => {
+    const reducer = createAgentReducer({});
+    let state: AgentState = createInitialState({
+      systemPrompt: '整段',
+      providerName: 'workbuddy',
+      modelId: 'cn:space-bunny',
+      toolNames: ['read'],
+      sessionId: 'v3shape',
+    });
+    let notify: (() => void) | null = null;
+    const dispatch = (a: AgentAction): void => {
+      state = reducer(state, a) as AgentState;
+      notify?.();
+    };
+    const store = {
+      getState: () => state,
+      subscribe: (l: () => void) => {
+        notify = l;
+        return () => {
+          notify = null;
+        };
+      },
+      dispatch,
+    };
+    // 装载 prompt（内核那一步的缩影）：分段 + 一条工具声明。
+    dispatch({
+      type: 'prompt.init',
+      systemPrompt: '整段',
+      sections: { preamble: '前言', cwd: '<cwd>/proj</cwd>' },
+      tools: [{ name: 'read', description: '读文件', parameters: { type: 'object', properties: {} } }],
+    } as never);
+
+    const rec = createSessionRecorder(store, { sessionId: 'v3shape', cwd: '/proj', enabled: true });
+    assert.ok(rec);
+    dispatch({ type: 'user.message', text: '你好' });
+    rec.dispose();
+
+    const session = readSession(rec.file);
+    assert.ok(session);
+    assert.equal(session.header.version, 3, 'header 写当前 pi 的版本号（我们直接产 v3，不让 pi 现场升级）');
+
+    const [c0, c1, c2, c3] = session.entries;
+    assert.equal(c0?.type, 'model_change');
+    assert.equal(c0?.['modelId'], 'cn:space-bunny');
+    assert.equal(c0?.parentId, null, '开头的 model_change 没有父');
+    assert.equal(c1?.type, 'thinking_level_change');
+    assert.equal(c2?.type, 'message');
+    const head = c2?.['message'] as Record<string, unknown>;
+    assert.equal(head['role'], 'system');
+    assert.deepEqual(head['sections'], { preamble: '前言', cwd: '<cwd>/proj</cwd>' });
+    assert.deepEqual(
+      (head['toolsAdded'] as Array<{ name: string }>).map((t) => t.name),
+      ['read'],
+      'head 带装载时那批工具的声明',
     );
+    assert.equal(c3?.['type'], 'message');
+    assert.equal((c3?.['message'] as { role: string }).role, 'user', 'head 之后第一条才是用户的话');
+
+    // id / parentId 串成链（pi 用它做 session tree）。
+    assert.deepEqual(
+      session.entries.map((e) => e.id),
+      ['e1', 'e2', 'e3', 'e4'],
+    );
+    assert.deepEqual(
+      session.entries.map((e) => e.parentId),
+      [null, 'e1', 'e2', 'e3'],
+    );
+
+    // 恢复时 head 被跳过：它由 `state.prompt` 每轮重建，读回来会翻倍。
+    assert.deepEqual(readSessionMessages(rec.file).map((m) => m.role), ['user']);
   });
 });

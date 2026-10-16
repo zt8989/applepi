@@ -31,9 +31,25 @@
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { ensureDir, findFileById, sessionDirFor, sessionFileName } from './config-home';
-import type { Message } from '@earendil-works/pi-ai';
+import type { Message, SystemMessage } from '@earendil-works/pi-ai';
 
-export const SESSION_VERSION = 1;
+/**
+ * 会话文件版本。
+ *
+ * **与 pi 当前那版对齐（`CURRENT_SESSION_VERSION = 3`）**，因为我们要产出的是一份
+ * pi 能直接读的会话文件（见下面的「v3 形状」）。pi 那边 v1→v3 的迁移只是补
+ * `id`/`parentId` 树、把 `hookMessage` role 改成 `custom` —— 那些字段我们写的时候
+ * 本来就有，所以 v3 不是「要迁移」，是「本来就是这个形状」。
+ *
+ * v3 相对我们早先写的 v1，多出来的两样（本文件 + session-recorder 一起产出）：
+ *
+ *   - 会话开头的 **`model_change`**（`provider` / `modelId`）—— pi 用它恢复「这一段
+ *     用的哪个模型」；我们早先只在**中途换模型**时写，开头那个没写。
+ *   - 开头的**一条 `system` 消息**（`sections` = 整份 system prompt 的分段 +
+ *     `toolsAdded` = 装载时那批工具的完整声明）—— 就是 pi 的「system prompt + tools」。
+ *     pi 靠它 `_restoreToolsFromTranscript()` 把工具表装回来。
+ */
+export const SESSION_VERSION = 3;
 
 export interface SessionHeader {
   type: 'session';
@@ -81,19 +97,16 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-let entrySeq = 0;
-/** entry id：会话内单调递增（`e1` `e2` …）。 */
-function nextEntryId(): string {
-  entrySeq += 1;
-  return `e${entrySeq}`;
-}
-
-export function resetEntrySeq(value = 0): void {
-  entrySeq = value;
-}
-
-export function entrySeqValue(): number {
-  return entrySeq;
+/**
+ * entry id 的序号（`e1` `e2` …）。
+ *
+ * **每一份 entry 占一个序号** —— 不只是 `message`，`model_change` /
+ * `thinking_level_change` / 开头那条 system 消息也都占。续写一个已存在的会话时，
+ * 序号从文件里**最后一条 entry** 接着数（见 `SessionWriter.start`），否则新写的
+ * entry 会与已有的撞 id，而 pi 用 id/parentId 建会话树 —— 撞了树就散。
+ */
+function seqOf(id: string): number {
+  return Number.parseInt(id.replace(/^e/, ''), 10) || 0;
 }
 
 export function createSessionHeader(options: {
@@ -117,6 +130,8 @@ export class SessionWriter {
   private readonly file: string;
   private header: SessionHeader | null = null;
   private lastId: string | null = null;
+  /** 下一条 entry 的序号（从已有文件接着数，见 `start`）。 */
+  private seq = 0;
   /** header 是否已落盘（推迟到第一条消息，空会话不建文件）。 */
   private wroteHeader = false;
   /** 文件本来就存在（恢复旧会话）：header 已在盘上，不再写。 */
@@ -150,7 +165,17 @@ export class SessionWriter {
   start(header?: SessionHeader): void {
     this.header = header ?? createSessionHeader({ id: this.id, cwd: this.cwd });
     // 文件已存在说明是恢复旧会话：header 用现成的，不重写。
-    if (existsSync(this.file)) this.existed = true;
+    if (existsSync(this.file)) {
+      this.existed = true;
+      // 续写要把链接上：`parentId` 必须是文件里最后一条 entry（不是 null），
+      // entry id 也从它后面接着数（不与已有的撞）。pi 用 id/parentId 建会话树，
+      // 断了链它会把这半段当成另一棵树 —— 恢复时只看得到后半段。
+      const last = readLastEntry(this.file);
+      if (last) {
+        this.lastId = last.id;
+        this.seq = Math.max(this.seq, seqOf(last.id));
+      }
+    }
   }
 
   /** 确保 header 已落盘（第一次写消息时调）。 */
@@ -167,15 +192,16 @@ export class SessionWriter {
   append(entry: { type: string; id?: string } & Record<string, unknown>): SessionEntry {
     // 第一条消息到了才落 header —— 空的会话文件不写盘。
     this.ensureHeader();
+    this.seq += 1;
     const full: SessionEntry = {
       ...entry,
-      id: entry.id ?? nextEntryId(),
+      id: entry.id ?? `e${this.seq}`,
       parentId: this.lastId,
       timestamp: nowIso(),
     };
     appendFileSync(this.file, `${JSON.stringify(full)}\n`, 'utf8');
     this.lastId = full.id;
-    entrySeq = Math.max(entrySeq, Number.parseInt(full.id.replace(/^e/, ''), 10) || 0);
+    this.seq = Math.max(this.seq, seqOf(full.id));
     return full;
   }
 
@@ -193,6 +219,61 @@ export class SessionWriter {
 }
 
 // ─── 读 ───
+
+/**
+ * 读文件里**最后一条** entry（续写时接上 `id` / `parentId` 链用）。
+ *
+ * 只读尾巴一段：一个会话文件是只追加的，最后一条就在末尾。单条 entry 可能很大
+ * （一条 toolResult 能有几百 KB），所以尾巴窗口取 1MB；万一最后一行比窗口还长、
+ * 解析不出来，再退回整份读一次（正确优先 —— 这是续写，宁可慢一点也不能接错 id）。
+ */
+function readLastEntry(file: string): SessionEntry | null {
+  const window = 1024 * 1024;
+  let fd: number | undefined;
+  let text: string;
+  let fromStart = false;
+  try {
+    fd = openSync(file, 'r');
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - window);
+    fromStart = start === 0;
+    const buf = Buffer.allocUnsafe(size - start);
+    if (buf.length === 0) return null;
+    const read = readSync(fd, buf, 0, buf.length, start);
+    text = buf.toString('utf8', 0, read);
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // 读失败后的清理失败不值得抛。
+      }
+    }
+  }
+
+  const lines = text.split('\n').filter((l) => l.trim() !== '');
+  // 窗口从半行开始时，第一条可能被截断 —— 跳过它。
+  const candidates = fromStart ? lines : lines.slice(1);
+  for (let i = candidates.length - 1; i >= 0; i -= 1) {
+    try {
+      const parsed = JSON.parse(candidates[i] as string) as SessionEntry;
+      if (parsed.type === 'session') continue;
+      return parsed;
+    } catch {
+      // 这一行被窗口截断（或崩溃半行）：上一行也不是它，退回整份读。
+      break;
+    }
+  }
+  if (fromStart) return null;
+  try {
+    const parsed = readSession(file);
+    return parsed && parsed.entries.length > 0 ? (parsed.entries[parsed.entries.length - 1] as SessionEntry) : null;
+  } catch {
+    return null;
+  }
+}
 
 export function readSession(file: string): Session | null {
   if (!existsSync(file)) return null;
@@ -223,13 +304,43 @@ export function readSession(file: string): Session | null {
   return { header, entries };
 }
 
+/**
+ * 这条 message 是不是 pi v3 的**开头 system 消息**（system prompt + tools）。
+ *
+ * 两条判据，够用且不误伤：
+ *
+ * - head 一定带 `toolsAdded`（装载时那批工具的完整声明）—— 中途那条
+ *   `prompt.segment.added`（MCP 的 `mcp_servers` 段 patch）没有它；
+ * - 万一工具一个都没有（没有 `toolsAdded`），head 也**没有 `source` 字段**，而段 patch
+ *   都带着 `source`（`before_agent_start`）。于是「第一条 system 消息且不是段 patch」
+ *   就是 head。
+ *
+ * 只看**第一条** message：head 永远在最前（`model_change` / `thinking_level_change`
+ * 不是 message 条目，不影响）。
+ */
+function isLeadingHead(message: Message): boolean {
+  const sys = message as SystemMessage;
+  if (sys.role !== 'system') return false;
+  if (Array.isArray(sys.toolsAdded) && sys.toolsAdded.length > 0) return true;
+  return !('source' in (message as Record<string, unknown>));
+}
+
 /** 把读出来的会话里的 message 条目按顺序取出（恢复历史用）。 */
 export function sessionMessages(session: Session): Message[] {
   const out: Message[] = [];
+  // 第一条 message 若是 head（system prompt + tools），**跳过**：它不是对话消息，
+  // 而是「请求头部」—— 本项目那份由 `state.prompt` 重建、每轮前置，读回来会变成
+  // 两条 head（前缀也对不上了）。v1 老文件与 pi 的文件都走这条判断。
+  let firstMessage = true;
   for (const entry of session.entries) {
     if (entry.type === 'message') {
       const message = (entry as MessageEntry).message;
-      if (message) out.push(message);
+      if (!message) continue;
+      if (firstMessage) {
+        firstMessage = false;
+        if (isLeadingHead(message)) continue;
+      }
+      out.push(message);
     }
   }
   return out;
