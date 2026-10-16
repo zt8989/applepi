@@ -165,6 +165,97 @@ test('steer 的 user 节点挂在 turn 容器下面（它是这回合里的一�
 
 // ── followUp：回合收工时才插，然后开新回合 ──
 
+/**
+ * 排一条 followUp 并等两个回合都跑完。
+ *
+ * ⚠️ **不能只用 `waitForIdle`**：`llm.done` 的迁移先把相位推到 idle，`turn.end` 之后
+ * 才开新回合 —— 那个瞬间 `waitForIdle` 就返回了，于是断言会在第二回合还没跑时就执行。
+ * 判据改成「环真的静了」：相位回 idle 且 `steps` 个 step 都跑完。
+ */
+async function runWithFollowUps(count: number): Promise<{
+  store: AgentStore;
+  injected: boolean;
+}> {
+  const faux = createFauxRuntime();
+  faux.setResponses(
+    Array.from({ length: count + 1 }, (_, i) =>
+      fauxAssistantMessage([fauxText(`第 ${i + 1} 句`)], { stopReason: 'stop' }),
+    ),
+  );
+  const store = createAgentStore({
+    runtime: faux.runtime,
+    systemPrompt: 'test',
+    sessionId: `q-followup-${count}`,
+  });
+
+  // 流到一半时排 followUp —— `Option+Enter`（`followUp()`）干的就是这件事。
+  let injected = false;
+  let queued = 0;
+  store.subscribe(() => {
+    const s = store.getState();
+    if (queued >= count || s.phase !== 'thinking' || s.streamingText.length === 0) return;
+    queued += 1;
+    injected = true;
+    store.dispatch({ type: 'queue.input', text: `接着说 ${queued}`, as: 'followUp' });
+  });
+
+  store.dispatch({ type: 'user.message', text: '你好' });
+  for (let i = 0; i < 200; i += 1) {
+    const s = store.getState();
+    if (s.phase === 'idle' && s.totalSteps >= count + 1) break;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return { store, injected };
+}
+
+test('followUp：回合收工后**真的再跑一个回合**（模型被再调用一次）', async () => {
+  const { store, injected } = await runWithFollowUps(1);
+  const state = store.getState();
+
+  assert.ok(injected, 'followUp 确实排过队');
+  // 这一条是核心：修好之前新回合会开出来、消息也插进去，但 `turn.start` 永远不发，
+  // 相位永远停在 thinking（环再也不转，且没有任何报错）。
+  assert.equal(state.phase, 'idle', '环最终停下来了');
+  assert.equal(state.followUpQueue.length, 0, '排的那条被取走了');
+  assert.equal(state.messages.filter((m) => m.role === 'user').length, 2);
+  assert.equal(
+    state.messages[state.messages.length - 1]?.role,
+    'assistant',
+    '模型为第二句话答过一次',
+  );
+  assert.equal(state.totalSteps, 2, '两次 LLM 调用');
+  assert.equal(state.turnIndex, 2, '两个回合');
+  assert.equal(traceStats(state.trace).turns, 2, '树上也是两个回合');
+});
+
+test('followUp 连排两条：每一条都开一个回合，最后一条也不能漏', async () => {
+  // 老实现里「消费后看剩余队列」在**最后一条**上必然判空 —— 单条与多条都要覆盖。
+  const { store } = await runWithFollowUps(2);
+  const state = store.getState();
+
+  assert.equal(state.phase, 'idle');
+  assert.equal(state.followUpQueue.length, 0);
+  assert.equal(state.messages.filter((m) => m.role === 'user').length, 3);
+  assert.equal(state.totalSteps, 3, '三次 LLM 调用');
+  assert.equal(state.turnIndex, 3, '三个回合');
+});
+
+test('followUp 开的新回合：step 与重试计数都从头（不是「第 1 步（重试）」）', async () => {
+  const { store } = await runWithFollowUps(1);
+  const state = store.getState();
+
+  // 两个回合各有一个 step，标签都应该是「第 1 步」：`stepIndex` 与 `llmAttempts`
+  // 都是**每个回合**归零的东西（后者不归零就会把新回合第一步标成「重试」，
+  // 并吃掉那一步的重试额度）。
+  const steps = Object.values(state.trace.nodes).filter((n) => n?.kind === 'step.start');
+  assert.deepEqual(
+    steps.map((n) => n?.label),
+    ['第 1 步', '第 1 步'],
+  );
+  assert.equal(state.turns, 1, '`turns` 是每回合内的 LLM 调用数，不是会话累计');
+  assert.equal(state.llmAttempts, 1, '新回合的第一次尝试就是第 1 次');
+});
+
 // ── 防重入 ──
 
 // ── 落盘 ──
