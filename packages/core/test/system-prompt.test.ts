@@ -222,8 +222,8 @@ test('promptFileSources：两个都没有时是空（不是路径字符串）', 
   });
 });
 
-test('defaultSystemPrompt() 给的是 pi 拼的那一份（不再有手写中文）', () => {
-  const prompt = defaultSystemPrompt(process.cwd());
+test('defaultSystemPrompt() 给的是 pi 拼的那一份（不再有手写中文）', async () => {
+  const prompt = await defaultSystemPrompt(process.cwd());
   assert.match(prompt, /<rules>/, '默认走完整前缀');
   assert.match(prompt, /<tools>/);
   // 早先这里是「你是一个编码助手…」那三行。现在不该再出现。

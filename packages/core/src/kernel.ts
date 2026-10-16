@@ -261,8 +261,9 @@ export interface Kernel {
  * 这个函数保留是因为它在两个地方是**方便入口**：测试与脚本想看一眼「没传 `--system`
  * 时到底会给模型发什么」。
  */
-export function defaultSystemPrompt(cwd: string = process.cwd()): string {
-  return buildSystemPromptText({ cwd, tools: promptToolsFrom(cwd), skills: loadSkillRegistry({ cwd }).skills });
+export async function defaultSystemPrompt(cwd: string = process.cwd()): Promise<string> {
+  const { skills } = await loadSkillRegistry({ cwd });
+  return buildSystemPromptText({ cwd, tools: promptToolsFrom(cwd), skills });
 }
 
 export async function createKernel(options: KernelOptions): Promise<Kernel> {
@@ -606,8 +607,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     // （codemode 靠它把自己的描述换成「现在能调哪些工具」的清单）。
     const declared = declaredToolset(cwd);
     const declaredNames = new Set(declared.tools.map((tool) => tool.name));
-    // Skill 清单：官方 `loadSkills()` + `loadSkillsFromDir()` 扫各个目录
-    // （含跳工具约定的 `~/.agents/skills`），再由 reducer 拼进 system prompt
+    // Skill 清单：官方 `DefaultResourceLoader` 扫各个目录（`~/.pi/agent/skills`、
+    // `<cwd>/.pi/skills`、cwd 与祖先的 `.agents/skills`、`~/.agents/skills`），
+    // 目录发现与重名判定与 pi 逐字相同；再由 reducer 拼进 system prompt
     // （走 prompt.init，所以会被落盘、被回放）。
     //
     // 加载**失败不能拖垮启动**：一个写坏 frontmatter 的 skill 不该让整个界面起不来
@@ -616,7 +618,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     // 诊断**不打到 stderr**：TUI 模式下 stderr 用户看不见，而「某个 skill 没加载上」
     // 正是静默退化（模型少了能力，界面与用户都不知道）。它们进 state，由界面开场显示
     // （与 pi 的 `[Skill conflicts]` 同形）。
-    const skillRegistry = loadSkillRegistry({ cwd, ...(options.skillPaths ? { paths: options.skillPaths } : {}) });
+    const skillRegistry = await loadSkillRegistry({ cwd, ...(options.skillPaths ? { paths: options.skillPaths } : {}) });
     // System prompt 由 **pi 的 buildSystemPrompt** 拼（工具规则 / AGENTS.md / cwd / skill）。
     // 我们只收集输入：工具的 snippet+guideline、AGENTS.md 上下文、skill 清单。
     //

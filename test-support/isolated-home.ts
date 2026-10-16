@@ -18,6 +18,11 @@
  * 求值之前把 **pi 官方的 `PI_CODING_AGENT_DIR`** 指到本次运行专属的临时目录，
  * 并在退出时整个删掉。
  *
+ * **`HOME` 也一起指过去**（指向同一个临时目录）：pi 的 `getHomeDir()` 读的是 `HOME`，
+ * 而技能加载除了 `~/.pi/agent/skills` 还会扫 `~/.agents/skills` —— 只改前者的话，
+ * 每个跑测试的人都把**自己真实家目录里的几十个 skill** 扫进 prompt（症状是
+ * 「这台机器上碰巧过」，以及本机看到的 skill 清单与 CI 上完全不同）。
+ *
  * 为什么用 pi 那个名字：本项目早先有自己的 `REDUX_AGENT_DIR`，现在删了 ——
  * 两个变量指向同一件事，却只有一个会被 pi 自己认，症状是「我们与 pi 各读各的」。
  * 详见 `packages/core/src/config-home.ts` 的文件头。
@@ -29,11 +34,22 @@
  * 同理，本文件还会在 chalk 加载前打开颜色（见文件末尾），因为 pi 主题的斜体靠 chalk。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
+
+/**
+ * 真实配置家目录 —— **必须在改 `HOME` 之前算**。
+ *
+ * `extension-host.test.ts` 是故意用真家目录的（它验的就是「与 pi 共用一份配置」），
+ * 而它现在靠这个变量找真目录（而不是 `homedir()` —— 那个会跟着被改掉的 `HOME` 跑）。
+ */
+process.env['PI_CODING_AGENT_DIR_REAL'] = path.join(homedir(), '.pi', 'agent');
 
 const dir = mkdtempSync(path.join(tmpdir(), `redux-agent-test-home-${process.pid}-`));
 process.env['PI_CODING_AGENT_DIR'] = dir;
+// `HOME` 跟着一起指过去：pi 的 `getHomeDir()`（→ `~/.agents/skills`、祖先目录的
+// `.agents/skills`）读的就是它。见文件头。
+process.env['HOME'] = dir;
 
 // 退出时清掉。正常退出与异常退出都要管，所以两个都挂上。
 const cleanup = (): void => {
