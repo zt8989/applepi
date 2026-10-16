@@ -24,6 +24,7 @@ import type { AgentStore } from './store';
 import type { InitRecord, TracePersistence, TraceSink } from './trace-store';
 import type { Message, Model, ModelThinkingLevel } from '@earendil-works/pi-ai';
 import type { AgentAction, ModelCapabilities } from './actions';
+import type { ExtensionLifecycleEvent } from './extension-events';
 import { createSessionRecorder, type SessionRecorder } from './session-recorder';
 import { readSession, readSessionThinking, sessionMessages, sessionThinking } from './session-file';
 import { findSessionFile } from './config-home';
@@ -355,6 +356,32 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
 
   // 工具执行门的持有者：store 先建、extensionHost 后建，所以走一个先声明、后赋值的引用。
   let extensionHostRef: ExtensionHost | undefined;
+
+  /**
+   * 生命周期事件的**唯一出口**：先落成 action（于是进轨迹、可回放），再发给扩展。
+   *
+   * ## 为什么是「先 dispatch 再 emit」
+   *
+   * 轨迹树是 action 的产物（reducer 把 `extension.lifecycle` 记成一条注释节点），
+   * 而前端扩展是**当场**就要收到事件的 —— 两件事不能各写一遍：写两遍必然漂
+   * （某条事件记得发却忘了记，或者反过来）。所以只有这一个函数。
+   *
+   * ## 为什么 dispatch 排在 emit 前面
+   *
+   * `emitLifecycle` 会同步开始跑扩展的 handler，而 handler 有可能又去 `dispatch`
+   * （`pi.sendMessage` 之类）。先把「这件事发生过」写进状态，再去通知别人，顺序才是
+   * 「先事实后反应」；反过来的话，扩展在 handler 里读到的状态会缺一条自己刚触发的事件。
+   *
+   * ## 循环风险
+   *
+   * dispatch 会再触发 store 订阅器（相位级事件就是订阅器发的）。那一路看的是
+   * `phase` 有没有变，没变就直接 return —— 所以嵌套一层就停了，不会自激。
+   */
+  function recordLifecycle(event: ExtensionLifecycleEvent): void {
+    store.dispatch({ type: 'extension.lifecycle', event } as AgentAction);
+    extensionHostRef?.emitLifecycle(event);
+  }
+
   const { store, persistence, autoCompact } = createPersistentStore({
     runtime,
     // `tool_call` 门：MCP 靠它等「脚本/模型点名了但服务器还没连上」。
@@ -363,6 +390,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       extensionHostRef === undefined
         ? Promise.resolve({ input })
         : extensionHostRef.beforeToolCall(toolCallId, name, input),
+    // 扩展生命周期事件（`agent_start` 之外的都从 effect 来）：统一走 recordLifecycle
+    // —— 先记进轨迹，再发给扩展（宿主还没装上时事件照旧记，只是没人收）。
+    onExtensionEvent: recordLifecycle,
     // **不给** systemPrompt：真的那份由下面的 prompt.init 装（那时才需要 cwd、
     // 工具、skill）。这里给一个占位只会活到第一条 prompt.init。
     cwd,
@@ -375,6 +405,34 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     autoCompactEnabled: readCompactionEnabled(cwd),
     ...(options.traceDir === null ? {} : { traceSink: activeSink }),
     ...(options.onTraceError ? { onTraceError: options.onTraceError } : {}),
+  });
+
+  // ── 相位级生命周期事件（`agent_start` / `agent_end` / `agent_settled`）──
+  //
+  // 为什么用订阅器而不是在 reducer 里：reducer 是纯函数，发事件不属于它；而「环刚停下来」
+  // 这个时刻在 redux-loop 里没有对应的 action（与 `createAutoCompact` 同一个理由，
+  // 见 store.ts 的头注释）。订阅器盯 `phase`，任何停止路径都不漏。
+  //
+  // 事件走 `recordLifecycle()`：先记进轨迹，再发给扩展。宿主还没装上
+  // （`deferExtensions` 的首帧那几秒）时只是没人收，**记录照旧** —— 轨迹是历史，
+  // 不该因为那一刻没有监听者就把一段真实发生过的事漏掉。
+  //
+  // `agent_start` 的判据是 idle → 非 idle；`agent_end` / `agent_settled` 是反过来那一下。
+  // **两个一起发**：pi 的 `agent_end` 是「这一轮结束」（可能还会继续），`agent_settled` 是
+  // 「真的静了」；相位回到 idle 就是两者同时成立的那一点。扩展自己按 `agentSettledSupported`
+  // 决定认哪个（Orca 的状态扩展就只认后者），所以两个都发，不替它选。
+  let agentWasRunning = false;
+  const unsubscribeAgentLifecycle = store.subscribe(() => {
+    const state = store.getState();
+    const running = state.phase !== 'idle';
+    if (running === agentWasRunning) return;
+    agentWasRunning = running;
+    if (running) {
+      recordLifecycle({ type: 'agent_start' });
+    } else {
+      recordLifecycle({ type: 'agent_end', messages: state.messages });
+      recordLifecycle({ type: 'agent_settled' });
+    }
   });
 
   // ── 扩展宿主的**活视图**（`deferExtensions` 用）──
@@ -417,6 +475,10 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     // 就是一行静默的降级（权限类扩展会丢掉 signal，而症状离真因很远）。
     beforeToolCall: (...args: Parameters<ExtensionHost['beforeToolCall']>) =>
       currentHost().beforeToolCall(...args),
+    // 同样逐次转发：后台装载完成后，早先抱着的「空宿主」视图里这个方法就指向真宿主了
+    // （否则就绪前发出的那些事件永远发不到扩展上）。
+    emitLifecycle: (event: Parameters<ExtensionHost['emitLifecycle']>[0]) =>
+      currentHost().emitLifecycle(event),
     dispose: () => currentHost().dispose(),
   };
 
@@ -446,6 +508,41 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     // 底箱的「已用 / 1.0M」要用。取不到就 0，底箱会不画那个百分比。
     contextWindow: runtime.model.contextWindow ?? 0,
   });
+
+  // ── 会话记录器：**必须在扩展装载之前建** ──
+  //
+  // 顺序不是随手排的：扩展的 `ctx.sessionManager.getSessionFile()` 要报「这个会话的
+  // 文件是哪个」，而它在 `session_start` 那一刻就被读走、之后不再刷新（那是 pi 的
+  // 状态扩展自己的逻辑）。Orca 那类宿主靠这个路径把「对话记录在哪」认下来 ——
+  // 拿不到就只能一直显示 loading。
+  //
+  // 报的是**计划路径**（`SessionWriter.path`），不是「文件已经在盘上」：本项目
+  // 空会话不建文件（见 session-file.ts），而状态扩展读的时候自己会 `existsSync` 重试
+  // （`getPersistedSessionMetadata`），第一条消息落盘之后那份元数据就真的带上去了 ——
+  // 与 pi 自己的注释「Pi publishes its planned path before creating the transcript」
+  // 同一回事。
+  const openRecorder = (
+    id: string,
+    resumeFrom?: number,
+    hasThinkingEntry?: boolean,
+  ): SessionRecorder | null => {
+    const rec = createSessionRecorder(store, {
+      sessionId: id,
+      cwd,
+      enabled: options.writeSession !== false,
+      ...(resumeFrom !== undefined ? { resumeFrom } : {}),
+      ...(hasThinkingEntry !== undefined ? { hasThinkingEntry } : {}),
+    });
+    current = { ...current, sessionId: id, recorder: rec };
+    return rec;
+  };
+  // 恢复场景的两件事合并成一处：**已有会话**（有消息）才谈「它记没记过档位」——
+  // 空壳文件不算已有会话，走新会话那条路（会补写一条初始记录）。
+  openRecorder(
+    sessionId,
+    options.resumeFrom,
+    startupSession?.hasMessages === true ? startupSession.hasEntry : undefined,
+  );
 
   // ── 扩展 + prompt：启动路径上最重的一块（jiti 装扩展，实测 2~3s）──
   //
@@ -643,32 +740,6 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   });
 
   //
-  // 会话记录器：把消息流写成 `sessions/<cwd>/<时间戳>_<id>.jsonl`，供「恢复历史」用。
-  // 它同样是 store 订阅器 —— 挂在 dispatch 链上，成功失败都记。
-  //
-  // 写成可替换的：`newSession()` 要换 id（于是换文件），而 store 不重建。
-  const openRecorder = (
-    id: string,
-    resumeFrom?: number,
-    hasThinkingEntry?: boolean,
-  ): SessionRecorder | null => {
-    const rec = createSessionRecorder(store, {
-      sessionId: id,
-      cwd,
-      enabled: options.writeSession !== false,
-      ...(resumeFrom !== undefined ? { resumeFrom } : {}),
-      ...(hasThinkingEntry !== undefined ? { hasThinkingEntry } : {}),
-    });
-    current = { ...current, sessionId: id, recorder: rec };
-    return rec;
-  };
-  // 恢复场景的两件事合并成一处：**已有会话**（有消息）才谈「它记没记过档位」——
-  // 空壳文件不算已有会话，走新会话那条路（会补写一条初始记录）。
-  openRecorder(
-    sessionId,
-    options.resumeFrom,
-    startupSession?.hasMessages === true ? startupSession.hasEntry : undefined,
-  );
 
   return {
     store,
@@ -729,6 +800,8 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         defaultLevel: readDefaultThinkingLevel(cwd),
         current: store.getState().model.thinkingLevel,
       });
+      const state = store.getState();
+      const previousModel = { provider: state.providerName, id: state.modelId };
       store.dispatch({
         type: 'model.changed',
         provider,
@@ -738,6 +811,16 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         capabilities: readCapabilities(model),
         contextWindow: model.contextWindow ?? 0,
       } as AgentAction);
+      // pi 的 `model_select`：扩展靠它把「当前模型」显示出来（Orca 的模型选择器）。
+      // 只有在真的变了时才发（与 pi 的 `_emitModelSelect` 一致：同一个模型不重发）。
+      if (previousModel.provider !== provider || previousModel.id !== modelId) {
+        recordLifecycle({
+          type: 'model_select',
+          model: { provider, id: modelId },
+          previousModel,
+          source: 'set',
+        });
+      }
       return true;
     },
     /**
@@ -868,6 +951,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     dispose(): void {
       disposed = true;
       unsubscribeStart();
+      unsubscribeAgentLifecycle();
       autoCompact?.dispose();
       current.recorder?.dispose();
       persistence?.dispose();

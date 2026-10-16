@@ -15,6 +15,7 @@ import { createInitialState, type AgentState } from './state';
 import type { AgentAction } from './actions';
 import type { ThinkingBudgets } from '@earendil-works/pi-ai';
 import { createPiAiEffectTable, type EffectTable, type ToolCallGate } from './effects';
+import type { ExtensionLifecycleEvent } from './extension-events';
 import { getTools } from './tools';
 import { defaultStreamFn, type AgentRuntime, type StreamFn } from './provider';
 import { createTracePersistence, type TracePersistence, type TraceSink } from './trace-store';
@@ -168,6 +169,14 @@ export interface CreateAgentStoreOptions {
    * 只在走 pi-ai 表（不给 `effects`）时生效。
    */
   onToolCall?: ToolCallGate | undefined;
+  /**
+   * pi 扩展生命周期事件的落点（内核接到 `ExtensionHost.emitLifecycle`）。
+   *
+   * 只在走 pi-ai 表（不给 `effects`）时生效：那是唯一一处知道「哪个工具在跑、参数是什么」
+   * 与「哪条助手消息定稿了」的地方。自定义 effect 表的调用方（Web 自接）自己不发生命周期
+   * 事件就收不到 —— 与 `onToolCall` 同一个限定。
+   */
+  onExtensionEvent?: ((event: ExtensionLifecycleEvent) => void) | undefined;
   /** 完全自定义 reducer 接线（测试用）。 */
   reducerEffects?: Partial<ReducerEffects> | undefined;
 }
@@ -204,6 +213,9 @@ export function createAgentStoreWith(options: CreateAgentStoreOptions): AgentSto
       resolveModel: (state) => runtime.models.getModel(state.model.provider, state.model.modelId),
       ...(options.thinkingBudgets !== undefined ? { thinkingBudgets: options.thinkingBudgets } : {}),
       ...(options.onToolCall !== undefined ? { onToolCall: options.onToolCall } : {}),
+      ...(options.onExtensionEvent !== undefined
+        ? { onExtensionEvent: options.onExtensionEvent }
+        : {}),
     });
 
   const initialState = createInitialState({

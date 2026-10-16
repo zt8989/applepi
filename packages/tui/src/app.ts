@@ -222,6 +222,9 @@ function nodeColor(node: TraceNode): (t: string) => string {
     case 'model.changed':
       // 换模型 / 换档位 —— 与装载同色（都是模型上下文的事），靠 label 里的名字区分。
       return dim;
+    // 生命周期注释（内核告诉了扩展什么）：与 `prompt.*` 同族 —— 背景信息，暗色。
+    case 'extension.event':
+      return dim;
   }
 }
 
@@ -3176,6 +3179,11 @@ export async function runTui(options: TuiOptions): Promise<number> {
      * 自己的 `done` 里 resolve —— 它不知道 composer 是谁。界面是**唯一**知道的那个。
      */
     mountEditorSlot,
+    // 扩展的 `ctx.ui.setEditorText`（Orca 的 prefill 扩展用它把提示词填进 composer）。
+    // `setText` 会重画，不需要我们自己 refresh。
+    setEditorText: (text: string) => {
+      editor.setText(text);
+    },
     tuiDialogs,
     questionnaire: openQuestionnaire,
     ...(options.dialogs !== undefined ? { dialogs: options.dialogs } : {}),

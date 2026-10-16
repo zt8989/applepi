@@ -97,6 +97,21 @@ export type TraceNodeKind =
   | 'model.init'
   /** 换成了哪个模型 / 哪个档位（model.changed / thinking.changed）。 */
   | 'model.changed'
+  /**
+   * 一个 **pi agent 生命周期事件**（`agent_start` / `tool_execution_*` / `message_end` …）。
+   *
+   * ## 为什么单独一种 kind
+   *
+   * 它既不是对话（不推进 tip），也不是上下文（不改 prompt）、不是压缩、不是失败 ——
+   * 它是「内核把什么告诉了扩展/宿主」的**注释**。单独一种是必要的：`traceStats` 按 kind
+   * 数回合/步/工具/错误，`extension.event` 一个都不该计进去。
+   *
+   * ## 不推进 tip
+   *
+   * 它是旁注：`tool.call` / `tool.result` / `llm.result` 才是「发生过的事」的推进点。
+   * 让它推进 tip 的话，后面真正的事件会挂到注释底下，树就串成一条以事件为轴的链。
+   */
+  | 'extension.event'
 
 /**
  * 节点状态。

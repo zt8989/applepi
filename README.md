@@ -18,9 +18,12 @@ agent** —— 循环不是写出来的，是 reducer 与副作用互相 dispatc
   `bash`，直接用 Pi 官方那套）摸的是真实文件系统。
 - **长命令边跑边显示。** 接上官方工具的 `onUpdate`，`npm install` 这类命令的输出
   逐行出现，而不是「卡几十秒然后突然蹦出一块」——那几十秒的空白和卡死了没区别。
-- **能装 pi 扩展。** `settings.json` 的 `packages` 里的扩展装上就能用 ——
+- **能装 pi 扩展。** `settings.json` 的 `packages` 里的扩展、以及 pi 那两个**本地目录**
+  （`<cwd>/.pi/extensions/`、`~/.pi/agent/extensions/`）里的扩展，装上就能用 ——
   比如让模型开一个结构化多选对话框问你（别猜），或者查 web 抓 PDF。官方 loader
   装载、官方扩展运行时驱动，本项目只提供自己那一半：环、工具表、overlay 宿主。
+  **agent 生命周期事件也接上了** —— Orca 装在 `~/.pi/agent/extensions/` 的状态钩子
+  因此能拿到 `agent_start` / `tool_execution_*` / `session_file`，不再永远停在 loading。
 - **system prompt 也是官方的。** 用 pi 的 `buildSystemPrompt` 拼：每个工具怎么用、
   `edit` 的那些坑、`AGENTS.md` 项目上下文、cwd、skill 清单。自己**一个字都不写** ——
   项目自己的规则写在 `.pi/APPEND_SYSTEM.md`（或家目录那份）里，与 pi 同路径、同优先级。

@@ -1,7 +1,8 @@
 # 扩展
 
-本项目能装 **pi 扩展**（`settings.json` 的 `packages`），装上来的工具与 prompt 片段
-在**装载时**并进内核。
+本项目能装 **pi 扩展**（`settings.json` 的 `packages`，外加 pi 的那两个**本地目录**
+`.pi/extensions/` 与 `~/.pi/agent/extensions/` —— Orca 的托管扩展就装在后一个里），
+装上来的工具与 prompt 片段在**装载时**并进内核，agent 生命周期事件则实时发给它们。
 
 接了两个：
 
@@ -89,6 +90,26 @@ const loaded = { extensions: results.flatMap((r) => r.extensions), … };
 自己读 `settings.json` 再拼路径，最后必然是「pi 装到哪儿我们不知道」——症状是
 `pi list` 明明有，这边说没装。取不到时用 `onMissing: skip`：**不自动 `npm install`**，
 本项目不是包管理器，替 pi 装东西会让两边状态分家。
+
+### 也扫**本地扩展目录**（与 pi 同一顺序、同一规则）
+
+`settings.json` 的 `packages` 不是 pi 扩展的唯一来源 —— pi 还会扫两个**本地目录**，
+“放到那儿就生效”：
+
+| 顺序 | 目录 | 谁在用 |
+| --- | --- | --- |
+| 1 | `<cwd>/.pi/extensions/` | 项目本地扩展 |
+| 2 | `<agentDir>/extensions/`（即 `~/.pi/agent/extensions/`） | **Orca 装给 pi 的托管扩展** |
+| 3 | `settings.json` 的 `packages` | npm / git / 路径 |
+
+顺序**是语义**：工具表是「同名先注册者优先」，所以「谁顶掉谁」只能由这份顺序决定。
+不扫这两个目录，Orca 那三个托管扩展（状态钩子 / 标题 spinner / prefill）一个都装不上 ——
+症状是「Orca 里那个面板永远停在 loading」。
+
+发现规则照抄 pi 的 `discoverExtensionsInDir`：只下探**一层** —— `extensions/*.ts` /
+`*.js`，或 `extensions/<子目录>/`（按子目录的 `package.json` 的 `pi.extensions`，
+再退到 `index.ts` / `index.js`）。本地扩展没有包元数据（`metadata: undefined`），
+官方 loader 已经给它们写了 `sourceInfo`（`source: 'local'`）。
 
 ## 我们必须自己给的三样
 
@@ -547,6 +568,72 @@ pi 那边是 `SessionManager` **类**，条目来自它自己的 `sessions/*.jso
 少包那层的话官方的 `buildSessionContext` 会把消息当成条目、读不到 `.message` ——
 症状是「模型这轮用过哪些 web 工具」判不出来，于是**每次都要求 `web_enable` 重新加载一遍**。
 
+## agent 生命周期事件：接上（Orca 靠它们）
+
+pi 的**状态类扩展**（最具体的例子就是 Orca 装在 `~/.pi/agent/extensions/orca-agent-status.ts`
+的那份）靠一组 `pi.on(...)` 事件把「在干活 / 等回答 / 干完了」报回宿主。本项目
+没有 pi 的 `AgentSession`（环是 redux-loop），所以这些事件得由**内核自己发**：
+
+| 事件 | 在哪发 | 对应什么 |
+| --- | --- | --- |
+| `session_start` | `loadExtensionHost().startSession()` | 装载时一次（MCP 也靠它） |
+| `before_agent_start` | 界面发消息之前（已有） | 用户刚说完、即将开跑 |
+| `agent_start` | kernel 的 store 订阅器 | 相位 idle → 非 idle |
+| `agent_end` | 同一个订阅器 | 相位回到 idle |
+| `agent_settled` | 同一个订阅器 | 同上那一刻（真的静了） |
+| `message_end` | effect 的 `callLlm` 里（成功定稿后） | 一条助手消息进 state |
+| `tool_execution_start` / `tool_execution_end` | effect 的 `runToolCall` 里 | 工具开始 / 结束执行 |
+| `tool_call` | `beforeToolCall` 那个门（已有） | 与上两者不同：它**有返回值** |
+| `ui_prompt_start` / `ui_prompt_end` | 官方 `ExtensionRunner` 自己包了 `ctx.ui` | 扩展开一个阻塞弹窗 |
+| `model_select` | `kernel.setModel()` | `/model` 真的换了模型 |
+
+几个刻意的取舍：
+
+- **每条都先落成 action（`extension.lifecycle`），再发出去**：轨迹树是 action 的产物 ——
+  只有走了 store 的事才会被 reducer 记进树上、被落盘、被回放。生命周期事件也得是 action，
+  「扩展/宿主收到了什么」才有一段留下证据的历史（Orca 的状态面板全靠它）。
+- **已经有专属节点的事件不重复记**：只有相位级三条（`agent_start` / `agent_end` /
+  `agent_settled`）落 kind 为 `extension.event` 的注释节点（不推进 tip，也不进
+  `traceStats` 计数）；`message_end` 已在 `llm.result`、`tool_execution_*` 已在
+  `tool.call` / `tool.result`、`model_select` 已在 `model.changed` 上，它们的信息更全。
+  所以 `tool_execution_*` **不能**代替 `tool.call` / `tool.result` —— 前者只有
+  id / 名字 / isError，后者带参数、结果、Message（见 [trace](trace.md)）。
+  发出与记录只有**一个出口**（kernel 的 `recordLifecycle()`），分成两处写必然漂。
+- **相位级事件用 store 订阅器，不用 reducer**：reducer 是纯函数；而且「环刚停下来」
+  在 redux-loop 里没有对应 action（与 `createAutoCompact` 同一个理由，见 `store.ts`）。
+  订阅器盯 `phase`，任何停止路径都不漏。
+- **`agent_start` 与 `agent_end` 之外还发 `agent_settled`**：pi 的语义里 `agent_end`
+  是「这一轮结束」（可能还会继续），`agent_settled` 是「真的静了」。本项目相位回到
+  idle 就是两者同时成立的那一点 —— 两个都发，让扩展按它自己的 `agentSettledSupported`
+  决定认哪个（Orca 的状态扩展只认后者）。
+- **`message_end` 只在助手消息**「真的要进 state」时发（`callLlm` 成功返回的那条）。
+  abort / provider 报错那些最终消息不会进 state（也不会进会话），给它们发等于
+  让扩展看到一条不存在的消息。
+- **工具事件在未知工具 / 被阻止的调用上不发**：它们根本没执行（pi 同理，
+  `tool_execution_start` 在 `runToolCall` 里）。
+- **发出去就不管**：`emitLifecycle` 不等 handler，但**同步开始**执行 —— 调用顺序就是
+  扩展看到的顺序（状态类 handler 都是同步的）。handler 报错只记诊断，不带崩整轮对话。
+
+### 一处顺序：**会话记录器要在扩展之前建**
+
+状态扩展在 `session_start` 那一刻读一次 `ctx.sessionManager.getSessionFile()`，之后不再刷新。
+而这个路径是它告诉宿主「对话记录在哪」的唯一机会 —— 拿不到就只能一直显示 loading。
+
+所以 `createKernel` 把 `openRecorder()` 提到扩展装载**之前**。报的是**计划路径**
+（`SessionWriter.path`）而非「文件已在盘上」：本项目空会话不建文件（见
+[sessions](sessions.md)），而状态扩展自己会在**每一次 post** 上 `existsSync` 重试
+（`getPersistedSessionMetadata`）—— 第一条消息落盘之后，那之后的每个事件就都带上了
+`session_id` + `session_file`。与 pi 自己的注释「Pi publishes its planned path before
+creating the transcript」同一回事。
+
+### 为它们补的 `ctx.ui` 两个成员
+
+- **`ctx.ui.setTitle(title)`** → pi-tui 的 `Terminal.setTitle`（OSC 0/2）。Orca 的标题
+  spinner 靠它把 `π ✳ <名字> - <目录>` 写进标题；不实现的话 spinner 自己降级（它先
+  `typeof setTitle === 'function'` 判一刀），不报错。
+- **`ctx.ui.setEditorText(text)`** → 换掉 composer 里那行字（Orca 的 prefill 扩展用）。
+  宿主没有输入区时（探针 / 一次性模式）**弹**，不假装把字填进去了。
+
 ## 仍然不接的
 
 - **那六个会话操作**（`waitForIdle` / `newSession` / `fork` / `navigateTree` /
@@ -632,14 +719,14 @@ pi 那边是 `SessionManager` **类**，条目来自它自己的 `sessions/*.jso
 | 文件 | 干什么 |
 | --- | --- |
 | `packages/core/src/extension-host.ts` | 装扩展：解包路径、`loadExtensions`、runner 绑定、工具适配 |
-| `packages/core/src/extension-ui.ts` | `ctx.ui`：`custom()`（overlay / inline）、`setWidget`、`theme`、`notify`、raw input |
+| `packages/core/src/extension-ui.ts` | `ctx.ui`：`custom()`（overlay / inline）、`setWidget`、`setTitle` / `setEditorText`、`theme`、`notify`、raw input |
 | `packages/core/src/extension-tools.ts` | pi `ToolDefinition` → 本项目 `AgentTool`；工具集读/写 |
 | `packages/core/src/extension-models.ts` | `ctx.modelRegistry`：官方的 `ModelRegistry` 门面 |
 | `packages/core/src/extension-sessions.ts` | `ctx.sessionManager`：四个只读成员，数据源是 `state.messages`（`getSessionFile` 读落盘器） |
 | `packages/core/src/extension-commands.ts` | 斜杠命令与快捷键（内置键优先） |
 | `packages/core/src/extension-prompt.ts` | `before_agent_start` 的接线、**段补丁**与两条守卫 |
 | `packages/core/src/prompt-head.ts` | 请求 head（prompt + 初始工具声明）与「当前生效 sections」的回放 |
-| `test/extension-*.test.ts` | 真扩展 + 探针 + 模拟按键（三个文件） |
+| `test/extension-*.test.ts` | 真扩展 + 探针 + 模拟按键（四个文件；`extension-lifecycle.test.ts` 盖本地发现与生命周期事件） |
 
 ## 测试为什么用真扩展
 

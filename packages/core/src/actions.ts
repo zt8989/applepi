@@ -11,6 +11,7 @@ import type { Message } from '@earendil-works/pi-ai';
 import type { LlmErrorKind, StopCause } from './state';
 import type { QueueKind } from './state';
 import type { TraceNodeStatus, TraceTree } from './trace';
+import type { ExtensionLifecycleEvent } from './extension-events';
 import type { SkillInfo } from './skills';
 import type { CompactReason } from './compact';
 
@@ -382,6 +383,34 @@ export type AgentAction =
   | ({ type: 'model.changed' } & ModelSpec)
   /** 换了思考级别。 */
   | { type: 'thinking.changed'; level: ModelThinkingLevel }
+  /**
+   * 一个 **pi agent 生命周期事件**（内核自己发的那些）。
+   *
+   * ## 为什么它是一条 action，而不是内核里一个直接回调
+   *
+   * 本项目的不变式是「状态只能由 action 改」，而**轨迹树是 action 的产物**：
+   * 只有走了 store 的事才会被 reducer 记进树上、被落盘、被回放。
+   * 生命周期事件（`agent_start` / `tool_execution_*` / `message_end` …）同理：
+   * 它们得是 action，才能在轨迹里看得见 —— 「扩展/宿主收到了什么」本身就是一段
+   * 该留下证据的历史（Orca 那类状态面板全靠它，出了问题也就靠它查）。
+   *
+   * 落点是 kind 为 `extension.event` 的轨迹节点（**不推进 tip** —— 它是注释，
+   * 不是「发生过的一件事」的推进点）。但**已经有专属节点的事件不再另开节点**：
+   *
+   * | 生命周期事件 | 专属节点（信息更全，就不重复记了） |
+   * | --- | --- |
+   * | `message_end` | `llm.result`（带完整 Message） |
+   * | `tool_execution_start` / `tool_execution_end` | `tool.call` / `tool.result`（带参数、结果、消息） |
+   * | `model_select` | `model.changed` |
+   *
+   * 所以真正落 `extension.event` 的只有相位级三条（`agent_start` / `agent_end` /
+   * `agent_settled`）—— 它们没别处记。也就是说 `tool_execution_*` **不能**代替
+   * `tool.call` / `tool.result`：前者是通知（只有 id / 名字 / isError），后者才是记录。
+   *
+   * 发出与记录在**同一处**（kernel 的 `recordLifecycle()`）：先 dispatch（进轨迹），
+   * 再 `ExtensionHost.emitLifecycle()`（发给扩展）。分开做两遍必然会漂。
+   */
+  | { type: 'extension.lifecycle'; event: ExtensionLifecycleEvent }
   // ── 上下文压缩 ──
   /**
    * 开始一次压缩。**不携带结果** —— 它只是「我要压」，真正干活的是 effect

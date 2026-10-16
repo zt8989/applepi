@@ -57,12 +57,19 @@
 ```
 store 建好
   ├─ model.init            ← **不依赖扩展**，先装（底栏首帧就要显示 `(provider) model`）
+  ├─ 会话记录器（openRecorder）← 计划路径要在 session_start 时就能报出去（见下）
   └─ 后台：扩展装载 → session_start → collectPromptSections → 按 cwd 算工具表
             → 扫 skill → prompt.init                        ← 这一整块可能 1~3 秒
 ```
 
 `model.init` 之所以要提到前面：底栏在首帧就要画 `(provider) model`，而那份数据只来自
 runtime 与启动解析出来的档位 —— 留在后面的话，扩展装载的那几秒里底栏是 `() `（看着像坏了）。
+
+会话记录器要提到**扩展装载之前**：状态类扩展在 `session_start` 那一刻读一次
+`ctx.sessionManager.getSessionFile()`，之后不再刷新，而 Orca 这类宿主靠那个路径把
+「对话记录在哪」认下来。报的是**计划路径**（空会话不建文件），第一条消息落盘后后续事件
+就真的带上 `session_id` + `session_file` —— 详见 [extensions](extensions.md) 的
+「agent 生命周期事件」那一节。
 轨迹不受这个顺序影响：`beginTrace()` 只认 `state.prompt.seeded` / `state.model.seeded`，
 而它要等用户发出第一句话才跑（见上面「推迟到第一句话」那节）。
 

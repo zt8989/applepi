@@ -28,6 +28,7 @@ import { getTool, getTools } from './tools';
 import { buildRequestContext, declaredToolSchemas } from './prompt-head';
 import { beginRun, endRun, lastAbortCause, RunAbortedError } from './run-control';
 import { resolveApiKey, type StreamFn } from './provider';
+import type { ExtensionLifecycleEvent } from './extension-events';
 import {
   effectiveCompactionSettings,
   runCompaction,
@@ -131,6 +132,14 @@ export interface PiAiEffectsOptions {
    * 发回模型；否则用返回的 `input`（handler 可以就地改参数）。
    */
   onToolCall?: ToolCallGate | undefined;
+  /**
+   * pi 的扩展生命周期事件落点（内核把它接到 `ExtensionHost.emitLifecycle`）。
+   *
+   * 为什么在 effect 里发而不是订阅 store：`tool_execution_start` 要**参数**、
+   * `message_end` 要**定稿的那条消息**，两者只在执行现场拿得到（state 里只有结果）。
+   * 相位级的 `agent_start` / `agent_end` 不在这里，它们由 kernel 的 store 订阅器发。
+   */
+  onExtensionEvent?: ((event: ExtensionLifecycleEvent) => void) | undefined;
 }
 
 /** `tool_call` 门的形状（`extension-host.ts` 的 `beforeToolCall` 就是它）。 */
@@ -276,6 +285,13 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
       if (final.stopReason === 'error') {
         throw new Error(final.errorMessage || 'LLM 返回错误');
       }
+      // 助手消息定稿 —— 发 pi 的 `message_end`（Orca 那类状态扩展用它把「最后一条回复」
+      // 摘要进侧栏；`pi-web-access` 之类也会听它）。
+      //
+      // **只在真的变成一条要进 state 的消息时发**：下面失败那些分支抛掉的最终消息
+      // （abort / provider 报错）不会进 state，给它们发 message_end 等于让扩展看到一条
+      // 不存在的消息（它的 handler 常会 `buildSessionContext(...).messages` 反向对账）。
+      options.onExtensionEvent?.({ type: 'message_end', message: final });
       // 连同 attempt 的 id 一起返回：成功/失败都要靠它把节点挂到正确的父节点下。
       return { message: final, nodeId };
     } catch (error) {
@@ -450,6 +466,19 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
         true,
       );
     }
+    // pi 的 `tool_execution_start` / `tool_execution_end`：状态类扩展（Orca 的活动指示、
+    // 工具面板）靠它们知道「现在在跑哪个工具」。
+    //
+    // 与 `tool_call`（上面那个门）的区别：门是**要返回值**的（可以阻止、可以改参数），
+    // 而这两个是纯通知 —— pi 也是两个事件都发。被阻止的调用与未知工具**不发** start/end，
+    // 因为它们根本没执行（pi 那边同理：`tool_execution_start` 在 runToolCall 里）。
+    const emitExtensionEvent = options.onExtensionEvent;
+    emitExtensionEvent?.({
+      type: 'tool_execution_start',
+      toolCallId: call.id,
+      toolName: call.name,
+      args,
+    });
     try {
       const result = await tool.execute(call.id, args, signal, (partial) => {
         // 流式增量 → `tool.progress` → reducer 存进 state.toolProgress。
@@ -461,8 +490,21 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
         // 这里只 dispatch，不改任何本地状态 —— 本项目的不变式：**状态只能由 action 改**。
         dispatch({ type: 'tool.progress', toolCallId: call.id, content: partial.content });
       });
-      return toToolResult(call, result.content, result.details, isFailure(result.content));
+      const isError = isFailure(result.content);
+      emitExtensionEvent?.({
+        type: 'tool_execution_end',
+        toolCallId: call.id,
+        toolName: call.name,
+        isError,
+      });
+      return toToolResult(call, result.content, result.details, isError);
     } catch (error) {
+      emitExtensionEvent?.({
+        type: 'tool_execution_end',
+        toolCallId: call.id,
+        toolName: call.name,
+        isError: true,
+      });
       return toToolResult(
         call,
         [

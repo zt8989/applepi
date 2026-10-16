@@ -168,6 +168,21 @@ export interface ExtensionHostUi {
   readonly theme: Theme;
   /** raw 终端输入（`ask_user_question` 靠它实现「浮层折叠后还能复原」）。 */
   onTerminalInput(handler: (data: string) => undefined | { consume?: boolean }): () => void;
+  /**
+   * 设终端标题（pi 的 `ctx.ui.setTitle`）。
+   *
+   * Orca 的**标题 spinner** 扩展就靠它：把 `π ✳ <名字> - <目录>` 写进终端标题，
+   * Orca 从标题里读出「在工作 / 需要输入」那个标记。不实现的话 spinner 自己降级
+   * （它 `typeof setTitle === 'function'` 先判一刀），不报错。
+   */
+  setTitle(title: string): void;
+  /**
+   * 替换输入框里的文字（pi 的 `ctx.ui.setEditorText`）。
+   *
+   * Orca 的 prefill 扩展用它把「刚开的那句提示词」填进 composer。
+   * 宿主没有输入区时**抛**（与 `custom()` 的非 overlay 那条路同一口径：不假装能做）。
+   */
+  setEditorText(text: string): void;
 }
 
 export interface HostUiOptions {
@@ -201,6 +216,13 @@ export interface HostUiOptions {
    * 的症状是「扩展在等一个永远不会出现的界面」，最难查。
    */
   mountEditorSlot?(component: (Component & { dispose?: () => void }) | undefined): void;
+  /**
+   * 把 composer 里的文字换成这个（`ctx.ui.setEditorText` 的落点）。
+   *
+   * **可缺省**：没有输入区的宿主（测试探针、一次性模式）不提供它 —— 那时
+   * `setEditorText` 明说用不了，而不是静静地把字丢掉。
+   */
+  setEditorText?(text: string): void;
   /**
    * 终端侧的原生对话框（`select` / `confirm` / `input`）。TUI 提供；不给 = 这个宿主
    * 只有浏览器那一份（或什么都没有）。
@@ -475,6 +497,23 @@ export function createHostUi(
         if (isKeyRelease(data)) return undefined;
         return handler(data);
       }),
+
+    // 终端标题：pi-tui 的 `Terminal.setTitle` 写 OSC 0/2。要活着的 tui，所以走 `live()`
+    // （Orca 的标题 spinner 在界面起来之后才可能调它）；界面没起来时它会抛，
+    // 而 spinner 自己 catch 掉并停表 —— 不会把整轮对话带崩。
+    setTitle: (title: string) => {
+      live().tui.terminal.setTitle(title);
+    },
+
+    // 输入框里的文字。落点在界面层（只有它知道 composer 是哪个）—— 探针／一次性模式
+    // 没有那一格时就抛，不假装把字填进去了。
+    setEditorText: (text: string) => {
+      const setEditorText = source().setEditorText;
+      if (setEditorText === undefined) {
+        throw new Error('本宿主没有输入区，`setEditorText` 用不了');
+      }
+      setEditorText(text);
+    },
 
     setWidget: (
       key: string,

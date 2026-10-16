@@ -22,7 +22,9 @@ interface TraceNode {
       | 'llm.result'
       | 'tool.call' | 'tool.result' | 'error' | 'stop'
       // 上下文族（不推进 tip，见下）
-      | 'prompt.base' | 'prompt.tools' | 'prompt.segment' | 'model.init' | 'model.changed';
+      | 'prompt.base' | 'prompt.tools' | 'prompt.segment' | 'model.init' | 'model.changed'
+      // 生命周期注释（内核告诉了扩展/宿主什么，也不推进 tip）
+      | 'extension.event';
   status: 'pending' | 'ok' | 'error' | 'aborted';
   label: string;                 // 短标签，渲染用
   detail?: string;               // 详细文本（回答全文、错误信息、工具参数）
@@ -181,7 +183,7 @@ function advancesTip(node) {
 ### 节点状态画在颜色上，不在字上
 
 `✓` / `✗` / `⊘` / `·` 那套状态字符已经删掉：成功绿、失败红**加粗**、进行中黄、
-上下文族（`prompt.*` / `model.init` / `model.changed`）暗。理由：`✓ n7 llm.result` 里那个 `✓` 占了宽度，
+上下文族（`prompt.*` / `model.init` / `model.changed` / `extension.event`）暗。理由：`✓ n7 llm.result` 里那个 `✓` 占了宽度，
 而它说的信息与颜色重复；轨道符号要能一眼区分的是「这是哪个节点」，不是「它成没成」。
 
 代价是**纯文本那一份（`renderTree()`）看不出成败** —— 落盘、回放、统计都不受影响
@@ -254,8 +256,33 @@ function advancesTip(node) {
 | `model.init` | 第一条 `user.message`（装载） | `provider/model` | `thinking` / `midConvoSystem` / `midConvoTools` / `developerRole` |
 | `model.changed` | 换模型 / 换档位后**下一次发话前**（见下） | `provider/model` | 同上 |
 | `prompt.segment` | `prompt.segment.added` | 片段首行摘要 | `role` / `source` |
+| `extension.event` | 相位级生命周期事件（`extension.lifecycle` action 里**没有专属节点**的那三条） | 事件名（`agent_start` / `agent_end` / `agent_settled`） | `messages`（仅 `agent_end`） |
 
 完整内容在 `detail` 里（prompt 全文、每个工具的 description、片段原文），`label` 只是摘要。
+
+### `extension.event`：相位级生命周期也留痕
+
+内核发给扩展（进而发给 Orca 那类宿主）的 pi 生命周期事件都先 dispatch 成
+`extension.lifecycle` action，但**只有没有专属节点的那三条**才在树上落一条
+`extension.event` 注释节点：
+
+| 生命周期事件 | 落点 |
+| --- | --- |
+| `agent_start` / `agent_end` / `agent_settled` | `extension.event` 注释节点（没别处记） |
+| `message_end` | `llm.result`（带完整 Message） |
+| `tool_execution_start` / `tool_execution_end` | `tool.call` / `tool.result`（带参数、结果、Message） |
+| `model_select` | `model.changed` |
+
+意义：「扩展/宿主收到了什么」是一段**该留下证据的历史** —— Orca 的状态面板全靠它，
+出了问题也就靠它查。相位级节点只有 label + 一个 `messages` 计数（`agent_end`），
+不带 payload 全文。
+
+**不推进 tip**：它是注释，不是「发生过的一件事」的推进点。连续出现时挂在同一条 tip 下，
+不会把树抽成一条以事件为轴的链。`traceStats` 也不计它。
+
+> 所以 `tool_execution_*` **不能**反过来代替 `tool.call` / `tool.result`：它只有
+> `toolCallId` / `toolName` / `isError`，没有结果内容、没有 Message、不推进 tip，
+> 而且未知工具 / 被阻止的调用根本不会发它。它是**通知**，那两条才是**记录**。
 
 ### 它们推迟到用户发出第一句话
 

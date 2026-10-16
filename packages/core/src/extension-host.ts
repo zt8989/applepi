@@ -54,6 +54,7 @@ import {
 import { ExtensionRunner } from '@earendil-works/pi-coding-agent/dist/core/extensions/runner.js';
 import { createEventBus } from '@earendil-works/pi-coding-agent/dist/core/event-bus.js';
 import { DefaultPackageManager } from '@earendil-works/pi-coding-agent/dist/core/package-manager.js';
+import { readPiManifest } from '@earendil-works/pi-coding-agent/dist/core/pi-manifest.js';
 import { createSourceInfo } from '@earendil-works/pi-coding-agent/dist/core/source-info.js';
 import type { PathMetadata } from '@earendil-works/pi-coding-agent/dist/core/package-manager.js';
 import type { Extension } from '@earendil-works/pi-coding-agent/dist/core/extensions/types.js';
@@ -88,11 +89,14 @@ import type { ExtensionFactory } from '@earendil-works/pi-coding-agent/dist/core
 import { createHostUi, type ExtensionHostUi, type HostUiOptions } from './extension-ui';
 import { QuestionnaireHost } from './questionnaire';
 import { createRequire } from 'node:module';
+import { existsSync, readdirSync, type Dirent } from 'node:fs';
+import path from 'node:path';
 import { extensionModelRegistry } from './extension-models';
 import { extensionSessionManager } from './extension-sessions';
 import { installExtensionCommands, type ExtensionCommands } from './extension-commands';
 import { notifyBeforeAgentStart, type BeforeAgentStartHandler } from './extension-prompt';
-import { configHome } from './config-home';
+import { configHome, PI_CONFIG_DIR } from './config-home';
+import type { ExtensionLifecycleEvent } from './extension-events';
 import type { ToolInfo } from '@earendil-works/pi-coding-agent';
 import type { AgentRuntime } from './provider';
 import type { PromptToolLike } from './system-prompt';
@@ -192,8 +196,34 @@ export interface ExtensionHost {
     input: Record<string, unknown>,
     options?: { parentToolCallId?: string | undefined; signal?: AbortSignal | undefined },
   ): Promise<{ block?: boolean; reason?: string | undefined; input: Record<string, unknown> }>;
+  /**
+   * 发一个 pi 的 **agent 生命周期事件**（`agent_start` / `agent_end` / `message_end` / …）。
+   *
+   * 为什么由内核显式发而不是让 runner 自己感知：pi 那边这些事件来自 AgentSession
+   * （它订阅自己的 agent 事件再转成扩展事件），而本项目的环是 redux-loop，
+   * 没有 AgentSession。所以接线在**内核**：store 相位变化发 `agent_start` / `agent_end` /
+   * `agent_settled`，effect 里的 LLM/工具调用来龙去脉发 `message_end` /
+   * `tool_execution_start` / `tool_execution_end`。
+   *
+   * **发出去的顺序 = 调用顺序**（同步开始执行 handler），且 handler 报错只记诊断、
+   * 不让环崩（与 `beforeToolCall` 同一口径）。
+   *
+   * **内核不直接叫它**：走 kernel 的 `recordLifecycle()` —— 先 dispatch 一条
+   * `extension.lifecycle` action（于是进轨迹、可回放），再调这里发给扩展。
+   * 轨迹树是 action 的产物，「扩展/宿主收到了什么」也得先成为 action 才留得住。
+   *
+   * `tool_call` **不在这里**：它是有返回值的门（`beforeToolCall`），
+   * 因为权限类扩展要靠它阻止调用、MCP 要靠它等服务器。
+   */
+  emitLifecycle(event: ExtensionLifecycleEvent): void;
   dispose(): void;
 }
+
+/**
+ * 生命周期事件的形状在 `extension-events.ts`（那里是唯一真相）—— 这里重导出一份，
+ * 于是 `ExtensionHost` 的用家可以只从这一个模块拿到 `emitLifecycle` 与它的载荷类型。
+ */
+export type { ExtensionLifecycleEvent } from './extension-events';
 
 export interface LoadExtensionHostOptions {
   store: AgentStore;
@@ -272,6 +302,7 @@ function emptyHost(errors: readonly string[] = []): ExtensionHost {
     startSession: async () => {},
     collectPromptSections: async () => ({}),
     beforeToolCall: async (_id, _name, input) => ({ input }),
+    emitLifecycle: () => {},
     dispose: () => {},
   };
 }
@@ -290,10 +321,80 @@ function emptyCommands(): ExtensionCommands {
   };
 }
 
-/** 解析出来的入口 **加上它的包元数据**（官方 `ResolvedResource.metadata`）。 */
+/**
+ * 解析出来的入口 **加上它的包元数据**（官方 `ResolvedResource.metadata`）。
+ *
+ * 本地目录里发现的扩展**没有**包元数据（`metadata: undefined`）—— 它们不是包，
+ * 官方 loader 已经给它们写好了 `sourceInfo`（`source: 'local'` + 入口所在目录），
+ * 不需要这里再补。
+ */
 interface ResolvedExtensionEntry {
   path: string;
-  metadata: PathMetadata;
+  metadata?: PathMetadata | undefined;
+}
+
+/** 本地扩展目录里一个文件名像不像扩展入口（与 pi `isExtensionFile` 同一判据）。 */
+function isExtensionFile(name: string): boolean {
+  return name.endsWith('.ts') || name.endsWith('.js');
+}
+
+/**
+ * 一个目录里的扩展入口（与 pi 的 `resolveExtensionEntries` 逐条对应）。
+ *
+ * 1. `package.json` 里 `pi.extensions` 声明的路径（存在几个算几个）；
+ * 2. 否则 `index.ts`；
+ * 3. 再否则 `index.js`；
+ * 4. 都没有就是 `null`（这个子目录不是扩展）。
+ */
+function directoryExtensionEntries(dir: string): string[] | null {
+  const manifestPath = path.join(dir, 'package.json');
+  if (existsSync(manifestPath)) {
+    const manifest = readPiManifest(manifestPath);
+    if (manifest?.extensions !== undefined && manifest.extensions.length > 0) {
+      const entries: string[] = [];
+      for (const entry of manifest.extensions) {
+        const resolved = path.resolve(dir, entry);
+        if (existsSync(resolved)) entries.push(resolved);
+      }
+      if (entries.length > 0) return entries;
+    }
+  }
+  const indexTs = path.join(dir, 'index.ts');
+  if (existsSync(indexTs)) return [indexTs];
+  const indexJs = path.join(dir, 'index.js');
+  if (existsSync(indexJs)) return [indexJs];
+  return null;
+}
+
+/**
+ * 扫一个 `extensions/` 目录（与 pi 的 `discoverExtensionsInDir` 同一套规则）。
+ *
+ * - 只下探**一层**：`extensions/*.ts` / `*.js`，或 `extensions/<子目录>/`（按上面的
+ *   入口规则取）；更深的嵌套要靠子目录自己的 `package.json` 声明。
+ * - 不排序：返回 `readdirSync` 的顺序，与 pi 逐字一致 —— 顺序是语义（同名工具先到先得），
+ *   自己排一遍就会在「pi 那边谁生效」与「ela 这边谁生效」之间造出差。
+ */
+function discoverExtensionsInDir(dir: string): string[] {
+  if (!existsSync(dir)) return [];
+  let dirents: Dirent[];
+  try {
+    dirents = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const discovered: string[] = [];
+  for (const entry of dirents) {
+    const entryPath = path.join(dir, entry.name);
+    if ((entry.isFile() || entry.isSymbolicLink()) && isExtensionFile(entry.name)) {
+      discovered.push(entryPath);
+      continue;
+    }
+    if (entry.isDirectory() || entry.isSymbolicLink()) {
+      const entries = directoryExtensionEntries(entryPath);
+      if (entries !== null) discovered.push(...entries);
+    }
+  }
+  return discovered;
 }
 
 /**
@@ -321,9 +422,27 @@ function isAskUserQuestionSource(source: string): boolean {
 }
 
 /**
- * 读 `settings.json` 的 `packages`，解析成**扩展入口文件**的绝对路径 + 包元数据。
+ * 把**本地扩展目录**与 `settings.json` 的 `packages` 合成一份扩展入口表。
  *
- * ## 直接用官方的 `DefaultPackageManager`
+ * ## 顺序与 pi 一致：项目本地 → 全局 → packages
+ *
+ * `pi` 的 `discoverAndLoadExtensions()` 就是这个顺序（见它的实现）：
+ *
+ * 1. `<cwd>/.pi/extensions/`（项目本地）
+ * 2. `<agentDir>/extensions/`（全局 —— Orca 那三个托管扩展就装在这里）
+ * 3. `settings.json` 的 `packages`
+ *
+ * 顺序**是语义**：工具表是「同名先注册者优先」，所以「谁顶掉谁」只能由这份顺序决定。
+ * 自己改一个顺序，症状是「pi 那边生效的扩展在 ela 这边不生效」，而两边的配置一模一样。
+ *
+ * ## 为什么必须扫这两个本地目录
+ *
+ * pi 的本地扩展（`~/.pi/agent/extensions/*.ts`）**不在** `settings.json` 里 ——
+ * 它们是「放到那儿就生效」。Orca 给 pi/omp 安装的托管扩展走的正是这条路。
+ * 只读 `packages` 的话，那些扩展永远装不上（症状：Orca 里的状态/标题扩展一个没跑，
+ * 面板永远停在 loading）。
+ *
+ * ## 包那一半：直接用官方的 `DefaultPackageManager`
  *
  * 它做的事比自己写一版多得多且都是必须的：用户级与项目级两份 settings 的合并、
  * 同一个包两处出现时项目优先（`autoload:false` 时是 delta 而非替换）、项目信任判断、
@@ -333,7 +452,7 @@ function isAskUserQuestionSource(source: string): boolean {
  * 症状是 `pi list` 明明有，这边说没装。**取不到就当没装**（`onMissing: skip`），
  * 不自动 `npm install`：本项目不是包管理器，替 pi 装东西会让两边状态分家。
  *
- * ## 为什么连 `metadata` 一起带回来
+ * ## 为什么连包的 `metadata` 一起带回来
  *
  * `loadExtensions(paths)` **不带**包信息：它的 `createExtension()` 给每个扩展硬写
  * `source: 'local'`、`baseDir = dirname(入口文件)`。于是 npm 包里的 `dist/index.js`
@@ -344,17 +463,24 @@ function isAskUserQuestionSource(source: string): boolean {
  * 官方的 `DefaultResourceLoader` 有一步 `applyExtensionSourceInfo()` 专门补这个
  * （它把 metadata 写到 `extension.sourceInfo` 上）。我们不接那整个 ResourceLoader，
  * 所以自己补这一步 —— 用的还是它给的那份 metadata，不是自己猜的。
+ * 本地目录里发现的扩展不需要这一步：它们**就是** `local`。
  */
 async function resolveExtensionEntries(
   cwd: string,
   errors: string[],
 ): Promise<ResolvedExtensionEntry[]> {
+  const resolvedCwd = path.resolve(cwd);
+  // 本地扩展**先**入表（与 pi 同序）。没有包元数据 —— 它们是文件，不是包。
+  const local: ResolvedExtensionEntry[] = [
+    ...discoverExtensionsInDir(path.join(resolvedCwd, PI_CONFIG_DIR, 'extensions')),
+    ...discoverExtensionsInDir(path.join(configHome(), 'extensions')),
+  ].map((p) => ({ path: p }));
   let settings: SettingsManager;
   try {
     settings = SettingsManager.create(cwd, configHome(), { projectTrusted: true });
   } catch (error) {
     errors.push(`扩展：读 settings 失败 —— ${msg(error)}`);
-    return [];
+    return local;
   }
   let entries: ResolvedExtensionEntry[];
   try {
@@ -368,9 +494,19 @@ async function resolveExtensionEntries(
       .map((r) => ({ path: r.path, metadata: r.metadata }));
   } catch (error) {
     errors.push(`扩展：解析包失败 —— ${msg(error)}`);
-    return [];
+    return local;
   }
-  return entries;
+  // 去重按**入口绝对路径**（与 pi `addPaths` 的 `seen` 同一口径）：同一个文件既在本地
+  // 目录里又被 `packages` 点名时只装一次（否则同一个工厂跑两遍，工具注册两遍）。
+  const seen = new Set<string>();
+  const merged: ResolvedExtensionEntry[] = [];
+  for (const entry of [...local, ...entries]) {
+    const key = path.resolve(entry.path);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(entry);
+  }
+  return merged;
 }
 
 /**
@@ -461,7 +597,10 @@ const errors: string[] = [];
     askUserQuestion === undefined
       ? entries
       : entries.map((e) =>
-          isAskUserQuestionSource(e.metadata.source) ? { ...e, path: askUserQuestion } : e,
+          // 本地扩展没有包元数据，`e.metadata` 可能是 undefined，所以要 `?.`。
+          e.metadata !== undefined && isAskUserQuestionSource(e.metadata.source)
+            ? { ...e, path: askUserQuestion }
+            : e,
         );
   // 一个都没有（也没内置）就不必建 runner 了 —— 与之前同一个早退。
   if (resolvedEntries.length === 0 && !withBuiltins) return emptyHost(errors);
@@ -791,6 +930,19 @@ const errors: string[] = [];
     },
     beforeToolCall: (toolCallId, name, input, callOptions) =>
       emitToolCallGate(runner, onExtensionError, toolCallId, name, input, callOptions?.parentToolCallId),
+    // 生命周期事件：发出去就完事（不等 handler），但**同步开始**执行 —— 于是调用顺序就是
+    // 扩展看到的顺序（status 钩子那些 handler 是同步的，`post()` 不 await 网络）。
+    //
+    // 报错只记诊断：一个状态扩展写坏了不该把整轮对话带崩（与 `beforeToolCall` 同一口径）。
+    emitLifecycle: (event) => {
+      try {
+        void Promise.resolve(runner.emit(event as never)).catch((error: unknown) =>
+          onExtensionError(event.type, msg(error)),
+        );
+      } catch (error) {
+        onExtensionError(event.type, msg(error));
+      }
+    },
     dispose: () => {
       // 先把 `session_shutdown` 发出去（MCP 关服务器），再作废 runner —— 反过来
       // handler 里的 ctx 就是 stale 的了。

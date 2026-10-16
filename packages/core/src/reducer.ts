@@ -14,6 +14,7 @@ import {
 import { appendNode, patchNode, type TraceNode, type TraceNodeStatus, type TraceTree } from './trace';
 import { compactReasonText, type CompactReason } from './compact';
 import { buildPromptHead, declaredToolSchemas, toolDeclarationDelta } from './prompt-head';
+import type { ExtensionLifecycleEvent } from './extension-events';
 /**
  * 一张纯表：action → (下一个状态, 该发哪些 effect)。
  *
@@ -411,6 +412,52 @@ function appendModelNode(
 }
 
 /**
+ * 把一个 **pi 生命周期事件**记成一条注释节点（kind `extension.event`）。
+ *
+ * 只会走到这里的是**没有专属节点**的相位级事件（`agent_start` / `agent_end` /
+ * `agent_settled`）—— 其余的在 `'extension.lifecycle'` 迁移里就返回原状态了
+ * （见那里的表）。
+ *
+ * ## 为什么不推进 tip / 不开新分支
+ *
+ * `appendNode` 只在 kind 属于 `TIP_ADVANCING_KINDS` 时才推进 tip，而
+ * `extension.event` 不在那里 —— 所以它会作为「当前 tip 的旁注」挂一份。
+ * 这正是要的：它是「内核刚才告诉了扩展什么」，不是「发生过的一件事」。
+ *
+ * ## meta 只放读得懂的
+ *
+ * 只有 `agent_end` 放一个消息数。不放事件对象全文（那是几 KB 的 JSON，一行一条
+ * 会把轨迹文件撑大，而回放时也没人会看）。真正重的 payload（工具参数、消息正文）
+ * 在 `tool.call` / `tool.result` / `llm.result` 那些专属节点上。
+ */
+function appendLifecycleNode(
+  tree: TraceTree,
+  event: ExtensionLifecycleEvent,
+  now: number,
+): TraceTree {
+  const meta: Record<string, string> = {}
+  if (event.type === 'agent_end') meta['messages'] = String(event.messages.length);
+  return appendNode(tree, tree.tipId, 'extension.event', {
+    status: 'ok',
+    label: event.type,
+    ...(Object.keys(meta).length > 0 ? { meta } : {}),
+    createdAt: now,
+    endedAt: now,
+  }).tree;
+}
+
+/**
+ * 这类生命周期事件已经有**专属节点**了吗 —— 有的话就不再落 `extension.event`。
+ *
+ * 只有相位级的三条没有别的节点记（它们是「环开始 / 结束 / 真的静了」这个时间轴），
+ * 其余三条都有一套信息更全的节点（见 `'extension.lifecycle'` 迁移里那张表）。
+ * 这条判定与那张表必须一致 —— 分开就会「有的重复有的没有」，而症状是轨迹上多寡不一。
+ */
+function lifecycleEventHasOwnNode(type: ExtensionLifecycleEvent['type']): boolean {
+  return type === 'agent_start' || type === 'agent_end' || type === 'agent_settled';
+}
+
+/**
  * 补上装载段的轨迹节点 —— **用户发出第一句话的那一刻**。
  *
  * ## 为什么要有这一步
@@ -625,6 +672,32 @@ const transitions: TransitionHandlers = {
     // 扁平别名跟着更新（真相在 prompt 块里）。
     toolNames: action.tools.map((tool) => tool.name),
   }),
+
+  /**
+   * 一个 pi 生命周期事件：记成一条**注释节点**（`extension.event`）。
+   *
+   * 只改 `trace`，别的什么也不动 —— 事件本身是「内核告诉了扩展什么」，
+   * 相位 / 消息 / 工具集在发这条 action 之前就已经由各自的 action 改好了。
+   *
+   * ## 已经有专属节点的事件**不再另开节点**
+   *
+   * 一件事两条节点是纯噪声，而且两条迟早会不一致。所以只给**没别处记**的相位级事件
+   * （`agent_start` / `agent_end` / `agent_settled`）落节点，其余交给它们的专属节点：
+   *
+   * | 生命周期事件 | 专属节点（信息更全） |
+   * | --- | --- |
+   * | `message_end` | `llm.result`（带完整 Message） |
+   * | `tool_execution_start` / `tool_execution_end` | `tool.call` / `tool.result`（带参数、结果、消息） |
+   * | `model_select` | `model.changed` |
+   *
+   * 所以 `tool_execution_*` **不能**反过来代替 `tool.call` / `tool.result` —— 它只有
+   * `toolCallId` / `toolName` / `isError`，没有结果内容、没有 Message、不推进 tip，
+   * 而且未知工具 / 被阻止的调用根本不会发它。它是**通知**，那两条才是**记录**。
+   */
+  'extension.lifecycle': (state, action) => {
+    if (!lifecycleEventHasOwnNode(action.event.type)) return state;
+    return { ...state, trace: appendLifecycleNode(state.trace, action.event, Date.now()) };
+  },
 
   // ── model 侧装载 ──
 
