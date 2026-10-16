@@ -33,7 +33,86 @@
  */
 import process from 'node:process';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+
+/**
+ * herdr pane 里的身份提示（`HERDR_AGENT`）。
+ *
+ * herdr 认 pane 里有没有 agent，只看**前台进程身份**：它拿进程名 / argv 去比对已知 agent，
+ * 认不出来就当这个 pane 没有 agent。而我们的进程是 `node …/bin/ela` —— `ela` 它不认识，
+ * 也看不出这是 pi 家族。于是 pane 在 Agents 面板里没有身份；更糟的是启动期那些探测子进程
+ * （比如扩展跑的 `opencode --version`）跟 ela 同一个前台进程组，会被它当成 OpenCode，
+ * 结果是「先显示成 opencode、子进程退出后又变成没有 agent」。
+ *
+ * herdr 为此给了包装进程用的提示变量：设了 `HERDR_AGENT=<agent>`，它就用**指定 agent** 的
+ * 屏幕 manifest 与集成来对待这个前台进程。ela 的界面与状态上报都走 pi 那一套
+ * （pi-tui / pi-ai，加上 herdr 装在 `~/.pi/agent/extensions` 的 pi 扩展负责报状态与 session），
+ * 所以这里默认报 `pi`。
+ *
+ * **为什么必须 re-exec 一次**：herdr 读的是**进程 exec 那一刻**的环境（macOS 的
+ * `KERN_PROCARGS2` / Linux 的 `/proc/<pid>/environ`），本进程里 `process.env.HERDR_AGENT = …`
+ * 它看不到（实测 `ps` 也看不到）。所以只能在 exec 之前就把变量塞进环境 —— 用同一份 argv
+ * 再执行一次自己，把 hint 传下去。
+ *
+ * **只在真的处于 herdr pane 里做**：三个变量齐全、且是个交互终端（stdin 是 TTY）才算 ——
+ * 变量判据与 herdr 自己的 pi 扩展同一套，TTY 判据是为了让脚本/测试/一次性模式里
+ * 少一个进程（那些场景 herdr 也不画这个 pane 的 TUI）。
+ * 并且**不覆盖**已经显式设置的 `HERDR_AGENT`。`ELA_HERDR_AGENT=<name>` 换身份，
+ * `ELA_HERDR_AGENT=off` 整个关掉。
+ *
+ * 代价是多一个常驻父进程（它只是阻塞等子进程，不占 CPU）+ 几十毫秒启动开销；换来的是 herdr
+ * 里正确的 agent 身份、idle/working/blocked 状态与 session 恢复。
+ */
+const HERDR_AGENT_HINT_ENV = 'ELA_HERDR_AGENT';
+
+/** 该给 herdr 报哪个 agent；`undefined` = 不干预（不在 herdr 里，或已被显式指定/关闭）。 */
+function herdrAgentHint() {
+  if (
+    process.env.HERDR_ENV !== '1' ||
+    !process.env.HERDR_PANE_ID ||
+    !process.env.HERDR_SOCKET_PATH ||
+    process.stdin.isTTY !== true
+  ) {
+    return undefined;
+  }
+  // 启动器（或用户）已经指定过身份，就别抢。
+  if (process.env.HERDR_AGENT) {
+    return undefined;
+  }
+  const requested = process.env[HERDR_AGENT_HINT_ENV];
+  if (requested === 'off' || requested === '0' || requested === '') {
+    return undefined;
+  }
+  return requested ?? 'pi';
+}
+
+/**
+ * 带着 hint 再执行一遍自己，把当前进程交棒给它。
+ *
+ * 已经交棒（调用方不该再往下走）返回 `true`；re-exec 起不来返回 `false` ——
+ * 这只是给 herdr 的提示，不该变成 ela 的启动前置条件。
+ */
+function handOffToHerdrAgentHint(agent) {
+  // 用 realpath（不是 argv[1]）：`ela` 是 symlink，直接再走一次链接会多一层解析。
+  const script = fileURLToPath(import.meta.url);
+  const child = spawnSync(process.execPath, [script, ...process.argv.slice(2)], {
+    stdio: 'inherit',
+    env: { ...process.env, HERDR_AGENT: agent },
+  });
+  if (child.error) {
+    process.stderr.write(
+      `ela：注入 HERDR_AGENT=${agent} 的重入失败，按原样启动（herdr 会认不出本 pane）：${child.error.message}\n`
+    );
+    return false;
+  }
+  // 退出状态 / 信号照原样传回去（zsh 的 job control 与 Ctrl+C 都指望这个）。
+  if (child.signal) {
+    process.kill(process.pid, child.signal);
+    return true;
+  }
+  process.exit(child.status ?? 1);
+}
 
 /** packages/tui/bin/ela.mjs → tui 包根。所有入口都从它推，不依赖 process.cwd()（那属于用户）。 */
 const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -65,6 +144,12 @@ async function main() {
   // main.ts 的 main() 是 async，模块顶层不等它 —— 事件循环上有活着的 TUI，
   // 进程会自己活着直到 Ctrl+C。所以这里只 await 模块求值本身就够了。
   await tsImport(entry, import.meta.url);
+}
+
+// 必须在装载 TUI 之前定：带 hint 的那份进程才是真正跑 TUI 的（见顶部注释）。
+const herdrAgent = herdrAgentHint();
+if (herdrAgent !== undefined) {
+  handOffToHerdrAgentHint(herdrAgent);
 }
 
 main().catch((error) => {
