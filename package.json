@@ -20,7 +20,8 @@
     "tui:test": "pnpm --filter @ela/tui test",
 
     "config:migrate": "pnpm --filter @ela/core config:migrate",
-    "models:migrate": "pnpm --filter @ela/core models:migrate"
+    "models:migrate": "pnpm --filter @ela/core models:migrate",
+    "repatch:ask-user-question": "python3 scripts/repatch-ask-user-question.py"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

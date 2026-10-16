@@ -1,5 +1,5 @@
 diff --git a/ask-user-question.ts b/ask-user-question.ts
-index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..5c710389723c44f738830d90c146d887943e0dc1 100644
+index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..bc1b7c290565fb5b513710381e0cd6296724e081 100644
 --- a/ask-user-question.ts
 +++ b/ask-user-question.ts
 @@ -1,5 +1,12 @@
@@ -24,23 +24,26 @@ index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..5c710389723c44f738830d90c146d887
  	type QuestionData,
  	type QuestionnaireError,
  	type QuestionnaireResult,
-@@ -269,6 +277,8 @@ async function mountQuestionnaire(config: {
+@@ -269,6 +277,10 @@ async function mountQuestionnaire(config: {
  	collapseKey: string;
  	presentation: Presentation;
  	Session: SessionModule["QuestionnaireSession"];
-+	/** ela patch：把这次的 `done` 交出去 —— 宿主（浏览器那份）先答时要用它收掉这一次挂载。 */
++	/** ela patch：把这次的 `done` 交出去 —— 宿主（浏览器那份）先答时用它收掉这一次挂载。 */
 +	onDone?: (done: (result: QuestionnaireResult | undefined) => void) => void;
++	/** ela patch：把这次建的 session 交出去 —— 宿主用它把"浏览器写的备注"同步进来。 */
++	onSession?: (session: InstanceType<SessionModule["QuestionnaireSession"]>) => void;
  }): Promise<QuestionnaireResult | undefined> {
  	const { ctx, collapseKey, presentation } = config;
  	const sessionRef: SessionRef = { current: null };
-@@ -281,8 +291,22 @@ async function mountQuestionnaire(config: {
+@@ -281,8 +293,25 @@ async function mountQuestionnaire(config: {
  	// back to the visible one-line row.
  	const canReopenWhileHidden = removeOverlayInputListener !== undefined;
  	try {
-+		// ela patch：包一层工厂，把 `done` 抓手留给上面那个回调（宿主先答时从外面收掉它）。
++		// ela patch：包一层工厂，把 `done` / session 抓手留给上面那两个回调
++		// （宿主先答时从外面收掉它；宿主写备注时同步进它）。
 +		const factory = makeSessionFactory({ ...config, canReopenWhileHidden, sessionRef });
 +		const wrapped =
-+			config.onDone === undefined
++			config.onDone === undefined && config.onSession === undefined
 +				? factory
 +				: (
 +						tui: TUI,
@@ -49,7 +52,9 @@ index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..5c710389723c44f738830d90c146d887
 +						done: (result: QuestionnaireResult) => void,
 +					) => {
 +						config.onDone?.(done);
-+						return factory(tui, theme, keybindings, done);
++						const component = factory(tui, theme, keybindings, done);
++						if (sessionRef.current !== null) config.onSession?.(sessionRef.current);
++						return component;
 +					};
  		return await ctx.ui.custom<QuestionnaireResult>(
 -			makeSessionFactory({ ...config, canReopenWhileHidden, sessionRef }),
@@ -57,7 +62,7 @@ index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..5c710389723c44f738830d90c146d887
  			presentation.overlay
  				? {
  						overlay: true,
-@@ -413,12 +437,62 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
+@@ -413,12 +442,77 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
  				return runRpcPath(pi, ctx.ui, typed);
  			}
  
@@ -65,20 +70,27 @@ index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..5c710389723c44f738830d90c146d887
 +			// 终端这一份仍然由我们自己画（下面 mount() → ctx.ui.custom）。ela 还会在
 +			// 浏览器里画同一份问卷：它实现了一个 `externalQuestionnaire` 接缝，我们把
 +			// 题目交出去（形状耦合留在包内 —— 它只回 label / selected / notes 这些表面
-+			// 东西），并给它两个动作：
++			// 东西），并给它三个动作：
 +			//
-+			//   answer(raw)  浏览器先答 → 用它把这一次挂载收掉（当作终端那边答完了）
-+			//   done()       终端这一份结束了（答了 / 放弃了 / 拆了）→ 宿主收掉浏览器那份
++			//   answer(raw)      浏览器先答 → 用它把这一次挂载收掉（当作终端那边答完了）
++			//   note(i, text)    浏览器写了备注 → 同步进这次 session（终端那份也看得到，
++			//                    而且万一是终端提交的，那条备注照样跟着答案回给模型）
++			//   done()           终端这一份结束了 → 宿主收掉浏览器那份
 +			//
 +			// 谁先答都算数，两边都不用猜对方的状态。宿主没有这个接缝时（别的宿主、
 +			// 老版本）全是 undefined，下面一切照旧。
 +			//
 +			// 为什么绕这一圈而不是让宿主直接 resolve 我们的 promise：那样宿主得猜
 +			// "紧随其后的那次 ctx.ui.custom 是不是这份问卷的"——并行工具调用一来就会认错。
-+			// 这里由我们自己收自己的挂载，宿主只负责画与答。
++			// 这里由我们自己收自己的挂载，宿主只负责画、答、同步备注。
++			//
++			// 为什么放在懒加载**之前**：`loadQuestionnaireSession()` 要 import 终端那份
++			// 渲染图（pi-tui 组件、markdown……冷导入约 1s，负载高时更久）。浏览器那份
++			// 弹窗不该等它 —— 早先放在后面，结果是"浏览器要等终端把重图导完才出现"。
 +			let finish: ((result: QuestionnaireResult) => void) | undefined;
 +			let heldExternal: QuestionnaireResult | undefined;
 +			let externalClosed = false;
++			let noteTarget: InstanceType<SessionModule["QuestionnaireSession"]> | undefined;
 +			const applyHeld = (): void => {
 +				if (heldExternal === undefined || finish === undefined) return;
 +				const result = heldExternal;
@@ -88,6 +100,11 @@ index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..5c710389723c44f738830d90c146d887
 +			const claimDone = (done: (result: QuestionnaireResult) => void): void => {
 +				finish = done;
 +				applyHeld();
++			};
++			const claimSession = (
++				session: InstanceType<SessionModule["QuestionnaireSession"]>,
++			): void => {
++				noteTarget = session;
 +			};
 +			const externalHost = (
 +				ctx.ui as {
@@ -103,6 +120,9 @@ index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..5c710389723c44f738830d90c146d887
 +					if (externalClosed) return;
 +					heldExternal = toExternalResult(raw, typed);
 +					applyHeld();
++				},
++				note: (index, text) => {
++					noteTarget?.setHostNote(index, text);
 +				},
 +				done: () => {
 +					externalClosed = true;
@@ -120,13 +140,11 @@ index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..5c710389723c44f738830d90c146d887
  				return buildToolResult(sessionLoad.message, { answers: [], cancelled: true, error: sessionLoad.error });
  			}
  			const { QuestionnaireSession } = sessionLoad.module;
-@@ -430,18 +504,26 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
- 			// Pi's editor slot (#253); the overlay only while another questionnaire holds the slot,
+@@ -431,7 +525,16 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
  			// or stacked when another overlay is already on screen (see below).
  			let presentation = resolvePresentation();
--			const mount = (p: Presentation) =>
+ 			const mount = (p: Presentation) =>
 -				mountQuestionnaire({ ctx, typed, itemsByTab, collapseKey, presentation: p, Session: QuestionnaireSession });
-+			const mount = (p: Presentation, onDone?: (done: (result: QuestionnaireResult) => void) => void) =>
 +				mountQuestionnaire({
 +					ctx,
 +					typed,
@@ -134,24 +152,13 @@ index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..5c710389723c44f738830d90c146d887
 +					collapseKey,
 +					presentation: p,
 +					Session: QuestionnaireSession,
-+					...(onDone !== undefined ? { onDone } : {}),
++					onDone: claimDone,
++					onSession: claimSession,
 +				});
  
  			emitAskUserBlockedEvent(pi, true);
  			try {
- 				emitTerminalAttention();
--				let result = await mount(presentation);
-+				let result = await mount(presentation, claimDone);
- 				if (result === YIELD_TO_OVERLAY) {
- 					// Another overlay was on screen: stack on top of it instead (see mustYieldInlineSlot).
- 					presentation.release?.();
- 					presentation = STACKED_OVERLAY_PRESENTATION;
--					result = await mount(presentation);
-+					result = await mount(presentation, claimDone);
- 				}
- 
- 				if (result === undefined) {
-@@ -452,6 +534,9 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
+@@ -452,6 +555,9 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
  			} finally {
  				presentation.release?.();
  				emitAskUserBlockedEvent(pi, false);
@@ -161,7 +168,7 @@ index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..5c710389723c44f738830d90c146d887
  			}
  		},
  	});
-@@ -460,3 +545,82 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
+@@ -460,3 +566,84 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
  }
  
  export { buildQuestionnaireResponse, buildToolResult };
@@ -202,6 +209,8 @@ index 2a390c37b7c7b1ae773d7e1ab19b16cecfeb83b3..5c710389723c44f738830d90c146d887
 +	params: QuestionParams;
 +	/** 浏览器先答：把答案给过来（简单形状），我们自己收掉终端那份并继续。 */
 +	answer: (raw: ExternalQuestionnaireAnswer) => void;
++	/** 浏览器写了某题的备注：同步进这次 session（`tab` 就是题号，最后一个是整份备注）。 */
++	note: (tab: number, text: string) => void;
 +	/** 终端那一份结束了：宿主把浏览器那份收掉。幂等。 */
 +	done: () => void;
 +}
@@ -289,3 +298,35 @@ index 96762fe1318b28fd47c2215c4088561382e9efe0..91f13d5846d6997668854ff2d2a1a7e8
  
  export function displayLabel(kind: SentinelKind): string {
  	return t(`sentinel.${kind}`, ROW_INTENT_META[kind].label);
+diff --git a/state/questionnaire-session.ts b/state/questionnaire-session.ts
+index 57de00da5d782cb04dd729846f50f35263df2447..71117f0cfd0fd415914f40e694bac40c7ab199a1 100644
+--- a/state/questionnaire-session.ts
++++ b/state/questionnaire-session.ts
+@@ -169,6 +169,27 @@ export class QuestionnaireSession {
+ 		this.viewAdapter.apply(this.state);
+ 	}
+ 
++	/**
++	 * ela patch：宿主（浏览器那一份界面）把它的备注同步进来。
++	 *
++	 * 走的是同一份状态：写进 `notesByTab`（上游那份"预先写好的备注"侧带，键就是题号，
++	 * 最后一个是整份备注）再刷新视图 —— 于是终端这边**看得见**同一条备注，而且万一
++	 * 最后是终端提交的，那条备注照样跟着答案回给模型（浏览器那份没白写）。
++	 *
++	 * 反向（终端 → 浏览器）没有通道：终端那份备注在扩展自己组件里，宿主读不到 ——
++	 * 见 `docs/architecture/extensions.md` 的"备注只同步一个方向"。
++	 */
++	setHostNote(tab: number, text: string): void {
++		const trimmed = text.trim();
++		const existing = this.state.notesByTab.get(tab) ?? "";
++		if (existing === (trimmed === "" ? "" : text)) return;
++		const next = new Map(this.state.notesByTab);
++		if (trimmed === "") next.delete(tab);
++		else next.set(tab, text);
++		this.state = { ...this.state, notesByTab: next };
++		this.viewAdapter.apply(this.state);
++	}
++
+ 	private mirrorNotesDraft(s: QuestionnaireState): QuestionnaireState {
+ 		// Drafts restore through Editor.setText, which clears the backing paste map —
+ 		// read expanded so stored drafts never orphan a paste marker.

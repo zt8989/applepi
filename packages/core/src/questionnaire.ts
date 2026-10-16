@@ -115,6 +115,13 @@ export interface QuestionnaireAnswerPayload {
 export interface ExternalQuestionnaireHandoff {
   params: unknown;
   answer: (raw: QuestionnaireAnswerPayload) => void;
+  /**
+   * 浏览器那份写了某题的备注 —— 同步进扩展自己那份 session（终端那边也看得到，
+   * 而且万一是终端提交的，这条备注照样跟着答案回给模型）。
+   *
+   * `tab` 就是题号；**最后一个是整份备注**（与扩展内部 `notesByTab` 的伪下标一致）。
+   */
+  note: (tab: number, text: string) => void;
   done: () => void;
 }
 
@@ -480,9 +487,38 @@ export class QuestionnaireHost {
     this.session = session;
     this.handoff = handoff;
     this.view = this.openView?.()?.(session);
+    // 备注是**实时**同步过去的（答案要等提交）：扩展那边把它写进自己的 `notesByTab`，
+    // 于是终端面板上看得见同一条，而且万一最后是终端那边答的，备注不会白写。
+    const forwarded: string[] = questions.map((_, index) => session.snapshot().notes[index] ?? '');
+    let forwardedGlobal = session.globalNote;
+    const forwardNotes = (): void => {
+      const current = session.snapshot();
+      current.notes.forEach((note, index) => {
+        const text = note ?? '';
+        if (text === forwarded[index]) return;
+        forwarded[index] = text;
+        try {
+          handoff.note(index, text);
+        } catch {
+          // 同步备注失败不该影响答案本身。
+        }
+      });
+      if (current.globalNote !== forwardedGlobal) {
+        forwardedGlobal = current.globalNote;
+        try {
+          handoff.note(current.questions.length, current.globalNote);
+        } catch {
+          // 同上。
+        }
+      }
+    };
     this.unsubscribe = session.subscribe(() => {
       // 提交 / 取消就是这一份结束了：把答案回给扩展（它那边会收掉自己的组件）。
-      if (session.finished) this.currentAnswer();
+      if (session.finished) {
+        this.currentAnswer();
+        return;
+      }
+      forwardNotes();
     });
     return { done };
   }

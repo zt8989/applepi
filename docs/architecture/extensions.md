@@ -106,13 +106,22 @@ inline 那条：宿主把**输入区那一格**（composer）换成扩展的组�
 `extension-host.ts` 当**内置扩展**按路径装载（`settings.json` 里那一份会被换成我们这份 ——
 同名工具是"先注册者优先"，两份都在的话生效的可能是没打补丁的那份）。
 
-补丁只做两件事：
+补丁做三件事（可复现来源：`scripts/repatch-ask-user-question.py`，跑一遍就重建那份 patch）：
 
-1. `execute()` 里多一个 `ctx.ui.externalQuestionnaire?.({ params, answer, done })` 握手段 ——
-   把归一化后的题目交给宿主（它只回 label / selected / notes 这些**表面**东西，翻成
-   `QuestionnaireResult` 的活儿留在包内）；
-2. `state/i18n-bridge.ts` 去掉顶层 await —— 上游那句 TLA 在 jiti 下会让**导入它的模块**
+1. `execute()` 里多一个 `ctx.ui.externalQuestionnaire?.({ params, answer, note, done })`
+   握手段 —— 把归一化后的题目交给宿主（它只回 label / selected / notes 这些**表面**
+   东西，翻成 `QuestionnaireResult` 的活儿留在包内）。它放在**会话懒加载之前**：
+   `loadQuestionnaireSession()` 要 import 终端那份渲染图（pi-tui/markdown，冷导入约 1s），
+   浏览器那份弹窗不该等它。
+2. `state/questionnaire-session.ts` 加一个 `setHostNote(tab, text)`：宿主（浏览器那份）
+   写的备注同步进扩展自己的 `notesByTab` —— 于是终端面板上看得见同一条，而且万一是
+   终端那边提交的，备注照样跟着答案回给模型。
+3. `state/i18n-bridge.ts` 去掉顶层 await —— 上游那句 TLA 在 jiti 下会让**导入它的模块**
    拿到 `undefined` 导出，症状是"这个工具坏了，请重启"（负载高时必现）。
+
+> 备注只同步**一个方向**：浏览器 → 扩展。反向没有通道（终端那份备注在扩展自己组件的
+> 内部状态里，宿主读不到）—— 这是"终端归扩展渲染"的代价，写在
+> `webui.md` 的问卷那一节里。
 
 于是两边**同时开着、谁先答都算数**：
 

@@ -225,10 +225,13 @@ function makeHost() {
     };
   });
   const answers: QuestionnaireAnswerPayload[] = [];
+  /** 同步到扩展那边的备注（`tab` → 最后一次同步的文本）。 */
+  const notes = new Map<number, string>();
   let dones = 0;
   const handoff = (params: unknown) => ({
     params,
     answer: (raw: QuestionnaireAnswerPayload) => answers.push(raw),
+    note: (tab: number, text: string) => notes.set(tab, text),
     done: () => {
       dones += 1;
     },
@@ -237,6 +240,7 @@ function makeHost() {
     host,
     views,
     answers,
+    notes,
     dones: () => dones,
     session: () => views[0]?.session,
     closed: () => views[0]?.closed ?? 0,
@@ -287,6 +291,23 @@ test('宿主：取消（浏览器里按 Esc）→ cancelled 回给扩展', () =>
   session()?.apply({ kind: 'cancel' });
   assert.deepEqual(answers, [{ answers: [], cancelled: true }]);
   assert.equal(closed(), 1);
+});
+
+test('宿主：备注**实时**同步给扩展（答案才等提交）', () => {
+  const { host, session, notes, answers, handoff } = makeHost();
+  host.open(handoff(PARAMS));
+  session()?.apply({ kind: 'note', index: 0, text: '部署脚本也要改' });
+  assert.deepEqual([...notes], [[0, '部署脚本也要改']], '备注不等提交就过去了');
+  session()?.apply({ kind: 'globalNote', text: '整份就这些' });
+  assert.deepEqual(
+    [...notes],
+    [
+      [0, '部署脚本也要改'],
+      [2, '整份就这些'],
+    ],
+    '整份备注用伪下标（题数）——与扩展内部的 notesByTab 一致',
+  );
+  assert.deepEqual(answers, [], '答案仍然只在提交时回给扩展');
 });
 
 test('宿主：认不出的题目不开视图（也不接管收尾）', () => {

@@ -468,6 +468,69 @@ test('内置扩展：终端那份由扩展自己画，浏览器那份由我们�
   }
 });
 
+test('内置扩展：浏览器写的备注会同步到终端那份，终端提交时照样带着', { skip: !hasAskUser && '没装 rpiv-ask-user-question' }, async () => {
+  useRealHome();
+  try {
+    const { store } = freshStore();
+    const tui = fakeTui([]);
+    const slot: FakeEditorSlot = { current: undefined };
+    initTheme('dark', false);
+    const opened: QuestionnaireSession[] = [];
+    await loadExtensionHost({
+      builtins: false,
+      store,
+      cwd: process.cwd(),
+      uiOptions: () => ({
+        ...hostUiOptions(tui, [], slot),
+        questionnaire: (session) => {
+          opened.push(session);
+          return () => {};
+        },
+      }),
+    });
+    const tool = getTool('ask_user_question');
+    registerExtraTools([]);
+    const pending = tool!.execute(
+      'call-note',
+      {
+        questions: [
+          {
+            question: 'Which approach?',
+            header: 'Approach',
+            options: [
+              { label: 'Minimal', description: 'Only what was asked.' },
+              { label: 'Thorough', description: 'Refactor neighbours too.' },
+            ],
+          },
+        ],
+      },
+      undefined,
+      undefined,
+    );
+    pending.catch(() => undefined);
+
+    await waitFor(() => opened.length === 1, 20_000, '浏览器那份该开着');
+    await waitFor(() => slot.current !== undefined, 20_000, '终端那份该挂着');
+    // 浏览器那份写一条备注（真界面上是备注框失焦时发 `note` 意图）。
+    opened[0]!.apply({ kind: 'note', index: 0, text: '浏览器写的备注' });
+    // 终端那份选第一个 —— 扩展自己的组件确认时会带上"预先写好的备注"。
+    slot.current?.handleInput?.('\r');
+
+    const result = (await pending) as {
+      details?: { answers?: { answer?: string | null; notes?: string }[]; cancelled?: boolean };
+    };
+    assert.equal(result.details?.cancelled, false);
+    assert.equal(result.details?.answers?.[0]?.answer, 'Minimal');
+    assert.equal(
+      result.details?.answers?.[0]?.notes,
+      '浏览器写的备注',
+      '浏览器写的备注该跟着终端那份答案一起回给模型（否则用户在浏览器里白写）',
+    );
+  } finally {
+    restoreHome();
+  }
+});
+
 test('内置扩展：终端先答（扩展自己的组件）→ 浏览器那份被收掉', { skip: !hasAskUser && '没装 rpiv-ask-user-question' }, async () => {
   useRealHome();
   try {

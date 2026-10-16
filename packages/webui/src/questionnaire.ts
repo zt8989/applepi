@@ -101,8 +101,19 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
     return answer?.kind === 'multi' ? answer.selected : [];
   };
 
-  /** 备注输入框（每题一个 + 提交页一个整份的）。`onChange` 只更新草稿。 */
-  const noteField = (value: string, placeholder: string, onChange: (text: string) => void): HTMLElement => {
+  /**
+   * 备注输入框（每题一个 + 提交页一个整份的）。
+   *
+   * `onChange` 只更新本地草稿（每次按键发一条 WebSocket 太啰嗦）；**失焦时**才把这条
+   * 备注发给服务端 —— 服务端会把它同步进扩展那份状态，于是终端面板上也看得见，
+   * 而且万一是终端提交的，这条备注照样跟着答案回给模型。
+   */
+  const noteField = (
+    value: string,
+    placeholder: string,
+    onChange: (text: string) => void,
+    onCommit: (text: string) => void,
+  ): HTMLElement => {
     const box = document.createElement('div');
     box.className = 'ela-q-note';
     const mark = document.createElement('span');
@@ -115,6 +126,7 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
     input.placeholder = placeholder;
     input.value = value;
     input.addEventListener('input', () => onChange(input.value));
+    input.addEventListener('blur', () => onCommit(input.value));
     box.append(mark, input);
     return box;
   };
@@ -301,9 +313,14 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
 
     // 每题一句备注（可空）—— 与终端那份的 `n` 是同一个东西（这里 Tab 就能到）。
     left.append(
-      noteField(notes[snapshot.active] ?? '', '这一题的备注（可选，Tab 到这里）', (text) => {
-        notes[snapshot.active] = text;
-      }),
+      noteField(
+        notes[snapshot.active] ?? '',
+        '这一题的备注（可选，Tab 到这里）',
+        (text) => {
+          notes[snapshot.active] = text;
+        },
+        (text) => emit({ kind: 'note', index: snapshot.active, text }),
+      ),
     );
 
     const previewRow = rows[at];
@@ -355,7 +372,16 @@ export function openQuestionnaireModal(options: QuestionnaireModalOptions): Ques
       }
     });
     body.append(list);
-    body.append(noteField(globalNote, '整份备注（可选）', (text) => { globalNote = text; }));
+    body.append(
+      noteField(
+        globalNote,
+        '整份备注（可选）',
+        (text) => {
+          globalNote = text;
+        },
+        (text) => emit({ kind: 'globalNote', text }),
+      ),
+    );
   };
 
   /**

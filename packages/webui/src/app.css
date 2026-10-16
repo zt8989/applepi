@@ -646,12 +646,15 @@ input.ela-q-box {
     align-items: flex-start;
   }
 
+  /* 答案优先：左边那栏给 3 份、预览 2 份（用户的原话：左右结构下答案被压缩了，
+     优先保证答案，预览可以弄小些）。 */
   .ela-q-left {
-    flex: 0 0 47%;
+    flex: 3 1 0;
+    min-width: 0;
   }
 
   .ela-q-previewbox {
-    flex: 1 1 0;
+    flex: 2 1 0;
     min-width: 0;
   }
 
