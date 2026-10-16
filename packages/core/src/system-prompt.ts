@@ -54,7 +54,6 @@ import {
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { configHome, PI_CONFIG_DIR as CONFIG_DIR_NAME } from './config-home';
-import { loadSkillRegistry } from './skills';
 import { BUILTIN_TOOL_NAMES, selectedBuiltinToolNames } from './tools';
 import type { Skill as PiSkill } from '@earendil-works/pi-coding-agent/dist/core/skills.js';
 import type { SkillInfo } from './skills';
@@ -305,19 +304,19 @@ export interface PromptParts {
 /**
  * 装配 prompt 的两份形态。
  *
- * @param loadSkills 是否顺带扫 skill 目录。回放 / 测试里传 false ——
- *   目录内容可能已经变了，重扫得到的是**另一个** prompt（那时应该用落盘的那份）。
+ * skill 清单一律由调用方传进来（内核在 `assembleExtensions` 里 await 一次
+ * `loadSkillRegistry()`）—— **这里不再自己扫目录**。早先那个 `loadSkills: true` 选项
+ * 会在这里同步再扫一遍，回放 / 测试里很容易拿到与落盘不同的那份；现在 skill 是
+ * `async` 加载的（pi 的 `DefaultResourceLoader` 是异步接口），prompt 装配本身保持纯函数。
  */
-export function buildPromptParts(inputs: PromptInputs & { loadSkills?: boolean }): PromptParts {
-  const skills =
-    inputs.skills ?? (inputs.loadSkills === true ? loadSkillRegistry({ cwd: inputs.cwd }).skills : []);
-  const options = buildPromptOptions({ ...inputs, skills });
+export function buildPromptParts(inputs: PromptInputs): PromptParts {
+  const options = buildPromptOptions({ ...inputs, skills: inputs.skills ?? [] });
   return { text: buildSystemPrompt(options), sections: buildSystemPromptSections(options) };
 }
 
 /**
  * 拼出完整的 system prompt 文本（发给模型的那一整段）。
  */
-export function buildSystemPromptText(inputs: PromptInputs & { loadSkills?: boolean }): string {
+export function buildSystemPromptText(inputs: PromptInputs): string {
   return buildPromptParts(inputs).text;
 }

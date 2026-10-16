@@ -47,6 +47,21 @@ import { fileURLToPath } from 'node:url';
  */
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
+/**
+ * 真实家目录 —— `test-support/isolated-home.ts` 在改 `HOME` 之前把它存在这里。
+ *
+ * 读不到（例如本文件被单个跑、没带 test-support）就用当前 `homedir()`。
+ */
+const REAL_HOME: string | undefined = (() => {
+  const agentDir = process.env['PI_CODING_AGENT_DIR_REAL'];
+  return agentDir === undefined ? undefined : path.dirname(path.dirname(agentDir));
+})();
+
+/** 读真实配置用的家目录（`REAL_HOME` 优先，它才是真家）。 */
+function realHomedir(): string {
+  return REAL_HOME ?? homedir();
+}
+
 /** TUI 入口（仓库根下的 tui 包源码）。 */
 const ENTRY = path.join(ROOT, 'packages', 'tui', 'src', 'main.ts');
 
@@ -55,10 +70,15 @@ const ENTRY = path.join(ROOT, 'packages', 'tui', 'src', 'main.ts');
  *
  * `delete` 而不是置空字符串：`PI_CODING_AGENT_DIR=''` 是「已设但为空」，pi 会照样
  * 拿它当目录。
+ *
+ * `HOME` 也要换回**真实的**那个：`test-support/isolated-home.ts` 会把它指到临时目录，
+ * 而底栏把 cwd 缩写成 `~` 靠的就是 `os.homedir()` —— 带着临时 `HOME` 启动时，仓库根
+ * 不在它下面，底栏左侧就不再是路径（这条测试就是这么抓到它的）。
  */
 function envWithoutTestHome(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, COLUMNS: '100', LINES: '30', NO_COLOR: '1' };
   delete env['PI_CODING_AGENT_DIR'];
+  if (REAL_HOME !== undefined) env['HOME'] = REAL_HOME;
   return env;
 }
 
@@ -73,6 +93,7 @@ function envWithColor(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, COLUMNS: '100', LINES: '30', TERM: 'xterm-256color' };
   delete env['PI_CODING_AGENT_DIR'];
   delete env['NO_COLOR'];
+  if (REAL_HOME !== undefined) env['HOME'] = REAL_HOME;
   return env;
 }
 
@@ -125,7 +146,7 @@ const BRANCH = (() => {
 const DEFAULT_MODEL_LINE = (() => {
   try {
     const raw = JSON.parse(
-      readFileSync(path.join(homedir(), '.pi', 'agent', 'settings.json'), 'utf8'),
+      readFileSync(path.join(realHomedir(), '.pi', 'agent', 'settings.json'), 'utf8'),
     ) as { defaultProvider?: unknown; defaultModel?: unknown };
     return typeof raw.defaultProvider === 'string' && typeof raw.defaultModel === 'string'
       ? `(${raw.defaultProvider}) ${raw.defaultModel}`
