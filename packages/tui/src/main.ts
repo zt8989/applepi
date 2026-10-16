@@ -377,7 +377,10 @@ async function main(): Promise<void> {
     return;
   }
 
-  process.once('exit', () => kernel.dispose());
+  // 退出兜底：正常情况下 `main()` 末尾会 `await kernel.dispose()`（那时 MCP 的子进程
+  // 已经收干净）。这一条是给「别处 `process.exit()`」或信号路径的 —— `exit` 事件里
+  // 做不了异步收尾，但 stdio 传输自己的 `exit` 钩子会把还活着的服务器进程组杀掉。
+  process.once('exit', () => void kernel.dispose());
 
   // `--session <id>` 不只是「用这个 id 建一个新的」—— 如果那个 id 已经有会话文件，
   // 就**真的把它恢复**（读消息 + 轨迹树，零 token）。
@@ -534,7 +537,7 @@ async function main(): Promise<void> {
   }
 
   const prompt = args.prompt;
-  process.exitCode = await runTui({
+  const exitCode = await runTui({
     store: kernel.store,
     // 扩展装载的门 + **首帧不等扩展**：交互式模式把装载推到后台（首帧 3.6s → ~1.1s），
     // 发消息、开场横幅重报都挂在 `ready` 上（见 `TuiOptions.ready`）。
@@ -590,6 +593,46 @@ async function main(): Promise<void> {
     // 关掉监听端口，否则事件循环上一直有活，进程退不掉（与 `kernel.dispose()` 同一个道理）。
     await web?.close();
     bridge?.dispose();
+    // 关扩展宿主（含 MCP 的 stdio 子进程）—— **必须 await**：子进程握着事件循环，
+    // 不等它们收掉，进程退不出去。见下面 `process.exit` 那段。
+    await kernel.dispose();
+  });
+
+  // ── 显式退出（一次性模式）──
+  //
+  // 光靠事件循环自己排空**不够**：MCP 的 stdio 服务器是子进程，而「连到一半就被丢下」
+  // 的那个（`npx -y rea-agents` 还在解析 / 下载时一次性模式已经跑完了）不会被优雅的
+  // `session_shutdown` 收掉 —— 那一刻它的 client 还没挂到 connection 上，`close()`
+  // 是空转，子进程的 stdio 就一直握着事件循环（实测卡到 600s 超时）。
+  //
+  // 官方 stdio 传输自己装了 `process.on('exit')` 钩子：进程退出时把还活着的服务器
+  // **进程组**一并杀掉。所以这里等 stdout 排空后显式退出，让那个钩子收尾 ——
+  // 这正是「在退出路径上显式收子进程」。
+  //
+  // 交互模式走不到这里（`runTui` 在 `await new Promise(() => {})` 上挂着，退出走
+  // `app.ts` 的 `process.exit(0)`，同样会触发那个钩子）。
+  await flushStdout();
+  process.exit(exitCode);
+}
+
+/**
+ * 等 `process.stdout` 把缓冲写出去。
+ *
+ * 一次性模式的输出是管道 / 重定向的接收方，而 macOS 上管道写是异步的 ——
+ * 紧接着 `process.exit()` 会把还没落地的字节丢掉（与测试里 `firstFrame` 的注释同一个坑）。
+ * 平时 `writableLength` 就是 0（直写终端 / 小输出），只有大输出或慢消费者才需要等。
+ * 给一个上限，免得 stdout 卡住时反过来把退出挂死。
+ */
+function flushStdout(timeoutMs = 1000): Promise<void> {
+  if (process.stdout.writableLength === 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    let timer: NodeJS.Timeout;
+    const done = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    timer = setTimeout(done, timeoutMs);
+    process.stdout.once('drain', done);
   });
 }
 

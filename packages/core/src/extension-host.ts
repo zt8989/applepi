@@ -192,7 +192,16 @@ export interface ExtensionHost {
     input: Record<string, unknown>,
     options?: { parentToolCallId?: string | undefined; signal?: AbortSignal | undefined },
   ): Promise<{ block?: boolean; reason?: string | undefined; input: Record<string, unknown> }>;
-  dispose(): void;
+  /**
+   * 收掉宿主：发 `session_shutdown`（MCP 靠它关服务器），再作废 runner。
+   *
+   * **可等待**，这是必需的：MCP 的 stdio 服务器是子进程，会握着事件循环。一次性模式
+   * （`-p`）跑完那一刻如果不等它们关掉，进程就退不出去（`process.on('exit')` 里做不了
+   * 异步收尾 —— 那一刻已经在退了）。见 `main.ts` 退出路径上的说明。
+   *
+   * 给一个上限：某个服务器赖着不走时也不能把退出挂死（到点就作废 runner 返回）。
+   */
+  dispose(): Promise<void>;
 }
 
 export interface LoadExtensionHostOptions {
@@ -272,7 +281,7 @@ function emptyHost(errors: readonly string[] = []): ExtensionHost {
     startSession: async () => {},
     collectPromptSections: async () => ({}),
     beforeToolCall: async (_id, _name, input) => ({ input }),
-    dispose: () => {},
+    dispose: async () => {},
   };
 }
 
@@ -417,6 +426,15 @@ function msg(error: unknown): string {
 }
 
 /**
+ * `dispose()` 等 `session_shutdown` 的上限。
+ *
+ * 一个服务器赖着不走（stdio 传输自己有 ~2.5s 的「关 stdin → SIGTERM → SIGKILL」兜底，
+ * OAuth 的 token 落盘也可能慢一点）时，退出不该跟着一起挂死 —— 到点就作废 runner 返回，
+ * 剩下的子进程交给传输自己的 `process.on('exit')` 钩子兜底。
+ */
+const SHUTDOWN_TIMEOUT_MS = 5_000;
+
+/**
  * 装扩展包。
  *
  * ## 失败不抛
@@ -440,7 +458,9 @@ export async function loadExtensionHost(
   };
   if (disabled === true) return emptyHost();
 
-const errors: string[] = [];
+  const errors: string[] = [];
+  // `dispose()` 只该真跑一次（内核可能在退出路径与测试 `t.after()` 各调一次）。
+  let hostDisposed = false;
   const onExtensionError = (where: string, message: string): void => {
     errors.push(`扩展 ${where}：${message}`);
   };
@@ -791,18 +811,31 @@ const errors: string[] = [];
     },
     beforeToolCall: (toolCallId, name, input, callOptions) =>
       emitToolCallGate(runner, onExtensionError, toolCallId, name, input, callOptions?.parentToolCallId),
-    dispose: () => {
+    dispose: async () => {
+      if (hostDisposed) return;
+      hostDisposed = true;
       // 先把 `session_shutdown` 发出去（MCP 关服务器），再作废 runner —— 反过来
       // handler 里的 ctx 就是 stale 的了。
-      void (async () => {
-        try {
-          await runner.emit({ type: 'session_shutdown', reason: 'quit' });
-        } catch {
-          // 关不干净不该让退出卡住。
-        } finally {
-          runner.invalidate();
-        }
-      })();
+      //
+      // **要 await**：MCP 关的是 stdio 子进程，不等它们收掉，一次性模式的进程会一直
+      // 挂在它们握着的事件循环上（见接口上的注释与 `main.ts` 的退出路径）。
+      //
+      // 但仍给上限：某个服务器赖着不走时不能让退出挂死。到点就作废 runner 返回 ——
+      // 剩下的子进程由 stdio 传输自己的 `process.on('exit')` 钩子在进程真退出时兜底杀掉。
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          runner.emit({ type: 'session_shutdown', reason: 'quit' }).catch(() => {
+            // 关不干净不该让退出卡住。
+          }),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, SHUTDOWN_TIMEOUT_MS);
+          }),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        runner.invalidate();
+      }
     },
   };
 }
