@@ -470,12 +470,36 @@ const errors: string[] = [];
   // **共享一个 runtime**：内置扩展与文件扩展必须挂在同一个 runtime 上，否则
   // `pi.registerMcpServer()` 写进的注册表、runner 绑定的 refreshTools 会是两份。
   const runtimeHandle = createExtensionRuntime();
-  const loaded = await loadExtensions(
-    resolvedEntries.map((e) => e.path),
-    cwd,
-    eventBus,
-    runtimeHandle,
+  // ── 并行装载（为什么不是一次 `loadExtensions(所有路径)`）──
+  //
+  // 官方那个函数内部是**串行**的：一个扩展 import 完再下一个。而每个扩展的装载是
+  // 各自独立的重活（jiti 转译 + 它自己的模块图），互相之间不等待 —— 实测三个 npm
+  // 扩展串行 2.7s、并行 1.4s，而这段时间整个在启动的关键路径上（首帧之前）。
+  //
+  // **并行不改变语义**，三件事各自成立：
+  //
+  // 1. `eventBus` 与 `runtimeHandle` 仍然共用同一个 —— 扩展之间靠它们互相看见
+  //    （谁先 import 完谁先去 `on()`，而事件是 `startSession()` 那一刻才统一发的，
+  //    所以「谁先注册 handler」与这里的并行无关）。
+  // 2. 结果**按原顺序**拼回去（`results[i]` 对应 `resolvedEntries[i]`），所以下游
+  //    看到的扩展顺序还是 `settings.json` 里的顺序 —— 这是必须的：工具表是
+  //    「同名先注册者优先」（`runner.getAllRegisteredTools()` 按 extensions 顺序走，
+  //    见下面的 `syncExtensionTools`），顺序一漂，重名工具谁生效就变成随机的。
+  // 3. 一个扩展失败不影响别的：官方已经把它收成 `errors` 里的一条（不抛），
+  //    拼起来之后与串行时的诊断一模一样。
+  //
+  // 代价：装载期同时开 N 份 jiti 转译，峰值 CPU 与内存高一点（实测首帧总 CPU 反而
+  // 更低：串行那份 CPU 有一部分是 I/O 等待）。扩展个数很少（`packages` 里几个），
+  // 不需要限流。
+  const results = await Promise.all(
+    resolvedEntries.map((entry) => loadExtensions([entry.path], cwd, eventBus, runtimeHandle)),
   );
+  const loaded = {
+    extensions: results.flatMap((result) => result.extensions),
+    errors: results.flatMap((result) => result.errors),
+    warnings: results.flatMap((result) => result.warnings),
+    runtime: runtimeHandle,
+  };
   // `loadExtensions` 只知道「一个文件」，包信息在这一步补上（理由见
   // `resolveExtensionEntries` 与 `applyExtensionSourceInfo` 的注释）。
   applyExtensionSourceInfo(loaded.extensions, resolvedEntries);

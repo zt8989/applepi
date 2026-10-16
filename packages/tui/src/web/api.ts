@@ -82,7 +82,14 @@ export interface WebApiOptions {
   autoCompactEnabled: () => boolean | null;
   setAutoCompactEnabled: (enabled: boolean) => void;
   /** 内置命令表（TUI 的 `SLASH_COMMANDS`）—— 标了 `web` 的才进接口。 */
-  commands: readonly WebCommandSource[];
+  /**
+   * 命令表（内置 + 扩展注册的）。
+   *
+   * **取值函数而不是数组**：内核 `deferExtensions` 时扩展是后台装的，装完才有它们的
+   * 命令（`main.ts` 那个数组里的第二段）。快照成数组的话，浏览器那边（`/` 下拉）
+   * 永远看不到扩展命令。
+   */
+  commands: () => readonly WebCommandSource[];
   /** 跑一条**扩展**命令（内置的不走这里 —— 它们的界面在浏览器侧）。 */
   runExtensionCommand: (name: string, arg: string) => Promise<void>;
 }
@@ -211,7 +218,8 @@ export function createWebApi(options: WebApiOptions): WebApi {
       // 扩展的命令一律进（它们本来就该在浏览器里也能跑）；内置的只有标了 `web` 的进
       // —— 会话类（`/new` `/sessions` `/compact` …）还在终端那边，见文件头。
       // `/skill:<名字>` 也列进来（展开由 bridge 在收到 prompt 时做，见那里的注释）。
-      const builtin: WebCommandInfo[] = options.commands
+      const builtin: WebCommandInfo[] = options
+        .commands()
         .filter((command) => command.source === 'extension' || command.web === true)
         .map((command) => ({
           name: command.name,

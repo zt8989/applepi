@@ -72,11 +72,10 @@ interface CliArgs {
   llmTimeoutMs?: number;
   maxLlmAttempts?: number;
   help: boolean;
-  demo: boolean;
   noTrace: boolean;
-  /** 不启 web ui（`--no-web`）。 */
-  noWeb: boolean;
-  /** web ui 的端口（默认 30141；被占就往后试）。 */
+  /** 起浏览器界面（`--web`）。**默认不起** —— 那是一个监听端口的服务，不开就不该占端口。 */
+  web: boolean;
+  /** web ui 的端口（默认 30141；被占就往后试）。**给了它就隐含 `--web`**。 */
   webPort?: number | undefined;
   sessionId?: string;
   /** 工具的工作目录（文件操作边界）。 */
@@ -108,15 +107,14 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
       --llm-timeout <ms> 一次 LLM 调用的超时（默认 120000）；超时按可重试错误处理
       --attempts <n>     单轮内最多几次 LLM 尝试（含首次，默认 2；超时/网络错会自动重试）
       --api-key <key>    直接给 key（否则读 DEEPSEEK_API_KEY）
-      --demo             不打网络：用 pi-ai 自带的 faux provider 跑一遍完整环
       --no-trace         不把轨迹落盘到 traces/
       --no-extensions    不装 pi 扩展（settings.json 的 packages）
       --session <id>     指定会话 id（决定 sessions/ 与 traces/ 里的文件名；支持 pi 的 UUIDv7）
       --skill <path>     额外的 skill 文件或目录（可重复；默认扫 ~/.pi/agent/skills 与 <cwd>/.pi/skills）
       --cwd <dir>       工具的工作目录（文件操作边界，默认当前目录）
       --trace-dir <dir> 轨迹目录（默认 ~/.pi/agent/traces）
-      --web-port <n>    浏览器界面的端口（默认 30141；只绑 127.0.0.1，被占就往后试）
-      --no-web           不起浏览器界面（只要终端界面）
+      --web              起浏览器界面（默认不起；只绑 127.0.0.1，无认证）
+      --web-port <n>    浏览器界面的端口（默认 30141；被占就往后试；给了它就隐含 --web）
   -h, --help             显示本帮助
 
 内置工具（默认 read / write / edit / bash；powershell / grep / find / ls 默认关，
@@ -130,7 +128,7 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
   find       - 按 glob 找文件（需要 fd）
   ls         - 列目录内容
 
-浏览器界面（默认随终端一起启动，\`--no-web\` 关掉）:
+浏览器界面（默认不起，\`--web\` 打开）:
   http://127.0.0.1:30141/   pi-web-ui 的聊天界面。环仍然是终端这一个进程里的那一份 ——
                             浏览器只是订阅它、往里发话（模型密钥与工具都在服务端）。
                             前端要先构建一次：\`pnpm build\`（没构建会显示一页说明）。
@@ -171,9 +169,8 @@ function parseArgs(argv: string[]): CliArgs {
     // 不给默认上限：模型要查多少轮由它自己说了算，--max-turns 留给需要兜底的人。
     maxTurns: undefined,
     help: false,
-    demo: false,
     noTrace: false,
-    noWeb: false,
+    web: false,
     noExtensions: false,
     cwd: process.cwd(),
     skillPaths: [],
@@ -263,17 +260,14 @@ function parseArgs(argv: string[]): CliArgs {
       case '--trace-dir':
         args.traceDir = next();
         break;
-      case '--demo':
-        args.demo = true;
-        break;
       case '--no-trace':
         args.noTrace = true;
         break;
+      case '--web':
+        args.web = true;
+        break;
       case '--web-port':
         args.webPort = Number.parseInt(next(), 10);
-        break;
-      case '--no-web':
-        args.noWeb = true;
         break;
       case '--no-extensions':
         args.noExtensions = true;
@@ -310,6 +304,17 @@ async function main(): Promise<void> {
     process.env[`${args.provider.toUpperCase().replace(/-/g, '_')}_API_KEY`] = args.apiKey;
   }
 
+  // **交互式模式** = 没有一次性要跑的东西（`-p`）也没关掉扩展。
+  //
+  // 它决定两件事，而且两件必须一致：
+  //
+  // 1. 内核 `deferExtensions`：扩展推到后台装（首帧不等它）；
+  // 2. 界面拿到 `kernel.ready` 这道门：装载完成前不发消息、开场横幅要重报一次。
+  //
+  // 一旦只给其中一边，症状分别是「首帧没变快」与「发送了一条缺工具集的消息」。
+  const oneShot = args.prompt !== undefined;
+  const deferExtensions = !oneShot && !args.noExtensions;
+
   // 内核：整个应用里唯一的一次 createKernel() 装配，界面只拿到它的 store。
   // 没有第二份 store，也没有第二份环。
   //
@@ -345,7 +350,6 @@ async function main(): Promise<void> {
           ? { thinkingLevel: args.modelThinking }
           : {}),
       ...(args.skillPaths.length > 0 ? { skillPaths: args.skillPaths } : {}),
-      demo: args.demo,
       maxTurns: args.maxTurns,
       llmTimeoutMs: args.llmTimeoutMs,
       maxLlmAttempts: args.maxLlmAttempts,
@@ -359,6 +363,8 @@ async function main(): Promise<void> {
       // 而扩展工具真被调用时（可能在第一轮之后）读那个引用。
       ...(args.prompt === undefined ? { uiOptions: () => requireUi(uiRef) } : {}),
       ...(args.noExtensions ? { noExtensions: true } : {}),
+      // 交互式模式：扩展装载不等（首帧 ~3.6s → ~1.1s）。见上面那个 `deferExtensions`。
+      ...(deferExtensions ? { deferExtensions: true } : {}),
       onTraceError: (error) => {
         process.stderr.write(
           `轨迹落盘失败（不影响对话）：${String(error instanceof Error ? error.message : error)}\n`,
@@ -423,7 +429,9 @@ async function main(): Promise<void> {
   let web: WebServerHandle | undefined;
   let bridge: WebBridge | undefined;
   let webNotice: string | undefined;
-  if (!args.noWeb) {
+  // **默认不起**：那是一个监听端口的服务，不开就不该占端口。`--web` 打开，
+  // `--web-port <n>` 隐含它（说要一个端口 = 要那个服务；否则那个值无处可用）。
+  if (args.web || args.webPort !== undefined) {
     // 模型解析：`getModels()` 对未知 provider 会抛（best-effort），裹一层。
     // 桥与 HTTP 接口共用同一个 —— 否则两边对「这个模型存不存在」的判断会漂移。
     const resolveModel = (provider: string, id: string) => {
@@ -460,9 +468,17 @@ async function main(): Promise<void> {
         stats: (state) => statsLine(state),
         // 底栏左端那一行（与终端底栏逐字同形）：家目录缩 `~` + git 分支。
         cwdLabel: (state) => cwdLine(state.session.cwd, gitBranch(state.session.cwd)),
+        // 扩展装载完成的门：浏览器那侧发消息也要等它（与终端 `send()` 同一道门）——
+        // 装载前 state 里的工具集与 system prompt 还是「没有扩展」的形状，先发出去的
+        // 那条会定下一份**缺工具集**的 head（不可改的历史，见 `prompt-head.ts`）。
+        // 一次性模式不给（它本来就不推迟装载）。
+        ...(deferExtensions ? { ready: kernel.ready } : {}),
       },
       // 开场诊断与终端那边同一个口径：装了哪些扩展 + 装载失败。
-      [
+      //
+      // **取值函数**：内核 `deferExtensions` 时这两样是后台装载完才有的（见那里的
+      // `ready`）—— 传数组快照就等于永远报不出装载诊断。
+      () => [
         // 只报装载**诊断**：开场那条「已装扩展：…」不进浏览器 —— 侧边栏已经能看出
         // 有哪些会话在用哪些 cwd，而扩展清单是终端那边的开场信息（`[Extensions]`），
         // 它在 web 里一条盖一条只占地方。
@@ -481,7 +497,9 @@ async function main(): Promise<void> {
       setModel: (provider, id) => kernel.setModel(provider, id),
       autoCompactEnabled: () => kernel.autoCompactEnabled(),
       setAutoCompactEnabled: (enabled) => kernel.setAutoCompactEnabled(enabled),
-      commands: [
+      // **取值函数**：扩展是后台装的（见内核的 `deferExtensions`），装载完成后
+      // 它们的命令才存在 —— 快照一次就等于浏览器那边永远看不到扩展命令。
+      commands: () => [
         ...SLASH_COMMANDS.map((command) => ({
           name: command.name,
           description: command.description,
@@ -515,16 +533,22 @@ async function main(): Promise<void> {
     }
   }
 
-  const prompt = args.prompt ?? (args.demo ? '算一下 (3+4)*6' : undefined);
+  const prompt = args.prompt;
   process.exitCode = await runTui({
     store: kernel.store,
+    // 扩展装载的门 + **首帧不等扩展**：交互式模式把装载推到后台（首帧 3.6s → ~1.1s），
+    // 发消息、开场横幅重报都挂在 `ready` 上（见 `TuiOptions.ready`）。
+    //
+    // 一次性模式（`-p`）**不给**：它没有首帧可提前，而装载那一刻本身就已经是结果了
+    // （那时 `kernel.ready` 早就完成，给一份「已完成」的门只会让横幅白闪一帧）。
+    ...(deferExtensions ? { ready: kernel.ready } : {}),
     // 工作目录不在这里传：它从 `store.getState().session.cwd` 读（与浏览器同一个地方）。
     // 把内核的「开新会话」交进去 —— TUI 只拿 store，换 id（于是换文件）要内核出手。
     newSession: () => kernel.newSession(),
     // 恢复历史：也必须走内核（换 id + 记录器游标对齐），界面自己做会把历史重写一遍。
     restoreSession: (file: string) => kernel.restoreSession(file),
     // 浏览器侧的对话框（`ctx.ui.select/confirm/input` 的那一份）。**取值**：桥可能
-    // 因为 `--no-web` 不存在，也可能在重连时换掉。
+    // 因为没给 `--web` 时它不存在，也可能在重连时换掉。
     dialogs: () => bridge?.dialogs,
     // 换模型：一条 `model.changed`（带全能力 / 窗口），且**先查模型存在**。
     // 第三个参数是作用域条目写死的档位（`/scoped-models` 的 `p/i:high`）——
@@ -545,7 +569,7 @@ async function main(): Promise<void> {
     // 扩展的 `before_agent_start`（内核持有的那个宿主）。
     beforeAgentStart: (text) => kernel.extensions.beforeAgentStart(text),
     // 扩展的斜杠命令与快捷键（补全、`runCommand` 兜底、raw input）。
-    extensionCommands: kernel.extensions.commands,
+    extensionCommands: () => kernel.extensions.commands,
     // 把活着的界面交给内核的扩展宿主（它在装扩展时只能拿到一个待填的引用）。
     publishUi: (options) => {
       uiRef.current = options;
@@ -556,11 +580,11 @@ async function main(): Promise<void> {
     //
     // `entries`（入口 + 来源）才是那一节要报的：`tools` 是工具名，报出去会让人
     // 拿着工具名去 settings 的 `packages` 里找那个扩展（见 resource-labels.ts）。
-    extensions: {
+    extensions: () => ({
       entries: kernel.extensions.entries,
       tools: kernel.extensions.tools.map((tool) => tool.name),
       errors: kernel.extensions.errors,
-    },
+    }),
     ...(prompt !== undefined ? { prompt } : {}),
   }).finally(async () => {
     // 关掉监听端口，否则事件循环上一直有活，进程退不掉（与 `kernel.dispose()` 同一个道理）。

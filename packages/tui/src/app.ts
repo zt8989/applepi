@@ -992,9 +992,16 @@ export interface TuiOptions {
   /**
    * 扩展的斜杠命令与快捷键（`extension-commands.ts` 造，界面读）。
    *
+   * ## 为什么是**取值函数**，不是那个对象
+   *
+   * 内核 `deferExtensions` 时（交互式启动，见 `kernel.ts`）扩展是**后台装的**：
+   * 这里存一个对象就等于把「装载前那个空命令表」钉死，症状是扩展的斜杠命令
+   * （`/websearch` 那种）**永远**不出现，而没有任何报错。取值是每次现取，
+   * 于是装载完成后补全、`/help`、`runCommand`、`/hotkeys` 都看得到它们。
+   *
    * 不给 = 没装扩展：补全里没有它们，`runCommand` 不会问。
    */
-  extensionCommands?: ExtensionCommands | undefined;
+  extensionCommands?: (() => ExtensionCommands | undefined) | undefined;
   /**
    * 装了哪些 pi 扩展（入口 + 装载诊断）。
    *
@@ -1007,7 +1014,7 @@ export interface TuiOptions {
    *
    * 诊断**刻意显眼**（黄字）：那不是「没装某个可选功能」，而是「你以为装上了」。
    */
-  extensions?: {
+  extensions?: (() => {
     /**
      * 装上的扩展（入口文件 + 来源）。
      *
@@ -1023,7 +1030,18 @@ export interface TuiOptions {
     entries: readonly ExtensionEntry[];
     tools: readonly string[];
     errors: readonly string[];
-  } | undefined;
+  } | undefined) | undefined;
+  /**
+   * 扩展装载完成的门（`deferExtensions` 时才有意义，见 `kernel.ts` 的 `ready`）。
+   *
+   * 两件事靠它：
+   *
+   * 1. **发消息**要在它之后（`send()`）—— 装载前 state 里的工具集与 system prompt
+   *    还是「没有扩展」的形状，先发出去的那条会把一份缺工具集的 head 写进会话。
+   * 2. **开场横幅**要在它之后再报一次：`[Skills]` / `[Extensions]` 这两节的内容
+   *    （skill 清单、扩展清单与装载诊断）都是装载那一刻才有的。
+   */
+  ready?: Promise<void> | undefined;
   /**
    * 扩展的 `ctx.ui` 由界面层造（它要活着的 tui 实例）。
    *
@@ -1230,6 +1248,23 @@ export function jumpToLatestHint(theme: Theme): string {
 export async function runTui(options: TuiOptions): Promise<number> {
   const { store, prompt, newSession, sessionId, restoreSession: restoreHook } = options;
   const beforeAgentStartHook = options.beforeAgentStart;
+  /** 扩展的命令表（**每次现取**，见 `TuiOptions.extensionCommands`）。 */
+  const extensionCommands = (): ExtensionCommands | undefined => options.extensionCommands?.();
+  /**
+   * 扩展装载完成了吗（同步的那一面）。
+   *
+   * `TuiOptions.ready` 是一个 promise，而 `send()` 里那句「现在能不能发」需要**同步**
+   * 判断（不能 await 完了再决定要不要提示用户）。所以另存一个布尔，由那个 promise 翻。
+   */
+  let extensionsReady = options.ready === undefined;
+  /**
+   * 扩展装载完成的门（`TuiOptions.ready`；没给就是一个**已经完成**的门）。
+   *
+   * `send()` 要 `await` 它：`deferExtensions`（内核把扩展推到后台装）下，装载完成前
+   * state 里的工具集与 system prompt 还是「没有扩展」的形状 —— 先发出去的那条会定下
+   * 一份**缺工具集**的 head，而 head 是不可改的历史（见 `prompt-head.ts`）。
+   */
+  const ready = options.ready ?? Promise.resolve();
   // 工作目录**从 store 读**（`state.session.cwd`）—— 与浏览器那边（桥、`/api/*`）
   // 是同一个地方。它不是一个「界面的选项」：内核启动时就定了，换会话也不变
   // （见 docs/architecture/kernel.md 的「会话身份住在状态里」）。
@@ -1517,7 +1552,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
     //
     // 为什么不用 `SLASH_COMMANDS` 那份常量：扩展的命令要等 `loadExtensions()` 装载完
     // 才知道，而那可能发生在编辑器建好**之后**。所以这里现取（与 skill 同一种情况）。
-    ...(options.extensionCommands?.list() ?? []),
+    ...(extensionCommands()?.list() ?? []),
   ];
 
   const base = new CombinedAutocompleteProvider(SLASH_COMMANDS, process.cwd());
@@ -1663,7 +1698,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const hotkeysLines = (width: number): readonly string[] | undefined => {
     if (hotkeysSource === undefined) return undefined;
     if (hotkeysLinesCache?.width !== width) {
-      hotkeysLinesCache = { width, lines: renderHotkeys(width, options.extensionCommands?.shortcuts() ?? []) };
+      hotkeysLinesCache = { width, lines: renderHotkeys(width, extensionCommands()?.shortcuts() ?? []) };
     }
     return hotkeysLinesCache.lines;
   };
@@ -1978,12 +2013,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // 所以这里先自己跑一遍，**已经消费就不再问扩展**。
     if (builtins()) return { consume: true };
 
-    if (options.extensionCommands) {
+    if (extensionCommands() !== undefined) {
       // 扩展的 handler 可能是 async（它会弹对话框），而输入监听器是**同步**回调 ——
       // 在这里 await 就是等一个要人来点的窗口，会把输入队列堵住。
       // 所以不消费这个键（返回 undefined，让按键继续往编辑器走），只把 handler 排出去。
-      void options.extensionCommands
-        .handleKey(data, () => false)
+      const commands = extensionCommands();
+      void commands
+        ?.handleKey(data, () => false)
         .catch((error: unknown) => {
           notify(yellow(`扩展快捷键出错：${error instanceof Error ? error.message : String(error)}`));
         });
@@ -2732,7 +2768,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
         // 表里的键名是**实时解析**的（`keyLabel()` → `getKeybindings()`），所以用户改过
         // `~/.pi/agent/keybindings.json` 之后这里显示的就是新键 —— 与顶行那个 `(Ctrl+R)`、
         // 与面板底部的提示行同一个来源。
-        hotkeysSource = hotkeysMarkdown(options.extensionCommands?.shortcuts() ?? []);
+        hotkeysSource = hotkeysMarkdown(extensionCommands()?.shortcuts() ?? []);
         hotkeysLinesCache = undefined;
         // 插在**当前对话末尾**（= 派生消息数）。之后的对话排在这张表下面，于是它会被
         // 往上顶开 —— 与 pi 把键位表 `addChild` 进对话区同一效果（见 hotkeysAtMessageIndex）。
@@ -2753,8 +2789,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
         return;
       default:
         // 扩展的命令在**最后**试：内置的与 skill 的优先（skill 走上面的分支）。
-        if (options.extensionCommands?.has(name)) {
-          void options.extensionCommands.run(name, arg).catch((error: unknown) => {
+        const commands = extensionCommands();
+        if (commands?.has(name)) {
+          void commands.run(name, arg).catch((error: unknown) => {
             notify(yellow(`/${name} 出错：${error instanceof Error ? error.message : String(error)}`));
           });
           return;
@@ -2865,10 +2902,23 @@ export async function runTui(options: TuiOptions): Promise<number> {
     //
     // 期间用一个门钉住重复发送：原来靠「`dispatch` 同步把 `phase` 变成 thinking」防连按，
     // 现在 `await` 会把这个窗口打开。
+    //
+    // ## 还要等**扩展装载完成**（`deferExtensions`，见 `TuiOptions.ready`）
+    //
+    // 装载完成前 state 里的工具集与 system prompt 还是「没有扩展」的形状，先发出去的
+    // 那条会把一份**缺工具集**的 head 写进会话与轨迹 —— head 是不可改的历史
+    // （见 `prompt-head.ts`），后面补不回来。
+    //
+    // 是「等」而不是「拒」：用户的输入一句都不丢，只是晚一两秒出去（并说一声为什么）。
+    // 这个 await 与那个 `sending` 门是同一件事的两半：门挡住连按，这里挡住「还没装完」。
     if (sending) return;
     sending = true;
+    if (!extensionsReady) {
+      notify(dim('扩展还在后台装载 —— 装载完就把它发出去'));
+    }
     void (async () => {
       try {
+        await ready;
         await beforeAgentStartHook?.(text);
       } finally {
         sending = false;
@@ -3131,32 +3181,46 @@ export async function runTui(options: TuiOptions): Promise<number> {
     ...(options.dialogs !== undefined ? { dialogs: options.dialogs } : {}),
   });
 
-  // 开场报一下装了哪些 skill —— 与 pi 同形（`[Skills]` 一节，逗号分隔的名字）。
-  //
-  // 为什么值得占这几行：skill 的全部意义在于「模型知道自己能做什么」，而清单在
-  // prompt 里是**看不见的**。不报出来，用户既不知道有哪些 skill 可用，也不会想到打
-  // `/skill:<名字>` —— 于是这功能等于没装。
-  //
-  // 形状照 pi：折叠成一逗号分隔的名字（55 个 skill 铺开会把对话区冲走）；Ctrl+O
-  // 已经是「展开工具输出」，这里不复用它 —— 名字一行本来就不长。
-  const startupSkills = stateSkills();
-  const startupDiagnostics = store.getState().prompt.skillDiagnostics ?? [];
-  const extensionEntries = (options.extensions?.entries ?? []).filter((e) => !e.hidden);
-  const extensionErrors = options.extensions?.errors ?? [];
-  // `[Context]` 那一节：进了 prompt 的上下文文件（`SYSTEM.md` / `APPEND_SYSTEM.md` /
-  // `AGENTS.md` …）。清单由 `contextFilePaths()` 给，与 `buildPromptOptions()` **同一个来源** ——
-  // 界面报的和模型收到的必须是同一批文件（理由见 `system-prompt.ts` 那个函数的注释）。
-  const contextFiles = contextFilePaths(cwd);
-  // 护栏要把上下文与扩展也算进去：只装了扩展没装 skill（或反过来）时，这几节**照样**要出。
-  // 早先写成只看 skill，于是「一个 skill 都没装」的用户永远看不到扩展清单 ——
-  // 而那恰好是最需要看到的人（他们不靠 skill，只靠扩展）。
-  if (
-    contextFiles.length > 0 ||
-    startupSkills.length > 0 ||
-    startupDiagnostics.length > 0 ||
-    extensionEntries.length > 0 ||
-    extensionErrors.length > 0
-  ) {
+  /**
+   * 开场横幅 —— **写成函数是因为它要报两次**。
+   *
+   * `deferExtensions`（交互式启动，见 `kernel.ts`）下扩展是后台装的，而这几节的内容
+   * （skill 清单、扩展清单与装载诊断）恰恰就是装载那一刻才有的：首帧那次只能报到
+   * 「正在装载」，装载完成后再报一次才是**真的**。写成一次性的话，症状是
+   * 「装了扩展，但开场横幅上永远看不到它」—— 而那条横幅的全部意义就是让人看见。
+   */
+  const buildStartupBanner = (): void => {
+    const startupSkills = stateSkills();
+    const startupDiagnostics = store.getState().prompt.skillDiagnostics ?? [];
+    // **每次现取**：装载完成后 `entries` / `errors` 才有内容（见 `TuiOptions.extensions`）。
+    const extensionInfo = options.extensions?.();
+    const extensionEntries = (extensionInfo?.entries ?? []).filter((e) => !e.hidden);
+    const extensionErrors = extensionInfo?.errors ?? [];
+    // 扩展还在后台装：横幅里说清这件事 —— 那几秒里发消息会被按住（见 `send()`），
+    // 而「按了回车没反应」必须有解释。
+    const loadingExtensions = options.ready !== undefined && !extensionsReady;
+    // `[Context]` 那一节：进了 prompt 的上下文文件（`SYSTEM.md` / `APPEND_SYSTEM.md` /
+    // `AGENTS.md` …）。清单由 `contextFilePaths()` 给，与 `buildPromptOptions()` **同一个来源** ——
+    // 界面报的和模型收到的必须是同一批文件（理由见 `system-prompt.ts` 那个函数的注释）。
+    const contextFiles = contextFilePaths(cwd);
+    // 护栏要把上下文与扩展也算进去：只装了扩展没装 skill（或反过来）时，这几节**照样**要出。
+    // 早先写成只看 skill，于是「一个 skill 都没装」的用户永远看不到扩展清单 ——
+    // 而那恰好是最需要看到的人（他们不靠 skill，只靠扩展）。装载中那一行同一个道理：
+    // 一节点东西都还没有的时候，正是最需要说明「为什么现在什么都没有」的时候。
+    if (
+      contextFiles.length === 0 &&
+      startupSkills.length === 0 &&
+      startupDiagnostics.length === 0 &&
+      extensionEntries.length === 0 &&
+      extensionErrors.length === 0 &&
+      !loadingExtensions
+    ) {
+      // 一段可报的都没有（`ready` 之后再报一次时可能变成这样）：清空 ——
+      // 不清的话「正在装载…」那一行会永远赖在横幅上。
+      banner.text = '';
+      refresh();
+      return;
+    }
     const lines: string[] = [];
     // 与 pi 同形：家目录缩 `~`，在 cwd 下的保持相对。
     if (contextFiles.length > 0) {
@@ -3193,14 +3257,34 @@ export async function runTui(options: TuiOptions): Promise<number> {
         `${yellow('[Extension issues]')}\n` + extensionErrors.map((e) => yellow(`  ${e}`)).join('\n'),
       );
     }
+    // 装载中：说清「为什么现在一节点东西都没有」，以及为什么按回车没反应（见 `send()`）。
+    // 这一行在 `ready` 那次重报里自然消失（那时报的是真的清单）。
+    if (loadingExtensions) {
+      lines.push(
+        `${yellow('[Extensions]')}\n${dim('正在后台装载（`settings.json` 的 packages）—— 装载完成前发不出消息')}`,
+      );
+    }
     banner.text = lines.join('\n\n');
     refresh();
+  };
+  buildStartupBanner();
+  if (options.ready !== undefined) {
+    // 装载完成：`extensionsReady` 翻真（之后 `send()` 不再等），并把横幅**重报一次** ——
+    // skill 清单、扩展清单、装载诊断都是这一刻才有的。
+    void options.ready.then(() => {
+      extensionsReady = true;
+      buildStartupBanner();
+    });
   }
   if (prompt !== undefined) {
     // 一次性模式：TUI 的差分渲染在非交互终端里只会留下一堆转义序列，
     // 所以不走界面 —— 直接跑环，然后把**纯文本**的对话与轨迹树打到 stdout。
     // 轨迹树照样有（这才是重点），只是不经过 pi-tui 的画布。
     tui.stop();
+    // 万一装载是推后的（`main.ts` 那边正常不会给这种组合，但门是免费的）：
+    // 一次性模式没有「等一下」的余地 —— 等够再发，否则这一条会把一份缺工具集的 head
+    // 写进会话与轨迹（见 `TuiOptions.ready`）。
+    await ready;
     store.dispatch({ type: 'user.message', text: prompt });
     await waitForIdleOrExit(store);
     // 一次性模式没有终端尺寸（不走 TUI），给 0 = 不折行、不截断（truncateToWidth 的约定）。

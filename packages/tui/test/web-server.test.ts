@@ -130,7 +130,7 @@ async function start(bridgeOptions: {
     setModel: () => true,
     autoCompactEnabled: () => true,
     setAutoCompactEnabled: () => {},
-    commands: [
+    commands: () => [
       { name: 'model', description: '换模型', web: true },
       { name: 'sessions', description: '恢复历史会话' },
       { name: 'ext-thing', description: '扩展命令', source: 'extension' },
@@ -411,7 +411,7 @@ test('web api：空目录给空列表；空作用域归一成 null（= 全开）
     setModel: () => true,
     autoCompactEnabled: () => null,
     setAutoCompactEnabled: () => {},
-    commands: [],
+    commands: () => [],
     runExtensionCommand: async () => {},
   });
   const info = api.models();
@@ -988,6 +988,65 @@ test('bridge：流式期整份状态不逐 token 发，但增量一条不漏', (
     if (last?.type !== 'state') throw new Error('unreachable');
     assert.equal(last.state.isStreaming, false);
     assert.ok(last.state.messages.some((message) => (message as { role?: string }).role === 'assistant'));
+  } finally {
+    bridge.dispose();
+  }
+});
+
+/**
+ * 扩展还在后台装载时，浏览器发来的那条**不能现在就发**。
+ *
+ * 内核 `deferExtensions`（交互式启动，见 `kernel.ts`）把扩展装载推到后台，于是
+ * 「`ready` 之前」是一个真实存在的时间窗：那一刻 state 里的工具集与 system prompt
+ * 还是「没有扩展」的形状，先发出去的那条会定下一份**缺工具集**的 head ——
+ * 而 head 是不可改的历史（见 `prompt-head.ts`），后面补不回来。
+ *
+ * 终端那边靠 `app.ts` 的 `send()` 等这道门，浏览器这边靠桥的同一个 `ready`
+ * （见 `WebBridgeOptions.ready`）。这条测试钉住：等，而且**不丢**用户的输入。
+ */
+test('bridge：ready 之前发来的消息要等装载完成（并说一声为什么）', async () => {
+  const faux = createFauxRuntime();
+  faux.setResponses(demoResponses());
+  const store = createAgentStore({
+    runtime: faux.runtime,
+    systemPrompt: 'test',
+    sessionId: 'ready-gate',
+    cwd: '/tmp/ela-web-test',
+  });
+
+  let release: (() => void) | undefined;
+  const ready = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const bridge = new WebBridge({
+    store,
+    setModel: () => true,
+    newSession: () => {},
+    resolveModel: () => null,
+    ready,
+  });
+  try {
+    const replies = bridge.handle({ type: 'prompt', text: '你好' });
+    assert.equal(store.getState().messages.length, 0, '装载完成前不该把消息放进 state');
+    assert.ok(
+      replies.some((message) => message.type === 'notice'),
+      '该回一条「为什么还没发出去」',
+    );
+
+    release?.();
+    // `ready.then` 里那一句 dispatch 在微任务里 —— 等一轮就够（这一轮里环还没跑完，
+    // 所以不数总条数：head 与助手回复都是随后才进的）。
+    await new Promise((resolve) => setImmediate(resolve));
+    const messages = store.getState().messages;
+    assert.ok(
+      messages.some((message) => (message as { role?: string }).role === 'user'),
+      '装载完成后那条消息要**补发**（不能丢）',
+    );
+    assert.equal(
+      messages.filter((message) => (message as { role?: string }).role === 'user').length,
+      1,
+      '一次发送只能补一条（不是两条）',
+    );
   } finally {
     bridge.dispose();
   }

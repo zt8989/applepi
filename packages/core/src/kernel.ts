@@ -132,6 +132,32 @@ export interface KernelOptions {
    * 与界面无关），但真去开对话框时会得到一句说人话的错。
    */
   uiOptions?: (() => HostUiOptions) | undefined;
+  /**
+   * **不等扩展装载**：`createKernel()` 在 store 与 `model.init` 就绪之后就返回，
+   * 扩展装载（jiti，实测 2~3s）与它后面的 prompt 装配在**后台**跑，
+   * `kernel.ready` 表示「装完了」。
+   *
+   * ## 为什么需要它
+   *
+   * 交互式界面的**首帧**要等 `createKernel()` 返回。而那 2~3s 全在扩展装载上 ——
+   * 用户在启动时看到的就是「敲了命令，2~3 秒内什么都没发生」。打开这一档，界面
+   * 立刻画出来（底栏、输入框、开场先报到手的那部分），扩展在后台接着装。
+   *
+   * ## 用它的地方必须做什么
+   *
+   * 1. **`ready` 之前不许发消息**：`state.prompt.tools` 与 system prompt 那一刻还是
+   *    「没有扩展」的形状，先发出去的那条消息会把一份缺工具集的 head 写进会话与轨迹
+   *    （而 head 是不可改的历史，见 `prompt-head.ts`）。界面那边把发送挂在 `ready` 上
+   *    （`tui/app.ts` 的 `send()`），一次性模式**不打开这一档**（没有首帧可提前）。
+   * 2. **读 `kernel.extensions.*` 要能在就绪后才读**：它是活视图（见 `Kernel.extensions`），
+   *    界面不能把「现在读到的内容」当成终局 —— 开场横幅要在 `ready` 之后重报一次。
+   *
+   * ## 失败怎么表现
+   *
+   * 这一档下装载失败**不抛**（界面已经在跑了，抛没人接）：收进 `kernel.extensions.errors`
+   * 由界面报出来。默认（不打开）那条路上失败照旧往外抛 —— 一次性模式该响亮地失败。
+   */
+  deferExtensions?: boolean | undefined;
   /** 跳过扩展装载（测试用；也省掉 jiti 那一跳的开销）。 */
   noExtensions?: boolean | undefined;
 }
@@ -144,6 +170,28 @@ export interface Kernel {
   persistence: TracePersistence | null;
   /** 当前会话记录器（写 `sessions/<cwd>/<时间戳>_<id>.jsonl`，供「恢复历史」用）。 */
   readonly session: SessionRecorder | null;
+  /**
+   * 扩展宿主（`deferExtensions` 时是**活视图**）。
+   *
+   * ## 为什么是「活视图」而不是「那一刻的那个对象」
+   *
+   * `deferExtensions` 下这个字段在 `ready` 之前指向一个**空宿主**（与 `--no-extensions`
+   * 同形），就绪后指向真的那个。而界面在 `createKernel()` 返回时就把里面几个引用
+   * 抓走了（`extensions.commands`、开场横幅那份 `entries`）—— 换对象等于它们永远看到
+   * 空的那份，症状是「扩展的斜杠命令不见了」而没有任何报错。
+   *
+   * 所以这里转发**每次读**：`kernel.extensions.commands.list()` 在就绪后念的是扩展的
+   * 命令。代价是「读到的内容会变」—— 界面据此在 `ready` 之后重新报一次开场（见
+   * `deferExtensions` 的注释）。
+   */
+  readonly extensions: ExtensionHost;
+  /**
+   * 扩展装载完成（`deferExtensions` 时才有意义；否则一开始就是已完成的）。
+   *
+   * **不会 reject**：`deferExtensions` 下装载失败收进 `extensions.errors`，
+   * 这一条照常完成 —— 界面不能卡在「正在装载」上。
+   */
+  readonly ready: Promise<void>;
   /** 开一个新会话：换 id（于是换文件）、清空对话。**不会**把新消息写进旧文件。 */
   newSession(): { id: string };
   /**
@@ -191,13 +239,6 @@ export interface Kernel {
     modelId: string,
     options?: { thinkingLevel?: string | undefined },
   ): boolean;
-  /**
-   * 扩展宿主（`settings.json` 的 `packages` 里装了什么）。
-   *
-   * 界面用它开场报一行「装了哪些扩展」，与 skill 清单同一个口径 —— 扩展也是
-   * 「模型知道自己能做什么」的一部分，而 prompt 里那份用户看不见。
-   */
-  readonly extensions: ExtensionHost;
   dispose(): void;
 }
 
@@ -336,7 +377,50 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     ...(options.onTraceError ? { onTraceError: options.onTraceError } : {}),
   });
 
-  // ── 装载：prompt 与 model 各走一条 action 打进状态树 ──
+  // ── 扩展宿主的**活视图**（`deferExtensions` 用）──
+  //
+  // 见 `Kernel.extensions` 的注释（为什么不能直接换对象）。
+  //
+  // 就绪前指向一个**空宿主**：与 `--no-extensions` 同形（工具表只有官方那几个、
+  // 命令表空、`beforeToolCall` 原样放行），界面在这段时间读到的就是「没有扩展」——
+  // 那是一个**少东西但一致**的状态，而不是 undefined（后者会让界面在 `entries` 上炸）。
+  const placeholderHost = await loadExtensionHost({ store, cwd, disabled: true });
+  const deferredErrors: string[] = [];
+  /** 已经 `dispose()` 了 —— 后台装载完成时不能再往界面上递一个活着的宿主。 */
+  let disposed = false;
+  const currentHost = (): ExtensionHost => extensionHostRef ?? placeholderHost;
+  const extensionView: ExtensionHost = {
+    // 逐条转发**每次读**：就绪后界面早先抓到的那个对象里就是真的那份了。
+    get tools() {
+      return currentHost().tools;
+    },
+    get promptTools() {
+      return currentHost().promptTools;
+    },
+    get commands() {
+      return currentHost().commands;
+    },
+    // 诊断是**两份**：占位那份自己的（没有）+ 后台装载整体失败的那条。
+    get errors() {
+      return [...currentHost().errors, ...deferredErrors];
+    },
+    get entries() {
+      return currentHost().entries;
+    },
+    get loaded() {
+      return currentHost().loaded;
+    },
+    beforeAgentStart: (text?: string) => currentHost().beforeAgentStart(text),
+    startSession: () => currentHost().startSession(),
+    collectPromptSections: () => currentHost().collectPromptSections(),
+    // 参数用 `Parameters<…>` 原样透传（包括第四个 `options`）：这里少转发一个参数
+    // 就是一行静默的降级（权限类扩展会丢掉 signal，而症状离真因很远）。
+    beforeToolCall: (...args: Parameters<ExtensionHost['beforeToolCall']>) =>
+      currentHost().beforeToolCall(...args),
+    dispose: () => currentHost().dispose(),
+  };
+
+  // ── 装载：`model.init` 与 prompt 各走一条 action 打进状态树 ──
   //
   // 为什么走 action 而不是直接写进 createInitialState：
   // 「装载」和「跑一轮对话」是同一类事（都是状态迁移），走 action 才能被落盘、被回放。
@@ -344,102 +428,13 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   //
   // 放在 store 建好之后：它们本身就是 dispatch，得走真实的 store。
   //
-  // **扩展先装、工具清单后取** —— 顺序不能反。`getTools()` 是「官方工具 + 扩展工具」
-  // 的合并结果，而 `prompt.init` 把那份清单装进 state（`effects.ts` 的 `toolSchemas()`
-  // 原样读它发给模型）。先装扩展再取清单，模型才知道它有 `ask_user_question`；
-  // 反过来它就只存在于注册表，症状是「工具调用永远回『未知工具』」，而界面上
-  // 那个工具块连参数都画不出来。
-  const extensionHost = await loadExtensionHost({
-    store,
-    cwd,
-    // 扩展要自己调模型时靠这个拿凭证（`pi-web-access` 的答案/摘要）。主路径下
-    // `runtime.runtime` 就是 pi 的 ModelRuntime（44 个内置 provider + 1500 模型），
-    // extension-models.ts 把它包成扩展认的 ModelRegistry。
-    ...(options.noExtensions ? {} : { runtime }),
-    ...(options.uiOptions ? { uiOptions: options.uiOptions } : {}),
-    ...(options.noExtensions ? { disabled: true } : {}),
-    // 会话：扩展的 `getSessionId()` / `getSessionFile()` / `getBranch()`。传的是
-    // **取值函数**而不是常量 —— `/new` 换会话后 id 与文件都变，而扩展问的时候得报
-    // 新的那个。`recorder` 此刻还是 null（`openRecorder` 在后面），但取值函数读的是
-    // `current`，扩展真问的时候它已经填上了。
-    sessionId: () => current.sessionId,
-    sessionFile: () => current.recorder?.file,
-    // 扩展的 `pi.sendMessage` 落到哪里：一条**用户消息**（于是环会跑起来），
-    // 与界面里敲一句话同一条路。
-    onSendMessage: (text) => {
-      if (text.trim() === '') return;
-      store.dispatch({ type: 'user.message', text } as AgentAction);
-    },
-    canSend: () => store.getState().phase === 'idle',
-  });
-  extensionHostRef = extensionHost;
-  // ── 发 `session_start`：MCP 靠它读 `mcp.json` 并开始连服务器 ──
+  // ## 两块为什么拆开：model 不依赖扩展，prompt 依赖
   //
-  // **必须在算工具表之前**：MCP 会发现「有 codemode 暴露的服务器」并激活 `codemode`
-  // （走 `setActiveTools` → 本项目的 `state.prompt.tools`）；而 `direct` 服务器的工具是
-  // 在连接过程中动态注册的 —— 加载后必须再扫一遍。
-  await extensionHost.startSession();
-  // 收 `before_agent_start` 写的 prompt 段（MCP 的 `mcp_servers`）。
-  // 它里面还会等 `direct` 服务器最多 10 秒（与 pi 一致）—— 等完了，它们的工具才注册完。
-  const sections = await extensionHost.collectPromptSections();
-  // **声明给模型**的工具在这一刻定下：激活集 ∩ 注册表，再跑一遍 `prepareLoadout`
-  // （codemode 靠它把自己的描述换成「现在能调哪些工具」的清单）。
-  const declared = declaredToolset(cwd);
-  const declaredNames = new Set(declared.tools.map((tool) => tool.name));
-  // Skill 清单：官方 `loadSkills()` + `loadSkillsFromDir()` 扫各个目录
-  // （含跳工具约定的 `~/.agents/skills`），再由 reducer 拼进 system prompt
-  // （走 prompt.init，所以会被落盘、被回放）。
-  //
-  // 加载**失败不能拖垮启动**：一个写坏 frontmatter 的 skill 不该让整个界面起不来
-  // （loadSkillRegistry 已经把异常收成 diagnostics 了）。
-  //
-  // 诊断**不打到 stderr**：TUI 模式下 stderr 用户看不见，而「某个 skill 没加载上」
-  // 正是静默退化（模型少了能力，界面与用户都不知道）。它们进 state，由界面开场显示
-  // （与 pi 的 `[Skill conflicts]` 同形）。
-  const skillRegistry = loadSkillRegistry({ cwd, ...(options.skillPaths ? { paths: options.skillPaths } : {}) });
-  // System prompt 由 **pi 的 buildSystemPrompt** 拼（工具规则 / AGENTS.md / cwd / skill）。
-  // 我们只收集输入：工具的 snippet+guideline、AGENTS.md 上下文、skill 清单。
-  //
-  // 为什么在这里（而不是让调用方传一整串进来）：工具清单是内核按 cwd 建的，
-  // AGENTS.md 与 skill 都随 cwd 变 —— 拼 prompt 需要的正是这三样，所以它属于内核这一步。
-  //
-  // **扩展工具与官方工具走同一条路**（同一个 `PromptToolLike` 形状、同一套筛选规则），
-  // 所以在 prompt 里它们没有区别 —— 「没有 promptSnippet 就不列」那条官方语义也照样
-  // 适用（那种工具模型看不到，而那是有意的：见 extension-host.ts 里的诊断）。
-  const promptTools: PromptToolLike[] = [
-    ...promptToolsFrom(cwd),
-    ...extensionHost.promptTools,
-    // 只列**这一轮真的声明给模型**的（没声明的与隐藏的都不算）：
-    // MCP 的 codemode 工具没激活时不进工具表，而 codemode 的 `mode: "only"`
-    // 会把直调工具从声明里藏掉（它们仍可被脚本调）。
-  ].filter((tool) => declaredNames.has(tool.name) && !declared.hidden.has(tool.name));
-  const { text: systemPrompt, sections: promptSections } = buildPromptParts({
-    cwd,
-    tools: promptTools,
-    skills: skillRegistry.skills,
-    ...(Object.keys(sections).length > 0 ? { sections } : {}),
-    ...(options.systemPrompt !== undefined ? { customPrompt: options.systemPrompt } : {}),
-    ...(options.appendSystemPrompt !== undefined
-      ? { appendPrompt: options.appendSystemPrompt }
-      : {}),
-  });
-  store.dispatch({
-    type: 'prompt.init',
-    systemPrompt,
-    // 分段与整段一起装：整段是发给模型的那份，分段是「以后按段 patch」的原料
-    // （见 `prompt-head.ts` 与 `system-prompt.ts` 的 `buildPromptParts`）。
-    sections: promptSections,
-    tools: declared.tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-    })),
-    skills: skillRegistry.skills,
-    skillDiagnostics: skillRegistry.diagnostics,
-  });
-  // 工具集**不是**定死的：之后 `setActiveTools`（`web_enable` / `subagents_enable`
-  // 那些 loader 工具）真的会改声明，而变更由 `agent.run` 在请求前 diff 成一条
-  // `toolsAdded` / `toolsRemoved` 消息声明出去（见 `prompt-head.ts`）。
+  // `deferExtensions`（交互式界面靠它把首帧提前 2~3 秒，见 `KernelOptions`）只把
+  // **prompt 那一块**推到后台：底栏在首帧就要显示 `(provider) model`，而那份数据只
+  // 来自 runtime 与启动解析出来的档位。把它留在后面的话，扩展装载的那几秒里底栏是
+  // `() `（看着像坏了）。轨迹不受这个顺序影响：`beginTrace()` 只认
+  // `state.prompt.seeded` / `state.model.seeded`，而它要等用户发出第一句话才跑。
   store.dispatch({
     type: 'model.init',
     provider: runtime.spec.provider,
@@ -451,6 +446,130 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     // 底箱的「已用 / 1.0M」要用。取不到就 0，底箱会不画那个百分比。
     contextWindow: runtime.model.contextWindow ?? 0,
   });
+
+  // ── 扩展 + prompt：启动路径上最重的一块（jiti 装扩展，实测 2~3s）──
+  //
+  // **扩展先装、工具清单后取** —— 顺序不能反。`getTools()` 是「官方工具 + 扩展工具」
+  // 的合并结果，而 `prompt.init` 把那份清单装进 state（`effects.ts` 的 `toolSchemas()`
+  // 原样读它发给模型）。先装扩展再取清单，模型才知道它有 `ask_user_question`；
+  // 反过来它就只存在于注册表，症状是「工具调用永远回『未知工具』」，而界面上
+  // 那个工具块连参数都画不出来。
+  //
+  // 包成一个函数而不是就地 await：`deferExtensions` 时它要在后台跑（见下面那个分岔）。
+  const assembleExtensions = async (): Promise<void> => {
+    const extensionHost = await loadExtensionHost({
+      store,
+      cwd,
+      // 扩展要自己调模型时靠这个拿凭证（`pi-web-access` 的答案/摘要）。主路径下
+      // `runtime.runtime` 就是 pi 的 ModelRuntime（44 个内置 provider + 1500 模型），
+      // extension-models.ts 把它包成扩展认的 ModelRegistry。
+      ...(options.noExtensions ? {} : { runtime }),
+      ...(options.uiOptions ? { uiOptions: options.uiOptions } : {}),
+      ...(options.noExtensions ? { disabled: true } : {}),
+      // 会话：扩展的 `getSessionId()` / `getSessionFile()` / `getBranch()`。传的是
+      // **取值函数**而不是常量 —— `/new` 换会话后 id 与文件都变，而扩展问的时候得报
+      // 新的那个。`recorder` 此刻还是 null（`openRecorder` 在后面），但取值函数读的是
+      // `current`，扩展真问的时候它已经填上了。
+      sessionId: () => current.sessionId,
+      sessionFile: () => current.recorder?.file,
+      // 扩展的 `pi.sendMessage` 落到哪里：一条**用户消息**（于是环会跑起来），
+      // 与界面里敲一句话同一条路。
+      onSendMessage: (text) => {
+        if (text.trim() === '') return;
+        store.dispatch({ type: 'user.message', text } as AgentAction);
+      },
+      canSend: () => store.getState().phase === 'idle',
+    });
+    extensionHostRef = extensionHost;
+    // 已经退出过了（`dispose()` 早于装载完成）：这个宿主没人管了，就地收掉 ——
+    // 否则 MCP 的子进程会挂在事件循环上（症状是「Ctrl+C 之后进程不退」）。
+    if (disposed) {
+      extensionHost.dispose();
+      return;
+    }
+    // ── 发 `session_start`：MCP 靠它读 `mcp.json` 并开始连服务器 ──
+    //
+    // **必须在算工具表之前**：MCP 会发现「有 codemode 暴露的服务器」并激活 `codemode`
+    // （走 `setActiveTools` → 本项目的 `state.prompt.tools`）；而 `direct` 服务器的工具是
+    // 在连接过程中动态注册的 —— 加载后必须再扫一遍。
+    await extensionHost.startSession();
+    // 收 `before_agent_start` 写的 prompt 段（MCP 的 `mcp_servers`）。
+    // 它里面还会等 `direct` 服务器最多 10 秒（与 pi 一致）—— 等完了，它们的工具才注册完。
+    const sections = await extensionHost.collectPromptSections();
+    // **声明给模型**的工具在这一刻定下：激活集 ∩ 注册表，再跑一遍 `prepareLoadout`
+    // （codemode 靠它把自己的描述换成「现在能调哪些工具」的清单）。
+    const declared = declaredToolset(cwd);
+    const declaredNames = new Set(declared.tools.map((tool) => tool.name));
+    // Skill 清单：官方 `loadSkills()` + `loadSkillsFromDir()` 扫各个目录
+    // （含跳工具约定的 `~/.agents/skills`），再由 reducer 拼进 system prompt
+    // （走 prompt.init，所以会被落盘、被回放）。
+    //
+    // 加载**失败不能拖垮启动**：一个写坏 frontmatter 的 skill 不该让整个界面起不来
+    // （loadSkillRegistry 已经把异常收成 diagnostics 了）。
+    //
+    // 诊断**不打到 stderr**：TUI 模式下 stderr 用户看不见，而「某个 skill 没加载上」
+    // 正是静默退化（模型少了能力，界面与用户都不知道）。它们进 state，由界面开场显示
+    // （与 pi 的 `[Skill conflicts]` 同形）。
+    const skillRegistry = loadSkillRegistry({ cwd, ...(options.skillPaths ? { paths: options.skillPaths } : {}) });
+    // System prompt 由 **pi 的 buildSystemPrompt** 拼（工具规则 / AGENTS.md / cwd / skill）。
+    // 我们只收集输入：工具的 snippet+guideline、AGENTS.md 上下文、skill 清单。
+    //
+    // 为什么在这里（而不是让调用方传一整串进来）：工具清单是内核按 cwd 建的，
+    // AGENTS.md 与 skill 都随 cwd 变 —— 拼 prompt 需要的正是这三样，所以它属于内核这一步。
+    //
+    // **扩展工具与官方工具走同一条路**（同一个 `PromptToolLike` 形状、同一套筛选规则），
+    // 所以在 prompt 里它们没有区别 —— 「没有 promptSnippet 就不列」那条官方语义也照样
+    // 适用（那种工具模型看不到，而那是有意的：见 extension-host.ts 里的诊断）。
+    const promptTools: PromptToolLike[] = [
+      ...promptToolsFrom(cwd),
+      ...extensionHost.promptTools,
+      // 只列**这一轮真的声明给模型**的（没声明的与隐藏的都不算）：
+      // MCP 的 codemode 工具没激活时不进工具表，而 codemode 的 `mode: "only"`
+      // 会把直调工具从声明里藏掉（它们仍可被脚本调）。
+    ].filter((tool) => declaredNames.has(tool.name) && !declared.hidden.has(tool.name));
+    const { text: systemPrompt, sections: promptSections } = buildPromptParts({
+      cwd,
+      tools: promptTools,
+      skills: skillRegistry.skills,
+      ...(Object.keys(sections).length > 0 ? { sections } : {}),
+      ...(options.systemPrompt !== undefined ? { customPrompt: options.systemPrompt } : {}),
+      ...(options.appendSystemPrompt !== undefined
+        ? { appendPrompt: options.appendSystemPrompt }
+        : {}),
+    });
+    store.dispatch({
+      type: 'prompt.init',
+      systemPrompt,
+      // 分段与整段一起装：整段是发给模型的那份，分段是「以后按段 patch」的原料
+      // （见 `prompt-head.ts` 与 `system-prompt.ts` 的 `buildPromptParts`）。
+      sections: promptSections,
+      tools: declared.tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      })),
+      skills: skillRegistry.skills,
+      skillDiagnostics: skillRegistry.diagnostics,
+    });
+    // 工具集**不是**定死的：之后 `setActiveTools`（`web_enable` / `subagents_enable`
+    // 那些 loader 工具）真的会改声明，而变更由 `agent.run` 在请求前 diff 成一条
+    // `toolsAdded` / `toolsRemoved` 消息声明出去（见 `prompt-head.ts`）。
+  };
+
+  // 现场装满还是推到后台：见 `KernelOptions.deferExtensions` 与 `Kernel.ready`。
+  let ready: Promise<void>;
+  if (options.deferExtensions === true) {
+    ready = assembleExtensions().catch((error) => {
+      // 这一档下**不抛**：界面已经在跑了（首帧画完了），抛出去没人接 —— 收成诊断，
+      // 界面读 `extensions.errors` 时会看到（与「一个扩展装不上」同一个口径）。
+      deferredErrors.push(
+        `扩展装载失败（界面不带扩展继续）：${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+  } else {
+    await assembleExtensions();
+    ready = Promise.resolve();
+  }
 
   // 装载段落盘：**写进同一个轨迹文件的前两行**（不再单独一个 `<id>.init.jsonl`）。
   // 有了它，回放时不必重装配工具、不必再问 provider「这个模型支持中途插 system 吗」。
@@ -468,18 +587,23 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
 
   const writeInit = (): void => {
     const capabilities = readCapabilities(runtime.model);
+    // **从 state 读**而不是从装配那一层的闭包读：`deferExtensions` 下 prompt 是后装的
+    // （而这段又恰好在「用户发出第一句话」那一刻才跑），读 state 就是「当时生效的那份」
+    // 这个定义本身 —— 两份闭包常量反而会多出一个「谁更真」的问题。
+    const promptState = store.getState().prompt;
+    const promptSkills = promptState.skills ?? [];
     const records: InitRecord[] = [
       {
         op: 'prompt.init',
         // 落**拼好的那一整段**（不是 customPrompt 的原文）：回放时要能重建
         // 「当时发给模型的到底是什么」，而 AGENTS.md 与 skill 清单都可能已经变了。
-        systemPrompt,
+        systemPrompt: promptState.systemPrompt,
         // 分段一并落：中途的 prompt 变更只 patch 变了的段，回放时靠它还原
         // 「当时有哪几段」（没有它就只能整段替换，见 `prompt-head.ts`）。
-        sections: promptSections,
-        tools: store.getState().prompt.tools,
+        sections: promptState.sections ?? {},
+        tools: promptState.tools,
         // skills 一并落：回放时要知道当时有哪些 skill（它们拼进了 prompt）。
-        ...(skillRegistry.skills.length > 0 ? { skills: skillRegistry.skills } : {}),
+        ...(promptSkills.length > 0 ? { skills: promptSkills } : {}),
       },
       {
         op: 'model.init',
@@ -739,14 +863,18 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         store.dispatch({ type: 'session.restored', message } as AgentAction);
       }
     },
-    extensions: extensionHost,
+    extensions: extensionView,
+    ready,
     dispose(): void {
+      disposed = true;
       unsubscribeStart();
       autoCompact?.dispose();
       current.recorder?.dispose();
       persistence?.dispose();
       if (current.sink?.close) void current.sink.close();
-      extensionHost.dispose();
+      // **活视图**的那个：`deferExtensions` 下界面上跑着的就是它（后台装载可能还在跑，
+      // 那一路在 `assembleExtensions` 里自己看 `disposed` 收尾）。
+      extensionView.dispose();
     },
   };
 }

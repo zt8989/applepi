@@ -84,7 +84,7 @@ export interface WebBridgeOptions {
    *
    * 走回调而不是在桥里 import `app.ts` 的 `statsLine`：桥是「内核状态 → 线协议」那一
    * 层，不该知道 TUI 的组件模块 —— 那个模块会拉进一整棵 pi-tui 的渲染图，而桥在
-   * `--no-web` 之外的所有情形（含测试探针）都会被构造。
+   * 只要起了 web server（`--web`）就会被构造 —— 测试探针也一样。
    */
   stats?: ((state: AgentState) => { text: string; level: 'none' | 'warn' | 'error' }) | undefined;
   /**
@@ -95,6 +95,14 @@ export interface WebBridgeOptions {
    * 不给就退回裸 cwd。
    */
   cwdLabel?: ((state: AgentState) => string) | undefined;
+  /**
+   * 扩展装载完成的门（内核 `deferExtensions` 时才有，见 `kernel.ts` 的 `ready`）。
+   *
+   * 浏览器那侧发消息也要等它：装载前 state 里的工具集与 system prompt 还是
+   * 「没有扩展」的形状，先发出去的那条会定下一份缺工具集的 head（不可改的历史，
+   * 见 `prompt-head.ts`）。与终端那边 `send()` 是同一道门。
+   */
+  ready?: Promise<void> | undefined;
 }
 
 /** 零用量：流式中的部分消息还没账可算。 */
@@ -257,7 +265,15 @@ export class WebBridge {
   private readonly listeners = new Set<(message: WebServerMessage) => void>();
   private readonly unsubscribe: () => void;
   private previous: WebAgentState;
-  private readonly notices: string[];
+  /**
+   * 开场诊断（给新连上来的浏览器）。
+   *
+   * **取值而不是快照**：内核 `deferExtensions` 时装载诊断是后台装载完才有的
+   * （见 `WebBridgeOptions.ready`）——快照一次就等于永远报不出它们。
+   */
+  private readonly noticesSource: () => readonly string[];
+  /** 扩展装载完成了吗（同步的一面，见 `WebBridgeOptions.ready`）。 */
+  private extensionsReady: boolean;
   /** 上一次发出去的流式文本 —— 只在真的变了才发 `message_update`（否则每个 store 变化都刷屏）。 */
   private lastStreamingKey = '';
   /**
@@ -364,9 +380,18 @@ export class WebBridge {
     });
   }
 
-  constructor(options: WebBridgeOptions, notices: readonly string[] = []) {
+  constructor(
+    options: WebBridgeOptions,
+    notices: readonly string[] | (() => readonly string[]) = [],
+  ) {
     this.options = options;
-    this.notices = [...notices];
+    this.noticesSource = typeof notices === 'function' ? notices : () => notices;
+    this.extensionsReady = options.ready === undefined;
+    if (options.ready !== undefined) {
+      void options.ready.then(() => {
+        this.extensionsReady = true;
+      });
+    }
     this.previous = this.snapshot();
     this.unsubscribe = options.store.subscribe(() => this.onStoreChange());
   }
@@ -377,7 +402,7 @@ export class WebBridge {
       type: 'hello',
       version: this.version,
       state: this.snapshot(),
-      notices: this.notices,
+      notices: [...this.noticesSource()],
     };
   }
 
@@ -447,6 +472,18 @@ export class WebBridge {
           // 跑着的时候再发就排队（与 TUI 的 steer 同一个口径），不打断当前回合。
           this.options.store.dispatch({ type: 'queue.input', text, as: 'steer' });
           return [{ type: 'notice', level: 'info', text: '环在跑，这条已排队（工具跑完后投递）' }];
+        }
+        // 扩展还在后台装（内核 `deferExtensions`）：等它装完再发 —— 见
+        // `WebBridgeOptions.ready` 的注释（为什么要等）。**不丢用户的输入**：
+        // 这里只是把同一条消息推后发，并说一声为什么。
+        if (this.options.ready !== undefined && !this.extensionsReady) {
+          const ready = this.options.ready;
+          void ready.then(() => {
+            this.options.store.dispatch({ type: 'user.message', text });
+          });
+          return [
+            { type: 'notice', level: 'info', text: '扩展还在装载（终端那边同样），装载完就发出去' },
+          ];
         }
         this.options.store.dispatch({ type: 'user.message', text });
         return [];

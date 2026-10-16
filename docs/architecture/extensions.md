@@ -54,6 +54,33 @@ typebox                     => NOT RESOLVABLE
 与 `isViewportTUI` 都成立。这一点验过，因为如果两边是两份，`showOverlay` 挂上去的
 浮层不会被我们的渲染循环认出来，而症状是「对话框显示了但不动」。
 
+### 多个扩展**并行**装载（顺序仍然是声明顺序）
+
+官方 `loadExtensions(paths, …)` 内部是**串行**的：一个扩展 import 完再下一个。而每个扩展
+的装载是各自独立的重活（jiti 转译 + 它自己的模块图），互相不等 —— 三个 npm 扩展实测
+**串行 2.7s / 并行 1.4s**，而这段时间整个在「界面画出来」之前（见 `init.md` 的启动时间线）。
+
+所以 `loadExtensionHost` 是**每个扩展单独调一次 `loadExtensions()`**，再 `Promise.all`：
+
+```ts
+const results = await Promise.all(
+  resolvedEntries.map((entry) => loadExtensions([entry.path], cwd, eventBus, runtimeHandle)),
+);
+const loaded = { extensions: results.flatMap((r) => r.extensions), … };
+```
+
+三件事让它与串行等价：
+
+| | 为什么 |
+| --- | --- |
+| `eventBus` / `runtimeHandle` **共用同一个** | 扩展之间靠它们互相看见；事件是 `session_start()` 那一刻统一发的，与「谁先 import 完」无关 |
+| 结果**按原顺序**拼回去 | 工具表是「同名先注册者优先」（`runner.getAllRegisteredTools()` 按 extensions 顺序走），顺序一漂，重名工具归谁就变成随机的 |
+| 每个扩展的失败仍收成一条诊断 | 官方包在自己的 try/catch 里（不抛），拼起来与串行时一样 |
+
+顺序这一条有测试钉住（`test/extension-host.test.ts` 的「并行装载，顺序仍是 settings.json 的顺序」）：
+那个测试故意让**声明在前**的扩展最慢（工厂里 `await` 一下，官方对工厂是 await 的），
+完成顺序因此正好与声明顺序相反 —— 一旦按完成顺序拼，`entries` 与重名工具的归属立刻会错。
+
 ### 为什么用 `DefaultPackageManager` 而不是自己读 `settings.json`
 
 它做的事多得多且都是必须的：用户级与项目级两份 settings 合并、同一个包两处出现时

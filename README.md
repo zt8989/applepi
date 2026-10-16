@@ -25,7 +25,7 @@ agent** —— 循环不是写出来的，是 reducer 与副作用互相 dispatc
   `edit` 的那些坑、`AGENTS.md` 项目上下文、cwd、skill 清单。自己**一个字都不写** ——
   项目自己的规则写在 `.pi/APPEND_SYSTEM.md`（或家目录那份）里，与 pi 同路径、同优先级。
   手写提示词会把那些踩坑换来的经验全扔掉。
-- **也能在浏览器里用。** 默认随终端起一个 web server（`http://127.0.0.1:30141/`），
+- **也能在浏览器里用。** `ela --web` 会额外起一个 web server（`http://127.0.0.1:30141/`，
   界面是 `@earendil-works/pi-web-ui` 的聊天界面 —— 但**环还是终端进程里那一个**，
   浏览器只是渲染层（模型密钥与工具都在服务端）。见
   [`docs/architecture/webui.md`](docs/architecture/webui.md)。
@@ -59,15 +59,14 @@ npm 只拷 `bin/`（`files` 之外的仓库文件不会跟着走），入口全�
 推 **tui 包根** —— 与调用时的 cwd 无关，因此**任何目录里都能跑**：
 
 ```bash
-ela                              # 交互式（同时起浏览器界面）
+ela                              # 交互式（只开终端界面）
 ela -p "今天几号？"              # 跑一条就退出
-ela --demo                       # 不打网络
 ela --cwd ~/some/project         # 工具的文件边界换到别处
-ela --no-web                     # 不要浏览器界面
-ela --web-port 8080              # 换浏览器界面的端口（默认 30141）
+ela --web                        # 额外起浏览器界面（默认不起）
+ela --web-port 8080              # 换浏览器界面的端口（给了它就隐含 --web）
 ```
 
-浏览器界面（`http://127.0.0.1:30141/`，默认开启）需要**先构建一次前端**：
+浏览器界面（`http://127.0.0.1:30141/`）需要**先构建一次前端**：
 
 ```bash
 pnpm build                       # = pnpm --filter @ela/webui build
@@ -112,6 +111,10 @@ install 然后失败**。
 **发过第一句话才算一段会话**：启动时 prompt / model 已经装进内存（开场就能报 skill 清单），
 但轨迹节点与这两个文件都**推迟到用户发出第一句话**才建 —— 「进来看一眼就退出」不该在盘上
 留一个只有装载段的空壳。与 pi 的 `SessionWriter` 同一个口径。
+
+**首帧不等扩展**：三个 npm 扩展装载加上 MCP 连服务器实测 2~3 秒，而它过去整个在首帧之前。
+现在交互式启动把这一块推到后台（`deferExtensions`）：界面 ~1.1s 就出来，扩展装完再报一次开场、
+在那之前发的消息会排队等装载完成（不丢，见 [init.md](docs/architecture/init.md) 的启动时间线）。
 
 **为什么与 pi 同址**：provider 目录改一次两边都得知道，key 改一次两边都得用。分两个目录的
 代价是每次改配置要同步两次，收益仅仅是一个命名上的所有权标记。会话目录名（`--<cwd>--` 编码）
@@ -232,20 +235,22 @@ pnpm install
 pnpm start                                  # 交互式（开发用）
 ela                                        # 交互式（全局命令，任何目录；与上面等价）
 pnpm start -p "今天几号？"                  # 跑一条就退出，顺带打印轨迹树
-pnpm start --demo                          # 不打网络：pi-ai 自带的 faux provider
 pnpm start --llm-timeout 30000 --attempts 3   # 短超时 + 三次尝试，好看到重试分叉
 pnpm start --cwd ../other                  # 工具的文件操作边界换到别的目录
 pnpm start --thinking high "帮我看看这个并发问题"   # 一次性的思考级别（按模型能力 clamp）
 pnpm start -m cn:deepseek-v4.1-flash:high   # 同一个意思：模型 pattern 的 :<级别> 后缀
 ```
 
-**浏览器界面**（pi-web-ui，默认随终端一起起）：
+要**不打网络**跑一遍完整环（pi-ai 自带的 faux provider、工具真执行、轨迹真落盘）走测试：
+`pnpm --filter @ela/core test`（内核的 `createKernel({ demo: true })` 就是那一条，
+CLI 上不再有这个开关 —— 它只在测试里用）。
+
+**浏览器界面**（pi-web-ui，**默认不起**，`--web` 打开）：
 
 ```bash
 pnpm build                       # 先构建一次前端（dist/ 不在版本库里）
-pnpm start                       # 然后开浏览器：http://127.0.0.1:30141/
-pnpm start --no-web              # 只要终端
-pnpm start --web-port 8080       # 换端口（被占就往后试，真地址会报出来）
+pnpm start --web                 # 然后开浏览器：http://127.0.0.1:30141/
+pnpm start --web-port 8080       # 换端口（被占就往后试，真地址会报出来；隐含 --web）
 ```
 
 两边是**同一个环**：在浏览器里发的话，终端那边也会看到（反之亦然）。模型列表与 TUI 的
@@ -391,8 +396,8 @@ pnpm start --skill ./docs/my-skill.md    # 额外指定，可重复
 > 清单是会话**装载时**定下的。事后新增 skill 要 `/new` 换个会话才生效。
 
 选项：`-p/--print`、`-P/--provider`、`-m/--model`、`-s/--system`、`--max-turns`、
-`--llm-timeout`、`--attempts`、`--api-key`、`--demo`、`--no-trace`、`--session`、
-`--skill`、`--cwd`、`--trace-dir`、`--no-extensions`、`-h/--help`。
+`--llm-timeout`、`--attempts`、`--api-key`、`--no-trace`、`--session`、
+`--skill`、`--cwd`、`--trace-dir`、`--no-extensions`、`--web`、`--web-port`、`-h/--help`。
 
 配置/provider 这一层**直接用 pi-coding-agent 的 `ModelRuntime`**（它自己读 models.json /
 auth.json、做 schema 校验、拼凭证优先级，并自带 44 个内置 provider、1500+ 模型目录）。

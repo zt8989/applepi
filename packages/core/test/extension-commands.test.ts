@@ -288,7 +288,11 @@ test('界面：扩展的 widget 槽在底部布局里（applyLayout 读它）', 
   // **假结论**，而测试照样绿 —— 那是最坏的失败方式。
   const onInput = src.slice(src.indexOf('const onInput: TuiInputListener'), src.indexOf('tui.addInputListener(onInput)'));
   const builtinAt = onInput.indexOf('if (builtins()) return { consume: true };');
-  const extAt = onInput.indexOf('options.extensionCommands');
+  // `extensionCommands()`（**取值**）而不是早先的 `options.extensionCommands` ——
+  // 扩展现在是后台装的，界面存那个对象就等于把装载前那个空命令表钉死
+  // （见 `TuiOptions.extensionCommands` 的注释）。要看的是「这里问了扩展没有」，
+  // 而不是它怎么问的。
+  const extAt = onInput.indexOf('extensionCommands()');
   assert.ok(builtinAt > 0, 'onInput 里该有「内置键先跑」那句');
   assert.ok(extAt > 0, 'onInput 里该问扩展的快捷键');
   assert.ok(
@@ -309,7 +313,7 @@ test('界面：扩展命令不并进 SLASH_COMMANDS 那份常量（唯一真相�
     );
   }
   assert.ok(
-    src.includes('extensionCommands?.list()'),
+    src.includes('extensionCommands()?.list()'),
     'commandTable() 该把扩展的命令接在后面（与 skill 同一种情况：现取）',
   );
 });

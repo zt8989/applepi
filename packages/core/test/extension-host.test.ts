@@ -168,6 +168,66 @@ test('扩展：没装任何包时是空宿主（不是崩）', async () => {
   }
 });
 
+/**
+ * 并行装载**不许改变声明顺序**。
+ *
+ * `loadExtensionHost` 把多个扩展用 `Promise.all` 一起装（串行 2.7s → 并行 1.4s，见那里的
+ * 注释）——于是**完成顺序与声明顺序不同**。而顺序是有语义的：工具表是「同名先注册者
+ * 优先」，谁生效只能由 `settings.json` 里的顺序决定。按完成顺序拼结果的话，重名工具
+ * 归谁就变成随机的（每次启动还可能不一样，而症状只是「那个工具偶尔行为不对」）。
+ *
+ * 这个测试故意让**声明在前**的那个最慢（工厂里 await 一下：官方对工厂是 `await` 的），
+ * 于是完成顺序正好与声明顺序相反 —— 结果一旦按完成顺序拼，`entries` 与重名工具的归属
+ * 立刻会错。
+ */
+test('扩展：并行装载，顺序仍是 settings.json 的顺序（重名工具先声明者优先）', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'ext-parallel-'));
+  const saved = process.env['PI_CODING_AGENT_DIR'];
+  process.env['PI_CODING_AGENT_DIR'] = dir;
+  // 三个**本地**扩展文件：`packages` 里写文件路径 = 一个文件一个扩展
+  // （pi 的 packages.md：「A file path loads one extension」）。
+  const extension = (name: string, delayMs: number): string => `
+export default async function (pi) {
+  await new Promise((resolve) => setTimeout(resolve, ${delayMs}));
+  pi.registerTool({
+    name: 'dup',
+    description: 'from ${name}',
+    parameters: { type: 'object', properties: {} },
+    execute: async () => ({ content: [], details: null }),
+  });
+}
+`;
+  writeFileSync(path.join(dir, 'a.ts'), extension('a', 150));
+  writeFileSync(path.join(dir, 'b.ts'), extension('b', 0));
+  writeFileSync(path.join(dir, 'c.ts'), extension('c', 0));
+  writeFileSync(
+    path.join(dir, 'settings.json'),
+    JSON.stringify({ packages: ['./a.ts', './b.ts', './c.ts'] }),
+  );
+  try {
+    const { store } = freshStore();
+    const host = await loadExtensionHost({ builtins: false, store, cwd: dir });
+    assert.equal(host.loaded, 3);
+    assert.deepEqual([...host.errors], [], '三个都该装成功');
+    assert.deepEqual(
+      host.entries.map((entry) => path.basename(entry.path)),
+      ['a.ts', 'b.ts', 'c.ts'],
+      'entries 要按 settings.json 的顺序（不是装载完成的顺序）',
+    );
+    const dups = host.tools.filter((tool) => tool.name === 'dup');
+    assert.equal(dups.length, 1, '重名工具在表里只能有一份');
+    assert.equal(
+      (dups[0] as { description?: string } | undefined)?.description,
+      'from a',
+      '重名的归**先声明**的那个（顺序是语义，不是巧合）',
+    );
+  } finally {
+    if (saved !== undefined) process.env['PI_CODING_AGENT_DIR'] = saved;
+    else delete process.env['PI_CODING_AGENT_DIR'];
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('扩展：--no-extensions（disabled）直接跳过装载', async () => {
   useRealHome();
   try {

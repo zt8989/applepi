@@ -16,6 +16,88 @@
 
 `seeded` 是「装过了没有」。回放时据此判断 init 段读到没有 —— 没读到就只能重新装配。
 
+## 启动时间线：首帧不等扩展（`deferExtensions`）
+
+### 时间都花在哪（本机实测，`ela` 带三个 npm 扩展）
+
+| 阶段 | 量级 | 能做什么 |
+| --- | --- | --- |
+| 模块装载（~1600 个模块 / 8.5MB 源码，pi 那一栈 + 各家 provider SDK） | 0.9~1.4s | 目前没找到可靠的减法（见下面「试过并否掉的两条」） |
+| 扩展装载（jiti，见 `extensions.md` 的并行装载） | 1.4~2.7s | **推到后台**（`deferExtensions`） |
+| `session_start` + `collectPromptSections`（MCP 连服务器，`direct` 服务器最多等 10s） | 0.4~0.5s | 同上 |
+| prompt 拼装 + skill 扫描 + 落盘器 + web 服务 | ~0.1s | —— |
+
+### 试过并否掉的两条
+
+**V8 编译缓存**（`module.enableCompileCache()`，Node 22.8+）：听起来是该做的那件事（把 1600 个
+模块的编译产物落盘），实测却是**净亏**。交替 A/B（同一台机器、背靠背跑）：
+
+| | 缓存关 | 缓存开 |
+| --- | --- | --- |
+| 全局 `ela`（启动器） | **0.96~1.4s** | 1.9~3.7s |
+| `node --import tsx src/main.ts`（开发入口） | 0.95~1.06s | 0.86~1.33s（首轮 1.97s） |
+
+所以**没加**。两个可能的原因：一是它的默认目录是**全机器共用**的，这台机器上已经攒到
+4 万个文件 / 264MB（平铺在一个目录里），查表比重新编译还贵；二是 launcher 走的是
+`tsImport()`，转译后的 TS 是字符串交给 V8 的，本来就吃不到文件级缓存。
+
+**惰性 import 那些 picker / 包根 barrel**：把 `@earendil-works/pi-coding-agent` 的包根换成
+`dist/...` 深路径能省 ~0.2s（包根会把整个交互层 + `main.js` 一并拉进来），但那个包根目前
+在我们 11 个文件里被引用，而且 promp 拼装真要深路径（`system-prompt.js` / `resource-loader.js`）——
+收益不够抵消「以后升级 pi 会一次次对路径」。真要做时，先量一次 `--cpu-prof` 里
+`compileSourceTextModule` 与 `readFileUtf8` 的占比。
+
+于是交互式启动的**首帧**：**~3.9s → ~1.15s**（另一半 2.2s 在后台跑完）。
+
+### 谁先装、谁后装
+
+`createKernel({ deferExtensions: true })`（只给交互式模式，`-p` 不给）把 `createKernel()`
+切成两段：
+
+```
+store 建好
+  ├─ model.init            ← **不依赖扩展**，先装（底栏首帧就要显示 `(provider) model`）
+  └─ 后台：扩展装载 → session_start → collectPromptSections → 按 cwd 算工具表
+            → 扫 skill → prompt.init                        ← 这一整块可能 1~3 秒
+```
+
+`model.init` 之所以要提到前面：底栏在首帧就要画 `(provider) model`，而那份数据只来自
+runtime 与启动解析出来的档位 —— 留在后面的话，扩展装载的那几秒里底栏是 `() `（看着像坏了）。
+轨迹不受这个顺序影响：`beginTrace()` 只认 `state.prompt.seeded` / `state.model.seeded`，
+而它要等用户发出第一句话才跑（见上面「推迟到第一句话」那节）。
+
+### 门：`ready` 之前**不许发消息**
+
+这是这一档唯一的硬约束。那一刻 `state.prompt.tools` 与 system prompt 还是「没有扩展」的形状，
+先发出去的那条会定下一份**缺工具集**的 head，而 head 是不可改的历史（见 `prompt-head.ts`）——
+后面补不回来（模型会在后面的回合里发现工具多了，但第一轮已经发错了）。
+
+所以 `Kernel.ready` 是「此刻的状态能不能拿去发」的唯一定义，两处消费它：
+
+| 谁 | 怎么用 |
+| --- | --- |
+| 终端（`tui/app.ts` 的 `send()`） | `await ready` 之后再 dispatch `user.message`，并提示「扩展还在装载，装载完就发出去」 |
+| 浏览器（`tui/web/bridge.ts`） | 没有用户消息时等 `ready` 再 dispatch，回一条同样意思的 notice |
+| 扩展命令的入口 / `pi.sendMessage` | 后者不需要：扩展装载完才有它们 |
+
+两条都是「等」，不是「拒绝」——用户的输入一句都不丢。
+
+### 界面要能在就绪**后**再读一次
+
+`kernel.extensions` 因此是个**活视图**（`get` 转发到当前宿主）：就绪前指向一个空宿主
+（与 `--no-extensions` 同形），就绪后指向真的那个。理由很实际 —— 界面在 `createKernel()`
+返回时就把 `extensions.commands`、开场横幅那份 `entries` 抓走了，换对象等于它们永远看到空的那份
+（症状：扩展的斜杠命令不见了，而没有任何报错）。
+
+同理，`TuiOptions` 那两个字段是**取值函数**而不是值：`extensions` / `extensionCommands`。
+开场横幅相应地要报**两次**：首帧那次只能报到「正在后台装载」，`ready` 之后再报一次才是真的
+（`[Skills]` / `[Extensions]` / 装载诊断都是那一刻才有的）。
+
+### 失败怎么表现
+
+这一档下装载失败**不抛**（界面已经在跑了，抛没人接）：收进 `kernel.extensions.errors`，
+由横幅报出来。默认（不打开这一档）那条路上失败照旧往外抛 —— 一次性模式该响亮地失败。
+
 ## 为什么走 action 而不是直接写进 createInitialState
 
 因为「装载」和「跑一轮对话」是**同一类事** —— 都是状态迁移。走 action 才能：
