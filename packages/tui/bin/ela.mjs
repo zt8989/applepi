@@ -61,6 +61,19 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
  * 并且**不覆盖**已经显式设置的 `HERDR_AGENT`。`ELA_HERDR_AGENT=<name>` 换身份，
  * `ELA_HERDR_AGENT=off` 整个关掉。
  *
+ * ## Windows 上不做（这条 hint 在那边没人读）
+ *
+ * 官方文档（*Agents → VMs and sandbox wrappers*）把这个变量限定在 **Linux / macOS**：
+ * “On Linux and macOS, a host-visible wrapper can hide the real agent process…” ——
+ * Windows 那份 `herdr.exe` 里连 `HERDR_AGENT` 这个字符串都不存在（那段逻辑是 `cfg(unix)`
+ * 的）。也就是说这里 exec 出去的变量 Windows 上的 herdr **从来不读**：pane 依旧没有身份，
+ * 白多一个常驻父进程。
+ *
+ * Windows（其实**所有**平台）的正解是 ela **自己上报**：见 `@ela/core/herdr` 的文件头。
+ * 那边走 `HERDR_SOCKET_PATH` 上报 pane 的 agent 名/状态/会话，跨平台都算数，与这里
+ * 这次 re-exec 是**互补**关系：这条 hint 给 herdr 一个「屏幕 manifest 按 pi 那套认」的
+ * 提示（mac / linux），那条上报直接告诉它「这个 pane 里是 pi」。
+ *
  * 代价是多一个常驻父进程（它只是阻塞等子进程，不占 CPU）+ 几十毫秒启动开销；换来的是 herdr
  * 里正确的 agent 身份、idle/working/blocked 状态与 session 恢复。
  */
@@ -68,6 +81,10 @@ const HERDR_AGENT_HINT_ENV = 'ELA_HERDR_AGENT';
 
 /** 该给 herdr 报哪个 agent；`undefined` = 不干预（不在 herdr 里，或已被显式指定/关闭）。 */
 function herdrAgentHint() {
+  // Windows：这条 hint 没人读，别为它多起一个进程（见顶部那一节）。
+  if (process.platform === 'win32') {
+    return undefined;
+  }
   if (
     process.env.HERDR_ENV !== '1' ||
     !process.env.HERDR_PANE_ID ||
