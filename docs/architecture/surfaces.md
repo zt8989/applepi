@@ -346,13 +346,13 @@ OSC 133 区域标记也被一并剥掉。
 
 ## 两个弹窗都直接用 pi 官方的组件
 
-`/sessions` 用 `SessionSelectorComponent`（见 [sessions](sessions.md)），`/model` 与
+`/resume` 用 `SessionSelectorComponent`（见 [sessions](sessions.md)），`/model` 与
 `/scoped-models` 用 `ModelSelectorComponent` / `ScopedModelsSelectorComponent`
 （`packages/tui/src/model-picker.ts`）。三个都是同一个理由：
 
 | 面板 | 官方组件 | 那一屏要处理的东西 |
 | --- | --- | --- |
-| `/sessions` | `SessionSelectorComponent` | 树形前缀、分数排序、`re:`/引号查询、异步加载 + `Loading 7/112`、删除确认态、改名子面板 |
+| `/resume` | `SessionSelectorComponent` | 树形前缀、分数排序、`re:`/引号查询、异步加载 + `Loading 7/112`、删除确认态、改名子面板 |
 | `/model` | `ModelSelectorComponent` | 后台刷目录 + 15s 超时 + 错误分级文案、模糊搜索 + `default` 特例、当前模型置顶排序、`Model Name:` 那行、滚动指示 |
 | `/scoped-models` | `ScopedModelsSelectorComponent` | 六个键（save / enableAll / clearAll / toggleProvider / reorderUp / reorderDown）、`null` = 全开的特例、越界不动 |
 
@@ -434,7 +434,7 @@ pi 里这几个面板根本不是弹窗：`interactive-mode.js` 的 `showSelecto
 （pi 也是 append 进对话区，不是弹面板）。与 pi 的唯一差别是**不列本项目没实现的动作** ——
 照抄 pi 的表会得到一份「按了没反应」的说明书。
 
-### 换模型要**真换**（与 `/sessions` 那一处最大的不同）
+### 换模型要**真换**（与 `/resume` 那一处最大的不同）
 
 面板选完不能只 `showStatus()` —— 那是 pi 能这么干的原因：它有 `session.setModel()`。
 本项目状态**只能由 action 改**，所以换模型是 `kernel.setModel()`：它 dispatch

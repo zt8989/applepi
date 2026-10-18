@@ -415,7 +415,7 @@ function discoverExtensionsInDir(dir: string): string[] {
  * 直接静态 import 会在这里解析不到 `typebox`。
  *
  * 取不到（依赖没装、被 prune 掉）就给 `undefined` 并留一条诊断：那时候
- * `/sessions` 那种"模型看不到这个工具"的降级比崩了好。
+ * `/resume` 那种"模型看不到这个工具"的降级比崩了好。
  */
 function askUserQuestionEntryPath(): string | undefined {
   try {

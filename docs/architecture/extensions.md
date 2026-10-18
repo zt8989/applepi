@@ -307,7 +307,7 @@ pi 的会话**层**（`addEntry` / `fork` / `navigateTree`…）本项目刻意�
 `pi-web-access` 注册了 4 个命令（`/websearch` `/curator` `/google-account` `/search`）
 与 2 个快捷键（`ctrl+shift+s` / `ctrl+shift+w`）。本项目**不接**它们，**而且明说**：
 
-- 命令表是 `tui/app.ts` 里的 `SLASH_COMMANDS`（唯一真相，补全与 `/help` 都念它）。
+- 命令表是 `tui/app.ts` 里的 `SLASH_COMMANDS`（唯一真相，补全念它）。
   接进去就要往那儿塞，而那边只有 `description` + 一个 `runCommand` 里的 switch。
 - 命令 handler 在 pi 那边拿的是 `ExtensionCommandContext`（`waitForIdle` /
   `newSession` / `fork` / `navigateTree`…），本项目**一个都没实现**。接了就在 handler
@@ -492,7 +492,7 @@ snippet 里）—— 错报一条就变成永远修不掉的 `[Extension issues]
 
 ### 为什么不并进 `SLASH_COMMANDS`
 
-那份表是**常量**（补全与 `/help` 都念它，是唯一真相），而扩展的命令要等
+那份表是**常量**（补全念它，是唯一真相），而扩展的命令要等
 `loadExtensions()` 装载完才知道 —— 可能发生在编辑器建好**之后**。所以走
 `commandTable()` 里一个单独的展开（`extensionCommands.list()`），与 skill 命令
 同一种情况：现取。
@@ -709,7 +709,7 @@ creating the transcript」同一回事。
 `editorContainer.clear(); addChild(component)` 是同一件事：换格、重排布局、给焦点，
 还回来时把 composer 与它进槽位前那行字一起还回。
 
-**为什么不复用本项目自己的 overlay 面板**（`/model`、`/sessions` 那几个用 overlay
+**为什么不复用本项目自己的 overlay 面板**（`/model`、`/resume` 那几个用 overlay
 复刻 composer 矩形）：inline 要的不只是「一块矩形」。扩展自己按 `tui.terminal.rows`
 算行预算、自己决定折叠、还要把对话区留在上面 —— 那只能由布局**真的把那一格换掉**
 才能得到。

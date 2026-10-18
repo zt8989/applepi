@@ -12,11 +12,11 @@
  * | `/thinking` | 弹档位列表；带参数直接 POST |
  * | `/settings` | 三项：自动压缩 / 隐藏思考块 / 默认思考级别（原位切换） |
  * | `/scoped-models` | 勾选列表，勾一下存一次 |
- * | `/skills` `/help` | 纯文本弹窗 |
+ * | `/skills` | 纯文本弹窗（**唯一一条 pi 没有的命令**，理由见 TUI 的 `SLASH_COMMANDS`） |
  * | 扩展命令 | `POST /api/command`（服务端跑） |
  * | `/skill:<名字>` | **不走这里** —— 当普通消息发出去，服务端展开成 `<skill>` 块 |
  *
- * 会话类命令（`/new` `/sessions` `/compact` …）服务端**不下发**，所以这里也不认
+ * 会话类命令（`/new` `/resume` `/compact` `/session` …）服务端**不下发**，所以这里也不认
  * —— 前端只做服务端说能做的。
  */
 
@@ -47,7 +47,7 @@ function report(result: { ok: boolean; message?: string | undefined }, ctx: Comm
   if (okText !== undefined) ctx.notice(okText);
 }
 
-/** 弹一个纯文本弹窗（`/help` `/skills` `/hotkeys`）。 */
+/** 弹一个纯文本弹窗（`/skills` 与扩展的只读输出）。 */
 function showText(title: string, text: string, footer = 'Esc 关闭'): void {
   const modal = openModal({ title, footer });
   modal.setText(text === '' ? '（空）' : text);
@@ -212,15 +212,6 @@ export async function runCommand(name: string, arg: string, ctx: CommandContext)
       showText(
         'Skills',
         skills.map((skill) => `${skill.name}（${skill.scope}）\n  ${skill.description}\n  ${skill.filePath}`).join('\n\n'),
-        'Esc 关闭',
-      );
-      return true;
-    }
-    case 'help': {
-      const commands = await elaApi.commands();
-      showText(
-        '命令',
-        commands.map((command) => `/${command.name}\n  ${command.description}`).join('\n'),
         'Esc 关闭',
       );
       return true;

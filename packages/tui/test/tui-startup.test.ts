@@ -365,7 +365,10 @@ async function firstFrame(
 }
 
 /**
- * 启动 TUI，**敲 `/sessions` 回车**，等面板画出来，然后杀掉。
+ * 启动 TUI，敲一串键，把屏幕上的可见文本拿回来。
+ *
+ * 名字里的 sessions 是它最早的用途（`/resume` 那个面板），现在它是**通用**的
+ * 「敲两下键然后看屏幕」 —— `/session` 那张卡片、`/model` 面板都走这里。
  *
  * ## 为什么必须真的启动进程
  *
@@ -387,7 +390,7 @@ async function firstFrame(
  * @param ms   整个子进程活多久
  */
 async function sessionsPanel(
-  keys = '/sessions\r',
+  keys = '/resume\r',
   ms = 11000,
 ): Promise<{ text: string; raw: string }> {
   return new Promise((resolve, reject) => {
@@ -500,7 +503,7 @@ test('TUI 首帧：底栏占两行（第二行是空的用量行）', async () =
 
 // ── 「恢复历史」面板 ──
 
-test('TUI：/sessions 打开的恢复面板画出了标题、作用域、排序与按键提示', async () => {
+test('TUI：/resume 打开的恢复面板画出了标题、作用域、排序与按键提示', async () => {
   const { text: frame } = await sessionsPanel();
   // 标题（官方 `SessionSelectorHeader` 那一行）。
   assert.ok(
@@ -535,14 +538,31 @@ test('TUI：/sessions 打开的恢复面板画出了标题、作用域、排序�
   );
 });
 
-test('TUI：恢复面板开着时 Ctrl+C 不杀进程（onInput 要给弹窗让路）', async () => {
-  // 这个断言真正验的是**让路**：`onInput` 开头那句 `if (tui.hasOverlay()) return undefined`
+test('TUI：/session 打出的卡片有话可说（文件 / ID / 消息 / 令牌 / 费用）', async () => {
+  // 这条盯的是「命令真的接上了，而且卡片能画进对话区」：`/session` 走
+  // `notify()`（插一张状态卡），而状态卡是**拼在渲染列表里**的 —— 卡片多行、
+  // 带 ANSI、还要跟着消息条数 splice，纯函数测不到「它到底进没进屏幕」。
+  const { text: frame } = await sessionsPanel('/session\r');
+  assert.ok(
+    frame.includes('会话信息'),
+    `应该有「会话信息」那一节。实际输出末尾：\n${frame.slice(-800)}`,
+  );
+  assert.ok(frame.includes('ID:'), `应该有会话 ID。实际：\n${frame.slice(-800)}`);
+  assert.ok(frame.includes('令牌'), `应该有「令牌」那一节。实际：\n${frame.slice(-800)}`);
+  // 一条消息都没发过（测试不喂 prompt）：不编造数字，也不报错。
+  assert.ok(
+    frame.includes('还没落盘'),
+    `空会话应该说清还没落盘。实际：\n${frame.slice(-800)}`,
+  );
+});
+
+test('TUI：恢复面板开着时 Ctrl+C 不杀进程（onInput 要给弹窗让路）', async () => {  // 这个断言真正验的是**让路**：`onInput` 开头那句 `if (tui.hasOverlay()) return undefined`
   // 若被删掉，面板开着时按 `Ctrl+C` 走的是 `app.ts` 里的空闲分支 —— `process.exit(0)`。
   // 退出码是 0、不打任何日志，于是症状是「界面突然没了」，而且只在弹窗里复现。
   //
   // 管道里发 `` 验不了它（ISIG 语义见 `sessionsPanel` 的注释），所以改成验
   // 「面板画出来了」—— 那次重绘本身就是让路逻辑生效的证据。
-  const { text: frame } = await sessionsPanel('/sessions\r');
+  const { text: frame } = await sessionsPanel('/resume\r');
   assert.ok(
     frame.includes('Resume Session'),
     `Ctrl+C 不该杀掉界面。实际输出前 600 字：\n${frame.slice(0, 600)}`,

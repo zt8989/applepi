@@ -355,23 +355,28 @@ tip 就在树上，不再另起一行 `HEAD →`。成败靠**颜色**（绿 / �
 > **pnpm 与参数**：`pnpm start -p "问题"`，**中间没有 `--`**。写了的话 pnpm 会把它
 > 一起透传给脚本，于是 `packages/tui/src/main.ts` 收到一个孤零零的 `--` 并报「未知选项」。
 
-界面支持斜杠命令，在输入框里打 `/` 弹补全：
+界面支持斜杠命令，在输入框里打 `/` 弹补全（**补全就是那个入口** —— 没有 `/help`，与 pi 一致）：
+
+命令表**与 pi 同名同义**，描述直接用 pi 的英文原文（`packages/tui/src/app.ts` 的
+`SLASH_COMMANDS` 是唯一真相；那张表的注释里列了「pi 有、这里不做」的那些命令与理由）。
 
 | 命令 | 作用 |
 | --- | --- |
-| `/model` | 盖住输入框的模型选择面板（同 pi）；`/model <id>` 精确命中就直接切。面板里 `Ctrl+S` 存默认模型 |
-| `/thinking` | 思考级别选择面板（同 pi）；`/thinking <级别>` 直接切。面板里 **`Ctrl+S` 存默认级别**，`Shift+Tab` 循环（**不**存） |
-| `/settings` | 设置面板（同 pi 的形状）：自动压缩、隐藏思考块、**每个模型的默认思考级别**（per-model 覆盖，之前只能手改 settings.json） |
-| `/scoped-models` | 挑哪些模型参与 `Ctrl+P` 循环（含每模型写死一档的 `p/id:high` 写法） |
-| `/sessions` | 盖住输入框的历史会话选择面板（满宽，同 pi）。**零 token** —— 不重跑模型，只把消息**和轨迹树**读回来 |
-| `/new` | 开**新会话**：换 id → 换文件。上一段完整留在 `sessions/` 里 |
-| `/clean`（或 `/wipe`） | **删除**除当前会话外的全部历史会话（连同轨迹文件）。不可逆 |
-| `/compact` | 把老对话换成一段结构化摘要（上下文快满了时用；与 pi 同名） |
-| `/skills` | 列出已装载的 skill（**已进 system prompt** 的那批） |
+| `/settings` | Open settings menu：自动压缩、隐藏思考块、**每个模型的默认思考级别**（per-model 覆盖，之前只能手改 settings.json） |
+| `/model` | Select model：盖住输入框的模型选择面板；`/model <id>` 精确命中就直接切。面板里 `Ctrl+S` 存默认模型 |
+| `/thinking` | Set thinking level：思考级别面板；`/thinking <级别>` 直接切。面板里 **`Ctrl+S` 存默认级别**，`Shift+Tab` 循环（**不**存） |
+| `/scoped-models` | Enable/disable models for Ctrl+P cycling（含每模型写死一档的 `p/id:high` 写法） |
+| `/skills` | 列出**真的进了 system prompt** 的 skill。表里唯一一条 pi 没有的命令 —— 磁盘上有、模型不知道，是这里最难归因的一类问题 |
+| `/copy` | Copy last agent message to clipboard（与 `Ctrl+X` 同一条路） |
+| `/name [<名字>]` | Set session display name：写进会话文件的 `session_info`（pi 读得懂同一个 entry）；不带参数 = 看当前名字 |
+| `/session` | Show session info and stats：文件 / ID / 名字 + 消息条数 + token（含缓存命中率）+ 费用（按模型拆） |
+| `/hotkeys` | Show all keyboard shortcuts（键名实时解析，与 pi 同形） |
+| `/new` | Start a new session：换 id → 换文件。上一段完整留在 `sessions/` 里 |
+| `/compact` | Manually compact the session context：把老对话换成一段结构化摘要 |
+| `/resume` | Resume a different session：盖住输入框的历史会话选择面板（满宽，同 pi）。**零 token** —— 不重跑模型，只把消息**和轨迹树**读回来；删历史也在这里（`ctrl+d`） |
+| `/quit` | 退出（与 `Ctrl+D` 同一条路：先回主屏，再打那行 `To resume this session:`） |
 | `/mcp` | MCP 服务器管理面板（内置扩展提供）：连接状态、登录、重连、改暴露方式 |
 | `/skill:<名字>` | 把某个 skill 的正文展开后，连同你写的问题一起发给模型 |
-| `/hotkeys` | 全部键位（键名实时解析，与 pi 的 `/hotkeys` 同形） |
-| `/help` | 命令列表 |
 
 命令**不发给模型** —— 那是给界面/内核的管理动作。**`/skill:` 是例外**：它展开成一段
 `<skill>` 块真的发给模型（形状与 pi 相同）。

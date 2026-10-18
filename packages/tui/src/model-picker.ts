@@ -3,7 +3,7 @@
  *
  * ## 为什么直接用 pi 官方的 `ModelSelectorComponent`
  *
- * 与 `/sessions`（见 `session-picker.ts`）**同一个理由**：这个面板的交互面很宽，而每一条都要与
+ * 与 `/resume`（见 `session-picker.ts`）**同一个理由**：这个面板的交互面很宽，而每一条都要与
  * pi 对齐才有意义（用户已经习惯了 `Ctrl+S` 存默认、`default` 前缀搜默认模型、
  * 「当前模型置顶 + 打勾」）：
  *
@@ -33,9 +33,9 @@
  * | `scopedModels` | 内核当前的作用域列表（`/scoped-models` 改的那份） |
  * | `defaultModel` | `settings.json` 的 `defaultProvider` / `defaultModel` |
  * | `onSelectAsDefault` | `SettingsManager.setDefaultModelAndProvider()` |
- * | `keybindings` | `installProjectKeybindings()` 并装到 pi-tui 全局（与 `/sessions` 同一句理由） |
+ * | `keybindings` | `installProjectKeybindings()` 并装到 pi-tui 全局（与 `/resume` 同一句理由） |
  *
- * ## 但**换模型要真的换**（与 `/sessions` 那一处最大的不同）
+ * ## 但**换模型要真的换**（与 `/resume` 那一处最大的不同）
  *
  * 选完之后不能只 `showStatus()` —— 那是 pi 的 `InteractiveMode` 能这么干的原因：它有
  * `session.setModel()`。本项目的状态**只能由 action 改**（reducer 纯函数那条不变式），所以

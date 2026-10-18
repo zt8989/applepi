@@ -1,5 +1,5 @@
 /**
- * TUI 的「恢复历史」弹窗 —— `/sessions` 打开。
+ * TUI 的「恢复历史」弹窗 —— `/resume` 打开。
  *
  * ## 为什么直接用 pi 官方的 `SessionSelectorComponent`
  *
@@ -46,8 +46,7 @@
  * 致命的那条是中断（默认 `ctrl+c`）：空闲时它 `process.exit(0)`，在弹窗里按一下
  * 「取消」整个界面就没了。
  */
-import { appendFileSync, closeSync, existsSync, fstatSync, openSync, readSync, rmSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { existsSync, rmSync } from 'node:fs';
 import {
   SessionSelectorComponent,
   type SessionInfo,
@@ -55,6 +54,7 @@ import {
 import type { SessionListProgress } from '@earendil-works/pi-coding-agent/dist/core/session-manager.js';
 import type { ViewportTUI } from '@earendil-works/pi-tui';
 import { listSessions, findTraceFile, type SessionSummary } from '@ela/core/config-home';
+import { appendSessionName } from '@ela/core/session-file';
 import { installProjectKeybindings } from './keybindings';
 import { composerOverlayOptions } from './composer-overlay';
 import { readJsonlHead, readSessionMessages } from '@ela/core/session-file';
@@ -173,80 +173,6 @@ function loadSessions(filter: { cwd?: string } | undefined, onProgress?: Progres
   return Promise.resolve(out);
 }
 
-/**
- * 重命名：往那个会话文件**追加**一条 `session_info`。
- *
- * 与 pi 同一个 entry type，所以**两边都能读到**这个名字（pi 的 `getSessionName()` 走的就是
- * 「倒着找最后一条 `session_info`」，我们那侧的 `config-home.readSessionMeta()` 同一套语义）。
- *
- * ## 为什么是 append 而不是重写文件
- *
- * entry 用 `parentId` 串成一条链（pi 用它做 session tree）。重写要重排那条链，
- * 而「给会话起个名字」不该动它 —— append 是**唯一**安全的形状。
- *
- * ## 名字里的换行会被压成空格
- *
- * 一条 `session_info` = 一行 JSON，而换行会把它劈成两半（第二半 `JSON.parse` 失败被跳过，
- * 于是这个名字**看起来没生效**）。与 pi 的 `appendSessionInfo()` 同一处理。
- *
- * ## 空名字 = 清掉名字
- *
- * 官方那边已经把空串拦掉了（`confirmRename` 里 `if (!next) return`），这里再兜一层。
- */
-function appendSessionName(file: string, name: string): void {
-  const sanitized = name.replace(/[\r\n]+/g, ' ').trim();
-  if (sanitized === '') return;
-  const entry = {
-    type: 'session_info',
-    // id：8 位随机（pi 的 `generateId()` 也是 8 位）。这条 entry 不参与消息树，
-    // 但要有 id 才能与 pi 的 `session_info` 形状一致。
-    id: randomUUID().slice(0, 8),
-    parentId: lastEntryId(file),
-    timestamp: new Date().toISOString(),
-    name: sanitized,
-  };
-  appendFileSync(file, `${JSON.stringify(entry)}\n`, 'utf8');
-}
-
-/**
- * 最后一条 entry 的 id（链尾）。读文件末尾 64KB 就够 —— 一条 entry id 只有 8 字符。
- *
- * 读不到就 `null`（一条 `session_info` 挂在链首是合法的：那条链后面还有消息）。
- */
-function lastEntryId(file: string): string | null {
-  let fd: number | undefined;
-  try {
-    fd = openSync(file, 'r');
-    const size = fstatSync(fd).size;
-    const start = Math.max(0, size - 64 * 1024);
-    const buf = Buffer.allocUnsafe(size - start);
-    readSync(fd, buf, 0, buf.length, start);
-    // 开头那一行可能被截断了（从中间开始读），跳过它。
-    const lines = buf.toString('utf8').split('\n').slice(1);
-    for (let i = lines.length - 1; i >= 0; i -= 1) {
-      const line = lines[i];
-      if (line === undefined || line.trim() === '') continue;
-      let entry: { type?: string; id?: string };
-      try {
-        entry = JSON.parse(line) as typeof entry;
-      } catch {
-        continue; // 崩溃截断的半行：跳过。
-      }
-      if (entry.type !== 'session') return entry.id ?? null;
-    }
-    return null;
-  } catch {
-    return null;
-  } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch {
-        // 读失败后的清理失败不值得抛。
-      }
-    }
-  }
-}
 
 /**
  * 官方 `SessionList` 的那一个字段（`onDeleteSession`）。
@@ -398,7 +324,7 @@ export function deleteSessionTrace(session: SessionSummary): boolean {
     return true;
   } catch {
     // Windows 上文件可能被索引器/编辑器短暂占着。留着比让整个删除流程炸掉好 ——
-    // 用户看到的是「会话删了」，下一次 `/clean` 会把它扫掉（见 `cleanSessionsExcept`）。
+    // 用户看到的是「会话删了」，轨迹那份留着占几百 KB（下次它自己能删时再说）。
     return false;
   }
 }

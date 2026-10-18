@@ -28,7 +28,7 @@
  *
  * ## 命令表是**界面**的，不是内核的
  *
- * 补全列表与 `/help` 都念 `tui/app.ts` 的 `SLASH_COMMANDS`（唯一真相）。所以扩展的
+ * 补全列表念 `tui/app.ts` 的 `SLASH_COMMANDS`（唯一真相）。所以扩展的
  * 命令**不并进那一份**，而是走一条单独的通道：`runCommand` 找不到自己的命令时，
  * 问扩展要。理由是那份表是**常量**（补全 provider 每次 `getSuggestions` 现取），
  * 而扩展的命令要等 `loadExtensions()` 装载完才知道 —— 与 skill 命令同一种情况，

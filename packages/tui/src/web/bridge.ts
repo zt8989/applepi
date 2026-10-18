@@ -523,7 +523,7 @@ export class WebBridge {
         return [];
       }
       case 'resumeSession': {
-        // 环在跑时不能换会话（消息还在往当前那个文件里写）—— 与 TUI 的 `/sessions`
+        // 环在跑时不能换会话（消息还在往当前那个文件里写）—— 与 TUI 的 `/resume`
         // 同一口径：拒绝并说一声，不静默。
         if (this.options.store.getState().phase !== 'idle') {
           return [{ type: 'notice', level: 'warn', text: '上一回合还没结束，先中断再恢复历史' }];

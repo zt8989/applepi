@@ -39,8 +39,8 @@
 
 ## 与 pi 的会话互通
 
-同址之后会话历史是**双向可见**的，pi 的 `/resume` 能看到我们的，我们的 `/sessions` 也能
-看到 pi 的。会话文件那边已经**与 pi 同形**：
+同址之后会话历史是**双向可见**的：pi 的 `/resume` 与我们的 `/resume` 看的是**同一份列表**
+（连命令名都一样了），彼此写的会话对方都能恢复。会话文件那边已经**与 pi 同形**：
 
 | | 我们 | pi |
 | --- | --- | --- |
@@ -193,7 +193,7 @@ kernel.restore(messages);      // 只灌（消息已读出来时）
 
 ## 界面的入口
 
-`/sessions` → **pi 官方的 `SessionSelectorComponent`**（覆盖层，搜索框 + 输入即筛 + 上下键 +
+`/resume` → **pi 官方的 `SessionSelectorComponent`**（覆盖层，搜索框 + 输入即筛 + 上下键 +
 回车选定；**满宽、盖住 composer** —— 与 pi 的 `showSelector()` 同形状，见
 [surfaces](surfaces.md) 的「这三个面板盖住 composer」），背后走 `config-home.listSessions()` +
 `session-file.readSessionMessages()`，**零 token**。适配层在 `packages/tui/src/session-picker.ts`，
@@ -229,7 +229,7 @@ WS 的 `resumeSession`）—— 同一个 `listSessions()`，但只读文件头 
    > 所以不会同时生效。这与 pi 自己的做法一致（它的 `Ctrl+R` 也只在会话面板里有含义）。
 3. **弹窗开着时 `onInput` 要让路**（`if (tui.hasOverlay()) return undefined`）。pi-tui 的
    `inputListeners` 在聚焦组件**之前**跑，而 `app.ts` 的 `onInput` 无条件处理 `ctrl+c` ——
-   空闲时它 `process.exit(0)`。于是「打开 /sessions 按 Ctrl+C 取消」会杀掉整个 pi。
+   空闲时它 `process.exit(0)`。于是「打开 /resume 按 Ctrl+C 取消」会杀掉整个 pi。
 4. **搜索面只给头部**（`allMessagesText` 传空串）。官方的实现是整个会话文件读出来拼的，
    我们不这么做 —— 见下面的性能一节。要找回聊过的那句话，用 `rg` 搜 `~/.pi/agent/sessions`。
 

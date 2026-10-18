@@ -47,8 +47,16 @@ import type { AgentState, QueuedInput, QueueKind } from '@ela/core/state';
 import type { AgentStore } from '@ela/core/store';
 import type { AgentAction } from '@ela/core/actions';
 import type { Message, ToolCall } from '@earendil-works/pi-ai';
-import { cleanSessionsExcept, listSessions, findSessionFile, resumeCommand, type SessionSummary } from '@ela/core/config-home';
+import {
+  findSessionFile,
+  listSessions,
+  readSessionName,
+  resumeCommand,
+  type SessionSummary,
+} from '@ela/core/config-home';
+import { appendSessionName } from '@ela/core/session-file';
 import { deleteSessionTrace, loadSessionMessages, openSessionPicker } from './session-picker';
+import { collectSessionStats, formatSessionCard } from './session-info';
 import { FOOTER_ROWS } from './composer-overlay';
 import {
   openModelPicker,
@@ -70,7 +78,7 @@ import {
 import { NO_SCOPE, readScopedModels, writeDefaultModel, readHideThinkingBlock, writeHideThinkingBlock, type ModelScope, type ScopedModelItem } from '@ela/core/model-scope';
 import type { AgentRuntime } from '@ela/core/provider';
 import type { Model, ModelThinkingLevel } from '@earendil-works/pi-ai';
-import { readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -917,75 +925,86 @@ function padToWidth(text: string, width: number): string {
 /**
  * 斜杠命令表里的一行。
  *
- * `SlashCommand`（pi-tui 的）只有 `name` / `description`；多出来的 `web` 是给
- * webui 用的：那个命令在浏览器里也能跑（非会话类）。不标 = 终端专有。
+ * `SlashCommand`（pi-tui 的）的 `description` / `argumentHint` 都原样透传（补全用）；
+ * 多出来的 `web` 是给 webui 用的：那个命令在浏览器里也能跑（非会话类）。不标 = 终端专有。
  * 接口在 `web/api.ts`，驱动它的 HTTP 路由在 `web/server.ts`。
  */
 export interface ElaSlashCommand {
   name: string;
   description: string;
+  /**
+   * 参数提示（`/model <provider/model>` 里那个尖括号）。与 pi 同一字段。
+   *
+   * 故意**不写** `| undefined`（与本文件其他可选字段不同）：pi-tui 的 `SlashCommand`
+   * 是 `argumentHint?: string`，而 tsconfig 开了 `exactOptionalPropertyTypes` —— 多写那个
+   * `| undefined` 就整张表不能当 `SlashCommand[]` 传给补全 provider 了。
+   */
+  argumentHint?: string;
   web?: boolean | undefined;
 }
 
 /**
  * 斜杠命令表——**唯一的真相**。
  *
- * 补全（`setAutocompleteProvider`）、`/help`、以及 webui 的 `/` 下拉都念这一份，
- * 所以加命令只改这里一处；以前 `/help` 里手抄了一份，两边会漂移。
+ * 补全（`setAutocompleteProvider`）、webui 的 `/` 下拉、以及 `runCommand` 都念这一份。
+ *
+ * ## 命名与文案直接跟 pi 对齐
+ *
+ * 名字、**英文原文描述**、`argumentHint` 都抄 pi 的 `core/slash-commands.js`：用户在两个
+ * 界面里看到的是同一句话，不会出现「pi 里叫 resume、这里叫 sessions」这种要翻译一遍的差。
+ * 有条无条按 pi 的顺序排，缺的那些一眼能看出是**没做**，而不是被谁挪了位置。
+ *
+ * ## pi 有、这里**不列**的（不是忘，是不做）
+ *
+ * | pi 的命令 | 为什么不列 |
+ * | --- | --- |
+ * | `tree` / `fork` / `clone` | 会话树导航（跳到历史某个点开分叉）。本项目的轨迹树（`Ctrl+T`）是**只读**的执行历史，没有「在消息树上换分支」这层能力 —— 列出来只能报「未实现」 |
+ * | `export` / `import` | 导出 HTML 需要 pi 那套导出器；会话文件本身就是 JSONL，`cp` 就是那个动作。恢复走 `/resume`（或 `ela --session <id>`） |
+ * | `share` | 分享到 Radius artifact / GitHub gist：没有账号体系 |
+ * | `bug` | 上报 bug 给「pi 的开发者」—— 我们不是 pi，那封信会寄错人 |
+ * | `changelog` | 本项目没有 changelog 文件可读 |
+ * | `trust` | 项目信任决策。本项目没有「项目级、需信任才会加载」的资源这一层 |
+ * | `login` / `logout` | 供应商鉴权在 pi 那边配（`~/.pi/agent/auth.json`、环境变量、`--api-key`），这里不另起一套 |
+ * | `reload` | 热重载 keybindings / 扩展 / skills / prompt。本项目的装载发生在内核装配那一刻，没有热重载入口（要换就重开） |
+ *
+ * ## 本项目有、pi **没有**的
+ *
+ * 只剩 `/skills` 一条：pi 在开场横幅里报 skill 清单，而 `disable-model-invocation`、
+ * 重装 prompt 这些都能让「磁盘上有、模型不知道」—— 会话中途能查一次是必要的诊断，
+ * 所以留住（它不是会话类命令，浏览器里也能跑）。
+ *
+ * 曾经还有三条，已按「只留 pi 那套」删掉：`/sessions`（并入 `/resume`）、`/clean` 与
+ * `/wipe`（删历史在 `/resume` 面板里，`ctrl+d`）、`/help`（pi 没有它，靠补全是那个入口 ——
+ * 打 `/` 就能看到全表）。
  */
 export const SLASH_COMMANDS: ElaSlashCommand[] = [
+  { name: 'settings', description: 'Open settings menu', web: true },
   {
     name: 'model',
-    description: '换模型（弹窗选择；`/model <id>` 精确命中时直接切；与 pi 同名）',
+    description: 'Select model (opens selector UI)',
+    argumentHint: '<provider/model>',
     web: true,
   },
   {
     name: 'thinking',
-    description:
-      '思考级别（弹窗选择；`/thinking <级别>` 直接切；面板里 Ctrl+S 存默认；与 pi 同名）',
-    web: true,
-  },
-  {
-    name: 'settings',
-    description: '设置面板（自动压缩 / 隐藏思考块 / 每个模型的默认思考级别；与 pi 同名）',
+    description: 'Set thinking level',
+    argumentHint: '<level>',
     web: true,
   },
   {
     name: 'scoped-models',
-    description: '启用/禁用哪些模型参与 Ctrl+P 循环（Ctrl+S 存进 settings）',
+    description: 'Enable/disable models for Ctrl+P cycling',
     web: true,
   },
-  {
-    name: 'skills',
-    description: '列出这一轮真的进了 prompt 的 skill（不是磁盘上的全集）',
-    web: true,
-  },
-  {
-    name: 'sessions',
-    description: '恢复历史会话（弹窗选择，零 token 不重跑模型）',
-  },
-  {
-    name: 'resume',
-    description: '同 /sessions（方便记）',
-  },
-  {
-    name: 'new',
-    description: '开新会话（换文件；上一段仍留在 sessions/ 里）',
-  },
-  {
-    name: 'clean',
-    description: '**删除**除当前会话外的全部历史会话（不可逆）',
-  },
-  { name: 'wipe', description: '同 /clean' },
-  {
-    name: 'compact',
-    description: '把老对话换成一段摘要（上下文快满了时用；与 pi 同名）',
-  },
-  {
-    name: 'hotkeys',
-    description: '列出全部键位（键名实时解析，与 pi 的 /hotkeys 同形）',
-  },
-  { name: 'help', description: '列出全部命令', web: true },
+  { name: 'skills', description: 'List the skills that entered this prompt', web: true },
+  { name: 'copy', description: 'Copy last agent message to clipboard' },
+  { name: 'name', description: 'Set session display name' },
+  { name: 'session', description: 'Show session info and stats' },
+  { name: 'hotkeys', description: 'Show all keyboard shortcuts' },
+  { name: 'new', description: 'Start a new session' },
+  { name: 'compact', description: 'Manually compact the session context' },
+  { name: 'resume', description: 'Resume a different session' },
+  { name: 'quit', description: 'Quit ela' },
 ];
 
 export interface TuiOptions {
@@ -1000,7 +1019,7 @@ export interface TuiOptions {
    * 内核 `deferExtensions` 时（交互式启动，见 `kernel.ts`）扩展是**后台装的**：
    * 这里存一个对象就等于把「装载前那个空命令表」钉死，症状是扩展的斜杠命令
    * （`/websearch` 那种）**永远**不出现，而没有任何报错。取值是每次现取，
-   * 于是装载完成后补全、`/help`、`runCommand`、`/hotkeys` 都看得到它们。
+   * 于是装载完成后补全、`runCommand`、`/hotkeys` 都看得到它们。
    *
    * 不给 = 没装扩展：补全里没有它们，`runCommand` 不会问。
    */
@@ -1276,11 +1295,49 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 当前会话**文件路径**（picker 用它把「正在用的这条」标出来并拒绝删除）。
    *
    * `sessionId` 是取值函数（`/new` 之后会变），所以每次开面板现算 —— 别缓存，
-   * 否则 `/new` 之后打开 `/sessions` 会去保护一个已经不存在的文件。
+   * 否则 `/new` 之后打开 `/resume` 会去保护一个已经不存在的文件。
    */
   const currentSessionFile = (): string | undefined => {
     const id = sessionId?.();
     return id === undefined || id === '' ? undefined : findSessionFile(id, cwd);
+  };
+  /**
+   * 当前会话**真的在盘上**的文件。
+   *
+   * 与 `currentSessionFile()` 的差别不是润色：`findSessionFile()` 找不到就**拼一个
+   * 将来才会用的路径**（它也会给不存在的文件返回一个看着很真的路径）。空会话不落盘
+   * （见 `SessionWriter.start`），所以「有路径」与「真落过盘」是两件事：
+   *
+   * - `/name` 要往文件里 append 一条 `session_info`。在一条**不存在**的文件上 append，
+   *   会造出一个**没有 header 的半残会话文件**（`readSession` 直接返回 null、列表里
+   *   一条 cwd 为空的幽灵记录）—— 所以那里必须问「真在盘上没」。
+   * - `/session` 要如实报「文件在哪」。报一个还不存在的路径，会让用户拿着 `rg` 去搜一个
+   *   搜不到的文件。
+   */
+  const currentSessionFileOnDisk = (): string | undefined => {
+    const file = currentSessionFile();
+    return file !== undefined && existsSync(file) ? file : undefined;
+  };
+  /**
+   * 当前会话的显示名（`session_info`）。名字落在会话文件里，这里只是进程内的那份缓存。
+   *
+   * ## 为什么要缓存，而不是每次去读文件
+   *
+   * `config-home.readSessionName()` 只扫文件**前 512KB**（那条已知限制写在那边），
+   * 而改名是往**文件末尾**追加的 —— 一个很长的会话刚 `/name` 完再去读，会读到旧名字。
+   * 所以 mem 里记住自己刚设的那个；恢复历史时从被选中的那条带过来，`/new` 清掉。
+   *
+   * `sessionNameLoaded` 单独一个布尔：`undefined` 同时是「没名字」与「还没读」两个意思，
+   * 不分就得每次重读一遍。
+   */
+  let sessionName: string | undefined;
+  let sessionNameLoaded = false;
+  const currentSessionName = (): string | undefined => {
+    if (!sessionNameLoaded) {
+      sessionName = readSessionName(currentSessionFileOnDisk());
+      sessionNameLoaded = true;
+    }
+    return sessionName;
   };
   /**
    * 退出前打印一行「怎么恢复这次会话」。
@@ -1586,7 +1643,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
    *
    * ## 为什么不复用 overlay
    *
-   * 本项目自己的那几个面板（`/model`、`/sessions`）是用 overlay **复刻** composer
+   * 本项目自己的那几个面板（`/model`、`/resume`）是用 overlay **复刻** composer
    * 的矩形（见 `composer-overlay.ts`）—— 那是「我们没有 pi 的 `editorContainer`」
    * 时代的写法。而扩展的 inline `custom()` 要的**不只是**一块矩形：它自己按
    * `tui.terminal.rows` 算行预算、自己决定折叠，把对话区留在上面 —— 那只能由布局
@@ -1816,7 +1873,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
      *
      * 这个监听器无条件处理那几个全局开关，其中一个是致命的：中断键（默认 `ctrl+c`）
      * 在空闲时 `process.exit(0)`。弹窗里 `Ctrl+C` 的语义是**取消面板**，于是
-     * 「打开 /sessions 然后想退出」会直接杀掉整个界面 —— 而且没有堆栈、没有日志，
+     * 「打开 /resume 然后想退出」会直接杀掉整个界面 —— 而且没有堆栈、没有日志，
      * 用户只会觉得「崩了」。
      * 另外几个（切轨迹页 / 展开工具 / 换队列模式）会让弹窗
      * 开着的**同时**背后的主界面也变了，看着像面板没盖住背景。
@@ -2440,6 +2497,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
     const arg = rest.join(' ');
     switch (name) {
       case 'skills': {
+        // 表里唯一一条 pi 没有的命令（理由见 `SLASH_COMMANDS` 的注释）。
+        //
         // 列出这一轮真的进了 prompt 的 skill（不是磁盘上全部）。
         //
         // 为什么只报「进了 prompt 的」：`/skill:x` 展开后模型能不能用，取决于清单里有没有它。
@@ -2466,8 +2525,67 @@ export async function runTui(options: TuiOptions): Promise<number> {
         );
         return;
       }
-      case 'sessions':
+      case 'copy': {
+        // pi 的 `/copy`（`Copy last agent message to clipboard`）：与 `Ctrl+X` 同一条路
+        // （`app.message.copy`），不另写一份「取最后一条助手消息」的逻辑。
+        copyLastMessage();
+        return;
+      }
+      case 'name': {
+        // pi 的 `/name`：起名 / 不带参数看当前名字。
+        //
+        // 名字落在会话文件的 `session_info` entry 里（与 pi 同一个 entry type，
+        // 所以 pi 的 `/resume` 面板、我们的恢复面板读的是同一个名字）。
+        const file = currentSessionFileOnDisk();
+        const wanted = arg.trim();
+        if (wanted === '') {
+          const current = currentSessionName();
+          notify(
+            current === undefined
+              ? dim('这个会话还没有名字。用法：/name <名字>')
+              : `${dim('会话名:')} ${current}`,
+          );
+          return;
+        }
+        if (file === undefined) {
+          // 空会话不落盘（见 `SessionWriter.start`）：没有文件可追加，直接说清。
+          // 注意用的是 `currentSessionFileOnDisk()` —— 在一条还不存在的文件上 append
+          // 会造出一个没有 header 的半残会话文件。
+          notify(yellow('这个会话还没落盘（一条消息都没发过），先聊一句再起名'));
+          return;
+        }
+        appendSessionName(file, wanted);
+        // 自己刚设的那个记在内存里：`readSessionName()` 只扫文件前 512KB，
+        // 而这条 entry 在文件**末尾**（长会话里回读会读到旧名字）。
+        sessionName = wanted.replace(/[\r\n]+/g, ' ').trim();
+        sessionNameLoaded = true;
+        notify(dim(`会话名已设为 ${sessionName}（写进 ${path.basename(file)}）`));
+        return;
+      }
+      case 'session': {
+        // pi 的 `/session`（`Show session info and stats`）：“这是个哪个文件 / 花了多少”。
+        //
+        // 数字全部念 `state.messages`（= 当前上下文），与底栏那一排 `↑↓R$` **同一口径**；
+        // 为什么不念会话文件：那要连整个文件解开（18MB 的会话就要等），而且压缩之后
+        // 两个数字对不上会让人以为算错了 —— 见 `session-info.ts` 头部的表。
+        const file = currentSessionFileOnDisk();
+        const name = currentSessionName();
+        notify(
+          formatSessionCard(
+            collectSessionStats(store.getState().messages),
+            {
+              ...(file !== undefined ? { file } : {}),
+              id: store.getState().session.id,
+              ...(name !== undefined ? { name } : {}),
+            },
+            { dim, bold },
+          ),
+        );
+        return;
+      }
       case 'resume': {
+        // pi 的 `/resume`（`Resume a different session`）。以前的 `/sessions` 已并入这里。
+        //
         // 环在跑时不能换会话（正在写消息）。
         if (store.getState().phase !== 'idle') {
           notify(yellow(`上一回合还没结束，先按 ${keyLabel('app.interrupt')} 中断再恢复历史`));
@@ -2477,33 +2595,23 @@ export async function runTui(options: TuiOptions): Promise<number> {
           tui,
           cwd,
           ...(currentSessionFile() !== undefined ? { currentSessionFile: currentSessionFile() } : {}),
-          onPick: (session) => restoreSession(session),
+          onPick: (session) => {
+            // 名字跟着被选中的那条走（否则 `/name` 会显示上一个会话的名字）。
+            sessionName = session.name;
+            sessionNameLoaded = true;
+            restoreSession(session);
+          },
           // 官方只删会话文件，轨迹那份要我们自己补 —— 见 session-picker 的注释。
           onSessionDeleted: (session) => {
             if (!deleteSessionTrace(session)) {
-              notify(dim(`已删会话 ${session.id}（轨迹文件 ${path.basename(session.file)} 旁边的 traces/ 那份没删掉，下次 /clean 会扫掉）`));
+              notify(
+                dim(
+                  `已删会话 ${session.id}（traces/ 里那份 ${path.basename(session.file)} 没删掉，可手动删）`,
+                ),
+              );
             }
           },
         });
-        return;
-      }
-      case 'clean':
-      case 'wipe': {
-        // 环在跑时不能删：正在往某个会话文件里写。
-        if (store.getState().phase !== 'idle') {
-          notify(yellow(`上一回合还没结束，先按 ${keyLabel('app.interrupt')} 中断再清理`));
-          return;
-        }
-        // 当前会话放行：它的文件正被记录器开着。
-        const current = sessionId?.();
-        const result = current ? cleanSessionsExcept([current]) : cleanSessionsExcept([]);
-        const failed = result.failed.length > 0 ? `，${result.failed.length} 条没删掉` : '';
-        notify(
-          dim(
-            `已清理 ${result.sessions} 条历史会话（${result.removed} 个文件）${failed}` +
-              (current ? '（当前这段保留）' : ''),
-          ),
-        );
         return;
       }
       case 'model': {
@@ -2736,8 +2844,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
         refresh();
         return;
       }
-      case 'new':
-      case 'forget': {
+      case 'new': {
         // 环在跑时不能换会话（正在写消息）。
         if (store.getState().phase !== 'idle') {
           notify(yellow(`上一回合还没结束，先按 ${keyLabel('app.interrupt')} 中断再开新会话`));
@@ -2749,6 +2856,10 @@ export async function runTui(options: TuiOptions): Promise<number> {
         hotkeysSource = undefined;
         hotkeysAtMessageIndex = undefined;
         hotkeysLinesCache = undefined;
+        // 新会话没名字（旧名字挂在旧文件上）。不标 `loaded` 的话，`/name` 会去读刚建的
+        // 那份空文件 —— 读出来也是 undefined，但少一个凭空的磁盘读。
+        sessionName = undefined;
+        sessionNameLoaded = true;
         // 走内核的 newSession：**换 sessionId**，于是换文件。
         // 只 dispatch conversation.reset 的话 id 不变，新消息会续写进旧文件 ——
         // 界面上看着像新会话，实际上把上一段历史污染了。
@@ -2759,7 +2870,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
           notify(dim('已清空对话（未接内核，沿用原会话文件）'));
           return;
         }
-        notify(dim(`已开新会话 ${created.id}（上一段仍在 sessions/ 里，/sessions 可回来）`));
+        notify(dim(`已开新会话 ${created.id}（上一段仍在 sessions/ 里，/resume 可回来）`));
+        return;
+      }
+      case 'quit': {
+        // pi 的 `/quit`（`Quit ela`）：走与 `Ctrl+D` 同一条退出路径
+        // （`exitApp()` 会先离开备用屏，再打那行 `To resume this session:`）。
+        exitApp();
         return;
       }
       case 'hotkeys': {
@@ -2781,15 +2898,6 @@ export async function runTui(options: TuiOptions): Promise<number> {
         refresh();
         return;
       }
-      case 'help':
-        // 念同一份命令表 —— 手抄一份迟早会和补全列表漂移。
-        notify(
-          commandTable().map(
-            (c) =>
-              `${bold(`/${c.name}`)}${' '.repeat(Math.max(1, 10 - c.name.length))}${c.description ?? ''}`,
-          ).join('\n'),
-        );
-        return;
       default:
         // 扩展的命令在**最后**试：内置的与 skill 的优先（skill 走上面的分支）。
         const commands = extensionCommands();
@@ -2799,7 +2907,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
           });
           return;
         }
-        notify(yellow(`未知命令 /${name}（试试 /help）`));
+        // 提示改成「打 `/` 看补全」：`/help` 已经删了（pi 也没有它，补全就是那个入口）。
+        notify(yellow(`未知命令 /${name}（打 / 看补全）`));
     }
     void arg;
   };
@@ -2989,7 +3098,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
       editorSlotComponent === undefined
         ? { component: editor, minSize: 3 }
         : { component: editorSlotComponent, minSize: 1 },
-      // 底栏行数 = `FOOTER_ROWS`，与 `/model`、`/sessions` 那些面板的
+      // 底栏行数 = `FOOTER_ROWS`，与 `/model`、`/resume` 那些面板的
       // `margin.bottom` **同一个来源** —— 面板底边要落在 composer 的底边上，
       // 而那个位置就是「底栏几行」决定的。两处各写一个数字就会漂移：
       // 底栏改成三行时面板会悬空一行，且症状很难归因。见 `composer-overlay.ts`。
