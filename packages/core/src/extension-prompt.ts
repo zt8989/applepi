@@ -49,6 +49,13 @@
  * `selectedTools`（谁会读、少一个会怎样，见下面那个字段的注释）。给多了（`skills` /
  * `toolSnippets` / `forceSystemPrompt`）才是有害的：那会让扩展以为它能重拼整份 prompt。
  *
+ * 同一个理由适用于事件**顶层**的 `systemPrompt`：官方类型里它是必填的
+ * （`readonly systemPrompt: string`），`pi-background-tasks` 的 shell 策略 handler 进来
+ * 第一句就 `typeof event.systemPrompt !== 'string'` → 抛
+ * `pi_bg_shell_prompt_unsupported`（症状：启动时一条「扩展装载诊断」，而它那段 shell
+ * 指引永远进不了 prompt）。所以我们给**当时那份整段**（只读事实），但**不采信** handler
+ * 返回的整段替换 —— 与下面 systemPromptOptions 同一个口径。
+ *
  * ## 扩展的错误不许炸环
  *
  * 官方在每个 handler 外面包了 try/catch 并报给 `runner.onError`。我们也照做 ——
@@ -65,6 +72,14 @@ export type BeforeAgentStartHandler = (
     type: 'before_agent_start';
     prompt: string;
     images: unknown[];
+    /**
+     * 当时生效的**整段** system prompt（官方必填字段，扩展会拿它做校验/拼自己的块）。
+     *
+     * 只是**只读事实**：handler 返回的 `systemPrompt` 一律忽略（本项目的 prompt 是装载时
+     * 定下的，整段替换会把已发出的 messages 与 prompt 弄对不上）。扩展真要改内容，走
+     * `systemPromptOptions.sections`（按段 patch，见文件头）。
+     */
+    readonly systemPrompt: string;
     /**
      * 官方的 `BuildSystemPromptOptions`。**只给 handler 真的会读的那三个字段**：
      *
@@ -154,6 +169,10 @@ export async function notifyBeforeAgentStart(
     type: 'before_agent_start' as const,
     prompt: text ?? '',
     images: [],
+    // 官方的必填字段（`pi-background-tasks` 拿它做形状校验，缺了就抛
+    // `pi_bg_shell_prompt_unsupported`）。给装载时那份整段 —— 它不含后续补丁段，
+    // 但那是**当时真实**的一份；扩展若据此重写整段，我们也不采信（见上面的字段注释）。
+    systemPrompt: state.prompt.systemPrompt,
     // 起点是**装载时那份**（不含别的 handler 已写过的段）：于是「某一轮不写某个段」
     // 表达的就是「不要那段了」，而不是「继承上一轮的值」。抄一份是因为 handler 就地改。
     systemPromptOptions: {

@@ -133,6 +133,21 @@ test('段补丁：head 一动不动，补丁是新消息，回放出来的 promp
   });
 });
 
+test('事件形状：`systemPrompt` 是官方必填的字符串（缺了 pi-background-tasks 会抛）', async () => {
+  const { store } = freshStore();
+  seedPrompt(store);
+  // `pi-background-tasks` 的 shell 策略 handler 就是这么开头的：先把事件当一个
+  // `{ systemPrompt: unknown }` 看，不是 string / string[] 就直接抛
+  // `pi_bg_shell_prompt_unsupported`（症状是启动时一条诊断，而那段 shell 指引永远
+  // 进不了 prompt）。这里钉住：给出去的那份是**装载时整段**，且是字符串。
+  let seen: unknown;
+  const patch = await run(store, (event) => {
+    seen = (event as unknown as { systemPrompt: unknown }).systemPrompt;
+  });
+  assert.equal(seen, '整段 prompt', '`systemPrompt` 必须是当时生效的整段');
+  assert.equal(patch, undefined, '只读事实不该顺手制造一条补丁');
+});
+
 test('段补丁：环在跑的时候不发（返回 undefined，不追加）', async () => {
   const { store } = freshStore();
   seedPrompt(store);

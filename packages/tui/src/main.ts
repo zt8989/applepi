@@ -16,6 +16,7 @@ import { findSessionFile } from '@ela/core/config-home';
 import { defaultProviderSpec, providerNames } from '@ela/core/provider';
 import { THINKING_LEVELS, isThinkingLevel } from '@ela/core/thinking-level';
 import { createKernel, type Kernel } from '@ela/core/kernel';
+import { startHerdrReporting } from '@ela/core/herdr';
 import { cwdLine, gitBranch, runTui, SLASH_COMMANDS, statsLine } from './app';
 import { setupTheme } from './theme';
 import { keyLabel } from './keybindings';
@@ -536,6 +537,41 @@ async function main(): Promise<void> {
     }
   }
 
+  // ── herdr：**自己上报**这个 pane 里是 pi ──
+  //
+  // 为什么不是像 mac 上那样给进程塞 `HERDR_AGENT`：那条 hint 只在 Linux/macOS 生效
+  // （见 `packages/core/src/herdr.ts` 的文件头，里面有文档与 `herdr.exe` 的证据）。
+  //
+  // 只在**交互式**那条路上开：一次性模式（`-p`）没有 PTY 给 herdr 显示 —— 与 herdr
+  // 官方 pi 集成自己那道 `ctx.mode === 'tui'` 的门同一个理由。不在 herdr 里时它是个
+  // 空壳（`startHerdrReporting` 直接返回空函数），零开销、零副作用。
+  const stopHerdr =
+    args.prompt === undefined
+      ? startHerdrReporting({
+          store: kernel.store,
+          // 会话引用**每次现取**：`/new` 会同时换 id 与文件，而 herdr 要的是「现在」那一个。
+          // resume 命令用本项目自己的 CLI —— herdr 服务器重启后拉回来的是 ela，而不是
+          // 一个没有 ela 状态的 pi 进程（herdr 会优先用它，见其文档的 `resume_argv`）。
+          session: () => {
+            const id = kernel.store.getState().session.id;
+            const file = kernel.session?.file;
+            return {
+              ...(file !== undefined ? { path: file } : {}),
+              id,
+              resumeArgv: ['ela', '--session', id],
+            };
+          },
+          // 第一次失败说一声就够（herdr 在、但连不上或它拒了 —— 那是要有人知道的）。
+          // 界面起来的时机在它之后（`publishUi`），所以两种路子都留着。
+          onError: (reason) => {
+            const text = `herdr 上报失败（这个 pane 在 herdr 里会认不出是 pi）：${reason}`;
+            const ui = uiRef.current;
+            if (ui !== undefined) ui.onNotice(text);
+            else process.stderr.write(`${text}\n`);
+          },
+        })
+      : () => {};
+
   const prompt = args.prompt;
   const exitCode = await runTui({
     store: kernel.store,
@@ -590,6 +626,8 @@ async function main(): Promise<void> {
     }),
     ...(prompt !== undefined ? { prompt } : {}),
   }).finally(async () => {
+    // herdr 那边放开这个 pane（异步，不等它 —— herdr 自己也会按「上报进程没了」清掉）。
+    stopHerdr();
     // 关掉监听端口，否则事件循环上一直有活，进程退不掉（与 `kernel.dispose()` 同一个道理）。
     await web?.close();
     bridge?.dispose();

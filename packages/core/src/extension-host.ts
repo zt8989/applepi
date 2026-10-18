@@ -930,6 +930,11 @@ export async function loadExtensionHost(
         type: 'before_agent_start' as const,
         prompt: '',
         images: [],
+        // 官方的必填字段：`pi-background-tasks` 的 shell 策略 handler 先校验它，
+        // 缺了就是启动时一条 `pi_bg_shell_prompt_unsupported`，且它那段 shell 指引
+        // 永远进不了 prompt。这一刻 `prompt.init` 还没发生，所以是空串 ——
+        // **形状**才是扩展要的（内容走 `sections`，见下面那个字段）。
+        systemPrompt: store.getState().prompt.systemPrompt,
         // 这一刻 `prompt.init` 还没发生，所以 `activeToolsFromState` 读的是注册表的
         // 激活集 —— 正是扩展此刻从 `pi.getActiveTools()` 会读到的同一份。
         systemPromptOptions: {

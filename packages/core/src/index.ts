@@ -125,6 +125,28 @@ export {
   type CutPlan,
 } from './compact';
 
+// ─── herdr 集成（自己上报，见 herdr.ts 的文件头） ───
+export {
+  HERDR_AGENT_ENV,
+  HERDR_AGENT_NAME,
+  HERDR_SOURCE,
+  createHerdrReporter,
+  herdrAgentName,
+  herdrPane,
+  herdrReportFor,
+  herdrSocketEndpoint,
+  sendHerdrRequest,
+  startHerdrReporting,
+  type HerdrAgentState,
+  type HerdrPane,
+  type HerdrReport,
+  type HerdrReporter,
+  type HerdrReporterOptions,
+  type HerdrReply,
+  type HerdrSessionRef,
+  type StartHerdrReportingOptions,
+} from './herdr';
+
 // ─── 装载与 middleware ───
 export type { ModelCapabilities, PromptToolDefinition } from './actions';
 export type { ModelState, PromptState } from './state';
