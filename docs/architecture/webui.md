@@ -196,14 +196,16 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 - 执行时不发给模型（`RemoteAgent.prompt` 里拦下，见 `onPrompt`）—— 与 TUI 的 `runCommand`
   同一个分工：命令是「跟界面说」的通道，消息才是「跟模型说」。
 - `/model` 弹已有的模型选择器；`/thinking` `/settings` `/scoped-models` 弹通用模态框；
-  `/skills` `/help` 是纯文本弹窗；扩展命令走 `POST /api/command`。
+  `/skills` 是纯文本弹窗；扩展命令走 `POST /api/command`。
+- **`/help` 没有**（与 pi 一致：它的入口是补全 —— 打 `/` 就把整张表摆出来）。
 - `/skill:<名字> [问题]` **不是命令**（与 TUI 一致）：它要把 SKILL.md 展开成 `<skill>` 块
   发给模型，而文件在磁盘上 —— 所以浏览器**不拦**，当普通消息发出去，
   `bridge` 收到后用 `@ela/core/skills` 的 `expandSkillCommand()` 展开（与 TUI 同一个函数）。
 
-**只做非会话类**：`/new` `/sessions` `/resume` `/clean` `/compact` 服务端**不下发**
+**只做非会话类**：`/new` `/resume` `/compact` `/session` `/name` `/copy` `/quit` 服务端**不下发**
 （命令表里没标 `web: true`），所以浏览器里打它们会得到「浏览器里只支持非会话类命令」——
-那几件要动会话本身（换文件、删历史、整份换 messages），它们的界面还在终端那边。
+那几件要么动会话本身（换文件、整份换 messages）、要么是终端的事（剪贴板、退出），
+它们的界面还在终端那边。
 
 ## 扩展对话框（`ctx.ui.select` / `confirm` / `input`）与问卷
 
@@ -282,7 +284,7 @@ WS   {type:'resumeSession', id, cwd}  → bridge → 内核的 restoreSession(fi
 - **环在跑时整列与「新建」一起锁上**：换会话会把正在写的那个文件丢掉，所以那段时间
   每行都 `aria-disabled`（点了给一句提示，不静默）。服务端还有第二道闸 —— `bridge`
   收到 `resumeSession` / `newSession` 时判 `phase !== 'idle'` 并回一条警示
-  （TUI 的 `/sessions` `/new` 也是同一条规矩）。
+  （TUI 的 `/resume` `/new` 也是同一条规矩）。
 - **恢复不换工作目录**：`cwd` 是内核启动时定的（reducer 的 `conversation.reset` 带
   `state.session.cwd` 过去，见 [kernel](kernel.md)）。所以跨目录恢复时**工具仍在原来的
   目录里跑** —— 这件事由服务端在提示里说清楚（「它的目录是 X；工具仍在 Y 里跑」），

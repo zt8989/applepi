@@ -29,6 +29,7 @@
  * 先跳过一堆与它无关的记录。
  */
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { ensureDir, findFileById, sessionDirFor, sessionFileName } from './config-home';
 import type { Message, SystemMessage } from '@earendil-works/pi-ai';
@@ -420,7 +421,7 @@ export function readSessionThinking(file: string): SessionThinkingInfo | undefin
  *
  * 会话文件里一条 toolResult 能有几百 KB（一次 `ls -la` 的输出、一次 grep 的全部命中），
  * 而**列表界面要的只是首条用户消息** —— 它在文件的前几行。为了显示 124 个会话的标题
- * 而把 18MB 全 parse 一遍（那是早先 `sessionTitle()` 干的事），就是「打开 /sessions 等一分钟」。
+ * 而把 18MB 全 parse 一遍（那是早先 `sessionTitle()` 干的事），就是「打开 /resume 等一分钟」。
  *
  * `stopAfter` 是真正的省法：拿到想要的 entry 就不再往下读。标题那条路上第一条 user 消息
  * 一命中就停，于是实际读量与**第一个问题有多长**成正比，与这个会话聊了多久无关。
@@ -561,6 +562,99 @@ export interface SessionInfoEntryLike extends SessionEntry {
   type: 'session_info';
   /** 用户给会话起的名字。空串 = 显式清掉上一个名字（与 pi 同一语义）。 */
   name?: string;
+}
+
+/**
+ * 给会话起名：往那个会话文件**追加**一条 `session_info`。
+ *
+ * 两个调用方：`/name`（`tui/app.ts`）与历史会话面板的重命名（`session-picker.ts`）。
+ * 写在**格式模块**里而不是其中任何一个，是因为这是「会话文件长什么样」的一部分 ——
+ * 面板只是碰巧也需要它。
+ *
+ * 与 pi 同一个 entry type，所以**两边都能读到**这个名字（pi 的 `getSessionName()` 走的就是
+ * 「倒着找最后一条 `session_info`」，我们的 `config-home.readSessionName()` 同一套语义）。
+ *
+ * ## 为什么是 append 而不是重写文件
+ *
+ * entry 用 `parentId` 串成一条链（pi 用它做 session tree）。重写要重排那条链，
+ * 而「给会话起个名字」不该动它 —— append 是**唯一**安全的形状。
+ *
+ * ## 为什么用随机 id 而不是接着正在跑的那个 writer 数
+ *
+ * 本函数是**带外**调用：正在记录的 `SessionWriter`（`session-recorder.ts`）手里有自己的
+ * `seq`，两边各自按「最后一条 entry 的 id 往后数」就会**算出同一个 id** —— 下一个 `e12`
+ * 既是这条 `session_info` 又是下一条消息，链上出现两个同 id 节点。随机 id 让两者互不相干。
+ *
+ * 副作用是：这条 `session_info` 与「下一条消息」在 `parentId` 上成了**兄弟**（都挂在当时的
+ * 链尾上），而不是一条直线。这是可接受的 —— pi 的会话树本来就有分叉，它的
+ * `appendSessionInfo()` 在外部 append 时也是这个形状；而且改名不该动链上的任何已有节点
+ * （见上面的「为什么是 append 而不是重写文件」）。
+ *
+ * ## 名字里的换行会被压成空格
+ *
+ * 一条 `session_info` = 一行 JSON，而换行会把它劈成两半（第二半 `JSON.parse` 失败被跳过，
+ * 于是这个名字**看起来没生效**）。与 pi 的 `appendSessionInfo()` 同一处理。
+ *
+ * ## 空名字 = 清掉名字
+ *
+ * pi 的语义是「最后一条 `session_info` 说了算，空串 = 显式清名」。`/name` 那边已经把
+ * 空串拦掉了（没给参数 = 显示当前名字），这里再兜一层（与 pi 的 `appendSessionInfo` +
+ * 面板 `confirmRename` 同一厚度）。
+ */
+export function appendSessionName(file: string, name: string): void {
+  const sanitized = name.replace(/[\r\n]+/g, ' ').trim();
+  if (sanitized === '') return;
+  const entry = {
+    type: 'session_info',
+    // id：8 位随机（pi 的 `generateId()` 也是 8 位）。这条 entry 不参与消息树，
+    // 但要有 id 才能与 pi 的 `session_info` 形状一致。
+    id: randomUUID().slice(0, 8),
+    parentId: lastEntryId(file),
+    timestamp: new Date().toISOString(),
+    name: sanitized,
+  };
+  ensureDir(path.dirname(file));
+  appendFileSync(file, `${JSON.stringify(entry)}\n`, 'utf8');
+}
+
+/**
+ * 最后一条 entry 的 id（链尾）。读文件末尾 64KB 就够 —— 一条 entry id 只有 8 字符。
+ *
+ * 读不到就 `null`（一条 `session_info` 挂在链首是合法的：那条链后面还有消息）。
+ */
+function lastEntryId(file: string): string | null {
+  let fd: number | undefined;
+  try {
+    fd = openSync(file, 'r');
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - 64 * 1024);
+    const buf = Buffer.allocUnsafe(size - start);
+    readSync(fd, buf, 0, buf.length, start);
+    // 开头那一行可能被截断了，跳过它。
+    const lines = buf.toString('utf8').split('\n').slice(1);
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const line = lines[i];
+      if (line === undefined || line.trim() === '') continue;
+      let entry: { type?: string; id?: string };
+      try {
+        entry = JSON.parse(line) as typeof entry;
+      } catch {
+        continue; // 崩溃截断的半行：跳过。
+      }
+      if (entry.type !== 'session') return entry.id ?? null;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // 读失败后的清理失败不值得抛。
+      }
+    }
+  }
 }
 
 /** 会话的第一句话（列表里做标题用）。 */

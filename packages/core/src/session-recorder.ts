@@ -112,7 +112,7 @@ export function createSessionRecorder(
    * 单独负责（pi 也在开头写一条）；这里只管「后来了又换过」。
    *
    * 不去重会怎样：订阅器**每帧**都跑，一次 `/model` 能写出几百条 —— 而会话文件
-   * 恰好是「打开 `/sessions` 面板要扫」的那些文件之一。
+   * 恰好是「打开 `/resume` 面板要扫」的那些文件之一。
    */
   const modelKeyOf = (s: AgentState): string => `${s.model.provider}\0${s.model.modelId}`;
   let lastModelKey = modelKeyOf(store.getState());

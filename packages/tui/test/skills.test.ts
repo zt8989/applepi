@@ -326,7 +326,7 @@ test('未知 skill 原样返回（不静默吞掉命令）', async () => {
     const registry = await loadSkillRegistry({ cwd });
     assert.equal(expandSkillCommand('/skill:根本没有', registry.skills), '/skill:根本没有');
     // 非 skill 命令也原样返回。
-    assert.equal(expandSkillCommand('/sessions', registry.skills), '/sessions');
+    assert.equal(expandSkillCommand('/resume', registry.skills), '/resume');
     assert.equal(expandSkillCommand('普通问题', registry.skills), '普通问题');
   });
 });

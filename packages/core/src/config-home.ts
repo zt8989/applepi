@@ -38,7 +38,7 @@
  * ## 会话怎么与 pi 互通
  *
  * 目录名（`--<cwd>--` 编码）、**文件名**（`<ISO 时间戳>_<id>.jsonl`）与 header 形状与 pi 一致，
- * 所以 pi 的 `/resume` 能看到我们的会话，我们的 `/sessions` 也能看到 pi 的。
+ * 所以 pi 的 `/resume` 能看到我们的会话，我们的 `/resume` 也能看到 pi 的。
  * session id 也是同一个形状（UUIDv7）—— 于是把我们的 id 粘给 pi 的 `--session <id>`
  * 能直接恢复。**header 的 `version` 写的是当前 pi 的 `3`**：v3 多出来的两样（开头的
  * `model_change` 与 head system 消息）我们自己就写（见 session-file.ts / session-recorder.ts），
@@ -329,7 +329,7 @@ function firstLineOf(chunk: string): string {
  *
  * 早先那样做，而列表阶段每个会话要读**两次**（一次取 header、一次数条数）：
  * 一个 18MB 的 sessions/ 目录就是 36MB 的读 + 36 万次字符串比较，而这一段在弹窗弹出前
- * 是**同步**的 —— 用户看到的就是「打开 /sessions 要等一分钟」。
+ * 是**同步**的 —— 用户看到的就是「打开 /resume 要等一分钟」。
  *
  * 现在只读开头 64KB 取 header（见 `readHead`），条数则**分块流式数换行**：
  * 不把全文读进内存，也不建一个几十万元素的 `split` 结果数组。而条数是**精确**的 ——
@@ -554,6 +554,21 @@ function readSessionMeta(file: string): { name?: string; parentSession?: string 
     : { ...(name !== undefined ? { name } : {}), ...(parentSession !== undefined ? { parentSession } : {}) };
 }
 
+/**
+ * 一个会话当前的显示名（`session_info`）。没起过名（或文件不存在）就 undefined。
+ *
+ * 与列表里 `SessionSummary.name` **同一份数据、同一套语义**（最后一条非空
+ * `session_info` 说了算，见 `readSessionMeta`）；这里只是给「只知道文件路径」的调用方
+ * （`/name` 与 `/session` 那两个命令）一个直接入口 —— 它们不该为了一个字段去 list 整个目录。
+ *
+ * **只扫前 512KB**（理由见 `readSessionMeta` 那段）。对 `/name` 的常见用法（给**正在聊**
+ * 的这个会话起名）一定命中，因为那条 entry 就追加在刚才聊的那几行后面。
+ */
+export function readSessionName(file: string | undefined): string | undefined {
+  if (file === undefined || !existsSync(file)) return undefined;
+  return readSessionMeta(file)?.name;
+}
+
 export function ensureDir(dir: string): void {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 }
@@ -628,6 +643,13 @@ export function cleanSessions(ids: readonly string[]): CleanResult {
  * 用途是「一键把测试留下的垃圾扫掉」：测试会话的 cwd 全是临时目录，
  * 界面上根本没法一个个点。keep 放行当前正在用的那个 id —— 它正在被记录器写着，
  * 删了会让接下来的消息写进一个已被删掉的文件（Linux 上还会拿到一个「看不见的」句柄）。
+ *
+ * ## 现在**没有命令入口**了（有意）
+ *
+ * 它以前是 `/clean` 与 `/wipe`。命令表改成与 pi 对齐之后那两条删了 —— pi 的删历史在
+ * `/resume` 面板里（`ctrl+d`，一次一条）。函数留着是因为它是**库**的能力：
+ * `clean-sessions.test.ts` 钉的「删会话要连带删轨迹」那条不变量因为它才跑得起来，
+ * 而哪天要开一个 CLI 的清理入口（或面板里的「删掉全部测试会话」）时不必重写。
  */
 export function cleanSessionsExcept(keep: readonly string[]): CleanResult {
   const keepSet = new Set(keep);

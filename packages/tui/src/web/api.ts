@@ -216,7 +216,7 @@ export function createWebApi(options: WebApiOptions): WebApi {
   return {
     commands() {
       // 扩展的命令一律进（它们本来就该在浏览器里也能跑）；内置的只有标了 `web` 的进
-      // —— 会话类（`/new` `/sessions` `/compact` …）还在终端那边，见文件头。
+      // —— 会话类（`/new` `/resume` `/compact` …）还在终端那边，见文件头。
       // `/skill:<名字>` 也列进来（展开由 bridge 在收到 prompt 时做，见那里的注释）。
       const builtin: WebCommandInfo[] = options
         .commands()

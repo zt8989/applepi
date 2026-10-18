@@ -20,7 +20,7 @@
  * 另外两条是纯约定的护栏，防止以后有人「顺手优化」掉：
  *
  * - 搜索**不**扫全文（`allMessagesText` 给空串）—— docs/architecture/sessions.md 里
- *   那条「打开 /sessions 要等一分钟」的结论就靠它。
+ *   那条「打开 /resume 要等一分钟」的结论就靠它。
  * - 删会话要连带删 `traces/<id>.jsonl` —— 只删会话文件的话 `traces/` 会一直涨。
  */
 import test from 'node:test';
@@ -38,7 +38,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { listSessions, sessionPath, tracePathFor } from '@ela/core/config-home';
-import { readJsonlTail, type MessageEntry } from '@ela/core/session-file';
+import { readJsonlTail, appendSessionName, type MessageEntry } from '@ela/core/session-file';
 import { deleteSessionTrace } from '../src/session-picker';
 
 async function withHome(fn: (home: string) => Promise<void> | void): Promise<void> {
@@ -356,18 +356,9 @@ test('改名是 append：parentId 链原封不动', async () => {
     ]);
     const before = readFileLines(file);
 
-    // `appendSessionName` 是 session-picker 内部的（不导出），这里直接模拟它写的形状。
-    appendFileSync(
-      file,
-      `${JSON.stringify({
-        type: 'session_info',
-        id: 'ff11ee22',
-        parentId: 'e3',
-        timestamp: new Date(t + 3).toISOString(),
-        name: '改个名',
-      })}\n`,
-      'utf8',
-    );
+    // 直接跑**真的**那个函数（`/name` 与面板的改名走的同一支）：它自己算
+    // `parentId`（读文件尾巴找链尾）与随机 id。
+    appendSessionName(file, '改个名');
 
     const after = readFileLines(file);
     assert.deepEqual(after.slice(0, before.length), before, '原来那几行一个字节都没动');
@@ -376,6 +367,14 @@ test('改名是 append：parentId 链原封不动', async () => {
     assert.equal(last.type, 'session_info');
     assert.equal(last.name, '改个名');
     assert.equal(last.parentId, 'e3', '挂在链尾');
+    // 换行会把一条 `session_info` 劈成半行 JSON（名字看上去没生效），所以压成空格。
+    appendSessionName(file, ' 两个\n名字 ');
+    const renamed = JSON.parse(readFileLines(file).at(-1) as string) as Entry & { name?: string };
+    assert.equal(renamed.name, '两个 名字');
+    // 空名字不写（清名有单独语义，不走这个入口）。
+    const count = readFileLines(file).length;
+    appendSessionName(file, '   ');
+    assert.equal(readFileLines(file).length, count, '空名字不落盘');
   });
 });
 

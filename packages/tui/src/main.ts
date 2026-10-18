@@ -420,7 +420,7 @@ async function main(): Promise<void> {
       process.stderr.write(
         `没有在 ${args.cwd} 的会话目录里找到 ${args.sessionId} —— 当成新会话继续` +
           `（若那个会话是别的工作目录下的，进那个目录再 \`ela --session ${args.sessionId}\`，` +
-          `或在本目录用 \`/sessions\` 选它）\n`,
+          `或在本目录用 \`/resume\` 选它）\n`,
       );
     }
   }

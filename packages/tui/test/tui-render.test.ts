@@ -304,7 +304,7 @@ test('命令反馈卡：上面一行空行 + 左边一格（pi 的 Spacer(1) + p
   assert.ok(out[index]?.startsWith(' Thinking'), `左边要留一格：${JSON.stringify(out[index])}`);
 });
 
-test('命令反馈卡：多行卡每一行都缩一格（`/help` 那种）', () => {
+test('命令反馈卡：多行卡每一行都缩一格（`/session` 那种）', () => {
   const state = { messages: [], toolTimings: {} } as unknown as AgentState;
   const out = stripTerminalSequences(
     renderTranscript(state, 0, 40, false, [{ text: '/model\n/thinking', at: 0 }]),

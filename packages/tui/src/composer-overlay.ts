@@ -1,5 +1,5 @@
 /**
- * 「覆盖 composer」这一形状的覆盖层参数 —— `/model`、`/scoped-models`、`/sessions`
+ * 「覆盖 composer」这一形状的覆盖层参数 —— `/model`、`/scoped-models`、`/resume`
  * 三个面板共用。
  *
  * ## 为什么不是居中的浮窗
@@ -19,7 +19,7 @@
  * ```
  *
  * 于是面板**天然**是 composer 的宽度（`editorContainer` 占满一行），而它的底边**就是**
- * composer 的底边（同一个槽位、同一个位置）。用户按下 Ctrl+L / /sessions 时看到的是
+ * composer 的底边（同一个槽位、同一个位置）。用户按下 Ctrl+L / /resume 时看到的是
  * 「输入框那块变成了列表」，不是「屏幕中央弹出一个框」。
  *
  * 本项目里 composer 是底部 `VStack` 里的一格（见 `app.ts` 的 `applyLayout`），
@@ -58,7 +58,7 @@ export const COMPOSER_BOTTOM_MARGIN = FOOTER_ROWS;
  * 「覆盖 composer」的覆盖层参数。
  *
  * 三个面板共用这一份，且**只此一份** —— 各写各的必然漂移，而漂移的症状是
- * 「/model 的面板贴着输入框、/sessions 的却飘在中间」。早期这三处就是各写各的
+ * 「/model 的面板贴着输入框、/resume 的却飘在中间」。早期这三处就是各写各的
  * （`anchor: 'center'` + `width: '90%'` + 各自的 `maxHeight`），那正是要修掉的东西。
  *
  * 返回普通对象而不是常量：调用方要往 `tui.showOverlay(component, options)` 里传，
