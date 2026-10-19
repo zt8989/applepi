@@ -134,6 +134,7 @@ export {
   herdrAgentName,
   herdrPane,
   herdrReportFor,
+  herdrSelfReportingActive,
   herdrSocketEndpoint,
   sendHerdrRequest,
   startHerdrReporting,
