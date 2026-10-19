@@ -623,6 +623,12 @@ const transitions: TransitionHandlers = {
       ...(action.skillDiagnostics && action.skillDiagnostics.length > 0
         ? { skillDiagnostics: action.skillDiagnostics }
         : {}),
+      // prompt 模板与 skill 同一个口径：装了就带着走（`/new` / `/resume` 之后照样能用），
+      // 没装（旧轨迹回放 / 测试）就保持 `undefined`。
+      ...(action.promptTemplates ? { promptTemplates: action.promptTemplates } : {}),
+      ...(action.promptDiagnostics && action.promptDiagnostics.length > 0
+        ? { promptDiagnostics: action.promptDiagnostics }
+        : {}),
       seeded: true,
     };
     return {

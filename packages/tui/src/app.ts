@@ -136,6 +136,12 @@ import type { QuestionnaireSession } from '@ela/core/questionnaire';
 import type { ExtensionCommands } from '@ela/core/extension-commands';
 import type { ExtensionEntry } from '@ela/core/extension-host';
 import { expandSkillCommand, parseSkillMessage, skillCommands, skillsInPrompt, type SkillInfo } from '@ela/core/skills';
+import {
+  expandPromptTemplate,
+  promptCommands,
+  promptTemplatesInPrompt,
+  type PromptTemplateInfo,
+} from '@ela/core/prompts';
 
 const useColor = !process.env.NO_COLOR;
 const paint = (code: string, text: string) => (useColor ? `\x1b[${code}m${text}\x1b[0m` : text);
@@ -1091,6 +1097,55 @@ export const SLASH_COMMANDS: ElaSlashCommand[] = [
   { name: 'quit', description: 'Quit ela' },
 ];
 
+/**
+ * 回车时一条 `/xxx` 该走哪条路 —— 与 pi 的分工一致。
+ *
+ * 顺序：
+ *
+ * 1. **skill**（`/skill:name` 展开成 `<skill>` 块）；
+ * 2. **真命令**（内置 `SLASH_COMMANDS` 与扩展命令，由调用方传 `isCommand` 判断）；
+ * 3. **prompt 模板**（`/名字` 展开成正文）；
+ * 4. 剩下的**原样当用户输入发送**。
+ *
+ * 与 pi 的唯一细微差别是第 1/2 步的先后：pi 把扩展命令放在最前面，这里保留原有的
+ * 「`/skill:` 先认」次序。因为 `skill:` 是保留前缀，只有「扩展恰好叫 `skill:xxx`」
+ * 这种病态命名才分得出来；普通输入上两条顺序结果相同。
+ *
+ * ## 为什么未命中是 `message` 而不是错误
+ *
+ * `/etc/hosts`、`/文件名` 这类输入在输入框里很自然，**不能报错也不能吞掉** ——
+ * pi 对认不出的 `/xxx` 就是原样发给模型。这一层只负责分类，不负责报错。
+ *
+ * 写成导出的纯函数是为了能测：`onSubmit` 是闭在 `runTui()` 里的，单测够不到。
+ */
+export type SlashInputRoute =
+  | { kind: 'skill'; text: string }
+  | { kind: 'template'; text: string }
+  | { kind: 'command' }
+  | { kind: 'message' };
+
+export function routeSlashInput(
+  input: string,
+  skills: readonly SkillInfo[],
+  prompts: readonly PromptTemplateInfo[],
+  isCommand: (name: string) => boolean,
+): SlashInputRoute {
+  // 1. skill：与 pi 同一个展开函数，认不出就原样返回。
+  const expandedSkill = expandSkillCommand(input, skills);
+  if (expandedSkill.startsWith('<skill ')) return { kind: 'skill', text: expandedSkill };
+
+  // 2. 真命令（内置 / 扩展）：名字命中就不展开模板 —— 命令有可执行行为。
+  const name = input.slice(1).split(/\s+/, 1)[0] ?? '';
+  if (isCommand(name)) return { kind: 'command' };
+
+  // 3. prompt 模板：`/council <问题>` → 模板正文。
+  const expandedTemplate = expandPromptTemplate(input, prompts);
+  if (expandedTemplate !== input) return { kind: 'template', text: expandedTemplate };
+
+  // 4. 未命中：当普通用户输入发送（**不是错误**）。
+  return { kind: 'message' };
+}
+
 export interface TuiOptions {
   store: AgentStore;
   /** 一次性提问：给完就退出（脚本/管道友好）。 */
@@ -1709,14 +1764,25 @@ export async function runTui(options: TuiOptions): Promise<number> {
    */
   const commandTable = (): SlashCommand[] => [
     ...SLASH_COMMANDS,
+    // prompt 模板紧跟内置命令（与 pi 的 `templateCommands` 同一个位置）：它们是最像
+    // 「命令」的一层 —— 名字短、有 argumentHint、回车就发。
+    ...promptCommands(statePrompts()).map(
+      (c): SlashCommand => ({
+        name: c.name,
+        description: c.description,
+        ...(c.argumentHint !== undefined ? { argumentHint: c.argumentHint } : {}),
+      }),
+    ),
+    // 扩展的命令**追在模板后面**：本项目的与模板的排前面，扩展的排后面。
+    //
+    // 为什么不用 `SLASH_COMMANDS` 那份常量：扩展的命令要等 `loadExtensions()` 装载完
+    // 才知道，而那可能发生在编辑器建好**之后**。所以这里现取（与模板、skill 同一种情况）。
+    ...(extensionCommands()?.list() ?? []),
+    // skill 放最后：与 pi 的 `[...slashCommands, ...templateCommands, ...extensionCommands,
+    // ...skillCommandList]` 同一个顺序，名字长（`skill:<name>`）的天然该在最后。
     ...skillCommands(stateSkills()).map(
       (c): SlashCommand => ({ name: c.name, description: c.description }),
     ),
-    // 扩展的命令**追在最后**：本项目的与 skill 的排前面，扩展的排后面。
-    //
-    // 为什么不用 `SLASH_COMMANDS` 那份常量：扩展的命令要等 `loadExtensions()` 装载完
-    // 才知道，而那可能发生在编辑器建好**之后**。所以这里现取（与 skill 同一种情况）。
-    ...(extensionCommands()?.list() ?? []),
   ];
 
   const base = new CombinedAutocompleteProvider(SLASH_COMMANDS, process.cwd());
@@ -1819,6 +1885,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 于是 `/skill:x` 展开过去模型却不认识它。
    */
   const stateSkills = (): SkillInfo[] => skillsInPrompt(store.getState());
+  /**
+   * 这一轮装载的 prompt 模板（`/名字` 展开用）。
+   *
+   * 与 `stateSkills()` 同一个口径：读 state 而不是重扫目录 —— 模板清单是 `prompt.init`
+   * 那一刻定下的，重扫会得到一个**与界面/补全不一致**的清单。
+   */
+  const statePrompts = (): PromptTemplateInfo[] => promptTemplatesInPrompt(store.getState());
   /**
    * 工具输出是否全部展开（Ctrl+O 切换）。
    *
@@ -2247,19 +2320,25 @@ export async function runTui(options: TuiOptions): Promise<number> {
     if (!input) return;
     // 斜杠命令：不发给模型。
     if (input.startsWith('/')) {
-      // **`/skill:name` 不是命令**，它要展开成 `<skill>` 块发给模型 ——
-      // 与 pi 一致（它的 `_expandSkillCommand()` 在 prompt 里展开，不走命令表）。
-      // 所以先问一句「是不是 skill」，不是才当命令处理。
-      if (expandSkillCommand(input, stateSkills()).startsWith('<skill ')) {
+      // 分类整个交给 `routeSlashInput()`（与 pi 同序）：skill → 模板 → 命令 → 普通输入。
+      // 未命中的 `/xxx` **不是错误** —— 当普通用户输入发给模型（`/etc/hosts`、`/文件名`
+      // 这类输入不该被命令层报错或吞掉，pi 也是认不出就原样发）。
+      const route = routeSlashInput(input, stateSkills(), statePrompts(), (name) =>
+        SLASH_COMMANDS.some((c) => c.name === name) || (extensionCommands()?.has(name) ?? false),
+      );
+      if (route.kind === 'skill' || route.kind === 'template') {
         if (store.getState().phase !== 'idle') {
           notify(yellow(`上一回合还没结束（按 ${keyLabel('app.interrupt')} 可中断）`));
           return;
         }
-        send(expandSkillCommand(input, stateSkills()));
+        send(route.text);
         return;
       }
-      runCommand(input.slice(1));
-      return;
+      if (route.kind === 'command') {
+        runCommand(input.slice(1));
+        return;
+      }
+      // `message`：未命中，走下面普通输入的路径（排队 / 发送）。
     }
     if (store.getState().phase !== 'idle') {
       // **环在跑：入队，而不是拒绝。**
@@ -2629,7 +2708,10 @@ export async function runTui(options: TuiOptions): Promise<number> {
 
   /**
    * 斜杠命令。不发给模型 —— 那是「跟模型说」的通道，命令是「跟界面说」的。
-   * 未知命令回一行提示，不静默吞掉（否则用户以为自己已经在跟模型说了）。
+   *
+   * **只处理确实命中的命令**：未命中的 `/xxx` 在 `editor.onSubmit` 那里就分流去当
+   * 普通输入发送了（与 pi 一致，见那里的注释）。所以 `default` 里那句提示只剩下
+   * 「`SLASH_COMMANDS` 里有、switch 里没实现」这种内部不一致的场合。
    */
   const runCommand = (raw: string): void => {
     const [name = '', ...rest] = raw.trim().split(/\s+/);
@@ -3046,6 +3128,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
           });
           return;
         }
+        // 走到这里说明命令表与 switch 不一致（正常的未命中在 onSubmit 就分流了）。
         // 提示改成「打 `/` 看补全」：`/help` 已经删了（pi 也没有它，补全就是那个入口）。
         notify(yellow(`未知命令 /${name}（打 / 看补全）`));
     }
@@ -3467,13 +3550,17 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 开场横幅 —— **写成函数是因为它要报两次**。
    *
    * `deferExtensions`（交互式启动，见 `kernel.ts`）下扩展是后台装的，而这几节的内容
-   * （skill 清单、扩展清单与装载诊断）恰恰就是装载那一刻才有的：首帧那次只能报到
-   * 「正在装载」，装载完成后再报一次才是**真的**。写成一次性的话，症状是
+   * （skill 清单、prompt 清单、扩展清单与装载诊断）恰恰就是装载那一刻才有的：首帧那次
+   * 只能报到「正在装载」，装载完成后再报一次才是**真的**。写成一次性的话，症状是
    * 「装了扩展，但开场横幅上永远看不到它」—— 而那条横幅的全部意义就是让人看见。
    */
   const buildStartupBanner = (): void => {
     const startupSkills = stateSkills();
     const startupDiagnostics = store.getState().prompt.skillDiagnostics ?? [];
+    // prompt 模板清单与诊断：与 skill 同一次 `prompt.init` 装载，同一种「装载完成需重报」
+    // 的时机（`deferExtensions` 下也是 `ready` 之后才有）。
+    const startupPrompts = statePrompts();
+    const startupPromptDiagnostics = store.getState().prompt.promptDiagnostics ?? [];
     // **每次现取**：装载完成后 `entries` / `errors` 才有内容（见 `TuiOptions.extensions`）。
     const extensionInfo = options.extensions?.();
     const extensionEntries = (extensionInfo?.entries ?? []).filter((e) => !e.hidden);
@@ -3493,6 +3580,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
       contextFiles.length === 0 &&
       startupSkills.length === 0 &&
       startupDiagnostics.length === 0 &&
+      startupPrompts.length === 0 &&
+      startupPromptDiagnostics.length === 0 &&
       extensionEntries.length === 0 &&
       extensionErrors.length === 0 &&
       !loadingExtensions
@@ -3518,13 +3607,12 @@ export async function runTui(options: TuiOptions): Promise<number> {
       const names = startupSkills.map((s) => s.name).sort((a, b) => a.localeCompare(b));
       lines.push(`${yellow('[Skills]')}\n${dim(names.join(', '))}`);
     }
-    // 与 pi 同形：`[Skill conflicts]`。加载不上的 skill 要看得见 ——
-    // 否则就是「模型静默少了能力」，而用户与界面都不知道为什么。
-    if (startupDiagnostics.length > 0) {
-      lines.push(
-        `${yellow('[Skill conflicts]')}\n` +
-          startupDiagnostics.map((d) => yellow(`  ${d}`)).join('\n'),
-      );
+    // 与 pi 同形：`[Prompts]` 列 `/名字`（排序后逗号连排，剩下交给终端折行）。
+    // 位置在 `[Skills]` 之后、`[Extensions]` 之前 —— pi 的顺序是 Context / Skills /
+    // Prompts / Extensions，终端里扫一眼就知道这轮有哪些 `/` 命令可用。
+    if (startupPrompts.length > 0) {
+      const names = startupPrompts.map((p) => `/${p.name}`).sort((a, b) => a.localeCompare(b));
+      lines.push(`${yellow('[Prompts]')}\n${dim(names.join(', '))}`);
     }
     // **常驻**（不靠 notify）：pi 的开场那一节也是 `loadedResourcesContainer` 里的
     // 常驻组件，永不消失。skill 名单要反复对照着打 `/skill:x`，30 秒后就没了等于没有。
@@ -3533,6 +3621,23 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // `resource-labels.ts` 的文件头：报工具名会让用户拿着工具名去 `packages` 里找扩展。
     if (extensionEntries.length > 0) {
       lines.push(`${yellow('[Extensions]')}\n${dim(extensionLabels(extensionEntries).join(', '))}`);
+    }
+    // 诊断统一排在清单之后（与 pi 的 `showLoadedResources` 同序）：
+    // Skill conflicts → Prompt conflicts → Extension issues。
+    //
+    // 加载不上的 skill / 模板要看得见 —— 否则就是「模型静默少了能力」或「命令凭空消失」，
+    // 而用户与界面都不知道为什么。
+    if (startupDiagnostics.length > 0) {
+      lines.push(
+        `${yellow('[Skill conflicts]')}\n` +
+          startupDiagnostics.map((d) => yellow(`  ${d}`)).join('\n'),
+      );
+    }
+    if (startupPromptDiagnostics.length > 0) {
+      lines.push(
+        `${yellow('[Prompt conflicts]')}\n` +
+          startupPromptDiagnostics.map((d) => yellow(`  ${d}`)).join('\n'),
+      );
     }
     if (extensionErrors.length > 0) {
       lines.push(
@@ -3552,7 +3657,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
   buildStartupBanner();
   if (options.ready !== undefined) {
     // 装载完成：`extensionsReady` 翻真（之后 `send()` 不再等），并把横幅**重报一次** ——
-    // skill 清单、扩展清单、装载诊断都是这一刻才有的。
+    // skill 清单、prompt 模板清单、扩展清单、装载诊断都是这一刻才有的。
     void options.ready.then(() => {
       extensionsReady = true;
       buildStartupBanner();

@@ -32,6 +32,7 @@ import { abortRun } from '@ela/core/run-control';
 import { isThinkingLevel } from '@ela/core/thinking-level';
 import { deriveStream, type StreamNoticeEntry } from '@ela/core/stream';
 import { expandSkillCommand, skillsInPrompt } from '@ela/core/skills';
+import { expandPromptTemplate, promptTemplatesInPrompt } from '@ela/core/prompts';
 import type { DialogHost } from '@ela/core/extension-ui';
 import type { QuestionnaireIntent } from '@ela/core/questionnaire';
 import {
@@ -457,17 +458,21 @@ export class WebBridge {
         // `/skill:<名字>` **不是命令**，而是「把 SKILL.md 展开成 `<skill>` 块发给模型」
         // —— 与 TUI 的 `editor.onSubmit` 同一处逻辑（共用同一个 `expandSkillCommand`）。
         // 展开必须在服务端做：SKILL.md 在磁盘上，浏览器读不到。
+        const state = this.options.store.getState();
         let text = raw;
         if (raw.startsWith('/skill:')) {
-          const state = this.options.store.getState();
           const name = raw.slice('/skill:'.length).split(/\s+/)[0] ?? '';
           const skills = skillsInPrompt(state);
-          if (!skills.some((skill) => skill.name === name)) {
-            return [{ type: 'notice', level: 'warn', text: `未知 skill：${name}（/skills 看清单）` }];
+          // 找不到同名 skill **不是错误**：保持原样发出去（与 pi 的
+          // `_expandSkillCommand()` 一致 —— 它认不出就原样返回）。
+          if (skills.some((skill) => skill.name === name)) {
+            text = expandSkillCommand(raw, skills);
           }
-          text = expandSkillCommand(raw, skills);
         }
-        const state = this.options.store.getState();
+        // Prompt 模板：与 TUI 同一个展开函数（正文也在服务端）。没有同名模板时原样返回，
+        // 所以未知的 `/xxx` 仍然按用户输入发出去（与终端那边一致，见 `editor.onSubmit`）；
+        // 浏览器里的扩展命令在前端已经走 `/api/command` 了，这里只接模板与 skill。
+        text = expandPromptTemplate(text, promptTemplatesInPrompt(state));
         if (state.phase !== 'idle') {
           // 跑着的时候再发就排队（与 TUI 的 steer 同一个口径），不打断当前回合。
           this.options.store.dispatch({ type: 'queue.input', text, as: 'steer' });

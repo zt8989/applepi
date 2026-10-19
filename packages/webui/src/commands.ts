@@ -15,6 +15,8 @@
  * | `/skills` | 纯文本弹窗（**唯一一条 pi 没有的命令**，理由见 TUI 的 `SLASH_COMMANDS`） |
  * | 扩展命令 | `POST /api/command`（服务端跑） |
  * | `/skill:<名字>` | **不走这里** —— 当普通消息发出去，服务端展开成 `<skill>` 块 |
+ * | `/模板名 [参数]` | **不走这里** —— 命令表里 `source: 'prompt'` 的那些当普通消息发出，由服务端展开（正文在磁盘上） |
+ * | 未命中的 `/xxx` | **不走这里** —— 返回 false，当普通消息发给模型（与 pi 一致，不报错） |
  *
  * 会话类命令（`/new` `/resume` `/compact` `/session` …）服务端**不下发**，所以这里也不认
  * —— 前端只做服务端说能做的。
@@ -217,8 +219,20 @@ export async function runCommand(name: string, arg: string, ctx: CommandContext)
       return true;
     }
     default: {
-      // 扩展命令：服务端跑（它可能发消息、改 prompt、调工具）。内置的没命中说明
-      // 那个名字只存在于终端那边 —— 说清楚，别静默。
+      // 只有**扩展命令**走服务端执行；其余未命中的 `/xxx`（prompt 模板、`/new` 这类
+      // 只在终端里实现的命令、以及 `/etc/hosts` 这样的普通输入）一律返回 false ——
+      // 当普通消息发给模型。命令层不能把未命中的输入报错或吞掉（与 pi 一致）。
+      //
+      // 名字与扩展命令撞车时**扩展优先**（与 pi 的「扩展命令先执行」一致）；
+      // 与内置命令撞车时到不了这里（switch 上面已经接住了）。
+      const commands = await elaApi.commands();
+      const isExtension = commands.some(
+        (command) => command.name === name && command.source === 'extension',
+      );
+      if (!isExtension) {
+        return false;
+      }
+      // 扩展命令：服务端跑（它可能发消息、改 prompt、调工具）。
       const result = await elaApi.runCommand(name, arg);
       report(result, ctx);
       return true;

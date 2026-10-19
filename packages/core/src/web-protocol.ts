@@ -259,8 +259,8 @@ export interface WebSessionsInfo {
 export interface WebCommandInfo {
   name: string;
   description: string;
-  /** 内置 / 扩展注册 / skill（`skill:<名字>`）。 */
-  source: 'builtin' | 'extension' | 'skill';
+  /** 内置 / 扩展注册 / prompt 模板 / skill（`skill:<名字>`）。 */
+  source: 'builtin' | 'extension' | 'prompt' | 'skill';
 }
 
 /** `GET /api/models`：目录 + 作用域 + 当前模型（选择器要置顶 + 打勾）。 */

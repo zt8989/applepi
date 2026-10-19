@@ -215,16 +215,32 @@ test('bridge：hello 带版本与诊断，浏览器 → 服务端 → 浏览器 
     assert.equal(modelsInfo.scoped, null);
     assert.equal(modelsInfo.current?.provider, 'faux');
 
-    // 命令表：内置的只有标了 `web` 的进，扩展的一律进（`sessions` 是会话类，不进）。
+    // 命令表：内置的只有标了 `web` 的进，扩展的一律进（`sessions` 是会话类，不进），
+    // prompt 模板插在两者之间（与 TUI 补全、pi 的顺序一致）。
+    ctx.store.dispatch({
+      type: 'prompt.init',
+      systemPrompt: '',
+      tools: [],
+      promptTemplates: [
+        {
+          name: 'council',
+          description: 'Run a council',
+          content: 'Council body',
+          filePath: '/tmp/council.md',
+          scope: 'user',
+        },
+      ],
+    } as never);
     const commands = (await (await fetch(`${ctx.server.url}api/commands`)).json()) as {
       name: string;
       source: string;
     }[];
     assert.deepEqual(
       commands.map((c) => c.name),
-      ['model', 'ext-thing'],
+      ['model', 'council', 'ext-thing'],
     );
-    assert.equal(commands[1]?.source, 'extension');
+    assert.equal(commands[1]?.source, 'prompt');
+    assert.equal(commands[2]?.source, 'extension');
 
     // 动作接口：不认识的模型回 `ok: false` + 一句话（不是异常）。
     const bad = (await (
@@ -701,14 +717,56 @@ test('bridge：`/skill:<名字>` 展开成 <skill> 块再发（文件在服务�
     assert.match(dispatched[0]?.text ?? '', /这是 skill 正文/);
     assert.match(dispatched[0]?.text ?? '', /帮我看下这个报错$/);
 
-    // 不认识的 skill：回一条警示，**不** dispatch（否则会被当成普通消息发给模型）。
+    // 不认识的 skill：**不报错**，原样当普通输入发出去（与 pi 的
+    // `_expandSkillCommand()` 一致 —— 认不出就原样返回）。
     dispatched.length = 0;
-    const warn = bridge.handle({ type: 'prompt', text: '/skill:nope 你好' });
-    assert.equal(warn[0]?.type, 'notice');
-    assert.equal(dispatched.length, 0);
+    assert.deepEqual(bridge.handle({ type: 'prompt', text: '/skill:nope 你好' }), []);
+    assert.equal(dispatched[0]?.type, 'user.message');
+    assert.equal(dispatched[0]?.text, '/skill:nope 你好');
   } finally {
     bridge.dispose();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('bridge：prompt 模板在服务端展开（正文在磁盘上，浏览器读不到）', () => {
+  const dispatched: { type?: string; text?: string }[] = [];
+  const state = {
+    ...fakeState([]),
+    trace: createTraceTree('t'),
+    prompt: {
+      promptTemplates: [
+        {
+          name: 'council',
+          description: 'Run a council',
+          content: 'Council on ${1:-这个问题}。',
+          filePath: '/tmp/council.md',
+          scope: 'user',
+        },
+      ],
+    },
+  };
+  const fake = fakeStore(state);
+  (fake.store as { dispatch: (action: { type?: string; text?: string }) => void }).dispatch = (action) =>
+    dispatched.push(action);
+  const bridge = new WebBridge({
+    store: fake.store as never,
+    setModel: () => true,
+    newSession: () => {},
+    resolveModel: () => null,
+  });
+  try {
+    assert.deepEqual(bridge.handle({ type: 'prompt', text: '/council "要不要拆包"' }), []);
+    assert.equal(dispatched[0]?.type, 'user.message');
+    // 参数按 pi 的规则替换，且**不是**把 `/council` 原样发给模型。
+    assert.equal(dispatched[0]?.text, 'Council on 要不要拆包。');
+
+    // 没有同名模板的 `/xxx` 保持原样（桥只展开模板，不当命令）。
+    dispatched.length = 0;
+    assert.deepEqual(bridge.handle({ type: 'prompt', text: '/nope 你好' }), []);
+    assert.equal(dispatched[0]?.text, '/nope 你好');
+  } finally {
+    bridge.dispose();
   }
 });
 
