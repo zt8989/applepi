@@ -89,13 +89,14 @@ import type { ExtensionFactory } from '@earendil-works/pi-coding-agent/dist/core
 import { createHostUi, type ExtensionHostUi, type HostUiOptions } from './extension-ui';
 import { QuestionnaireHost } from './questionnaire';
 import { createRequire } from 'node:module';
-import { existsSync, readdirSync, type Dirent } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, type Dirent } from 'node:fs';
 import path from 'node:path';
 import { extensionModelRegistry } from './extension-models';
 import { extensionSessionManager } from './extension-sessions';
 import { installExtensionCommands, type ExtensionCommands } from './extension-commands';
 import { notifyBeforeAgentStart, type BeforeAgentStartHandler } from './extension-prompt';
 import { configHome, PI_CONFIG_DIR } from './config-home';
+import { herdrSelfReportingActive } from './herdr';
 import type { ExtensionLifecycleEvent } from './extension-events';
 import type { ToolInfo } from '@earendil-works/pi-coding-agent';
 import type { AgentRuntime } from './provider';
@@ -376,6 +377,32 @@ function directoryExtensionEntries(dir: string): string[] | null {
 }
 
 /**
+ * herdr 托管的那份 **pi 扩展**（`~/.pi/agent/extensions/herdr-agent-state.ts`）？
+ *
+ * 为什么要跳过它：ela 自己上报 pane（`herdr.ts`）时，这份扩展会在同一个进程里也报一遍
+ * （source `herdr:pi`），而 herdr 的官方 source 一旦持有 pane，自定义 source 就再也拿不到
+ * `resume_argv`（实测：状态上报回 ok，但 pane 的 authority 仍旧是 `herdr:pi`）——
+ * 结果服务器重启时 herdr 用内置的 `pi --session <id>` 拉起一个没有 ela 状态的 pi。
+ * 全部理由见 [herdr.ts](./herdr.ts) 的文件头。
+ *
+ * 为什么按**文件内容**而不是文件名认：文件名是 herdr 写死的安装位置，但用户完全可以
+ * 在别处放一个同名文件；而 herdr 在文件头留了机器可读的标记
+ * （`// installed by herdr` + `// HERDR_INTEGRATION_ID=pi`），那才是稳定且不会误伤
+ * 用户自写扩展的判据。读不到就当不是：宁可多装一个，也不要吃掉用户自己的东西。
+ */
+function isHerdrManagedPiIntegration(filePath: string): boolean {
+  let head: string;
+  try {
+    // 标记就在文件头，读进来再截断：扩展文件都很小（十几 KiB），不值得为它上 openSync
+    // + 定长 read 那一套。
+    head = readFileSync(filePath, 'utf8').slice(0, 2048);
+  } catch {
+    return false;
+  }
+  return head.includes('installed by herdr') && head.includes('HERDR_INTEGRATION_ID=pi');
+}
+
+/**
  * 扫一个 `extensions/` 目录（与 pi 的 `discoverExtensionsInDir` 同一套规则）。
  *
  * - 只下探**一层**：`extensions/*.ts` / `*.js`，或 `extensions/<子目录>/`（按上面的
@@ -480,10 +507,17 @@ async function resolveExtensionEntries(
 ): Promise<ResolvedExtensionEntry[]> {
   const resolvedCwd = path.resolve(cwd);
   // 本地扩展**先**入表（与 pi 同序）。没有包元数据 —— 它们是文件，不是包。
+  //
+  // 自己上报 herdr 时把 herdr 托管的那份 pi 扩展挡掉：否则它会抢走 pane 的 authority，
+  // 让我们的 `resume_argv` 永远进不去（见 herdr.ts 的文件头）。`ELA_HERDR_AGENT=off`
+  // 时这里不算「自己上报」，那份扩展照常装。
+  const selfReportingHerdr = herdrSelfReportingActive();
   const local: ResolvedExtensionEntry[] = [
     ...discoverExtensionsInDir(path.join(resolvedCwd, PI_CONFIG_DIR, 'extensions')),
     ...discoverExtensionsInDir(path.join(configHome(), 'extensions')),
-  ].map((p) => ({ path: p }));
+  ]
+    .filter((p) => !(selfReportingHerdr && isHerdrManagedPiIntegration(p)))
+    .map((p) => ({ path: p }));
   let settings: SettingsManager;
   try {
     settings = SettingsManager.create(cwd, configHome(), { projectTrusted: true });
@@ -500,6 +534,11 @@ async function resolveExtensionEntries(
     }).resolve(async () => 'skip');
     entries = resolved.extensions
       .filter((r) => r.enabled)
+      // 官方 `DefaultPackageManager.resolve()` 也扫 `<agentDir>/extensions`（不只是
+      // `settings.json` 的 packages），所以 herdr 那份扩展会**在这里再出现一次**；
+      // 上面那次过滤不够，同一条判据要在这里再用一遍（去重是按路径做的，两处都
+      // 不剩才是真的不装）。
+      .filter((r) => !(selfReportingHerdr && isHerdrManagedPiIntegration(r.path)))
       .map((r) => ({ path: r.path, metadata: r.metadata }));
   } catch (error) {
     errors.push(`扩展：解析包失败 —— ${msg(error)}`);

@@ -15,8 +15,9 @@
  * 从来不读它，pane 依旧没有身份。
  *
  * 跨平台的正确路子是 herdr 文档里的 *Add Herdr support to your agent*：agent 自己
- * 上报。这也是 herdr 官方 pi 集成（`herdr:pi`）在做的事 —— 只是它的上报者是**真的
- * pi 进程**且只在 `ctx.mode === 'tui'` 时开工，本项目这边指望不上。
+ * 上报。herdr 也给 pi 装了一份官方集成（`herdr:pi`，写在 pi 的扩展目录里），而 ela
+ * 的扩展宿主扫的正是那个目录 —— 它在本项目里也会跑（ela 同样会发 `session_start`），
+ * 跟这里抢同一个 pane。下一节「为什么要挡掉…」讲的就是这件事。
  *
  * ## 报什么、报给谁
  *
@@ -37,6 +38,37 @@
  * 27MB 的 herdr 进程、还带一个控制台 —— 而状态变化是**每轮对话好几次**。
  * socket 是 herdr 自己的 pi 扩展走的那条路（同一份 `pane.report_agent` 协议），
  * 实测在 Windows 上可用（Windows 的 socket 是**命名管道**，见 `herdrSocketEndpoint`）。
+ *
+ * ## resume 要**两步**：先持有 pane，再附命令
+ *
+ * herdr 对 `resume_argv` 有一条额外规矩（*Socket API → Agent state reporting*）：
+ *
+ * > A custom agent must hold the pane through `pane.report_agent` before it can attach
+ * > a command; otherwise the request fails with `resume_not_accepted`.
+ *
+ * 也就是说「第一次上报就带 resume」只有在那个 pane **还没有主**的时候才恰好能过；
+ * 一旦 pane 已经被别的上报者占着，herdr 会**整条拒掉**（连状态一起不生效）并回
+ * `resume_argv requires the reporter to hold the pane; report its state with pane.report_agent first`。
+ * 所以这里分两步：第一次只报状态（顺带把 pane 拿下来），收下之后再把 resume 补一条。
+ * 补的那条被拒（`resume_not_accepted`）就**安静地**降级成只报状态 —— pane 里已经有
+ * 别人在报 resume 了，那不是错误（见下一节）。
+ *
+ * ## 为什么要挡掉 herdr 自己那份 pi 扩展
+ *
+ * herdr 的官方 pi 集成（`~/.pi/agent/extensions/herdr-agent-state.ts`，source
+ * `herdr:pi`）是**装在 pi 扩展目录**里的，而 ela 的扩展宿主扫的就是那个目录 —— 于是
+ * 它在 ela 里也会跑，也往同一个 pane 报（`session_start` 那一刻就报，比这里的
+ * `startHerdrReporting` 还早）。
+ *
+ * 实证（herdr 0.9.3）：官方的 `herdr:` source 一旦持有 pane，**自定义 source 就再也
+ * 拿不到它** —— 状态上报回 `ok`，但 `pane.get` 里的 agent 与 session 仍旧是
+ * `herdr:pi`，`resume_argv` 永远 `resume_not_accepted`。后果是服务器重启后 herdr 用
+ * 它内置的 `pi --session <id>` 把 pane 拉起来（一个没有 ela 状态的 pi），而不是
+ * `ela --session <id>` —— 这正是 ela 要自己上报的原因。
+ *
+ * 所以 ela 自己报的时候，`extension-host.ts` 会把那份**herdr 托管的** pi 扩展跳过
+ * （按文件头的 `HERDR_INTEGRATION_ID=pi` 标记认，只跳这一个）。`ELA_HERDR_AGENT=off`
+ * 时这里不上报，那份扩展就照常装（mac / linux 上仍由 herdr 官方集成管这个 pane）。
  *
  * ## 失败面：报不上不算错
  *
@@ -115,6 +147,17 @@ export function herdrPane(env: NodeJS.ProcessEnv = process.env): HerdrPane | und
 }
 
 /**
+ * ela 是不是要**自己**上报这个 pane（在 herdr 里、且没被 `ELA_HERDR_AGENT` 关掉）。
+ *
+ * 单独暴露出来是给扩展宿主用的：自己上报时要把 herdr 托管的 pi 扩展**跳过**，
+ * 否则它会把 pane 的 authority 抢走、ela 的 resume 永远附不上（见文件头
+ * 「为什么要挡掉 herdr 自己那份 pi 扩展」）。
+ */
+export function herdrSelfReportingActive(env: NodeJS.ProcessEnv = process.env): boolean {
+  return herdrPane(env) !== undefined && herdrAgentName(env) !== undefined;
+}
+
+/**
  * socket 的**平台形式**。
  *
  * Windows 上 `HERDR_SOCKET_PATH` 是个**路径形状的命名管道名**（`…\AppData\Roaming\herdr\herdr.sock`）：
@@ -129,7 +172,10 @@ export function herdrSocketEndpoint(
 }
 
 /** 一条请求的结局：herdr 回了 `result`（`ok`）还是别的（连不上/超时/它回的 error）。 */
-export type HerdrReply = { ok: true } | { ok: false; reason: string };
+export type HerdrReply =
+  | { ok: true }
+  /** `code` 是 herdr 自己的错误码（`resume_not_accepted` 之类）；连不上/超时没有。 */
+  | { ok: false; reason: string; code?: string | undefined };
 
 /** 发一条请求（一行 JSON）等回执。任何失败都只是 `{ ok: false }` —— 见文件头的「失败面」。 */
 export function sendHerdrRequest(
@@ -166,13 +212,23 @@ function parseReply(data: Buffer): HerdrReply {
   const line = data.toString().split('\n')[0]?.trim() ?? '';
   if (line === '') return { ok: false, reason: 'herdr 的回执是空的' };
   try {
-    const parsed = JSON.parse(line) as { error?: { message?: unknown } | undefined };
+    const parsed = JSON.parse(line) as {
+      error?: { code?: unknown; message?: unknown } | undefined;
+    };
     const message = parsed.error?.message;
-    return typeof message === 'string' ? { ok: false, reason: message } : { ok: true };
+    if (typeof message !== 'string') return { ok: true };
+    const code = parsed.error?.code;
+    return typeof code === 'string' ? { ok: false, reason: message, code } : { ok: false, reason: message };
   } catch {
     return { ok: false, reason: `herdr 的回执不是 JSON：${line}` };
   }
 }
+
+/** pane 被别的上报者占着时 herdr 对 `resume_argv` 的回执（见文件头「resume 要两步」）。 */
+const RESUME_NOT_ACCEPTED = 'resume_not_accepted';
+
+/** `resume_argv` 本身不合 herdr 的形状（命令名是路径、带撇号/控制字符……）。 */
+const INVALID_RESUME_ARGV = 'invalid_resume_argv';
 
 /** 会话引用：给 herdr 的「服务器重启后回哪儿」（见文件头）。 */
 export interface HerdrSessionRef {
@@ -215,7 +271,14 @@ export function herdrReportFor(state: AgentState, session?: HerdrSessionRef | un
  * 拆出来是为了去重：内容一样但 seq 不同，那不算「变了」—— herdr 那边每条请求都会
  * 推一次 revision、惊动界面，而 ela 的 store 每来一个 token 都要动一次。
  */
-function reportParams(paneId: string, source: string, agent: string, report: HerdrReport): Record<string, unknown> {
+function reportParams(
+  paneId: string,
+  source: string,
+  agent: string,
+  report: HerdrReport,
+  /** 只有已经持有 pane 才带 `resume_argv`（herdr 的规矩，见文件头）。 */
+  withResume: boolean,
+): Record<string, unknown> {
   const params: Record<string, unknown> = {
     pane_id: paneId,
     source,
@@ -226,7 +289,7 @@ function reportParams(paneId: string, source: string, agent: string, report: Her
   const session = report.session;
   if (session?.path !== undefined) params.agent_session_path = session.path;
   if (session?.id !== undefined) params.agent_session_id = session.id;
-  if (session?.resumeArgv !== undefined) params.resume_argv = [...session.resumeArgv];
+  if (withResume && session?.resumeArgv !== undefined) params.resume_argv = [...session.resumeArgv];
   return params;
 }
 
@@ -266,6 +329,14 @@ export interface HerdrReporterOptions {
  *
  * herdr 只接受**比上次大**的 seq，而「上次」是它记住的上一个 ela 进程（同一 pane、
  * 同一 source）。从时间戳起步就不可能与上一个进程撞车（与 herdr 官方 pi 扩展同一做法）。
+ *
+ * ## 两步上报的状态机
+ *
+ * `holdsPane` 是唯一一个「herdr 那边的状态」：第一条 report 被收下之后才为真。
+ * 在那之前 resume_argv 一律不带（带了可能整条被拒）；变真之后补发最新一份带 resume 的。
+ * `resumeUsable` 是被拒之后的降级开关：`resume_not_accepted` 说明 pane 归别人，
+ * 安静地不再尝试（状态照报）；`invalid_resume_argv` 说明我们自己的命令形状错了，
+ * 报一次错（免得一直带着一个永远被拒的字段）然后再降级。
  */
 export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporter {
   const source = options.source ?? HERDR_SOURCE;
@@ -273,10 +344,19 @@ export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporte
   const send = options.send ?? sendHerdrRequest;
   let seq = Date.now() * 1000;
   let lastKey: string | undefined;
-  let queued: Record<string, unknown> | undefined;
+  /** 最后一次**被 herdr 收下**的去重键（与 `lastKey` 不同：它可能是一次被拒的尝试）。 */
+  let lastAcceptedKey: string | undefined;
+  /** 队列里只有一份：新请求顶掉旧的（见上面「单条在途」）。 */
+  let queued: QueuedHerdrRequest | undefined;
   let inFlight = false;
   let disposed = false;
   let complained = false;
+  /** herdr 是否已收下过本 source 的状态上报 —— `resume_argv` 的前提（见文件头）。 */
+  let holdsPane = false;
+  /** resume 被 herdr 拒过就只报状态：它要么归别的上报者，要么我们给错了形状。 */
+  let resumeUsable = true;
+  /** 最新一份报告：持有 pane 之后补发 resume 时用它（不能拿旧的那份）。 */
+  let latest: HerdrReport | undefined;
 
   const nextSeq = (): number => {
     seq += 1;
@@ -290,14 +370,52 @@ export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporte
   };
 
   /**
+   * 把**最新**一份报告排进队列（内容与上次一样就什么都不做）。
+   *
+   * 为什么单独抽出来：首次上报收下之后要拿 `latest` 再发一条带 resume 的，而那时
+   * 排队里的那份可能已经被更新的状态顶掉了。
+   */
+  const pushLatest = (): void => {
+    if (disposed || latest === undefined) return;
+    const params = reportParams(
+      options.pane.paneId,
+      source,
+      options.agent,
+      latest,
+      holdsPane && resumeUsable,
+    );
+    const key = JSON.stringify(params);
+    if (key === lastKey) return;
+    lastKey = key;
+    const at = nextSeq();
+    queued = {
+      kind: 'report',
+      key,
+      request: { id: `${source}:report:${at}`, method: 'pane.report_agent', params: { ...params, seq: at } },
+    };
+    void drain();
+  };
+
+  /** resume 那条被拒：退回不带 resume 的版本重发一次（只要那份还没被收下过）。 */
+  const downshiftResume = (): void => {
+    resumeUsable = false;
+    // 拿「最后被收下的那份」当去重基准：状态本身通常已经在第一次上报里送过了，
+    // 那就不该因为一次被拒的 resume 而重发一条一模一样的（herdr 会白推一次 revision）。
+    lastKey = lastAcceptedKey;
+    pushLatest();
+  };
+
+  /**
    * 发一条。第一次 500ms 连不上就再等一次（1500ms）—— herdr 那边可能是**忙**（正在写
    * 快照），不是不在；官方 pi 扩展同样是「一次短超时 + 一次长超时」。
    */
-  const deliver = async (request: Record<string, unknown>): Promise<void> => {
+  const deliver = async (request: Record<string, unknown>): Promise<HerdrReply> => {
     const first = await send(endpoint, request, 500);
-    if (first.ok) return;
-    const second = await send(endpoint, request, 1500);
-    if (!second.ok) fail(second.reason);
+    if (first.ok) return first;
+    // herdr **回了话**（带错误码）就是它的判决，再发一次不会变 —— 比如
+    // `resume_not_accepted`，重试只会把降级拖晚 500ms。只有连不上/超时（没有码）才值得再等一次。
+    if (first.code !== undefined) return first;
+    return send(endpoint, request, 1500);
   };
 
   const drain = async (): Promise<void> => {
@@ -305,9 +423,41 @@ export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporte
     inFlight = true;
     try {
       while (queued !== undefined) {
-        const request = queued;
+        const item = queued;
         queued = undefined;
-        await deliver(request);
+        const reply = await deliver(item.request);
+        if (item.kind === 'release') {
+          if (reply.ok) holdsPane = false;
+          else fail(reply.reason);
+          continue;
+        }
+        if (reply.ok) {
+          lastAcceptedKey = item.key;
+          if (!holdsPane) {
+            holdsPane = true;
+            // 现在才允许附 resume（herdr 的「先持有 pane」）；最新那份马上补发。
+            pushLatest();
+          }
+          continue;
+        }
+        if (!resumeUsable) {
+          // 已经降级过了，这条只可能是普通的状态上报失败。
+          fail(reply.reason);
+          continue;
+        }
+        if (reply.code === RESUME_NOT_ACCEPTED) {
+          // 另一个上报者（herdr 自己的 pi 扩展）占着 pane：状态照报，resume 归它。
+          // 这不是「上报失败」，不该惊动用户（见文件头「为什么要挡掉…」）。
+          downshiftResume();
+          continue;
+        }
+        if (reply.code === INVALID_RESUME_ARGV) {
+          // 这条是我们自己的 bug：命令名不是 PATH 上的名字 / 带撇号…… 说一声再降级。
+          fail(reply.reason);
+          downshiftResume();
+          continue;
+        }
+        fail(reply.reason);
       }
     } finally {
       inFlight = false;
@@ -318,22 +468,20 @@ export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporte
   return {
     report(next: HerdrReport): void {
       if (disposed) return;
-      const params = reportParams(options.pane.paneId, source, options.agent, next);
-      const key = JSON.stringify(params);
-      if (key === lastKey) return;
-      lastKey = key;
-      const at = nextSeq();
-      queued = { id: `${source}:report:${at}`, method: 'pane.report_agent', params: { ...params, seq: at } };
-      void drain();
+      latest = next;
+      pushLatest();
     },
 
     release(): void {
       if (disposed) return;
       const at = nextSeq();
       queued = {
-        id: `${source}:release:${at}`,
-        method: 'pane.release_agent',
-        params: { pane_id: options.pane.paneId, source, agent: options.agent, seq: at },
+        kind: 'release',
+        request: {
+          id: `${source}:release:${at}`,
+          method: 'pane.release_agent',
+          params: { pane_id: options.pane.paneId, source, agent: options.agent, seq: at },
+        },
       };
       void drain();
     },
@@ -341,8 +489,17 @@ export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporte
     dispose(): void {
       disposed = true;
       lastKey = undefined;
+      latest = undefined;
     },
   };
+}
+
+/** 队列里的一份：`kind` 决定回执怎么处理（report 失败会触发 resume 降级，release 不会）。 */
+interface QueuedHerdrRequest {
+  kind: 'report' | 'release';
+  /** report 的去重键：被收下时记下来，留着 resume 降级后判断要不要重发。 */
+  key?: string | undefined;
+  request: Record<string, unknown>;
 }
 
 export interface StartHerdrReportingOptions {

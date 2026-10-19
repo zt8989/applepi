@@ -21,6 +21,7 @@ import {
   herdrAgentName,
   herdrPane,
   herdrReportFor,
+  herdrSelfReportingActive,
   herdrSocketEndpoint,
   sendHerdrRequest,
   startHerdrReporting,
@@ -54,13 +55,22 @@ interface FakeHerdr {
   close(): Promise<void>;
 }
 
+/** fake herdr 的拒收形状：`code` 缺省是 `invalid_request`（herdr 对参数错误的通用码）。 */
+interface FakeFailure {
+  code?: string;
+  message: string;
+}
+
 /**
  * 一个只收不干活的 herdr。
  *
- * `fail` 给了就每条回执都带 `error`（模拟 herdr 拒了这次上报）。
+ * `fail` 给了就按它拒：字符串 = 每条都拒（`invalid_request`），函数 = 逐条判断
+ * （模拟 herdr 的 `resume_not_accepted` 只在带 `resume_argv` 时发生）。
  * 监听地址走 `herdrSocketEndpoint`：Windows 上必须是个命名管道名，Linux 上是个临时文件。
  */
-async function fakeHerdr(fail?: string): Promise<FakeHerdr> {
+async function fakeHerdr(
+  fail?: string | ((request: Record<string, unknown>) => FakeFailure | undefined),
+): Promise<FakeHerdr> {
   const name = `ela-herdr-test-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
   const raw = process.platform === 'win32' ? name : path.join(tmpdir(), `${name}.sock`);
   const requests: Record<string, unknown>[] = [];
@@ -74,10 +84,13 @@ async function fakeHerdr(fail?: string): Promise<FakeHerdr> {
         buffer = buffer.slice(index + 1);
         const request = JSON.parse(line) as { id?: string };
         requests.push(request as Record<string, unknown>);
+        const failure = typeof fail === 'function' ? fail(request as Record<string, unknown>) : fail;
+        const verdict: FakeFailure | undefined =
+          failure === undefined ? undefined : typeof failure === 'string' ? { message: failure } : failure;
         const reply =
-          fail === undefined
+          verdict === undefined
             ? { id: request.id, result: { type: 'ok' } }
-            : { id: request.id, error: { code: 'invalid_request', message: fail } };
+            : { id: request.id, error: { code: verdict.code ?? 'invalid_request', message: verdict.message } };
         socket.write(`${JSON.stringify(reply)}\n`);
         index = buffer.indexOf('\n');
       }
@@ -109,6 +122,13 @@ test('herdrPane：三个变量齐全才算在 herdr 里', () => {
   assert.equal(herdrPane({ ...full, HERDR_ENV: undefined }), undefined);
   assert.equal(herdrPane({ ...full, HERDR_PANE_ID: '' }), undefined);
   assert.equal(herdrPane({ ...full, HERDR_SOCKET_PATH: undefined }), undefined);
+});
+
+test('herdrSelfReportingActive：在 herdr 里且没被关掉才自己报', () => {
+  const full = { HERDR_ENV: '1', HERDR_PANE_ID: 'w1:p2', HERDR_SOCKET_PATH: '/tmp/herdr.sock' };
+  assert.equal(herdrSelfReportingActive(full), true);
+  assert.equal(herdrSelfReportingActive({ ...full, ELA_HERDR_AGENT: 'off' }), false);
+  assert.equal(herdrSelfReportingActive({ ...full, HERDR_ENV: '0' }), false);
 });
 
 test('herdrSocketEndpoint：Windows 是命名管道，加 \\\\.\\pipe\\ 前缀', () => {
@@ -215,8 +235,81 @@ test('上报器：request 形状、去重、seq 单调、release', async () => {
   }
 });
 
-test('上报器：herdr 回 error 时只在第一次出声', async () => {
-  const herdr = await fakeHerdr('invalid_resume_argv');
+test('上报器：首次上报不带 resume，收下后才补一条带的（hold 两步）', async () => {
+  const herdr = await fakeHerdr();
+  try {
+    const reporter = createHerdrReporter({ pane: { paneId: 'w1:p2', socketPath: herdr.raw }, agent: 'pi' });
+
+    reporter.report({
+      state: 'idle',
+      session: { id: 's1', resumeArgv: ['ela', '--session', 's1'] },
+    });
+    await waitFor(() => herdr.requests.length === 2);
+
+    const [first, attach] = herdr.requests as {
+      params: Record<string, unknown>;
+    }[];
+    assert.equal(first?.params['resume_argv'], undefined, '第一条不能带 resume（pane 还没拿下来）');
+    assert.equal(first?.params['agent_session_id'], 's1', '会话引用第一条就报，不受 hold 限制');
+    assert.deepEqual(attach?.params['resume_argv'], ['ela', '--session', 's1']);
+    assert.equal(
+      (attach?.params['seq'] as number) > (first?.params['seq'] as number),
+      true,
+      'seq 必须递增',
+    );
+  } finally {
+    await herdr.close();
+  }
+});
+
+test('上报器：resume 被拒（pane 归别人）→ 不出声，退回只报状态', async () => {
+  const herdr = await fakeHerdr((request) => {
+    const params = request['params'] as Record<string, unknown>;
+    return params['resume_argv'] === undefined
+      ? undefined
+      : {
+          code: 'resume_not_accepted',
+          message: 'resume_argv requires the reporter to hold the pane; report its state with pane.report_agent first',
+        };
+  });
+  try {
+    const reasons: string[] = [];
+    const reporter = createHerdrReporter({
+      pane: { paneId: 'w1:p2', socketPath: herdr.raw },
+      agent: 'pi',
+      onError: (reason) => reasons.push(reason),
+    });
+
+    reporter.report({
+      state: 'working',
+      session: { id: 's1', resumeArgv: ['ela', '--session', 's1'] },
+    });
+    // 状态（无 resume）→ 补带的 resume（被拒）。状态本身已经报上去了，不用重发。
+    await waitFor(() => herdr.requests.length === 2);
+    assert.equal(
+      (herdr.requests[0] as { params: Record<string, unknown> }).params['resume_argv'],
+      undefined,
+    );
+    assert.deepEqual(
+      (herdr.requests[1] as { params: Record<string, unknown> }).params['resume_argv'],
+      ['ela', '--session', 's1'],
+    );
+
+    // 之后的状态变化照报，只是永远不带 resume。
+    reporter.report({ state: 'idle', session: { id: 's1', resumeArgv: ['ela', '--session', 's1'] } });
+    await waitFor(() => herdr.requests.length === 3);
+    const params = (herdr.requests[2] as { params: Record<string, unknown> }).params;
+    assert.equal(params['resume_argv'], undefined, '降级之后不再带 resume');
+    assert.equal(params['state'], 'idle', '状态本身仍要报到');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.deepEqual(reasons, [], 'pane 归别的上报者不是错误，不该惊动用户');
+  } finally {
+    await herdr.close();
+  }
+});
+
+test('上报器：herdr 回普通 error 时只在第一次出声', async () => {
+  const herdr = await fakeHerdr('herdr 忙着呢');
   try {
     const reasons: string[] = [];
     const reporter = createHerdrReporter({
@@ -227,12 +320,12 @@ test('上报器：herdr 回 error 时只在第一次出声', async () => {
 
     reporter.report({ state: 'working' });
     await waitFor(() => reasons.length === 1);
-    assert.equal(reasons[0], 'invalid_resume_argv');
+    assert.equal(reasons[0], 'herdr 忙着呢');
 
     reporter.report({ state: 'idle' });
-    await waitFor(() => herdr.requests.length >= 2);
+    await waitFor(() => herdr.requests.length === 2);
     await new Promise((resolve) => setTimeout(resolve, 60));
-    assert.deepEqual(reasons, ['invalid_resume_argv'], '第二次不再出声（免得刷屏）');
+    assert.deepEqual(reasons, ['herdr 忙着呢'], '第二次不再出声（免得刷屏）');
   } finally {
     await herdr.close();
   }
@@ -296,26 +389,30 @@ test('接线：订阅 store、按需上报、拆台时放开 pane', async () => 
       session: () => ({ id: 's1', resumeArgv: ['ela', '--session', 's1'] }),
     });
 
-    // 订阅那一刻先补一次（恢复场景下 store 里早就不是空的）。
-    await waitFor(() => herdr.requests.length === 1);
+    // 订阅那一刻先补一次（恢复场景下 store 里早就不是空的）：先是状态，
+    // 收下之后才补一条带 resume 的（herdr 的 hold 规矩，见 herdr.ts 的文件头）。
+    await waitFor(() => herdr.requests.length === 2);
     const initial = herdr.requests[0] as { params: Record<string, unknown> };
     assert.equal(initial.params.state, 'idle');
-    assert.deepEqual(initial.params.resume_argv, ['ela', '--session', 's1']);
+    assert.equal(initial.params.resume_argv, undefined, '第一条不带 resume');
+    const attach = herdr.requests[1] as { params: Record<string, unknown> };
+    assert.deepEqual(attach.params.resume_argv, ['ela', '--session', 's1']);
 
     // 进 thinking → working。
     set(stateWith({ phase: 'thinking' }));
-    await waitFor(() => herdr.requests.length === 2);
-    const working = herdr.requests[1] as { params: Record<string, unknown> };
+    await waitFor(() => herdr.requests.length === 3);
+    const working = herdr.requests[2] as { params: Record<string, unknown> };
     assert.equal(working.params.state, 'working');
+    assert.deepEqual(working.params.resume_argv, ['ela', '--session', 's1'], '持有 pane 之后每条都带 resume');
 
     stop();
-    await waitFor(() => herdr.requests.length === 3);
-    assert.equal((herdr.requests[2] as { method: string }).method, 'pane.release_agent');
+    await waitFor(() => herdr.requests.length === 4);
+    assert.equal((herdr.requests[3] as { method: string }).method, 'pane.release_agent');
 
     // 拆台之后 store 再怎么动都不发了。
     set(stateWith({ phase: 'thinking' }));
     await new Promise((resolve) => setTimeout(resolve, 60));
-    assert.equal(herdr.requests.length, 3);
+    assert.equal(herdr.requests.length, 4);
   } finally {
     await herdr.close();
   }
