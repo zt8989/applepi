@@ -612,6 +612,10 @@ async function main(): Promise<void> {
     // 把活着的界面交给内核的扩展宿主（它在装扩展时只能拿到一个待填的引用）。
     publishUi: (options) => {
       uiRef.current = options;
+      // 界面起来之前扩展设过的状态段补喂一遍（那时只有一个「没有底栏」的占位宿主，
+      // 它把值存在 `pendingStatuses` 里了）。顺序保持插入序，界面那边自己按 key 排。
+      for (const [key, text] of pendingStatuses) options.setStatus?.(key, text);
+      pendingStatuses.clear();
       // 界面起来了才报 web ui 的地址（备用屏之前写 stdout 会被它盖掉，见文件末尾的注释）。
       if (webNotice !== undefined) options.onNotice(webNotice);
     },
@@ -675,6 +679,15 @@ function flushStdout(timeoutMs = 1000): Promise<void> {
 }
 
 /**
+ * 界面起来**之前**扩展设过的底栏状态段（`ctx.ui.setStatus`）。
+ *
+ * 界面一 publish 就补喂一遍。为什么不能直接丢：`pi-background-tasks` 在装载期就会
+ * 设一条（版本提示 / 「1 running」），之后**只有任务真的变化时**才重设 —— 丢掉的话
+ * 那条就永远不出现（而它正是「现在有几个后台任务在跑」的唯一线索）。
+ */
+const pendingStatuses = new Map<string, string>();
+
+/**
  * 取出界面层的 UI 宿主（扩展的 `ctx.ui` 由它造）。
  *
  * ## 拿不到就**抛**，不是给空实现
@@ -717,6 +730,16 @@ function requireUi(ref: { current: HostUiOptions | undefined }): HostUiOptions {
       process.stderr.write(`${text}\n`);
     },
     setWidget: () => {},
+    // 底栏还没有（界面未起）：先**存着**，`publishUi` 那一刻补喂给真界面。
+    // 这个函数本身不能缺：`pi-background-tasks` 在装载期就会调它，缺失的话它拿到
+    // `undefined` 而不是函数，又回到「`ctx.ui.setStatus is not a function`」那个报错。
+    setStatus: (key: string, text: string | undefined) => {
+      if (text === undefined) pendingStatuses.delete(key);
+      else pendingStatuses.set(key, text);
+    },
+    // 界面未起时没有工具输出展开状态：按 pi 的默认给 `false`，设了就丢掉（不抛）。
+    getToolsExpanded: () => false,
+    setToolsExpanded: () => {},
   };
 }
 
