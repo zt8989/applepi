@@ -289,12 +289,21 @@ function nodeColor(node: TraceNode): (t: string) => string {
  *   那是 `scrollToPrompt`（上一个 / 下一个提问）拼的锚点，剪掉就跳不动了。
  */
 const SGR_SEQUENCE = /\u001b\[[0-9;]*m/;
+/**
+ * 整行只由「转义序列 + 空格」组成 —— 屏幕上没有任何可见字符。
+ *
+ * 写成一个锚定的整体匹配（而不是先 `stripTerminalSequences()` 再 `trim()`）是为了**快**：
+ * 这个函数每帧都会把整个对话区的行过一遍（历史 1200 条时上千行），而绝大多数行是内容行
+ * —— 它第一个可见字符就匹配失败退出了。碰到不认识的转义形式也不怕：匹配不上就**不动**
+ * 那一行（宁可不剪，也不要把带样式的行错剪成零宽）。
+ */
+const BLANK_ROW = /^(?:\u001b\[[0-9;]*[A-Za-z]|\u001b\][^\u0007]*\u0007|[ \t])*$/;
 function collapseBlankRows(lines: string[]): string[] {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!;
     if (line === '') continue;
-    // 有可见字符就不碰。
-    if (stripTerminalSequences(line).trim() !== '') continue;
+    // 有可见字符（绝大多数行在这一步就退出）。
+    if (!BLANK_ROW.test(line)) continue;
     // 带样式（SGR）的空行是带底色的 padding，属于卡片本身。
     if (SGR_SEQUENCE.test(line)) continue;
     lines[i] = line.replace(/[ \t]+$/, '');
@@ -1466,6 +1475,26 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const tui: ViewportTUI = new TuiAltScreen(terminal, true, undefined, {
     mouse: true,
     copyOnSelect: true,
+    /**
+     * 拖选松开时写剪贴板 —— **用 pi 那一份**（同一个函数、同一种传法，见 pi 的
+     * `modes/interactive/tui-renderer.js`）。
+     *
+     * 为什么不能不传（不传就只剩 pi-tui 的 OSC 52）：
+     * OSC 52 是「发出去就算成功」，对方收不收得到它自己也不知道 —— macOS 的 Terminal.app、
+     * tmux 未开 `set-clipboard` 时，屏幕上照样会闪一句 `Copied!`，剪贴板里却什么都没有。
+     * 传了这个回调，pi-tui 会改用回调的返回值判成败（原生剪贴板 → 平台命令 → OSC 52
+     * 的整条兜底链都在 `copyToClipboard` 里），失败时提示的是真实原因而不是 `Copied!`。
+     *
+     * 返回 `true` / 报错文本是 pi-tui 的契约：`string` 会被当成「失败」显示出来。
+     */
+    copySelection: async (text: string) => {
+      try {
+        await copyToClipboard(text);
+        return true;
+      } catch (error: unknown) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    },
     // 往上翻之后，视口最后一行压一条「回到最新」的提示（与 pi 同一条，见 jumpToLatestHint）。
     // pi-tui 只在 **primary** 那个 ScrollView 离开末尾时画它 —— 本项目切页时会重建
     // ScrollView 并让当前页当 primary（见 applyLayout），所以对话页与轨迹页各管各的，
