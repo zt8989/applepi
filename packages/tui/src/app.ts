@@ -908,6 +908,40 @@ export function twoColumn(left: string, right: string, width: number): string {
 }
 
 /**
+ * 底栏**第一行**：cwd 在左，扩展的状态段贴在右（`ctx.ui.setStatus`）。
+ *
+ * ## 为什么状态段在这儿，而不是像 pi 那样另起一行
+ *
+ * pi 的底栏行数随状态段变化（`footer.js` 里 `lines.push(statusLine)`）；本项目的
+ * 底栏是**固定两行**的（`FOOTER_ROWS` 同时被 `composer-overlay.ts` 拿去做面板行预算，
+ * 两边必须相等）—— 多一行会把对话区挤掉一格。而第一行右半边本来就空着。
+ *
+ * ## dim 只包左段
+ *
+ * 状态段是扩展**自己上的色**（`pi-background-tasks` 是 `lightBlue(label)`，收尾 `\x1b[0m`）。
+ * 整体包一层 dim 的话，那个 `\x1b[0m` 会把 dim 提前关掉 —— 于是右段之后到行尾的内容
+ * 会突然变亮（见 `dimLine` 的注释，同一个道理）。
+ *
+ * ## 两个分支都要把行补齐到全宽
+ *
+ * pi-tui 是增量重绘：行变短时旧字的尾巴不会被擦掉，下一帧就叠着出现。
+ *
+ * @param cwdText   左边那段（`cwdLine()` 的结果，不带颜色）
+ * @param statusText 右边那段（已排序、已单行化，**可能带颜色**；空串 = 没有状态段）
+ */
+export function extensionFooterRow(cwdText: string, statusText: string, width: number): string {
+  if (statusText === '') return dim(padToWidth(cwdText, width));
+  const cwdWidth = visibleWidth(cwdText);
+  const statusWidth = visibleWidth(statusText);
+  // 放不下时与 `twoColumn` 同一口径：拼起来截断（路径可以靠 /pwd 看，
+  // 但两条信息都不能丢到界面外）。
+  if (cwdWidth + statusWidth + 1 > width) {
+    return truncateToWidth(`${dim(cwdText)} ${statusText}`, width, dim('...'));
+  }
+  return dim(cwdText) + ' '.repeat(width - cwdWidth - statusWidth) + statusText;
+}
+
+/**
  * 一行补到终端全宽（可见列宽，不计 ANSI）。
  *
  * pi-tui 是**增量**重绘：只重画变化的行。页签行是变长的（`3轮2步` → `3轮3步`、
@@ -1638,6 +1672,37 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const widgetSlots = new Map<string, Component>();
 
   /**
+   * 扩展的**底栏状态段**（`ctx.ui.setStatus(key, text)`）：key → 已清洗的单行文本。
+   *
+   * ## 为什么是第一行的右半边
+   *
+   * pi 把状态段画在底栏**多出来的一行**上（`footer.js` 的 `lines.push(statusLine)`）。
+   * 本项目不能这么干：底栏行数是**固定**的（`FOOTER_ROWS`，见 `composer-overlay.ts`），
+   * 多一行会把对话区挤掉一格。而第一行右半边正好空着（左边只有 cwd + 分支），
+   * 状态段本来就是「顺带看一眼」的东西，放那儿不多占一行。
+   *
+   * ## 为什么是一个活着的 Map
+   *
+   * 与 `widgetSlots` 同一理由：`refresh()` 每帧都可能跑，它读当前集合就行；
+   * 状态段是**按 key 替换/删除**的（官方语义），用 Map 才不用每次重建布局。
+   */
+  const extensionStatuses = new Map<string, string>();
+
+  /**
+   * 当前所有状态段拼成一行（空集合 = 空串）。
+   *
+   * 按 key 排序 —— 与 pi 的 `footer.js` 一致（它 `sort(([a],[b]) => a.localeCompare(b))`）：
+   * 两边显示顺序相同，盯同一个扩展时才不会以为「换了位置 = 换了东西」。
+   * 单行化已经在 `@ela/core` 的 `ctx.ui.setStatus` 里做过了（底栏是固定行数）。
+   */
+  const extensionStatusText = (): string =>
+    [...extensionStatuses.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([, text]) => text)
+      .filter((text) => text !== '')
+      .join(' ');
+
+  /**
    * 扩展的**输入区槽位**（pi 的 `editorContainer` 语义）：非空时，composer 那一格
    * 显示的是它，而不是 `editor`。
    *
@@ -1791,8 +1856,12 @@ export async function runTui(options: TuiOptions): Promise<number> {
     queuePanel.setText(padToWidth(renderQueuePanel(state, width), width));
     const stats = statsLine(state);
     const statsRow = twoColumn(stats.text, modelLine(state), width);
+    // 第一行：左边 cwd + 分支，右边是扩展的状态段（`ctx.ui.setStatus`）。
+    // 没有状态段时就是原来那一行（补到全宽后整体 dim）。
+    const cwdText = cwdLine(cwd, gitBranch(cwd));
+    const statusText = extensionStatusText();
     footer.setText(
-      dim(padToWidth(cwdLine(cwd, gitBranch(cwd)), width)) +
+      extensionFooterRow(cwdText, statusText, width) +
         '\n' +
         // dimLine 而不是 dim：上下文超 70%/90% 时那一小段要保持黄/红。
         // 直接 dim(带色文本) 的话，内层的 \x1b[0m 会把外层 dim 提前关掉。
@@ -3292,6 +3361,32 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // `setText` 会重画，不需要我们自己 refresh。
     setEditorText: (text: string) => {
       editor.setText(text);
+    },
+    /**
+     * 扩展的底栏状态段（`ctx.ui.setStatus(key, text)`）。
+     *
+     * `undefined`（或空串）就是清掉那一格 —— 与官方语义逐字一致。这里必须
+     * `refresh()`：底栏那两行是我们每帧自己拼的文本，不重算就一直是旧的那行。
+     *
+     * 渲染位置在 `refresh()` 里（`extensionFooterRow`）：第一行右半边。
+     */
+    setStatus: (key: string, text: string | undefined) => {
+      if (text === undefined) extensionStatuses.delete(key);
+      else extensionStatuses.set(key, text);
+      refresh();
+    },
+    /**
+     * 工具输出是否全部展开（pi 的 `ctx.ui.getToolsExpanded` / `setToolsExpanded`）。
+     *
+     * 与 `app.tools.expand`（Ctrl+O）是**同一个** `expanded` 变量 —— 这是故意的：
+     * `pi-subagents` 在跑 subagent 前会 `setToolsExpanded(false)`（「把主转录收起来，
+     * 别把整个屏幕刷满」）—— 让那个开关跟我们自己的键位指向两个不同的状态的话，
+     * 用户按 Ctrl+O 看到的东西就与扩展以为的不一致。
+     */
+    getToolsExpanded: () => expanded,
+    setToolsExpanded: (value: boolean) => {
+      expanded = value;
+      refresh();
     },
     tuiDialogs,
     questionnaire: openQuestionnaire,

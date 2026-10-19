@@ -521,6 +521,34 @@ snippet 里）—— 错报一条就变成永远修不掉的 `[Extension issues]
   **`setWidget` 有两种形状，两个都接**：官方的 `string[]`（扩展自己上好色的行）与
   组件工厂。早期只接工厂、把数组当错误抛了 —— 而 `pi-web-access` 恰恰用数组。
 
+### 底栏状态段：`ctx.ui.setStatus(key, text)`
+
+`pi-background-tasks` 每改一次任务状态就调它（`updateUi()` 里**无条件**），
+`pi-subagents` 的 `/agents` 面板也用它。少了这个成员不是「少一行提示」这么简单 ——
+`pi-background-tasks` 在 `catch` 里打一行
+`[background-tasks] UI update failed: ctx.ui.setStatus is not a function`，
+顺手把 `currentCtx` 清成 `undefined`：**之后所有后台任务事件都不再更新界面**
+（任务在跑，底栏永远不再说）。
+
+落点与 pi 不同，这是刻意的：
+
+| | pi | 本项目 |
+| --- | --- | --- |
+| 位置 | 底栏**多出来的一行**（`lines.push(statusLine)`） | 底栏**第一行的右半边**（左边是 cwd + 分支） |
+| 排序 | 按 key `localeCompare` | 同一个 |
+| 单行化 | `sanitizeStatusText()`（换行/制表符→空格、压空格、trim） | 同一个（`@ela/core` 的 `setStatus` 里做） |
+
+为什么不能像 pi 那样另起一行：本项目底栏行数是**固定**的（`FOOTER_ROWS`，
+`composer-overlay.ts` 同时拿它算面板行预算），多一行会把对话区挤掉一格。
+
+两个细节都不显眼但会静默坏：
+
+- **dim 只能包左段**。状态段是扩展自己上的色（`pi-background-tasks` 是
+  `lightBlue(label)`，收尾 `\x1b[0m`）；整体包一层 dim 的话那个 reset 会把 dim 提前关掉，
+  行尾突然变亮（与 `dimLine` 同一个坑）。
+- **界面起来之前设的那条不能丢**。扩展在装载期就会 `setStatus`，而那时 `uiRef` 还是空的 ——
+  `main.ts` 的占位宿主把它存进 `pendingStatuses`，`publishUi` 那一刻补喂一遍。
+
 ### 一处真回归：`theme` 不能要求界面已起来
 
 `ctx.ui.theme` 是 getter，而扩展在**界面起来之前**就可能碰它（内核装扩展时
@@ -626,13 +654,21 @@ pi 的**状态类扩展**（最具体的例子就是 Orca 装在 `~/.pi/agent/ex
 `session_id` + `session_file`。与 pi 自己的注释「Pi publishes its planned path before
 creating the transcript」同一回事。
 
-### 为它们补的 `ctx.ui` 两个成员
+### 为它们补的 `ctx.ui` 四个成员
 
 - **`ctx.ui.setTitle(title)`** → pi-tui 的 `Terminal.setTitle`（OSC 0/2）。Orca 的标题
   spinner 靠它把 `π ✳ <名字> - <目录>` 写进标题；不实现的话 spinner 自己降级（它先
   `typeof setTitle === 'function'` 判一刀），不报错。
 - **`ctx.ui.setEditorText(text)`** → 换掉 composer 里那行字（Orca 的 prefill 扩展用）。
   宿主没有输入区时（探针 / 一次性模式）**弹**，不假装把字填进去了。
+- **`ctx.ui.setStatus(key, text)`** → 底栏第一行右半边的状态段（`pi-background-tasks` /
+  `pi-subagents` 都用；见上「底栏状态段」那一节）。宿主没有底栏时**丢掉** —— 与
+  `setWidget` 同一口径：丢一条状态不该把整轮对话带崩。
+- **`ctx.ui.getToolsExpanded()` / `setToolsExpanded(v)`** → 就是 `app.tools.expand`
+  （Ctrl+O）那个 `expanded`。`pi-subagents` 跑 subagent 前会 `setToolsExpanded(false)`
+  （**无条件**，`hasUI` 就行），缺了它那条路径抛 `is not a function` —— 又一个
+  「少一个成员就整条功能挂」的例子。两处指向同一个变量是故意的：让 Ctrl+O 与扩展
+  以为的展开状态不一致，用户看到的就永远是次优的一边。
 
 ## 仍然不接的
 
@@ -719,7 +755,7 @@ creating the transcript」同一回事。
 | 文件 | 干什么 |
 | --- | --- |
 | `packages/core/src/extension-host.ts` | 装扩展：解包路径、`loadExtensions`、runner 绑定、工具适配 |
-| `packages/core/src/extension-ui.ts` | `ctx.ui`：`custom()`（overlay / inline）、`setWidget`、`setTitle` / `setEditorText`、`theme`、`notify`、raw input |
+| `packages/core/src/extension-ui.ts` | `ctx.ui`：`custom()`（overlay / inline）、`setWidget`、`setStatus`、`getToolsExpanded` / `setToolsExpanded`、`setTitle` / `setEditorText`、`theme`、`notify`、raw input |
 | `packages/core/src/extension-tools.ts` | pi `ToolDefinition` → 本项目 `AgentTool`；工具集读/写 |
 | `packages/core/src/extension-models.ts` | `ctx.modelRegistry`：官方的 `ModelRegistry` 门面 |
 | `packages/core/src/extension-sessions.ts` | `ctx.sessionManager`：四个只读成员，数据源是 `state.messages`（`getSessionFile` 读落盘器） |

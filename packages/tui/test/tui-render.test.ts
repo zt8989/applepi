@@ -18,6 +18,7 @@ import {
   dim,
   dimLine,
   emphasizedTraceLine,
+  extensionFooterRow,
   modelLine,
   renderColoredTree,
   TraceChunks,
@@ -84,6 +85,41 @@ test('twoColumn：中文按双宽计算（右栏不会飘到左边盖住路径�
 test('twoColumn：放不下时截断而不是溢出（溢出会换行，把输入区顶出屏幕）', () => {
   const line = twoColumn('C:\\very\\long\\path\\that\\keeps\\going', '(workbuddy) cn:space-bunny', 30);
   assert.ok(visibleWidth(stripTerminalSequences(line)) <= 30, '不能超过给定宽度');
+});
+
+// ─── 底栏第一行的状态段（`ctx.ui.setStatus`） ───
+
+/**
+ * 这组盯的是扩展的 `ctx.ui.setStatus(key, text)` 落到哪儿：
+ *
+ * - 没有状态段时必须与原来那一行**逐字相同**（补满 + 整行 dim）—— 这是回归保护，
+ *   底栏形状是 pi 截图一格对齐的，多一个空格都算退化；
+ * - 有状态段时贴右边、**保持扩展自己的颜色**（整体再包一层 dim 会把它提前关掉）；
+ * - 放不下时截断，不换行（换行会把输入区顶出屏幕）。
+ */
+test('extensionFooterRow：没有状态段 —— 就是原来那一行（补满整宽 + 整行 dim）', () => {
+  const row = extensionFooterRow('~/proj (main)', '', 30);
+  assert.equal(row, dim('~/proj (main)' + ' '.repeat(30 - '~/proj (main)'.length)));
+  assert.equal(visibleWidth(stripTerminalSequences(row)), 30);
+});
+
+test('extensionFooterRow：状态段贴右边，且保留它自己的颜色', () => {
+  // 扩展（`pi-background-tasks`）自己上色，收尾是 `\x1b[0m`。
+  const status = '\x1b[36m bg 1 running \x1b[0m';
+  const row = extensionFooterRow('~/proj (main)', status, 40);
+  const plain = stripTerminalSequences(row);
+  assert.equal(visibleWidth(plain), 40, '整行要正好补到 40 列，否则增量重绘留残影');
+  assert.ok(plain.startsWith('~/proj (main)'), `左边应该是 cwd：${plain}`);
+  // 状态段自带前后空格（扩展自己加的），所以只比内容贴不贴右边。
+  assert.ok(plain.trimEnd().endsWith('bg 1 running'), `右边应该是状态段：${plain}`);
+  assert.ok(row.includes('\x1b[36m'), '状态段的颜色不能被 dim 包掉');
+  // dim 必须在状态段之前就结束（否则那段的 \x1b[0m 之后整行会突然变亮）。
+  assert.ok(row.indexOf('\x1b[36m') > row.lastIndexOf('\x1b[2m'));
+});
+
+test('extensionFooterRow：放不下时截断而不是换行（溢出会把输入区顶出屏幕）', () => {
+  const row = extensionFooterRow('~/very/long/path/that/keeps/going', 'bg 3 running · 2 failed · tab', 30);
+  assert.ok(visibleWidth(stripTerminalSequences(row)) <= 30, '不能超过给定宽度');
 });
 
 // ─── cwd 行（底栏左侧） ───

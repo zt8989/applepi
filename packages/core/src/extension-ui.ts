@@ -183,6 +183,33 @@ export interface ExtensionHostUi {
    * 宿主没有输入区时**抛**（与 `custom()` 的非 overlay 那条路同一口径：不假装能做）。
    */
   setEditorText(text: string): void;
+  /**
+   * 底栏里的一个**状态段**（pi 的 `ctx.ui.setStatus(key, text)`）。
+   *
+   * 按 key 存：同一个 key 再设一次就是替换，`undefined`（或空串）就是清掉那一格 ——
+   * 与官方的语义逐字一致。
+   *
+   * 为什么必须有它：`pi-background-tasks` 每次任务状态变化都调它
+   * （`updateUi()` 里无条件是 `ctx.ui.setStatus(...)`），少了这个成员那一步就抛
+   * `ctx.ui.setStatus is not a function` —— 它在自己的 catch 里打一行日志、顺手把
+   * `currentCtx` 清成 `undefined`，于是**之后所有后台任务事件都不再更新界面**。
+   * `pi-subagents` 的 `/agents` 面板同理（`subagent-slash` 那个段）。
+   *
+   * 宿主没有底栏（一次性 `-p`、测试探针）时**丢掉**而不是抛：状态段只是显示，
+   * 与 `setWidget` 同一口径 —— 丢一条状态不该把整轮对话带崩。
+   */
+  setStatus(key: string, text: string | undefined): void;
+  /**
+   * 工具输出是否全部展开（pi 的 `ctx.ui.getToolsExpanded`）。
+   *
+   * `pi-subagents` 的面板用它决定自己那份转录要不要展开（`ui.getToolsExpanded?.()` 判一刀，
+   * 没有就默认 false）—— 所以缺了它不会报错，但 `setToolsExpanded` 那边**不是可选的**：
+   * `executeSubagentCollapsed()` 在 `hasUI` 时**无条件** `ctx.ui.setToolsExpanded(false)`，
+   * 缺了就是「跑 subagent 的那一刻挂掉」。两个一起给（与 pi 一致）。
+   */
+  getToolsExpanded(): boolean;
+  /** 设工具输出的展开状态（`app.tools.expand` 那个开关的同一个值）。 */
+  setToolsExpanded(expanded: boolean): void;
 }
 
 export interface HostUiOptions {
@@ -190,6 +217,24 @@ export interface HostUiOptions {
   theme: Theme;
   /** raw input 的注册口（pi-tui 的 `addInputListener`）。 */
   addInputListener(listener: TuiInputListener): () => void;
+  /**
+   * 底栏状态段的落点（`ctx.ui.setStatus`）。
+   *
+   * **可缺省**：没有底栏的宿主（测试探针、一次性模式）不提供它，于是那条状态段
+   * 被丢掉 —— 扩展的后台任务照跑，只是没那一行提示。
+   *
+   * 传进来的 `text` 已经是「清洗过的单行文本」（换行／制表符／连续空格都压掉了，
+   * 见 `sanitizeStatusText()`）：底栏是固定行数的，一个含 `\n` 的状态会把布局撑歪。
+   */
+  setStatus?(key: string, text: string | undefined): void;
+  /**
+   * 工具输出是否全部展开（`getToolsExpanded` / `setToolsExpanded` 的落点）。
+   *
+   * **可缺省**：探针 / 一次性模式没有「展开」这一说，于是读回来 `false`、设了就丢掉 ——
+   * 两者都不抛（`pi-subagents` 在 `hasUI` 时会无条件设它，抛一次就整个 subagent 跑不起来）。
+   */
+  getToolsExpanded?(): boolean;
+  setToolsExpanded?(expanded: boolean): void;
   /** 扩展的提示写进哪里（界面 `notify()` 插的那张命令反馈卡）。 */
   onNotice(text: string): void;
   /**
@@ -291,6 +336,20 @@ function noticePrefix(type: string | undefined): string {
   if (type === 'error') return '[扩展] ';
   if (type === 'warning') return '[扩展警告] ';
   return '[扩展] ';
+}
+
+/**
+ * 底栏状态段的**单行化**（与 pi 的 `footer.js` 里那个同名函数逐字同形）。
+ *
+ * 换行 / 制表符 / 回车换成空格，连续空格压成一个，两头 trim。
+ * **ANSI 保留**：扩展自己上了色（`pi-background-tasks` 是 `lightBlue(label)`），
+ * 那是它要的形态，抹掉反而会与 pi 上的样子不一致。
+ *
+ * 为什么必须做：底栏在本项目里是**固定行数**的（`FOOTER_ROWS`），一个含 `\n` 的
+ * 状态会把底栏撑成三行 —— 多出来的那行被裁掉，看上去就是「字丢了一半」。
+ */
+export function sanitizeStatusText(text: string): string {
+  return text.replace(/[\r\n\t]/g, ' ').replace(/ +/g, ' ').trim();
 }
 
 /**
@@ -513,6 +572,25 @@ export function createHostUi(
         throw new Error('本宿主没有输入区，`setEditorText` 用不了');
       }
       setEditorText(text);
+    },
+
+    // 底栏状态段（pi 的 `setStatus`）。落点在界面层（只有它知道底栏在哪）——
+    // 没有底栏的宿主（探针 / 一次性模式）就**丢掉**：状态段只是显示，与 `setWidget`
+    // 同一口径。这里绝不抛：`pi-background-tasks` 在 `updateUi()` 里无条件调它，
+    // 抛一次它就把 `currentCtx` 清了，之后**所有**后台任务事件都不再更新界面。
+    // 清洗放在这里（而不是界面里）：「单行」是底栏的契约，与哪个界面无关。
+    setStatus: (key: string, text: string | undefined) => {
+      const setStatus = source().setStatus;
+      if (setStatus === undefined) return;
+      const line = text === undefined ? '' : sanitizeStatusText(text);
+      setStatus(key, line === '' ? undefined : line);
+    },
+
+    // 工具输出的展开状态（`pi-subagents` 的 subagent 工具在 hasUI 时无条件设它）。
+    // **读不到就是 false、设了就丢掉** —— 这两条不能抛（见 HostUiOptions 里的注释）。
+    getToolsExpanded: () => source().getToolsExpanded?.() ?? false,
+    setToolsExpanded: (expanded: boolean) => {
+      source().setToolsExpanded?.(expanded);
     },
 
     setWidget: (

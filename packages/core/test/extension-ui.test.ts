@@ -101,3 +101,90 @@ test('confirm：浏览器那一份回 `true` → 结果是 `true`（终端那份
   assert.equal(await pending, true);
   assert.ok(ctx.log.includes('tui:teardown'), `终端组件要被卸下：${ctx.log.join(',')}`);
 });
+
+// ─── 底栏状态段（`ctx.ui.setStatus`）───
+
+/**
+ * 这一组盯的是一个**真发生过的报错**：
+ *
+ *     [background-tasks] UI update failed: ctx.ui.setStatus is not a function
+ *
+ * `pi-background-tasks` 在 `updateUi()` 里无条件是 `ctx.ui.setStatus(...)`，而我们的
+ * `ctx.ui` 当时没有这个成员 —— 于是它在自己的 catch 里打一行日志、顺手把 `currentCtx`
+ * 清成 `undefined`，之后**所有**后台任务事件都不再更新界面（任务还在跑，底栏再也不说）。
+ */
+test('setStatus：转发给宿主，并把文本压成单行', () => {
+  const calls: (string | undefined)[][] = [];
+  const ui = createHostUi(() => ({
+    tui: {} as never,
+    theme: {} as never,
+    addInputListener: () => () => {},
+    onNotice: () => {},
+    setStatus: (key, text) => calls.push([key, text]),
+  }));
+  ui.setStatus('background-tasks', ' bg 2 running \n (试试 tab)  ');
+  // 与 pi 的 `sanitizeStatusText()` 逐字同口径：换行变空格、连续空格压掉、两头 trim
+  // （那是底栏的单行契约 —— 带 `\n` 的状态会把固定行数的底栏撑歪）。
+  assert.deepEqual(calls, [['background-tasks', 'bg 2 running (试试 tab)']]);
+});
+
+test('setStatus：`undefined` 与空串都是「清掉那一格」', () => {
+  const calls: (string | undefined)[][] = [];
+  const ui = createHostUi(() => ({
+    tui: {} as never,
+    theme: {} as never,
+    addInputListener: () => () => {},
+    onNotice: () => {},
+    setStatus: (key, text) => calls.push([key, text]),
+  }));
+  ui.setStatus('background-tasks', undefined);
+  ui.setStatus('background-tasks', '   ');
+  // 两种写法都得落成 `undefined` —— 界面的 Map 只认「有」与「没有」两态，
+  // 留一个空串就是多一种反例（底栏于是可能多出一格空白）。
+  assert.deepEqual(calls, [
+    ['background-tasks', undefined],
+    ['background-tasks', undefined],
+  ]);
+});
+
+test('setStatus：宿主没有底栏时不抛（探针 / 一次性模式）', () => {
+  // 关键：**不抛也不 reject**。状态段只是显示，而扩展在这里通常没有 try ——
+  // 抛出去会把整轮对话带崩（`pi-subagents` 的 /agents 面板就在命令 handler 里调它）。
+  const ui = createHostUi(() => ({
+    tui: {} as never,
+    theme: {} as never,
+    addInputListener: () => () => {},
+    onNotice: () => {},
+  }));
+  assert.doesNotThrow(() => ui.setStatus('background-tasks', ' bg 1 running '));
+});
+
+test('getToolsExpanded / setToolsExpanded：转发给宿主', () => {
+  let expanded = false;
+  const ui = createHostUi(() => ({
+    tui: {} as never,
+    theme: {} as never,
+    addInputListener: () => () => {},
+    onNotice: () => {},
+    getToolsExpanded: () => expanded,
+    setToolsExpanded: (value) => {
+      expanded = value;
+    },
+  }));
+  assert.equal(ui.getToolsExpanded(), false);
+  ui.setToolsExpanded(true);
+  assert.equal(ui.getToolsExpanded(), true, '读回来的必须是刚设的那个值（同一个展开开关）');
+});
+
+test('getToolsExpanded / setToolsExpanded：宿主没有时默认 false 且不抛', () => {
+  // `pi-subagents` 的 subagent 工具在 `hasUI` 时**无条件**调 `setToolsExpanded(false)`
+  // （`executeSubagentCollapsed()`），所以这里抛一次就是「一跑 subagent 就挂」。
+  const ui = createHostUi(() => ({
+    tui: {} as never,
+    theme: {} as never,
+    addInputListener: () => () => {},
+    onNotice: () => {},
+  }));
+  assert.equal(ui.getToolsExpanded(), false);
+  assert.doesNotThrow(() => ui.setToolsExpanded(true));
+});
