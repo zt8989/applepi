@@ -377,9 +377,11 @@ tip 就在树上，不再另起一行 `HEAD →`。成败靠**颜色**（绿 / �
 | `/quit` | 退出（与 `Ctrl+D` 同一条路：先回主屏，再打那行 `To resume this session:`） |
 | `/mcp` | MCP 服务器管理面板（内置扩展提供）：连接状态、登录、重连、改暴露方式 |
 | `/skill:<名字>` | 把某个 skill 的正文展开后，连同你写的问题一起发给模型 |
+| `/<模板名> [参数]` | Prompt 模板（pi 的 Prompt Templates）：`~/.pi/agent/prompts/*.md`、项目 `.pi/prompts/*.md` 与 pi 包里 `pi.prompts` 点名的文件；回车展开成正文发给模型 |
 
-命令**不发给模型** —— 那是给界面/内核的管理动作。**`/skill:` 是例外**：它展开成一段
-`<skill>` 块真的发给模型（形状与 pi 相同）。
+命令**不发给模型** —— 那是给界面/内核的管理动作。**`/skill:` 与 prompt 模板是例外**：
+它们展开成正文/`<skill>` 块真的发给模型（形状与 pi 相同）。**未命中的 `/xxx` 也照发**：
+`/etc/hosts`、`/文件名` 这类输入不该被命令层报错或吞掉 —— 与 pi 一致（认不出就原样发）。
 
 ### Skill
 
@@ -402,6 +404,32 @@ pnpm start --skill ./docs/my-skill.md    # 额外指定，可重复
 [`docs/architecture/tools.md`](docs/architecture/tools.md#skill--也在-pi-那一侧packagescoresrcskillsts)。
 
 > 清单是会话**装载时**定下的。事后新增 skill 要 `/new` 换个会话才生效。
+
+### Prompt 模板
+
+Prompt 模板就是「一段常写的提示词」存成 Markdown：**文件名是命令名**，正文是回车后
+真正发给模型的那段话。pi 的 `pi.prompts`（安装的包）与下面两处目录都会加载：
+
+```text
+~/.pi/agent/prompts/review.md          ← 用户级，命令是 /review
+<工作目录>/.pi/prompts/parallel-review.md ← 项目级
+```
+
+```markdown
+---
+description: Review staged git changes
+argument-hint: "[focus]"
+---
+Review the staged changes. Focus on ${1:-correctness, security, and error handling}.
+```
+
+`description` / `argument-hint` 进补全；`$1` / `$@` / `${1:-默认值}` 的替换规则
+**整个复用 pi 的 `expandPromptTemplate()`**，与模板作者在 pi 文档里看到的一致。
+
+开场横幅里那一节 `[Prompts]` 就是本轮可用的模板清单（与 pi 同形、同样常驻），
+所以装了 `pi-subagents` 之后会直接看到 `/council`、`/parallel-review`、`/review-loop` 这些；
+`--web` 的 `/` 命令下拉里也列同一批（选中后由服务端展开）。
+模板**不进 system prompt**，也不改工具集 —— 它只是省掉每次手打一大段提示词。
 
 选项：`-p/--print`、`-P/--provider`、`-m/--model`、`-s/--system`、`--max-turns`、
 `--llm-timeout`、`--attempts`、`--api-key`、`--no-trace`、`--session`、

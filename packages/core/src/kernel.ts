@@ -45,6 +45,7 @@ import { loadExtensionHost } from './extension-host';
 import type { HostUiOptions } from './extension-ui';
 import type { ExtensionHost } from './extension-host';
 import { loadSkillRegistry } from './skills';
+import { loadPromptRegistry } from './prompts';
 /**
  * 从 Model 对象上读我们关心的三个能力。
  *
@@ -619,6 +620,10 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     // 正是静默退化（模型少了能力，界面与用户都不知道）。它们进 state，由界面开场显示
     // （与 pi 的 `[Skill conflicts]` 同形）。
     const skillRegistry = await loadSkillRegistry({ cwd, ...(options.skillPaths ? { paths: options.skillPaths } : {}) });
+    // Prompt 模板：与 skill 同一条装载链（`DefaultResourceLoader`），所以 pi 包清单里
+    // `pi.prompts` 声明的模板（比如 pi-subagents 的 `/council`）在这里也会出现。
+    // 它们**不进** system prompt，只进状态给界面用（开场横幅 / 补全 / 回车展开）。
+    const promptRegistry = await loadPromptRegistry({ cwd });
     // System prompt 由 **pi 的 buildSystemPrompt** 拼（工具规则 / AGENTS.md / cwd / skill）。
     // 我们只收集输入：工具的 snippet+guideline、AGENTS.md 上下文、skill 清单。
     //
@@ -658,6 +663,8 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       })),
       skills: skillRegistry.skills,
       skillDiagnostics: skillRegistry.diagnostics,
+      promptTemplates: promptRegistry.prompts,
+      promptDiagnostics: promptRegistry.diagnostics,
     });
     // 工具集**不是**定死的：之后 `setActiveTools`（`web_enable` / `subagents_enable`
     // 那些 loader 工具）真的会改声明，而变更由 `agent.run` 在请求前 diff 成一条

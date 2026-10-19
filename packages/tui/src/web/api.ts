@@ -40,6 +40,7 @@ import {
 } from '@ela/core/thinking-level';
 import { readHideThinkingBlock, readScopedModels, writeHideThinkingBlock, writeScopedModels } from '@ela/core/model-scope';
 import { skillCommands, skillsInPrompt } from '@ela/core/skills';
+import { promptCommands, promptTemplatesInPrompt } from '@ela/core/prompts';
 import type {
   WebActionResult,
   WebCommandInfo,
@@ -215,22 +216,40 @@ export function createWebApi(options: WebApiOptions): WebApi {
 
   return {
     commands() {
-      // 扩展的命令一律进（它们本来就该在浏览器里也能跑）；内置的只有标了 `web` 的进
-      // —— 会话类（`/new` `/resume` `/compact` …）还在终端那边，见文件头。
-      // `/skill:<名字>` 也列进来（展开由 bridge 在收到 prompt 时做，见那里的注释）。
-      const builtin: WebCommandInfo[] = options
-        .commands()
-        .filter((command) => command.source === 'extension' || command.web === true)
+      // 顺序与 TUI 的补全一致（也是 pi 的顺序）：内置 → prompt 模板 → 扩展 → skill。
+      //
+      // 内置只有标了 `web` 的进（会话类 `/new` `/resume` `/compact` … 还在终端那边，
+      // 见文件头）；扩展的一律进（它们本来就该在浏览器里也能跑）。
+      const commandList = options.commands();
+      const builtin: WebCommandInfo[] = commandList
+        .filter((command) => command.source !== 'extension' && command.web === true)
         .map((command) => ({
           name: command.name,
           description: command.description,
-          source: command.source ?? 'builtin',
+          source: 'builtin',
         }));
+      // Prompt 模板（pi 的 Prompt Templates）：与 TUI 的 `/` 补全同一份清单。
+      // 浏览器里选中后当普通消息发出去，由桥在服务端展开（正文在磁盘上，见 bridge.ts）。
+      const prompts: WebCommandInfo[] = promptCommands(
+        promptTemplatesInPrompt(store.getState()),
+      ).map((command) => ({
+        name: command.name,
+        description: command.description,
+        source: 'prompt',
+      }));
+      const extensions: WebCommandInfo[] = commandList
+        .filter((command) => command.source === 'extension')
+        .map((command) => ({
+          name: command.name,
+          description: command.description,
+          source: 'extension',
+        }));
+      // `/skill:<名字>` 也列进来（展开由 bridge 在收到 prompt 时做，见那里的注释）。
       const skills: WebCommandInfo[] = skillCommands(skillsInPrompt(store.getState())).map((command) => ({
         ...command,
         source: 'skill',
       }));
-      return [...builtin, ...skills];
+      return [...builtin, ...prompts, ...extensions, ...skills];
     },
 
     models() {

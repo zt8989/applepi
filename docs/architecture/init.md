@@ -98,7 +98,7 @@ runtime 与启动解析出来的档位 —— 留在后面的话，扩展装载�
 
 同理，`TuiOptions` 那两个字段是**取值函数**而不是值：`extensions` / `extensionCommands`。
 开场横幅相应地要报**两次**：首帧那次只能报到「正在后台装载」，`ready` 之后再报一次才是真的
-（`[Skills]` / `[Extensions]` / 装载诊断都是那一刻才有的）。
+（`[Skills]` / `[Prompts]` / `[Extensions]` / 装载诊断都是那一刻才有的）。
 
 ### 失败怎么表现
 

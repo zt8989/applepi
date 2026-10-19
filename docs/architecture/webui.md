@@ -169,7 +169,7 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 
 | 接口 | 回什么 |
 | --- | --- |
-| `GET /api/commands` | `/` 补全下拉念的命令表（内置的标了 `web` 的 + 扩展注册的） |
+| `GET /api/commands` | `/` 补全下拉念的命令表（内置的标了 `web` 的 + prompt 模板 + 扩展注册的 + skill） |
 | `GET /api/models` | 目录 + 作用域 + 当前模型 |
 | `GET /api/sessions` | 侧边栏那份会话列表（每个 cwd 的历史会话，见下） |
 | `GET /api/skills` | 进了 prompt 的 skill 清单 |
@@ -194,18 +194,24 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 - 输入框以 `/` 开头时弹出下拉（命令表来自 `GET /api/commands`，**与 TUI 的补全同一份**）；
   `↑↓` 选 · `Tab` / `Enter` 补全 · 已是完整命令名时 `Enter` 直接执行。
 - 执行时不发给模型（`RemoteAgent.prompt` 里拦下，见 `onPrompt`）—— 与 TUI 的 `runCommand`
-  同一个分工：命令是「跟界面说」的通道，消息才是「跟模型说」。
+  同一个分工：命令是「跟界面说」的通道，消息才是「跟模型说」。**例外是未命中的 `/xxx`**：
+  不报错、不拦，当普通消息发出去（与 pi、终端一致）。
 - `/model` 弹已有的模型选择器；`/thinking` `/settings` `/scoped-models` 弹通用模态框；
   `/skills` 是纯文本弹窗；扩展命令走 `POST /api/command`。
 - **`/help` 没有**（与 pi 一致：它的入口是补全 —— 打 `/` 就把整张表摆出来）。
 - `/skill:<名字> [问题]` **不是命令**（与 TUI 一致）：它要把 SKILL.md 展开成 `<skill>` 块
   发给模型，而文件在磁盘上 —— 所以浏览器**不拦**，当普通消息发出去，
   `bridge` 收到后用 `@ela/core/skills` 的 `expandSkillCommand()` 展开（与 TUI 同一个函数）。
+  名字没命中时原样发送（pi 的 `_expandSkillCommand()` 也是认不出就原样返回）。
+- prompt 模板（`[Prompts]` 那批，`source: 'prompt'`）同理：下拉里列出来（与 TUI 同序：
+  内置 → 模板 → 扩展 → skill），选中后当普通消息发出去，`bridge` 用
+  `@ela/core/prompts` 的 `expandPromptTemplate()` 展开；`commands.ts` 只负责认出它们
+  并放行，不把它们当命令执行。
 
 **只做非会话类**：`/new` `/resume` `/compact` `/session` `/name` `/copy` `/quit` 服务端**不下发**
-（命令表里没标 `web: true`），所以浏览器里打它们会得到「浏览器里只支持非会话类命令」——
-那几件要么动会话本身（换文件、整份换 messages）、要么是终端的事（剪贴板、退出），
-它们的界面还在终端那边。
+（命令表里没标 `web: true`），所以下拉里看不到它们；直接在浏览器里打这些名字也不会
+报错 —— 它们同样走「未命中 → 当普通消息」那条路（那几件要么动会话本身、要么是终端
+的事，界面还在终端那边）。
 
 ## 扩展对话框（`ctx.ui.select` / `confirm` / `input`）与问卷
 

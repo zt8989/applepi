@@ -13,6 +13,7 @@ import type { QueueKind } from './state';
 import type { TraceNodeStatus, TraceTree } from './trace';
 import type { ExtensionLifecycleEvent } from './extension-events';
 import type { SkillInfo } from './skills';
+import type { PromptTemplateInfo } from './prompts';
 import type { CompactReason } from './compact';
 
 /**
@@ -153,6 +154,17 @@ export type AgentAction =
       skills?: SkillInfo[] | undefined;
       /** 加载诊断（重名 / frontmatter 不合法…），TUI 开场要显示。 */
       skillDiagnostics?: string[] | undefined;
+      /**
+       * 装进来的 prompt 模板（`prompts.ts` 加载）。
+       *
+       * 它们**不拼进** system prompt，但仍是装载结果：开场横幅要报 `[Prompts]`、
+       * 补全要列命令、回车要认「这条是不是模板」。
+       *
+       * 没有就是没装（旧轨迹回放、测试）—— 判据是 `undefined`，不是空数组。
+       */
+      promptTemplates?: PromptTemplateInfo[] | undefined;
+      /** prompt 模板加载诊断（重名 / frontmatter 不合法…），TUI 开场要显示。 */
+      promptDiagnostics?: string[] | undefined;
     }
   /**
    * 中途追加一段 prompt（`system` 或 `developer` role）。

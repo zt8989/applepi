@@ -8,6 +8,7 @@ import type {
 } from '@earendil-works/pi-ai';
 import type { ModelCapabilities, PromptToolDefinition } from './actions';
 import type { SkillInfo } from './skills';
+import type { PromptTemplateInfo } from './prompts';
 import { compactionSettings, type CompactionSettings } from './compact';
 import { createTraceTree, newSessionId, type TraceTree } from './trace';
 
@@ -211,6 +212,24 @@ export interface PromptState {
    * pi 把这类信息印在开场（`[Skill conflicts]`），我们也照做。
    */
   skillDiagnostics?: string[];
+  /**
+   * 装进来的 prompt 模板（`prompts.ts` + 官方 `DefaultResourceLoader`）。
+   *
+   * 与 skill 不同，模板**不进** system prompt —— 它只是 `/名字` 展开成的那段提示词。
+   * 但同样要留在状态里：开场横幅要报清单、补全要列命令、回车时要判断「这条是不是
+   * 模板」。而装载发生在内核装配那一刻，换会话（`/new` / `/resume`）时状态块带着走，
+   * 所以界面不必自己再存一份。
+   *
+   * **可选**：旧轨迹回放与测试里没有这个字段（判据是 `undefined`，不是空数组）。
+   */
+  promptTemplates?: PromptTemplateInfo[];
+  /**
+   * prompt 模板的加载诊断（重名 / frontmatter 不合法…）。
+   *
+   * 与 `skillDiagnostics` 同一个理由：TUI 下 stderr 看不见，而「模板没装上」是静默退化
+   * —— pi 在开场报 `[Prompt conflicts]`，我们也照做。
+   */
+  promptDiagnostics?: string[];
   /** 是否已经装载过。回放时据此判断「init 段读到了没有」。 */
   seeded: boolean;
 }

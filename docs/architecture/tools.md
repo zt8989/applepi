@@ -324,3 +324,52 @@ prompt 里那份清单**用户看不见**。不报出来的话，用户既不知
 诊断**原来打到 stderr**，TUI 模式下用户看不见，而「某个 skill 没加载上」正是静默退化
 （模型少了能力，界面与用户都不知道原因）。所以它们进 `state.prompt.skillDiagnostics`，
 由界面显示。
+
+## Prompt 模板 —— 同一条装载链（`packages/core/src/prompts.ts`）
+
+Prompt 模板是 pi 的 Prompt Templates：一个 Markdown 文件就是一个 `/` 命令，
+**文件名是命令名**，正文是回车后真正发给模型的那段提示词。它没有可执行行为，
+与 skill 的区别是「skill 是给模型的说明书（模型自己 read），模板是替人省掉一段长输入」。
+
+装载同样走 `DefaultResourceLoader`（只开 prompt：`noExtensions` / `noSkills` /
+`noThemes` / `noContextFiles`），于是下面这些来源与 pi 逐字相同：
+
+```text
+~/.pi/agent/prompts/*.md              ← 用户级（scope: user）
+<工作目录>/.pi/prompts/*.md           ← 项目级（scope: project）
+settings.json 的 packages → package.json 的 pi.prompts  ← 包（scope: path）
+```
+
+最后一条是「装了 pi 包却看不见它的 `/council`」那个坑的解法：pi-subagents 这类包
+在 manifest 里声明 `pi.prompts: ["./prompts"]`，自己拼目录列表是扫不到的。
+
+### 与 prompt / 状态的关系
+
+模板**不进** system prompt，也不改工具集 —— 所以 `prompt.init` 里的 `promptTemplates`
+只是给界面用的（开场 `[Prompts]`、补全、回车展开），不像 `skills` 那样会被
+`writeInit()` 落进轨迹 init 段（那些正文塞进去只会把装载记录撑大）。
+
+与 skill 一样留在 `state.prompt` 里：换会话（`/new` / `/resume`）时状态块带着走，
+界面不必自己再存一份；而「这一轮有哪些模板」在装载那一刻定下，重扫目录会得到一个
+与补全/展开不一致的清单。
+
+### 展开与命令优先级
+
+`/review concurrency` → 正文（`$1` / `$@` / `${1:-默认值}` 替换、shell 风格引号切分）
+整个交给 pi 的 `expandPromptTemplate()`，参数规则不会与模板作者看的文档漂移。
+
+回车时的优先级与 pi 一致：**内置命令 > 扩展命令 > prompt 模板 > 普通消息**。
+模板名字撞上内置/扩展命令时不展开（那些命令有可执行行为）；展开在 skill 之后、
+`runCommand()` 之前 —— 与 pi 的 `prompt()` 里 skill → template 的顺序相同。
+
+**未命中的 `/xxx` 不是错误**：分类完后当普通用户输入发给模型（`/etc/hosts`、`/文件名`
+都照发；pi 也是认不出就原样发）。这一层是 `app.ts` 导出的纯函数
+`routeSlashInput()`（skill → 模板 → 命令 → 消息），`onSubmit` 只负责把分类结果
+变成 send / queue / `runCommand()`，所以优先级可以单测。
+
+### 开场同样要报清单，而且常驻
+
+`[Prompts]` 一节列出 `/名字`（排序、逗号连排），位置按 pi 的
+Context / Skills / Prompts / Extensions 顺序；诊断是 `[Prompt conflicts]`。
+它与 `[Skills]` 同一次 `prompt.init`、同一个 `ready` 后重报的时机
+（`deferExtensions` 下首帧先报「正在装载」）。
