@@ -627,6 +627,57 @@ test('纯 toolCall 的助手消息不产生空行（它由紧跟的 toolResult �
   assert.ok(!out.includes('\n\n\n'), `不该有多余空行：${JSON.stringify(stripTerminalSequences(out))}`);
 });
 
+// ─── 卡片之间的空隙行必须是**零宽**的 ───
+//
+// 对话区每个块是一个 pi-tui 的 `Text`，而 `Text.render()` 会把每一行补空格到全宽。
+// 官方组件里那些「空隙」行（`AssistantMessageComponent` 开头的 `Spacer(1)`、Markdown
+// 的空段）本来返回的是零宽空串，过完 `Text` 就变成整行空格；而 `TuiAltScreen` 的选区
+// 按列算，宽度 > 0 的行会被**整行**刷成反显 —— 于是拖选跨过两张卡片之间的间隙时，
+// 屏幕上会扫过一条整行高的亮条（看着像「空白也被选中了」）。pi 不把整条消息套进 `Text`
+// （组件直接塞 `Container`），那种行还是零宽的，高亮会跳过去。`collapseBlankRows()`
+// 就是把这一层还原掉。
+//
+// 两件事一起钉：视觉空白的行必须零宽，但**带底色的 padding 行**不能跟着被剪 —— 那是卡片
+// 本身（pi 里也一样全宽、也一样会被刷亮）；OSC 133 的 `scrollToPrompt` 锚点也不能丢。
+test('卡片之间的空隙行保持零宽（拖选不会刷出一条整行亮条）', () => {
+  const state = {
+    messages: [
+      { role: 'user', content: '第一个问题', timestamp: 0 },
+      { role: 'assistant', content: [{ type: 'text', text: '第一个回答' }], timestamp: 0 },
+    ],
+  } as unknown as AgentState;
+  const chunks = new TranscriptChunks();
+  chunks.update(state, 60, false, []);
+  const lines = chunks.render(60);
+
+  const visuallyBlank = (line: string): boolean => stripTerminalSequences(line).trim() === '';
+  const hasStyle = (line: string): boolean => /\u001b\[[0-9;]*m/.test(line);
+
+  const gaps = lines.filter((line) => visuallyBlank(line) && !hasStyle(line));
+  assert.ok(gaps.length > 0, `应当有空隙行：${JSON.stringify(lines.map(stripTerminalSequences))}`);
+  assert.deepEqual(
+    gaps.map((line) => visibleWidth(line)),
+    gaps.map(() => 0),
+    '空隙行必须是零宽 —— 否则拖选会把它们整行刷亮',
+  );
+
+  const cardPadding = lines.filter((line) => visuallyBlank(line) && hasStyle(line));
+  assert.ok(cardPadding.length > 0, '用户蓝块的 padding 行应当带底色');
+  assert.deepEqual(
+    cardPadding.map((line) => visibleWidth(line)),
+    cardPadding.map(() => 60),
+    '卡片自己的 padding 行仍是全宽（它是卡片的一部分，不能剪）',
+  );
+
+  // `scrollToPrompt`（上一个 / 下一个提问）靠 OSC 133 的 A 标记找落点 —— 空隙行上那个
+  // 标记正是 `AssistantMessageComponent` 拼在第 0 行（= 它的 `Spacer(1)`）上的。
+  assert.equal(
+    lines.filter((line) => line.includes('\u001b]133;A')).length,
+    2,
+    `两条消息各应保留一个 OSC 133 落点：${JSON.stringify(lines)}`,
+  );
+});
+
 // ─── 用户蓝块与上一条之间要有真空隙 ───
 //
 // `UserMessageComponent` 的 paddingY=1 会产生上下两行空白，但它们是**带蓝底**的

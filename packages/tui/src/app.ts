@@ -261,6 +261,56 @@ function nodeColor(node: TraceNode): (t: string) => string {
  * 轨迹是**时间线**，不是可折叠的树：关掉一个节点不该让它的子节点消失（那是 pi 渲染
  * `entry_appended` 那类内容的形状）。这里要的只是「按块增量 + 可滚动」。
  */
+
+/**
+ * 把「**只有空格、没有任何转义序列**」的行折成空串。
+ *
+ * ## 为什么需要这一步：空隙会被拖选刷亮
+ *
+ * 对话区（与轨迹页）每个块都是一个 pi-tui 的 `Text`，而 `Text.render()` 会把**每一行都补空格
+ * 到全宽**（`lineWithMargins + " ".repeat(paddingNeeded)`）。官方组件里那些「空隙」行
+ * （`AssistantMessageComponent` 开头的 `Spacer(1)`、Markdown 的空段）本来返回的是**空串**
+ * （零宽），经 `Text` 一过就变成整行空格。
+ *
+ * 代价在选区上：`TuiAltScreen` 的选中按「行 + 列」算，宽度 > 0 的行会**整行**刷成反显
+ * —— 于是拖选跨过两张卡片之间的间隙时，屏幕上会扫过一条整行高的亮条，看着就像
+ * 「空白也被选中了」。pi 不把整条消息套进 `Text`（它把组件直接塞 `Container`），那些行
+ * 还是零宽的，高亮会跳过去（只剩卡片自己的底色 padding 被刷亮，那是卡片的一部分）。
+ *
+ * **复制出来的文本两边一样**：pi-tui 逐行 `stripTerminalSequences(...).trimEnd()` 再
+ * `join('\n')`，空串行照样是一个空行。所以这里只对齐「看得见的那部分」，不动复制内容。
+ *
+ * 判据是「剥掉转义序列后没有可见字符、且**不带样式**」：
+ *
+ * - 带底色的 padding 行（`\x1b[48;2;…m` 加一串空格）**不能动** —— 它本来就是卡片的一部分，
+ *   在 pi 里也占全宽、也会被刷亮；
+ * - 只有 **OSC 133 区域标记**加空格的行（`AssistantMessageComponent` 把 `\x1b]133;A\x07`
+ *   拼在第 0 行上，而第 0 行恰恰是它那个 `Spacer(1)`）**只剪尾部的空格**，标记留着 ——
+ *   那是 `scrollToPrompt`（上一个 / 下一个提问）拼的锚点，剪掉就跳不动了。
+ */
+const SGR_SEQUENCE = /\u001b\[[0-9;]*m/;
+/**
+ * 整行只由「转义序列 + 空格」组成 —— 屏幕上没有任何可见字符。
+ *
+ * 写成一个锚定的整体匹配（而不是先 `stripTerminalSequences()` 再 `trim()`）是为了**快**：
+ * 这个函数每帧都会把整个对话区的行过一遍（历史 1200 条时上千行），而绝大多数行是内容行
+ * —— 它第一个可见字符就匹配失败退出了。碰到不认识的转义形式也不怕：匹配不上就**不动**
+ * 那一行（宁可不剪，也不要把带样式的行错剪成零宽）。
+ */
+const BLANK_ROW = /^(?:\u001b\[[0-9;]*[A-Za-z]|\u001b\][^\u0007]*\u0007|[ \t])*$/;
+function collapseBlankRows(lines: string[]): string[] {
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]!;
+    if (line === '') continue;
+    // 有可见字符（绝大多数行在这一步就退出）。
+    if (!BLANK_ROW.test(line)) continue;
+    // 带样式（SGR）的空行是带底色的 padding，属于卡片本身。
+    if (SGR_SEQUENCE.test(line)) continue;
+    lines[i] = line.replace(/[ \t]+$/, '');
+  }
+  return lines;
+}
+
 export class TraceChunks implements Component {
   /** 每个节点一个 `Text`，下标与 `tree.order` 一一对应。 */
   private readonly blocks: Text[] = [];
@@ -427,7 +477,7 @@ export class TraceChunks implements Component {
     const lines: string[] = [];
     for (const block of this.blocks) lines.push(...block.render(at));
     if (this.showingNotice) lines.push(...this.noticeBlock.render(at));
-    return lines;
+    return collapseBlankRows(lines);
   }
 
   invalidate(): void {
@@ -1425,6 +1475,26 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const tui: ViewportTUI = new TuiAltScreen(terminal, true, undefined, {
     mouse: true,
     copyOnSelect: true,
+    /**
+     * 拖选松开时写剪贴板 —— **用 pi 那一份**（同一个函数、同一种传法，见 pi 的
+     * `modes/interactive/tui-renderer.js`）。
+     *
+     * 为什么不能不传（不传就只剩 pi-tui 的 OSC 52）：
+     * OSC 52 是「发出去就算成功」，对方收不收得到它自己也不知道 —— macOS 的 Terminal.app、
+     * tmux 未开 `set-clipboard` 时，屏幕上照样会闪一句 `Copied!`，剪贴板里却什么都没有。
+     * 传了这个回调，pi-tui 会改用回调的返回值判成败（原生剪贴板 → 平台命令 → OSC 52
+     * 的整条兜底链都在 `copyToClipboard` 里），失败时提示的是真实原因而不是 `Copied!`。
+     *
+     * 返回 `true` / 报错文本是 pi-tui 的契约：`string` 会被当成「失败」显示出来。
+     */
+    copySelection: async (text: string) => {
+      try {
+        await copyToClipboard(text);
+        return true;
+      } catch (error: unknown) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    },
     // 往上翻之后，视口最后一行压一条「回到最新」的提示（与 pi 同一条，见 jumpToLatestHint）。
     // pi-tui 只在 **primary** 那个 ScrollView 离开末尾时画它 —— 本项目切页时会重建
     // ScrollView 并让当前页当 primary（见 applyLayout），所以对话页与轨迹页各管各的，
@@ -4925,7 +4995,7 @@ export class TranscriptChunks {
     cardsAtEnd();
     if (hotkeysAt >= this.blocks.length) pushBlock(this.hotkeysBlock.render(at));
     pushBlock(this.streamBlock.render(at));
-    return lines;
+    return collapseBlankRows(lines);
   }
 
   invalidate(): void {
