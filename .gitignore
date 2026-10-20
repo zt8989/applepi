@@ -11,5 +11,9 @@ node_modules/.pnpm_patches/
 # 会话与轨迹不再落在仓库里（在 ~/.pi/agent/），所以这里没有条目。
 .playwright-mcp/
 
+# pi 自己的任务产物（`bg_run` 的输出、`.pi/tasks/` 那些）—— 机器相关，不进仓库。
+# 注意别写成 `.pi/` 以外的形状：`~/.pi/agent/` 才是配置与凭证，那份在仓库外。
+.pi/
+
 # 本地检索缓存（向量索引 + 锁），机器相关的产物。
 .zvec-grep/
