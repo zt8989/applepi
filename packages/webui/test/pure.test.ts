@@ -2,10 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { scopedKeys } from '../src/model-picker';
 import { extractText, stripAssistantUsage } from '../src/remote-agent';
+import { extractAttachments, withMessageAttachments, withUserAttachments } from '../src/attachments';
 import { parseEditDiff } from '../src/edit-diff';
 import { parseUnifiedPatch } from '../src/split-diff';
 import { toolParameterFields } from '../src/context-panels';
-import { formatToolDuration } from '../src/tool-view';
+import { formatToolDuration, resultImages } from '../src/tool-view';
 import { pathBase, relativeTime } from '../src/format';
 import { groupSessions, matchesQuery } from '../src/sidebar';
 
@@ -54,6 +55,81 @@ test('extractText：字符串 / `{content}` / `{content: 块}` 三种入参都�
   );
   assert.equal(extractText(undefined), '', '拿不到就给空串（调用方据此不发）');
   assert.equal(extractText({ role: 'user', content: 42 }), '');
+});
+
+// ─── 附件：发送投影（spi web-ui → 线协议）与展示投影（内核消息 → 界面） ───
+
+test('extractAttachments：图片带 base64，文档只带正文；用不了的跳过', () => {
+  const attachments = extractAttachments({
+    role: 'user-with-attachments',
+    content: '看图',
+    attachments: [
+      { id: 'a', type: 'image', fileName: 'shot.png', mimeType: 'image/png', size: 3, content: 'AAA', preview: 'AAA' },
+      { id: 'b', type: 'document', fileName: 'spec.pdf', mimeType: 'application/pdf', size: 9, content: 'BIG', extractedText: '第一页' },
+      { id: 'c', type: 'document', fileName: 'empty.pdf', mimeType: 'application/pdf', size: 0, content: '', extractedText: '   ' },
+      { id: 'd', type: 'image', fileName: 'broken.png', mimeType: 'image/png', size: 0, content: '' },
+    ],
+  });
+  assert.deepEqual(attachments.map((attachment) => attachment.fileName), ['shot.png', 'spec.pdf']);
+  assert.equal(attachments[0]?.content, 'AAA', '图片的 base64 必须过线（模型要看图）');
+  assert.equal(attachments[1]?.content, '', '文档原文件不过线（只留正文）');
+  assert.equal(attachments[1]?.extractedText, '第一页');
+  assert.deepEqual(extractAttachments('纯字符串'), []);
+  assert.deepEqual(extractAttachments({ content: '没有 attachments' }), []);
+});
+
+test('withMessageAttachments：图片标签 + 文档块还原成附件格子，正文不留在气泡里', () => {
+  const message = {
+    role: 'user',
+    content: [
+      { type: 'text', text: '这张图' },
+      { type: 'text', text: '[Image: shot.png]' },
+      { type: 'image', data: 'AAA', mimeType: 'image/png' },
+      { type: 'text', text: '\n\n[Document: spec.pdf]\n第一页' },
+    ],
+    timestamp: 1,
+  };
+  const converted = withMessageAttachments(message) as {
+    role: string;
+    content: string;
+    attachments: { type: string; fileName: string; content: string; preview?: string; extractedText?: string }[];
+  };
+  assert.equal(converted.role, 'user-with-attachments');
+  assert.equal(converted.content, '这张图', '标签与文档正文都不进气泡');
+  assert.deepEqual(
+    converted.attachments.map((attachment) => [attachment.type, attachment.fileName]),
+    [
+      ['image', 'shot.png'],
+      ['document', 'spec.pdf'],
+    ],
+  );
+  assert.equal(converted.attachments[0]?.preview, 'AAA', '缩略图直接用图片内容');
+  assert.equal(converted.attachments[1]?.extractedText, '第一页');
+  assert.equal(converted.attachments[1]?.content, '', '历史里没有原文件');
+});
+
+test('withMessageAttachments：没有附件块的消息原样返回（引用不变）', () => {
+  const plain = { role: 'user', content: '你好', timestamp: 1 };
+  assert.equal(withMessageAttachments(plain), plain);
+  assert.equal(withUserAttachments([plain])[0], plain);
+
+  // 用户自己打的 `[Image: …]`：后面不是图片，就不该被当成标签吃掉。
+  const lookalike = {
+    role: 'user',
+    content: [
+      { type: 'text', text: '[Image: not-a-file]' },
+      { type: 'text', text: '这是我在说一句话' },
+    ],
+    timestamp: 2,
+  };
+  assert.equal(withMessageAttachments(lookalike), lookalike);
+  // 用户自己打的文档前缀（没有桥加的那两个前导换行）也不动。
+  const docLookalike = {
+    role: 'user',
+    content: [{ type: 'text', text: '[Document: x]\n正文' }],
+    timestamp: 3,
+  };
+  assert.equal(withMessageAttachments(docLookalike), docLookalike);
 });
 
 // ─── `edit` 的 diff：分栏（unified patch）+ 单栏（展示 diff）两套解析 ───
@@ -256,4 +332,29 @@ test('matchesQuery：标题 / cwd / id 三个面都能命中，空查询全过',
   assert.ok(matchesQuery(one, 'alpha'));
   assert.ok(matchesQuery(one, 'sess-1'));
   assert.equal(matchesQuery(one, 'beta'), false);
+});
+
+/**
+ * 工具结果里的图片（`read` 读图）。
+ *
+ * 这段是「看起来对、其实错」的那类：拼错一处 MIME 或漏掉 base64 前缀，浏览器给的
+ * 不是报错而是一张破图 —— 而它只在有人真去读图的时候才出现。
+ */
+test('resultImages：图像块拼成 data URL，非图像块 / 空 data 一律跳过', () => {
+  const images = resultImages({
+    content: [
+      { type: 'text', text: 'Read image file [image/png]' },
+      { type: 'image', data: 'AAAABBBB', mimeType: 'image/png' },
+      { type: 'image', data: '', mimeType: 'image/jpeg' },
+      { type: 'text', text: '后面还有一句' },
+    ],
+  });
+  assert.equal(images.length, 1, '空的 data 不画（否则是个 src="data:;base64," 的破图）');
+  assert.equal(images[0]?.src, 'data:image/png;base64,AAAABBBB');
+  assert.equal(images[0]?.alt, 'image/png');
+
+  // 没有 mimeType 时按 png 兜底（pi 的 ImageContent 一定有它，但别因为缺一个字段就丢图）。
+  assert.equal(resultImages({ content: [{ type: 'image', data: 'X' }] })[0]?.src, 'data:image/png;base64,X');
+  assert.deepEqual(resultImages(undefined), [], '还没结果时没有图');
+  assert.deepEqual(resultImages({ content: [] }), []);
 });

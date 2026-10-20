@@ -15,6 +15,7 @@ import type {
   WebActionResult,
   WebCommandInfo,
   WebModelsInfo,
+  WebSessionDeleteInfo,
   WebSessionsInfo,
   WebSettingsInfo,
   WebSkillInfo,
@@ -45,6 +46,14 @@ export const elaApi = {
   models: (): Promise<WebModelsInfo> => request('/api/models'),
   /** 侧边栏：每个 cwd 的历史会话（恢复走 WebSocket，见 `sidebar.ts`）。 */
   sessions: (): Promise<WebSessionsInfo> => request('/api/sessions'),
+  /** 侧边栏「已归档」那一栏：归档的会话明细（带 `archivedAt`）。 */
+  archivedSessions: (): Promise<WebSessionsInfo> => request('/api/sessions/archived'),
+  /** 归档（`archived = true`）/ 恢复一批会话。 */
+  setArchived: (ids: readonly string[], archived: boolean): Promise<WebActionResult> =>
+    post('/api/sessions/archive', { ids, archived }),
+  /** 真删会话文件（+ 轨迹文件）—— 删了就没了，调用前必须问过用户。 */
+  deleteSessions: (ids: readonly string[]): Promise<WebSessionDeleteInfo> =>
+    post('/api/sessions/delete', { ids }),
   skills: (): Promise<WebSkillInfo[]> => request('/api/skills'),
   thinking: (): Promise<WebThinkingInfo> => request('/api/thinking'),
   settings: (): Promise<WebSettingsInfo> => request('/api/settings'),

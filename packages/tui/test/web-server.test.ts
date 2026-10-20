@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createAgentStore } from '@ela/core/store';
 import { createFauxRuntime, demoResponses } from '@ela/core/provider';
 import { createTraceTree } from '@ela/core/trace';
 import type { Api, Model } from '@earendil-works/pi-ai';
-import { WebBridge, modelRefs } from '../src/web/bridge';
+import { WebBridge, attachmentLabel, modelRefs, promptContent, usablePromptAttachments } from '../src/web/bridge';
 import { createWebApi } from '../src/web/api';
 import { startWebServer, type WebServerHandle } from '../src/web/server';
 import type { WebServerMessage } from '@ela/core/web-protocol';
@@ -502,6 +502,10 @@ test('web api：完整历史读会话文件（压缩掉的早期消息也在）�
     assert.match(fallbackHtml, /完整历史/);
     assert.match(fallbackHtml, /还没落盘/);
     assert.match(fallbackHtml, /内存里的那句话/);
+    // 内存里那份 messages 不含 head：页面上要补出「模型收到的系统提示词」，
+    // 否则「还没落盘」时看起来像模型压根没收到提示词与工具。
+    assert.ok(fallbackHtml.includes('class="role">system'), '要有一条 system（请求头部）');
+    assert.match(fallbackHtml, /test/, '就是 store 里那份 systemPrompt');
 
     // 2) 真有一份会话文件时以它为准 —— 三种 entry 都进时间线。
     //    （家目录由 `isolated-home.ts` 指到本次运行专属的临时目录，不会污染用户目录。）
@@ -512,10 +516,30 @@ test('web api：完整历史读会话文件（压缩掉的早期消息也在）�
       file,
       [
         JSON.stringify({ type: 'session', version: 1, id: 'web-test-session', timestamp: stamp, cwd: '/tmp/ela-web-test' }),
+        // pi v3 的请求头部：system prompt 的分段 + 工具表（这一条以前在页面上是个空壳）。
+        JSON.stringify({
+          type: 'message',
+          id: 'e0',
+          parentId: null,
+          timestamp: stamp,
+          message: {
+            role: 'system',
+            content: '',
+            timestamp: Date.now(),
+            sections: { rules: '不许瞎猜', docs: '<script>alert(1)</script>' },
+            toolsAdded: [
+              {
+                name: 'read',
+                description: '读文件',
+                parameters: { type: 'object', properties: { path: { type: 'string' } } },
+              },
+            ],
+          },
+        }),
         JSON.stringify({
           type: 'message',
           id: 'e1',
-          parentId: null,
+          parentId: 'e0',
           timestamp: stamp,
           message: { role: 'user', content: '落盘的那句话', timestamp: Date.now() },
         }),
@@ -529,6 +553,14 @@ test('web api：完整历史读会话文件（压缩掉的早期消息也在）�
     assert.match(html, /faux\/fake-9/, '模型切换要成为一条注记');
     assert.match(html, /思考级别 → high/);
     assert.ok(html.includes(file), '页面上要写明读的是哪个文件');
+    // 请求头部（系统提示词 + 工具）必须画出来 —— 以前它落到 default 分支，只剩一个空壳。
+    assert.match(html, /系统提示词 2 段 · 工具 1 个/);
+    assert.ok(html.includes('段 <code>rules</code>'), '每一段都要看得见段名（折叠着也搜得到）');
+    assert.match(html, /不许瞎猜/);
+    assert.ok(html.includes('<code>read</code>'), '工具名要看得见');
+    assert.match(html, /读文件/);
+    assert.ok(html.includes('&lt;script&gt;alert(1)&lt;/script&gt;'), '段正文要转义');
+    assert.equal(html.includes('<script>alert(1)'), false, '不能把会话里的 HTML 直接插进页面');
   } finally {
     await ctx.dispose();
   }
@@ -767,6 +799,163 @@ test('bridge：prompt 模板在服务端展开（正文在磁盘上，浏览器�
     assert.equal(dispatched[0]?.text, '/nope 你好');
   } finally {
     bridge.dispose();
+  }
+});
+
+/** 一份能过 `usablePromptAttachments()` 的图片 / 文档（后面几条测试共用）。 */
+const imageAttachment = {
+  id: 'a',
+  type: 'image' as const,
+  fileName: 'shot.png',
+  mimeType: 'image/png',
+  size: 3,
+  content: 'AAA',
+};
+const documentAttachment = {
+  id: 'b',
+  type: 'document' as const,
+  fileName: 'spec.pdf',
+  mimeType: 'application/pdf',
+  size: 9,
+  content: '',
+  extractedText: '第一页',
+};
+
+test('bridge：promptContent 把附件折成 content 块（图片带文件名标签，文档只留正文）', () => {
+  assert.deepEqual(promptContent('看看这张图', [imageAttachment, documentAttachment]), [
+    { type: 'text', text: '看看这张图' },
+    { type: 'text', text: '[Image: shot.png]' },
+    { type: 'image', data: 'AAA', mimeType: 'image/png' },
+    { type: 'text', text: '\n\n[Document: spec.pdf]\n第一页' },
+  ]);
+  // 没有附件：返回 undefined —— 调用方走原来的纯文本路径，消息形状一个字节不变。
+  assert.equal(promptContent('你好', []), undefined);
+  // 只发附件：没有空的 text 块。
+  assert.deepEqual(promptContent('', [imageAttachment]), [
+    { type: 'text', text: '[Image: shot.png]' },
+    { type: 'image', data: 'AAA', mimeType: 'image/png' },
+  ]);
+  assert.equal(attachmentLabel([imageAttachment, documentAttachment]), '（附件：shot.png、spec.pdf）');
+  assert.equal(attachmentLabel([]), '（附件）');
+});
+
+test('bridge：附件逐项验（空图片 / 非图片 MIME / 无正文文档 / 超过 10 份都跳过）', () => {
+  const usable = usablePromptAttachments([
+    imageAttachment,
+    { ...imageAttachment, id: 'empty', fileName: 'empty.png', content: '' },
+    { ...imageAttachment, id: 'wrong-mime', fileName: 'a.txt', mimeType: 'text/plain' },
+    { ...documentAttachment, id: 'no-text', fileName: 'empty.pdf', extractedText: '   ' },
+    documentAttachment,
+    { ...imageAttachment, id: 'video', type: 'video' as never, fileName: 'a.mp4', mimeType: 'video/mp4' },
+  ]);
+  assert.deepEqual(usable.map((attachment) => attachment.fileName), ['shot.png', 'spec.pdf']);
+
+  const many = Array.from({ length: 12 }, (_, index) => ({
+    ...documentAttachment,
+    id: `d${index}`,
+    fileName: `${index}.txt`,
+  }));
+  assert.equal(usablePromptAttachments(many).length, 10, '一次最多 10 份（与 pi-web-ui 的编辑器同口径）');
+});
+
+test('bridge：带附件的 prompt 走 user.message 的 content（不是只发文字）', () => {
+  const dispatched: { type?: string; text?: string; content?: unknown[]; as?: string }[] = [];
+  const state = { ...fakeState([]), trace: createTraceTree('t'), prompt: {} };
+  const fake = fakeStore(state);
+  (fake.store as { dispatch: (action: { type?: string; text?: string; content?: unknown[] }) => void }).dispatch = (
+    action,
+  ) => dispatched.push(action);
+  const bridge = new WebBridge({
+    store: fake.store as never,
+    setModel: () => true,
+    newSession: () => {},
+    resolveModel: () => fakeModel() as never,
+  });
+  try {
+    assert.deepEqual(
+      bridge.handle({ type: 'prompt', text: '看图', attachments: [imageAttachment, documentAttachment] }),
+      [],
+    );
+    assert.equal(dispatched[0]?.type, 'user.message');
+    assert.equal(dispatched[0]?.text, '看图');
+    assert.equal(dispatched[0]?.content?.length, 4, '一条正文 + 图片标签 + 图片块 + 文档块');
+
+    // 只有附件：轨迹 / 队列那一行要有字可显示（用文件名顶上）。
+    dispatched.length = 0;
+    assert.deepEqual(bridge.handle({ type: 'prompt', text: '', attachments: [imageAttachment] }), []);
+    assert.equal(dispatched[0]?.text, '（附件：shot.png）');
+    assert.equal(dispatched[0]?.content?.length, 2);
+
+    // 一份都用不了：文字照发，但要报一句（不然用户只看到附件没了）。
+    dispatched.length = 0;
+    const warnings = bridge.handle({
+      type: 'prompt',
+      text: '你好',
+      attachments: [{ ...imageAttachment, content: '' }],
+    });
+    assert.equal(warnings[0]?.type, 'notice');
+    assert.equal(dispatched[0]?.text, '你好');
+    assert.equal(dispatched[0]?.content, undefined, '没有可用附件就还是纯文本消息');
+  } finally {
+    bridge.dispose();
+  }
+});
+
+test('bridge：附件进了内核的消息流，快照里仍是 content 块（界面靠它画附件）', async () => {
+  const ctx = await start();
+  try {
+    assert.deepEqual(
+      ctx.bridge.handle({ type: 'prompt', text: '看图', attachments: [imageAttachment, documentAttachment] }),
+      [],
+    );
+    const hello = ctx.bridge.hello();
+    if (hello.type !== 'hello') throw new Error('unreachable');
+    // 轨迹派生出来的那条 user 消息带着 content 块 —— 浏览器侧才还原得出附件格子。
+    const message = hello.state.messages.find(
+      (item) => item.role === 'user' && Array.isArray((item as { content?: unknown }).content),
+    ) as { content: { type: string }[] } | undefined;
+    assert.ok(message, '快照里要有那条带附件的 user 消息');
+    assert.deepEqual(
+      message.content.map((block) => block.type),
+      ['text', 'text', 'image', 'text'],
+    );
+  } finally {
+    await ctx.dispose();
+  }
+});
+
+test('web server：附件经 WS 进来仍带着 content 块（parseClientMessage 不能吞掉 attachments）', async () => {
+  const ctx = await start();
+  const client = await connect(`${ctx.server.url.replace('http', 'ws')}ws`);
+  try {
+    await client.waitFor('hello', (m) => m.type === 'hello');
+    // 走真的 WebSocket + `parseClientMessage()` —— 桥的单测绕不过那道校形门。
+    client.send({ type: 'prompt', text: '看图', attachments: [imageAttachment, documentAttachment] });
+    const landed = await client.waitFor(
+      '带附件的 user 消息',
+      (m) =>
+        m.type === 'state' &&
+        m.state.messages.some((item) => {
+          const record = item as { role?: unknown; content?: unknown };
+          return (
+            record.role === 'user' &&
+            Array.isArray(record.content) &&
+            record.content.some((block) => (block as { type?: unknown }).type === 'image')
+          );
+        }),
+    );
+    if (landed.type !== 'state') throw new Error('unreachable');
+    const message = landed.state.messages.find((item) => {
+      const record = item as { role?: unknown; content?: unknown };
+      return record.role === 'user' && Array.isArray(record.content);
+    }) as { content: { type: string }[] };
+    assert.deepEqual(
+      message.content.map((block) => block.type),
+      ['text', 'text', 'image', 'text'],
+    );
+  } finally {
+    client.close();
+    await ctx.dispose();
   }
 });
 
@@ -1107,5 +1296,248 @@ test('bridge：ready 之前发来的消息要等装载完成（并说一声为�
     );
   } finally {
     bridge.dispose();
+  }
+});
+
+/**
+ * 侧边栏行末那几个按钮（归档 / 删除 + 项目「删全部」）的服务端那一半。
+ *
+ * 守的是三件在界面上看不出对错的事：归档的**真的**不在主列表里（而份数对得上）、
+ * 恢复能回来、删除**真的**把文件删掉（并且不删当前正在用的那个会话）。
+ */
+test('web api：归档 / 恢复 / 删除会话（行末那几个按钮的服务端那一半）', async () => {
+  const ctx = await start();
+  const post = async (pathname: string, body: unknown): Promise<Record<string, unknown>> =>
+    (await (
+      await fetch(`${ctx.server.url}${pathname}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    ).json()) as Record<string, unknown>;
+  interface ListInfo {
+    sessions: { id: string; archivedAt?: number }[];
+    archivedCount: number;
+  }
+  const list = async (pathname: string): Promise<ListInfo> =>
+    (await (await fetch(`${ctx.server.url}${pathname}`)).json()) as ListInfo;
+  const write = (id: string, cwd: string, firstLine: string): void => {
+    const file = findSessionFile(id, cwd);
+    mkdirSync(path.dirname(file), { recursive: true });
+    const stamp = new Date().toISOString();
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: 'session', version: 1, id, timestamp: stamp, cwd }),
+        JSON.stringify({
+          type: 'message',
+          id: 'e1',
+          parentId: null,
+          timestamp: stamp,
+          message: { role: 'user', content: firstLine, timestamp: Date.now() },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+  };
+
+  try {
+    write('sess-keep', '/tmp/ela-archive-a', '留着的那条');
+    write('sess-arch', '/tmp/ela-archive-a', '要归档的那条');
+    write('sess-gone', '/tmp/ela-archive-b', '要删掉的那条');
+
+    assert.equal((await list('api/sessions')).archivedCount, 0, '一开始没人归档');
+
+    const archived = await post('api/sessions/archive', { ids: ['sess-arch'], archived: true });
+    assert.equal(archived['ok'], true);
+
+    const main = await list('api/sessions');
+    assert.equal(
+      main.sessions.some((session) => session.id === 'sess-arch'),
+      false,
+      '归档的不在主列表里',
+    );
+    assert.equal(main.archivedCount, 1, '份数是给底部「已归档 · N」的');
+
+    const archiveView = await list('api/sessions/archived');
+    const entry = archiveView.sessions.find((session) => session.id === 'sess-arch');
+    assert.ok(entry, '归档那一栏能看到它');
+    assert.equal(typeof entry.archivedAt, 'number', '归档那一行要显示「什么时候归档的」');
+
+    await post('api/sessions/archive', { ids: ['sess-arch'], archived: false });
+    const restored = await list('api/sessions');
+    assert.equal(restored.archivedCount, 0, '恢复后份数归零');
+    assert.ok(
+      restored.sessions.some((session) => session.id === 'sess-arch'),
+      '恢复的要回到主列表',
+    );
+
+    const removed = await post('api/sessions/delete', { ids: ['sess-gone'] });
+    assert.deepEqual(removed['deleted'], ['sess-gone']);
+    assert.equal(
+      existsSync(findSessionFile('sess-gone', '/tmp/ela-archive-b')),
+      false,
+      '删除是真删文件，不是只从列表里藏起来',
+    );
+
+    // 当前会话不删：它正被记录器拿着（下一次说话会写进一个已删掉的文件）。
+    const current = await post('api/sessions/delete', { ids: ['web-test-session'] });
+    assert.equal(current['ok'], false);
+    assert.equal(typeof current['message'], 'string', '拒绝要有话说，不静默');
+  } finally {
+    await post('api/sessions/delete', { ids: ['sess-keep', 'sess-arch'] });
+    await ctx.dispose();
+  }
+});
+
+/**
+ * `GET /api/history?sessionId=<id>`：有个 id 就能打开那一段。
+ *
+ * 这条能力是为「会话不在当前 cwd 里」准备的：`resume` 别的项目的会话时内核 cwd 不变
+ * （恢复不换工作目录），按 `(id, cwd)` 拼出来的路径是空的 —— 只按 id 跨目录找才对。
+ */
+test('web api：/api/history?sessionId= 开任意一个会话；找不到给 404', async () => {
+  const ctx = await start();
+  const write = (id: string, cwd: string, firstLine: string): void => {
+    const file = findSessionFile(id, cwd);
+    mkdirSync(path.dirname(file), { recursive: true });
+    const stamp = new Date().toISOString();
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: 'session', version: 3, id, timestamp: stamp, cwd }),
+        JSON.stringify({
+          type: 'message',
+          id: 'e1',
+          parentId: null,
+          timestamp: stamp,
+          message: {
+            role: 'system',
+            content: '',
+            timestamp: Date.now(),
+            sections: { rules: '别猜' },
+            toolsAdded: [{ name: 'read', description: '读文件', parameters: { type: 'object' } }],
+          },
+        }),
+        JSON.stringify({
+          type: 'message',
+          id: 'e2',
+          parentId: 'e1',
+          timestamp: stamp,
+          message: { role: 'user', content: firstLine, timestamp: Date.now() },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+  };
+
+  try {
+    // 在**别的** cwd 里的一份会话（内核的 cwd 是 /tmp/ela-web-test）。
+    write('sess-elsewhere', '/tmp/ela-web-elsewhere', '别处的那个会话');
+    const found = await fetch(`${ctx.server.url}api/history?sessionId=sess-elsewhere`);
+    assert.equal(found.status, 200);
+    const html = await found.text();
+    assert.match(html, /别处的那个会话/, '按 id 找到的是那一份会话文件');
+    assert.match(html, /ela-web-elsewhere/, '页面上写明它自己的工作目录');
+    assert.match(html, /系统提示词 1 段 · 工具 1 个/, '头部照常画出来');
+    assert.match(html, /段 <code>rules<\/code>/);
+
+    // 不存在的 id：404 + 说得清楚（不是「还没落盘」，那会让人以为会话还在内存里）。
+    const missing = await fetch(`${ctx.server.url}api/history?sessionId=nobody-here`);
+    assert.equal(missing.status, 404);
+    const missingHtml = await missing.text();
+    assert.match(missingHtml, /找不到这个会话/);
+    assert.match(missingHtml, /nobody-here/);
+
+    // 形状不像 id 的一律当没有（这串字符会去与文件名比对）。
+    const odd = await fetch(`${ctx.server.url}api/history?sessionId=${encodeURIComponent('../etc/passwd')}`);
+    assert.equal(odd.status, 404);
+    assert.match(await odd.text(), /找不到这个会话/);
+  } finally {
+    await ctx.dispose();
+  }
+});
+
+/**
+ * 完整历史里的**图片预览**。
+ *
+ * 图片是会话文件里本来就有的东西（`read` 读图把 base64 塞进工具结果，用户发的附件
+ * 也一样），早先那两处只画一个 `[图片]` 占位 —— 而「完整历史」要回答的正是
+ * 「当时到底看了什么」。这条钉住：图块要变成 `<img>`（data URL）、文字块不被吞掉。
+ */
+test('web api：完整历史把图像块画成 <img>（用户附件与工具结果都算）', async () => {
+  const ctx = await start();
+  // 1x1 像素的透明 PNG —— 内容不重要，重要的是它被原样拼进 data URL。
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  try {
+    const file = findSessionFile('web-test-session', '/tmp/ela-web-test');
+    mkdirSync(path.dirname(file), { recursive: true });
+    const stamp = new Date().toISOString();
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: 'session', version: 3, id: 'web-test-session', timestamp: stamp, cwd: '/tmp/ela-web-test' }),
+        JSON.stringify({
+          type: 'message',
+          id: 'e1',
+          parentId: null,
+          timestamp: stamp,
+          message: {
+            role: 'user',
+            content: [
+              { type: 'text', text: '看看这张截图' },
+              { type: 'image', data: png, mimeType: 'image/png' },
+            ],
+            timestamp: Date.now(),
+          },
+        }),
+        JSON.stringify({
+          type: 'message',
+          id: 'e2',
+          parentId: 'e1',
+          timestamp: stamp,
+          message: {
+            role: 'assistant',
+            content: [{ type: 'toolCall', id: 'call-1', name: 'read', arguments: { path: 'shot.png' } }],
+            api: 'openai-completions',
+            provider: 'faux',
+            model: 'fake',
+            usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+            stopReason: 'toolUse',
+            timestamp: Date.now(),
+          },
+        }),
+        JSON.stringify({
+          type: 'message',
+          id: 'e3',
+          parentId: 'e2',
+          timestamp: stamp,
+          message: {
+            role: 'toolResult',
+            toolCallId: 'call-1',
+            toolName: 'read',
+            content: [
+              { type: 'text', text: 'Read image file [image/png]' },
+              { type: 'image', data: png, mimeType: 'image/png' },
+            ],
+            isError: false,
+            timestamp: Date.now(),
+          },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    const html = await (await fetch(`${ctx.server.url}api/history`)).text();
+    const images = html.match(/<img class="shot"[^>]*>/g) ?? [];
+    assert.equal(images.length, 2, '用户消息里一张、工具结果里一张');
+    for (const image of images) {
+      assert.ok(image.includes(`src="data:image/png;base64,${png}"`), 'data URL 原样拼好（含 MIME 与 base64）');
+    }
+    assert.match(html, /看看这张截图/, '图片旁边的文字不能被吞掉');
+    assert.match(html, /Read image file \[image\/png\]/);
+    assert.equal(html.includes('[图片]'), false, '画了图就不再留那个占位文字');
+  } finally {
+    await ctx.dispose();
   }
 });

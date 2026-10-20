@@ -33,8 +33,11 @@ import type { QuestionnaireIntent, QuestionnaireSnapshot } from './questionnaire
  * v4：问卷（`ui-questionnaire` / `ui-questionnaire-intent`）—— 多题 tab 那种提问的
  * 整份快照与意图。加消息种类也算"对不上就拒绝"（旧前端收到不认识的帧会当未知消息），
  * 所以版本号跟着走。
+ *
+ * v5：`prompt` 带附件（`attachments`）—— 浏览器把图片 / 文档折成 content 块发给内核。
+ * 旧前端不知道这个字段，带附件的消息会**静默丢掉附件**；所以版本号跟着走。
  */
-export const WEB_PROTOCOL_VERSION = 4;
+export const WEB_PROTOCOL_VERSION = 5;
 
 /**
  * 聊天流里「提示」条目用的合成消息 role。
@@ -60,6 +63,30 @@ export interface WebModelRef {
   name: string;
   /** 支持思考（理论上限不是 `off`）—— 与 TUI 面板上的标记同一个口径。 */
   reasoning: boolean;
+}
+
+/**
+ * 浏览器侧传上来的一份附件（对应 pi-web-ui 的 `Attachment`）。
+ *
+ * ## 为什么文档只带 `extractedText`
+ *
+ * 模型要的是可读文本，不是那份二进制；而 `content`（原文件的 base64）会跟着 WS 帧
+ * 传一遍、再被内核写进会话文件 —— 一份 10MB 的 PDF 变成几十 MB 的轨迹。图片不同：
+ * 模型**真的**要看图，所以 `content` 必须带上（它就是 `ImageContent.data`）。
+ *
+ * `preview` 只有界面用（PDF 首页缩略图），服务端不需要 —— 所以这里不传。
+ */
+export interface WebAttachment {
+  id: string;
+  type: 'image' | 'document';
+  fileName: string;
+  mimeType: string;
+  /** 原文件字节数（界面显示用）。 */
+  size: number;
+  /** 图片的 base64（不含 data URL 前缀）；文档为空串。 */
+  content: string;
+  /** 文档抽出来的正文（图片没有）。 */
+  extractedText?: string | undefined;
 }
 
 /**
@@ -204,7 +231,13 @@ export type WebServerMessage =
 
 /** 浏览器 → 服务端的消息。 */
 export type WebClientMessage =
-  | { type: 'prompt'; text: string }
+  /**
+   * 人说一句话（可带附件）。
+   *
+   * `text` 可以是空串（只发附件）；`attachments` 缺省 = 纯文本。桥会把它们折成
+   * `user.message` 的 content 块（图片 → image 块，文档 → 带文件名头的 text 块）。
+   */
+  | { type: 'prompt'; text: string; attachments?: WebAttachment[] }
   | { type: 'abort' }
   | { type: 'setModel'; provider: string; id: string }
   | { type: 'setThinking'; level: string }
@@ -248,11 +281,41 @@ export interface WebSessionRef {
   lastActivityMs: number;
   /** 消息条数（数行数，不解析）。 */
   messageCount: number;
+  /**
+   * 归档时刻（ms）—— 只有 `GET /api/sessions/archived` 会给。
+   *
+   * 主列表（`GET /api/sessions`）里**不会有**带这个字段的条目：归档的那些不在其中，
+   * 它们的份数在 `archivedCount` 里。
+   */
+  archivedAt?: number | undefined;
 }
 
-/** `GET /api/sessions`：侧边栏要的那份列表（按 cwd 分组是前端的事）。 */
+/**
+ * `GET /api/sessions`：侧边栏要的那份列表（按 cwd 分组是前端的事）。
+ *
+ * `sessions` **不含**已归档的会话；它们要走 `GET /api/sessions/archived`（归档视图
+ * 才需要那份明细，所以不跟着主列表一起算）。`archivedCount` 是底部「已归档 · N」
+ * 那个入口要的数，只数**还存在的**会话 —— 文件被手工删掉的不该把数撑大。
+ */
 export interface WebSessionsInfo {
   sessions: WebSessionRef[];
+  archivedCount: number;
+}
+
+/**
+ * `POST /api/sessions/delete` 的结果。
+ *
+ * `failed` 不抛错：Windows 上文件可能被占着，删一批时让用户看到「删了 12 个、1 个
+ * 没删掉」比整个请求失败有用（与 `cleanSessions` 同一口径）。
+ */
+export interface WebSessionDeleteInfo {
+  ok: boolean;
+  /** 真的删掉的会话 id。 */
+  deleted: string[];
+  /** 没删掉的：`<id>` 与原因。 */
+  failed: { id: string; reason: string }[];
+  /** 一句给用户看的说明（当前会话被跳过、正在跑那一回合被拒之类）。 */
+  message?: string | undefined;
 }
 
 /** `GET /api/commands` 里的一条：`/` 补全下拉念它。 */
@@ -338,7 +401,11 @@ export type WebHistoryLine =
   | { kind: 'note'; at: string; text: string };
 
 /**
- * `GET /api/history`：**完整历史**（顶栏那个按钮打开的那一页）。
+ * `GET /api/history[?sessionId=<id>]`：**完整历史**（顶栏那个按钮打开的那一页）。
+ *
+ * 不带 `sessionId` = 当前会话（内核 `state.session.id`）。带上它就能开**任意**一个会话：
+ * 按 id 跨 `sessions/` 下每个目录找文件，于是不必先知道它当初在哪个 cwd 里
+ * （`config-home` 的 `findSessionFileById()`）。找不到时 `missing: true`，服务端回 404。
  *
  * ## 为什么读会话文件而不是内存里的 `messages`
  *
@@ -351,6 +418,13 @@ export interface WebHistoryInfo {
   cwd: string;
   /** 会话文件路径；`null` = 还没落盘，内容来自内存。 */
   file: string | null;
+  /**
+   * `true` = 指定了 `?sessionId=` 但盘上没有那个会话（文件被删了 / 不在这台机器上）。
+   *
+   * 与「还没落盘」不是一回事：后者是**当前**会话还没写过文件，内容来自内存；
+   * 这个是我们连它是谁都不知道。所以那一页要说得不一样（服务端回 404）。
+   */
+  missing?: boolean | undefined;
   lines: WebHistoryLine[];
 }
 
@@ -367,7 +441,13 @@ export function parseClientMessage(raw: string): WebClientMessage | undefined {
   switch (type) {
     case 'prompt': {
       const text = (value as { text?: unknown }).text;
-      return typeof text === 'string' ? { type: 'prompt', text } : undefined;
+      if (typeof text !== 'string') return undefined;
+      const attachments = parseClientAttachments((value as { attachments?: unknown }).attachments);
+      return {
+        type: 'prompt',
+        text,
+        ...(attachments === undefined ? {} : { attachments }),
+      };
     }
     case 'abort':
       return { type: 'abort' };
@@ -412,6 +492,41 @@ export function parseClientMessage(raw: string): WebClientMessage | undefined {
     default:
       return undefined;
   }
+}
+
+/**
+ * `prompt` 里附件的校形（**不认识的一律丢掉**，与其余客户端消息同一条规矩）。
+ *
+ * 服务端还会再验一遍能不能真的带给模型（`web/bridge.ts` 的
+ * `usablePromptAttachments()`）：这里只保证形状是 `WebAttachment`，不替它判业务。
+ * 少这一层的话字段会在 `parseClientMessage()` 这一步就消失 —— 症状是浏览器明明发了
+ * `attachments`、内核收到的却只有一句文字（e2e 真踩过）。
+ */
+function parseClientAttachments(raw: unknown): WebAttachment[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const attachments: WebAttachment[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) continue;
+    const record = item as Record<string, unknown>;
+    const type = record['type'];
+    const fileName = record['fileName'];
+    const mimeType = record['mimeType'];
+    if (type !== 'image' && type !== 'document') continue;
+    if (typeof fileName !== 'string' || fileName === '') continue;
+    if (typeof mimeType !== 'string' || mimeType === '') continue;
+    const extractedText = record['extractedText'];
+    const size = record['size'];
+    attachments.push({
+      id: typeof record['id'] === 'string' ? record['id'] : '',
+      type,
+      fileName,
+      mimeType,
+      size: typeof size === 'number' && Number.isFinite(size) ? size : 0,
+      content: typeof record['content'] === 'string' ? record['content'] : '',
+      ...(typeof extractedText === 'string' ? { extractedText } : {}),
+    });
+  }
+  return attachments.length === 0 ? undefined : attachments;
 }
 
 /**

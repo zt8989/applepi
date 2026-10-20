@@ -30,6 +30,7 @@ TUI 之外的第二块界面：**浏览器里的 pi-web-ui**，环仍然是终�
 | `web/history.ts` | `@ela/tui` | 「完整历史」那一页的服务端渲染（`GET /api/history`） |
 | `web/server.ts` | `@ela/tui` | HTTP 静态资源 + `/api/*` + `/ws`（WebSocket） |
 | `src/remote-agent.ts` | `@ela/webui` | 线协议 → pi-web-ui：`Agent` 形状的替身 |
+| `src/attachments.ts` | `@ela/webui` | 附件的两个投影：发送（`extractAttachments`）/ 展示（`withUserAttachments`） |
 | `src/api.ts` | `@ela/webui` | `/api/*` 的客户端 |
 | `src/command-palette.ts` | `@ela/webui` | 输入 `/` 时的命令补全下拉 |
 | `src/commands.ts` | `@ela/webui` | `/` 命令在浏览器侧的执行（弹面板 / 调接口） |
@@ -171,18 +172,21 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 | --- | --- |
 | `GET /api/commands` | `/` 补全下拉念的命令表（内置的标了 `web` 的 + prompt 模板 + 扩展注册的 + skill） |
 | `GET /api/models` | 目录 + 作用域 + 当前模型 |
-| `GET /api/sessions` | 侧边栏那份会话列表（每个 cwd 的历史会话，见下） |
+| `GET /api/sessions` | 侧边栏那份会话列表（每个 cwd 的历史会话，**不含**已归档的；另带 `archivedCount`） |
+| `GET /api/sessions/archived` | 归档那一栏的明细（带 `archivedAt`，按归档时刻倒序） |
 | `GET /api/skills` | 进了 prompt 的 skill 清单 |
 | `GET /api/thinking` | 当前档位 + 这个模型支持的档位 + 默认档 |
 | `GET /api/settings` | 自动压缩 / 隐藏思考块 / 默认思考级别 |
 | `GET /api/system-prompt` | 模型实际收到的系统提示词（`text` + `sections`） |
 | `GET /api/tools` | 模型看到的工具定义（`name` / `description` / `parameters`） |
-| `GET /api/history` | 完整会话记录 —— **一整页 HTML**（其余接口都是 JSON） |
+| `GET /api/history[?sessionId=<id>]` | 完整会话记录 —— **一整页 HTML**（其余接口都是 JSON）；带 `sessionId` 就开那一个会话（按 id 跨目录找文件，找不到回 404） |
 | `POST /api/model` | `{arg}` → 精确命中就换（内核的 `setModel()`） |
 | `POST /api/thinking` | `{level}` |
 | `POST /api/settings` | `{autoCompact?, hideThinking?, defaultThinkingLevel?}` |
 | `POST /api/scoped-models` | `{ids}`（`null` = 全开） |
 | `POST /api/command` | `{name, arg}` → 跑一条**扩展**命令 |
+| `POST /api/sessions/archive` | `{ids, archived}` → 归档 / 恢复一批会话（`archived: false` 是恢复） |
+| `POST /api/sessions/delete` | `{ids}` → 真删会话文件 + 轨迹文件（当前会话拒绝；环在跑时拒绝） |
 
 读写与 TUI 的 `/model`、`/thinking`、`/settings`、`/scoped-models` 面板落在**同一批函数**
 （内核的 `setModel()` / `settings.json` 的读写），所以两边不会不一致。
@@ -239,6 +243,44 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
   这条跟上游的 `computeAutoAdvanceTab` 同规则 —— 早先我们这边"不自动跳提交页"，
   那是为了躲键盘重复引起的误提交；重复已经在两个渲染器里都滤掉了，所以改回来。
 
+## 附件（图片 / 文档）
+
+pi-web-ui 的 composer 本来就带那个回形针（`ChatPanel.setAgent()` 把 `enableAttachments`
+打开），差的只是两段：`session.prompt()` 的入参到我们这里只剩文字，服务端历史里的
+content 块界面也不会画。两头都补上之后是这么走的：
+
+- **发送**：`RemoteAgent.prompt()` 用 `extractAttachments()`（`src/attachments.ts`）把
+  `user-with-attachments` 里的附件挑出来，随 `{type:'prompt', text, attachments}` 发出去；
+  桥用 `promptContent()`（`web/bridge.ts`）折成 `user.message` 的 content 块 ——
+  图片是「`[Image: 文件名]` 文本块 + `image` 块」，文档是「`[Document: 文件名]` + 正文」
+  的文本块。消息于是仍是标准的 pi user 消息（`content` 是 `TextContent | ImageContent[]`），
+  TUI、会话文件、模型看到的是同一份。中间还有一道校形门 `parseClientMessage()`
+  （`web-protocol.ts`）：它只抄认识的字段，附件必须在那里被显式带上 —— 漏了的话浏览器
+  发的 `attachments` 在这一步就消失，桥后面写得再对也收不到（e2e 踩过：模型回
+  「没有附带任何图片」）。
+- **文档只带正文**：`WebAttachment` 里文档的 `content` 是空串。原文件 base64 对模型没用，
+  传一遍再写进会话文件只会把轨迹撑大。（图片相反：模型真的要看图，base64 必须带，
+  它就是 `ImageContent.data`。）
+- **界面展示**：服务端历史里是 pi 的 content 块，`RemoteAgentState.apply()` 在装进
+  `state.messages` 之前先用 `withUserAttachments()` 还原成 `user-with-attachments` ——
+  `content` 只留人打的那句话，`attachments` 交给 pi-web-ui 的 `UserMessage` 画缩略图 /
+  文件格子，点开是它自带的 `AttachmentOverlay`（图片大图、文档正文）。
+- **文件名藏在文本块里**：`ImageContent` 只有 `data` / `mimeType`，没有名字；而名字要
+  跨刷新、跨历史恢复活下来。所以桥在图片前插一条 `[Image: 名字]`，展示层消费掉它。
+  只有「下一块真的是图片」时才认这个标签 —— 用户自己打的这行字不会被吃掉。
+  文档块只认桥那种带两个前导换行的形状（`\n\n[Document: …]`）。
+- **只发附件**：`text` 允许是空串（只发附件），轨迹 / 排队那一行用文件名顶上
+  （`（附件：a.png、b.pdf）`）。
+- **用不了的附件会说一句**：空文件 / 单张图片超过 20MB / 图片合计约 45MB /
+  文档抽不出正文 / 超过 10 份，服务端丢掉并回一条 warn。`usablePromptAttachments()`
+  是信任边界，类型 / MIME / 大小 / 正文逐项再验一遍（浏览器那道 `MessageEditor` 的限制
+  只是体验，不是安全边界）。合计上限还有一条很实际的理由：`ws` 默认 `maxPayload` 是
+  100MiB，10 × 20MB 的图片不封顶会直接把连接撑断。
+- **带附件时不拦斜杠命令**：`/model` 那些只认纯文字。带附件时那句话是给模型的 ——
+  命令拦下就等于把 pi-web-ui 已经清掉的附件白丢了。
+- 协议 **v5**：`prompt` 多了 `attachments`。旧前端不认识这个字段，带附件的消息会静默
+  丢附件，所以版本号跟着走（与问卷那次同一个理由）。
+
 ## 底栏统计行（与 TUI 逐字同形）
 
 终端底栏那一行是 `↑362k ↓310k R121M CH99.9% 52%/1.0M`（`statsLine()`）。pi-web-ui 自带
@@ -263,6 +305,11 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
   `state.toolTimings`（见 [tools](tools.md)），经线协议发过去（`WebAgentState.toolTimings`），
   `tool-view.ts` 按 `toolCallId` 查；文案格式照 Pi Web 的 `formatToolDuration`（`1.2s`）。
   工具跑着的时候表里还没这一条，那一格就留给转圈的状态图标。
+- **工具结果里的图片直接画出来**（`read` 读图）。pi 的 `read` 遇到图片返回
+  `[{type:'text', text:'Read image file [image/png]'}, {type:'image', data, mimeType}]`，
+  于是那份 base64 **本来就在消息里** —— 不必再回服务端取一次。`tool-view.ts` 把它们拼成
+  `<img>` 缩略图（封顶 180px；一张截图铺满对话列会把上下文冲走），点开是盖一层的原图
+  （`openImageOverlay()`；不走 `window.open`，因为 `data:` 顶层导航会被浏览器拦掉）。
 
 ## 侧边栏：历史会话（按 cwd）+ 恢复
 
@@ -298,6 +345,30 @@ WS   {type:'resumeSession', id, cwd}  → bridge → 内核的 restoreSession(fi
 - 列表在**连上、一轮跑完、恢复之后**刷新（`main.ts` 的 `onStatus` / `onStateApplied`）。
   不做轮询：`listSessions()` 要读每个会话的头部与尾部，没有理由每几秒来一次。
 
+### 行上的悬停动作：归档与删除
+
+照 Pi Web 的侧边栏（`docs/architecture` 里其它几处也是这么对齐的）：
+
+- **项目名加粗、右边不再挂条数**。那是节标题，不是一行数据；条数在悬停提示
+  （`title`）里还在，列表上省掉这一格。
+- **项目行悬停出两个**：`+`（在这个项目里新建会话）与垃圾桶（删掉这个项目的全部会话，
+  会先问一句「删 X 个会话」）。`+` 只有**当前项目**能真做 —— 内核的 cwd 是启动时定的
+  （见上一节「恢复不换工作目录」），别的项目点了给一句「请在 <cwd> 里启动 ela」，
+  不假装成功。服务端那两条写操作在环跑着时都拒绝（与其它写操作同一口径）。
+- **会话行悬停出两个**：归档与删除；悬停时右端那格时间让位给它们（两者都靠右，会叠）。
+  行的 DOM 因此从「整行一个 `button`」变成 `div` 里一个 `button` + 两个图标 `button`
+  —— 按钮里不能套按钮，而这两个图标必须长在行里。图标用 `opacity` 收起而不是
+  `display: none`：后者会把它们从 Tab 序列里摘掉，键盘 / 屏幕阅读器就永远按不到。
+- **归档 = 服务端记一个时刻**，会话文件不动。状态在
+  `<家目录>/ela-webui-sidebar-state.json`（`@ela/core/sidebar-state`）：
+  `GET /api/sessions` 过滤掉归档的并带一份 `archivedCount`，底部「已归档 · N」切到那一栏
+  （`GET /api/sessions/archived`），行末变成恢复 / 删除。为什么不写进会话 `.jsonl`：
+  那是「这次对话发生过的事」，归档是「我现在不想看见它」，而删会话时那份标记本来就该
+  跟着没（`POST /api/sessions/delete` 会顺手清掉）。
+- **删除是真删文件**（会话 + 轨迹，复用 `cleanSessions()`），所以先弹一次确认：
+  `modal.ts` 的 `message` 说明 + 两行「取消 / 删除」，默认高亮落在**取消**上。
+  删当前会话会被服务端拒绝 —— 记录器还拿着那个文件，下一次说话会写进一个已删掉的文件里。
+
 ## 外壳（会话 id 不显示，cwd 在输入框左下）
 
 - 顶栏只剩：侧边栏开关、那三个入口、连接状态。**会话 id 不显示** ——
@@ -328,7 +399,7 @@ WS   {type:'resumeSession', id, cwd}  → bridge → 内核的 restoreSession(fi
 
 | 入口 | 给什么 | 数据从哪来 |
 | --- | --- | --- |
-| **完整历史** | 整段会话记录（含被压缩掉的早期消息），新标签页打开 | `GET /api/history`（读会话文件，服务端渲染成一页） |
+| **完整历史** | 整段会话记录（含被压缩掉的早期消息），新标签页打开 | `GET /api/history?sessionId=<当前会话>`（读会话文件，服务端渲染成一页） |
 | **系统** | 模型实际收到的 system prompt | `GET /api/system-prompt`（`state.prompt.systemPrompt`） |
 | **工具** | 模型看到的工具定义：描述 + 参数（JSON Schema） | `GET /api/tools`（`state.prompt.tools`） |
 
@@ -350,6 +421,28 @@ TUI 那边换了模型 / 改了工具开关，浏览器里还显示着旧的那�
 
 渲染在 `web/history.ts`，全部 `escapeHtml` —— 会话内容里 `<script>` 也好、`&` 也好，
 一个字符都不能漏出去。
+
+**请求头部（system prompt + 工具表）单独画一张卡**：会话文件第一条 `message` 就是 pi v3 的
+head（`sections` = 各段正文、`toolsAdded` = 装载时那批工具的完整声明），早先它落到 `default`
+分支只读 `content`（head 的 content 通常是空串），页面上只剩一个空壳 —— 而那正是「模型到底
+收到了什么提示词、拿到了哪些工具」的唯一证据。现在每段、每个工具各一个 `<details>`（折叠着
+也看得见段名 / 工具名，也就搜得到），头部那张卡的副标题写着「系统提示词 N 段 · 工具 M 个」。
+内存兜底那条路（还没落盘）也要补一条同样的 head：`state.prompt` 那份用 `buildPromptHead()` 造，
+与 `effects.ts` 发给模型的是同一个造法 —— 内存里的 `messages` 本来就不含 head。
+
+**图片同样是 `<img>`**，不是 `[图片]` 占位：`read` 读图的结果、用户发的图片附件，都是会话
+文件里现成的 base64（`imageBlocks()`）。缩略图封顶 60vh，点一下用**另一层**（`.shot-overlay`）
+看大图 —— 原来那张不动：把它改成 `position: fixed` 会从文档流里抽走，卡片上留个空洞、
+后面的内容整体上移，看着像「点一下把图删了」。那一层里是另一个 `<img>`，`src` 取
+`currentSrc`（同一份 data URL，不再嵌一遍 base64），Esc / 点任意处关；开着时锁住底下滚动，
+打印时整层隐藏。
+
+**`?sessionId=`：有个 id 就能打开那一段。** 不带参数是当前会话；带上就按 id 跨 `sessions/`
+下每个 `--<cwd>--` 目录找文件（`config-home` 的 `findSessionFileById()`）—— 于是不必先知道它
+当初在哪个 cwd 里，也顺手治了另一件事：`resume` 别的项目的会话时内核 cwd 不变，按
+`(id, cwd)` 拼出来的路径是空的，页面上会误报「还没落盘」。找不到就 404，页面写「找不到这个
+会话」，与「还没落盘」分开（后者是当前的会话还没写过文件）。顶栏那个按钮也带上了
+`sessionId`：这一页在导航之后才加载，中间换了会话就不该跟着变。
 
 ### 为什么是「新标签页 + 顶栏下内联面板」
 
@@ -395,9 +488,10 @@ pnpm build          # = pnpm --filter @ela/webui build
 - **前后端各带一代 pi**：pi-web-ui `0.75.3` 依赖 `pi-ai@^0.75.3`，而内核用 `pi-ai@^1.0`。
   两者**只交换 JSON**（协议里的 `Message` / `Model` 形状两代一致），所以不冲突。
   模型列表不走它那一代（见下面的「模型列表」）。
-- **前端那些「浏览器里跑」的工具不参与**：artifacts 面板、附件、JS REPL 是
-  pi-web-ui 自带的能力，它们假设 agent 在浏览器里。工具在服务端跑，所以这些面板
-  不会真的有事可做（`ChatPanel` 仍会渲染它们，只是没有插件往里喂数据）。
+- **前端那些「浏览器里跑」的工具不参与**：artifacts 面板、JS REPL 是 pi-web-ui
+  自带的能力，它们假设 agent 在浏览器里。工具在服务端跑，所以这些面板不会真的有事可做
+  （`ChatPanel` 仍会渲染它们，只是没有插件往里喂数据）。**附件是例外**：它已经接上了
+  线协议（见上面的「附件」一节），图片 / 文档照样能发、能显示。
 - **`pnpm-workspace.yaml` 关掉了 `blockExoticSubdeps`**：pi-web-ui 的 `xlsx` 依赖走 URL
   （`cdn.sheetjs.com`），pnpm 11 默认拦这种「exotic 子依赖」，而它没有 allowlist 粒度。
   这是本项目唯一一处放宽供应链策略，写在那个文件里。

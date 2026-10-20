@@ -38,6 +38,14 @@ export interface ContextPanelsOptions {
   panelHost: HTMLElement;
   /** 出错时往提示行写一句（面板里也会写，但提示行更容易被看见）。 */
   notice: (text: string, tone?: 'info' | 'warn' | 'error') => void;
+  /**
+   * 当前会话 id —— 只给「完整历史」那个链接用。
+   *
+   * 为什么不省掉（服务端不带 `sessionId` 时默认就是当前会话）：这一页在**新标签页**
+   * 里加载，与点击之间隔了一次导航。中间要是 TUI 那边换了会话（`/resume`、`/new`），
+   * 不带 id 的链接打开的会是**另一个**会话 —— 点的是这段历史，看到的却是别处的。
+   */
+  sessionId?: (() => string) | undefined;
 }
 
 /** 顶栏按钮的三个图标（与 Pi Web 同形的线条图标）。 */
@@ -390,7 +398,12 @@ export function installContextPanels(options: ContextPanelsOptions): void {
     if (kind === 'history') {
       // 完整历史是**服务端渲染的一页**：新标签页打开，好让它能自己滚、能 Ctrl-F、
       // 能打印 —— 也能和当前的聊天界面并排看。
-      window.open('/api/history', '_blank', 'noopener,noreferrer');
+      //
+      // 带上 `sessionId`：这一页在导航之后才加载，中间换了会话就不该跟着变（见
+      // `ContextPanelsOptions.sessionId`）。
+      const id = options.sessionId?.() ?? '';
+      const url = id === '' ? '/api/history' : `/api/history?sessionId=${encodeURIComponent(id)}`;
+      window.open(url, '_blank', 'noopener,noreferrer');
       return;
     }
     if (kind === 'system' || kind === 'tools') void openPanel(kind);

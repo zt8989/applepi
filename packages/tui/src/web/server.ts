@@ -165,7 +165,7 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
       return;
     }
     if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
-      void serveApi(options.api, req, res, url.pathname, log);
+      void serveApi(options.api, req, res, url, log);
       return;
     }
     serveStatic(res, distDir, decodeURIComponent(url.pathname));
@@ -323,13 +323,21 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 /** 一整页 HTML（只有「完整历史」走这条：它给人读，不给人解析）。 */
-function sendHtml(res: ServerResponse, html: string): void {
-  res.writeHead(200, {
+function sendHtml(res: ServerResponse, html: string, status = 200): void {
+  res.writeHead(status, {
     'content-type': 'text/html; charset=utf-8',
     'cache-control': 'no-store',
   });
   res.end(html);
 }
+
+/**
+ * `?sessionId=` 允许的形状（与 pi 写的会话 id 一致：UUIDv7、测试里那种 `sess-alpha`）。
+ *
+ * 限制形状不是为了洁癖：这串字符会被拿去与磁盘上的文件名比对，越早挡掉越省事，
+ * 也顺手把「空串」判成「没有这个会话」（而不是落回「当前会话」）。
+ */
+const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /**
  * 非会话数据的 HTTP 接口。
@@ -345,12 +353,21 @@ async function serveApi(
   api: WebApi,
   req: IncomingMessage,
   res: ServerResponse,
-  pathname: string,
+  url: URL,
   log: (line: string) => void,
 ): Promise<void> {
   const method = req.method ?? 'GET';
+  const pathname = url.pathname;
   if (method === 'GET' && pathname === '/api/history') {
-    sendHtml(res, renderHistoryPage(api.history()));
+    // `?sessionId=` 开任意一个会话（按 id 跨目录找文件，见 `web/api.ts` 的 `history()`）。
+    // 只认像 id 的那串字符：它会被拿去与文件名比对，别的形状一律当「没有这个会话」。
+    const wanted = url.searchParams.get('sessionId') ?? undefined;
+    if (wanted !== undefined && !SESSION_ID_PATTERN.test(wanted)) {
+      sendHtml(res, renderHistoryPage({ sessionId: wanted, cwd: '', file: null, lines: [], missing: true }), 404);
+      return;
+    }
+    const info = api.history(wanted);
+    sendHtml(res, renderHistoryPage(info), info.missing === true ? 404 : 200);
     return;
   }
   const body = method === 'POST' ? await readJsonBody(req) : undefined;
@@ -366,6 +383,23 @@ async function serveApi(
       case 'GET /api/sessions':
         sendJson(res, 200, api.sessions());
         return;
+      case 'GET /api/sessions/archived':
+        sendJson(res, 200, api.archivedSessions());
+        return;
+      case 'POST /api/sessions/archive': {
+        const ids = Array.isArray(record['ids'])
+          ? record['ids'].filter((id): id is string => typeof id === 'string')
+          : [];
+        sendJson(res, 200, api.setArchived(ids, record['archived'] === true));
+        return;
+      }
+      case 'POST /api/sessions/delete': {
+        const ids = Array.isArray(record['ids'])
+          ? record['ids'].filter((id): id is string => typeof id === 'string')
+          : [];
+        sendJson(res, 200, api.deleteSessions(ids));
+        return;
+      }
       case 'GET /api/skills':
         sendJson(res, 200, api.skills());
         return;

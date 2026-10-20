@@ -246,10 +246,20 @@ body {
   margin-top: 0.35rem;
 }
 
+/*
+ * 组头：一行「节标题」，hover 时**整行**起底色（不是只有名字那一块）。
+ * 加粗是刻意的：它下面那一列是会话，两者靠字重与缩进分开（照 Pi Web 的侧边栏）。
+ */
 .ela-session-group-head {
   display: flex;
   align-items: center;
-  gap: 0.25rem;
+  gap: 0.15rem;
+  padding-right: 0.15rem;
+  border-radius: 0.3rem;
+}
+
+.ela-session-group-head:hover {
+  background: var(--secondary, #f4f4f5);
 }
 
 /* 组头那一行目录名：不是全路径（全路径在 title 里）。 */
@@ -261,8 +271,8 @@ body {
   border-radius: 0.3rem;
   background: none;
   color: var(--muted-foreground, #6b7280);
-  font-size: 0.7rem;
-  font-weight: 600;
+  font-size: 0.72rem;
+  font-weight: 700;
   text-align: left;
   white-space: nowrap;
   overflow: hidden;
@@ -278,32 +288,64 @@ body {
   content: '▸ ';
 }
 
-.ela-session-group-toggle:hover {
-  background: var(--secondary, #f4f4f5);
+.ela-session-group-head:hover .ela-session-group-toggle {
   color: var(--foreground, #111);
 }
 
-.ela-session-group-count {
+/* 组头右边那两个（新建 / 删掉这个项目的全部会话）：hover 才出现。 */
+.ela-session-group-actions {
+  display: none;
   flex: none;
-  padding-right: 0.25rem;
-  color: var(--muted-foreground, #6b7280);
-  font-size: 0.65rem;
-  font-variant-numeric: tabular-nums;
+  align-items: center;
+  gap: 2px;
 }
 
-/* 一行会话：标题占满，时间在右。 */
+.ela-session-group-head:hover .ela-session-group-actions,
+.ela-session-group-head:focus-within .ela-session-group-actions {
+  display: flex;
+}
+
+/*
+ * 行末的图标按钮（组头的 + / 垃圾桶，会话行的归档 / 删除）。
+ * 尺寸固定成 20px 的小方块：不定宽的话 hover 时那两个字会把标题挤一下，
+ * 鼠标底下就跟着跳 —— 这正是「悬停才出现的按钮」最容易踩的坑。
+ */
+.ela-session-group-action,
+.ela-session-action {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--muted-foreground, #6b7280);
+  cursor: pointer;
+}
+
+.ela-session-group-action:hover,
+.ela-session-action:hover {
+  background: var(--background, #fff);
+  color: var(--foreground, #111);
+}
+
+.ela-session-group-action.is-danger:hover,
+.ela-session-action.is-danger:hover {
+  color: var(--destructive, #dc2626);
+}
+
+/* 一行会话：标题占满，时间在右；hover 时时间让位给那两个图标按钮。 */
 .ela-session-row {
+  position: relative;
   display: flex;
   width: 100%;
-  align-items: baseline;
-  gap: 0.4rem;
-  padding: 0.3rem 0.45rem 0.3rem 0.9rem;
-  border: 0;
+  align-items: center;
+  gap: 0.15rem;
+  padding-right: 0.15rem;
   border-radius: 0.3rem;
-  background: none;
-  color: var(--foreground, #111);
-  text-align: left;
-  cursor: pointer;
 }
 
 .ela-session-row:hover {
@@ -315,10 +357,29 @@ body {
   box-shadow: inset 2px 0 0 var(--primary, currentColor);
 }
 
+/* 行里那个真的按钮（点了恢复这条会话）。整行不再是 button：按钮里不能套按钮。 */
+.ela-session-main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.3rem 0.45rem 0.3rem 0.9rem;
+  border: 0;
+  border-radius: 0.3rem;
+  background: none;
+  color: var(--foreground, #111);
+  text-align: left;
+  cursor: pointer;
+}
+
 /* 运行时列表锁上：看得见、点不动（点了给一句提示，见 sidebar.ts）。 */
 .ela-session-row.is-locked {
-  cursor: not-allowed;
   opacity: 0.55;
+}
+
+.ela-session-row.is-locked .ela-session-main {
+  cursor: not-allowed;
 }
 
 .ela-session-row.is-locked:hover {
@@ -340,6 +401,65 @@ body {
   font-size: 0.65rem;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/*
+ * 归档 / 删除：叠在行的右端，hover（或键盘聚焦在行里）才**显形**；显形时时间让位
+ * （两者都靠右，会叠）。
+ *
+ * 为什么是 `opacity` 而不是 `display: none`：后者会把这两个按钮从 Tab 序列里摘掉，
+ * 于是键盘 / 屏幕阅读器永远按不到「归档」「删除」。`opacity: 0` 的按钮仍然可聚焦
+ * （聚焦时 `:focus-within` 就把它显出来），而 `pointer-events: none` 保证它不挡
+ * 鼠标（不然点在时间上会误触归档）。
+ */
+.ela-session-actions {
+  position: absolute;
+  top: 50%;
+  right: 0.15rem;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.ela-session-row:hover .ela-session-actions,
+.ela-session-row:focus-within .ela-session-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.ela-session-row:hover .ela-session-meta,
+.ela-session-row:focus-within .ela-session-meta {
+  display: none;
+}
+
+/* 底栏上面那条「已归档 · N」：切到归档那一栏 / 切回来（一个都没归档时整行收起来）。 */
+.ela-sidebar-archive {
+  flex: none;
+  padding: 0 0.4rem;
+}
+
+.ela-sidebar-archive-toggle {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.3rem 0.4rem;
+  border: 0;
+  border-radius: 0.3rem;
+  background: none;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 0.7rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ela-sidebar-archive-toggle:hover,
+.ela-sidebar-archive-toggle.is-active {
+  background: var(--secondary, #f4f4f5);
+  color: var(--foreground, #111);
 }
 
 /* 底栏：模型 / 技能 / 设置。 */
@@ -1108,4 +1228,47 @@ input.ela-q-box {
     grid-template-columns: minmax(74px, 0.7fr) minmax(0, 1.3fr);
     gap: 0.6rem;
   }
+}
+
+/*
+ * 工具结果里的图片（`read` 读图，见 `tool-view.ts` 的 `resultImages()`）。
+ *
+ * 缩略图封顶 180px 高：一张截图铺满整个对话列会把上下文冲走；点开才看原图。
+ * 底色给白：透明 PNG 在深色主题下直接贴在卡片底上会看不清内容。
+ */
+.ela-tool-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border, #e5e5e5);
+}
+
+.ela-tool-image {
+  max-width: 100%;
+  max-height: 180px;
+  border: 1px solid var(--border, #e5e5e5);
+  border-radius: 4px;
+  background: #fff;
+  cursor: zoom-in;
+}
+
+/* 点开看原图的那一层（`openImageOverlay()`）：Esc / 点任意处关。 */
+.ela-image-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4vh 4vw;
+  background: rgb(0 0 0 / 0.72);
+  cursor: zoom-out;
+}
+
+.ela-image-overlay img {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 6px;
+  background: #fff;
 }

@@ -27,9 +27,20 @@
  */
 
 import type { AgentStore } from '@ela/core/store';
-import type { Api, Model } from '@earendil-works/pi-ai';
+import type { Api, Message, Model } from '@earendil-works/pi-ai';
 import { existsSync } from 'node:fs';
-import { findSessionFile, listSessions, type SessionSummary } from '@ela/core/config-home';
+import {
+  cleanSessions,
+  findSessionFile,
+  findSessionFileById,
+  listSessions,
+  type SessionSummary,
+} from '@ela/core/config-home';
+import {
+  forgetArchivedSessions,
+  readSidebarState,
+  setArchivedSessions,
+} from '@ela/core/sidebar-state';
 import { readSession, readJsonlHead } from '@ela/core/session-file';
 import { historyLines } from './history';
 import {
@@ -45,7 +56,9 @@ import type {
   WebActionResult,
   WebCommandInfo,
   WebHistoryInfo,
+  WebHistoryLine,
   WebModelsInfo,
+  WebSessionDeleteInfo,
   WebSessionRef,
   WebSessionsInfo,
   WebSettingsInfo,
@@ -54,6 +67,7 @@ import type {
   WebThinkingInfo,
   WebToolDefinitionInfo,
 } from '@ela/core/web-protocol';
+import { buildPromptHead, declaredToolSchemas } from '@ela/core/prompt-head';
 import { supportedThinkingLevels } from '../pi-actions';
 import { modelRefs } from './bridge';
 
@@ -98,8 +112,14 @@ export interface WebApiOptions {
 export interface WebApi {
   commands(): WebCommandInfo[];
   models(): WebModelsInfo;
-  /** 侧边栏的会话列表（每个 cwd 的历史会话）。 */
+  /** 侧边栏的会话列表（每个 cwd 的历史会话，**不含**已归档的）。 */
   sessions(): WebSessionsInfo;
+  /** 归档视图那份明细（带 `archivedAt`，按归档时刻倒序）。 */
+  archivedSessions(): WebSessionsInfo;
+  /** 归档 / 恢复一批会话（`archived = false` 是恢复）。 */
+  setArchived(ids: readonly string[], archived: boolean): WebActionResult;
+  /** 真删磁盘上的一批会话（会话文件 + 轨迹文件），归档标记跟着清。 */
+  deleteSessions(ids: readonly string[]): WebSessionDeleteInfo;
   skills(): WebSkillInfo[];
   thinking(): WebThinkingInfo;
   settings(): WebSettingsInfo;
@@ -107,8 +127,12 @@ export interface WebApi {
   systemPrompt(): WebSystemPromptInfo;
   /** 发给模型的工具定义（顶栏「工具」）。 */
   tools(): WebToolDefinitionInfo[];
-  /** 完整会话记录（顶栏「完整历史」，由 server 渲染成页面）。 */
-  history(): WebHistoryInfo;
+  /**
+   * 完整会话记录（顶栏「完整历史」，由 server 渲染成页面）。
+   *
+   * 不给 `sessionId` = 当前会话；给了就开那一个（按 id 跨目录找文件，不必知道它的 cwd）。
+   */
+  history(sessionId?: string): WebHistoryInfo;
   setModel(arg: string): WebActionResult;
   setThinking(level: string): WebActionResult;
   setSettings(patch: {
@@ -176,17 +200,35 @@ function sessionListTitle(summary: SessionSummary): string {
  * 一份，而它在服务端（`normalizeCwd`）。
  *
  * 代理子会话不列：它们属于某个主会话（`parentSession`），单独列出来只会把侧边栏塞满。
+ *
+ * `archived` 由调用方读**一次**再传进来（每条会话都读一遍那份文件是白读 N 次）：命中的
+ * 条目带上 `archivedAt`，没命中的不带。
  */
-function sessionRefs(): WebSessionRef[] {
+function sessionRefs(archived: Readonly<Record<string, number>>): WebSessionRef[] {
   return listSessions()
     .filter((session) => session.parentSession === undefined)
-    .map((session) => ({
-      id: session.id,
-      cwd: session.cwd,
-      title: sessionListTitle(session),
-      lastActivityMs: session.lastActivityMs,
-      messageCount: session.entries,
-    }));
+    .map((session) => {
+      const at = archived[session.id];
+      return {
+        id: session.id,
+        cwd: session.cwd,
+        title: sessionListTitle(session),
+        lastActivityMs: session.lastActivityMs,
+        messageCount: session.entries,
+        ...(at === undefined ? {} : { archivedAt: at }),
+      };
+    });
+}
+
+/** 读一次归档表、列一遍会话，再按归档与否分成两份（主列表 / 归档明细）。 */
+function splitSessions(): { live: WebSessionRef[]; archivedRefs: WebSessionRef[] } {
+  const all = sessionRefs(readSidebarState().archived);
+  return {
+    live: all.filter((session) => session.archivedAt === undefined),
+    archivedRefs: all
+      .filter((session) => session.archivedAt !== undefined)
+      .sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0)),
+  };
 }
 
 export function createWebApi(options: WebApiOptions): WebApi {
@@ -265,7 +307,50 @@ export function createWebApi(options: WebApiOptions): WebApi {
     },
 
     sessions() {
-      return { sessions: sessionRefs() };
+      const { live, archivedRefs } = splitSessions();
+      // 份数只算**还存在的**归档会话：文件被手工删掉的不该把「已归档 · N」撑大。
+      return { sessions: live, archivedCount: archivedRefs.length };
+    },
+
+    archivedSessions() {
+      const { archivedRefs } = splitSessions();
+      return { sessions: archivedRefs, archivedCount: archivedRefs.length };
+    },
+
+    setArchived(ids, archived) {
+      // 与其它写操作同一条规矩：环在跑时不改侧边栏的归属（正在写的那个会话
+      // 一归档就从列表上消失，用户会以为它被删了）。
+      if (store.getState().phase !== 'idle') return busyResult();
+      const wanted = [...new Set(ids)];
+      if (wanted.length === 0) return { ok: false, message: '没指定要归档的会话' };
+      setArchivedSessions(wanted, archived ? Date.now() : null);
+      return { ok: true };
+    },
+
+    deleteSessions(ids) {
+      if (store.getState().phase !== 'idle') {
+        return {
+          ok: false,
+          deleted: [],
+          failed: [],
+          message: '上一回合还没结束，先中断再删会话',
+        };
+      }
+      // 当前会话不删：它正被记录器拿着（下一次说话会往一个已删掉的文件里写）。
+      const current = session().id;
+      const wanted = [...new Set(ids.filter((id) => typeof id === 'string' && id !== ''))];
+      const targets = wanted.filter((id) => id !== current);
+      const keptCurrent = wanted.length !== targets.length;
+      const result = targets.length === 0 ? { failed: [] } : cleanSessions(targets);
+      const deleted = targets.filter((id) => !result.failed.some((entry) => entry.id === id));
+      // 文件没了，归档标记也就没意义了：不清的话下一次「已归档 · N」会把幽灵算进去。
+      forgetArchivedSessions(deleted);
+      return {
+        ok: result.failed.length === 0 && !keptCurrent,
+        deleted,
+        failed: result.failed,
+        ...(keptCurrent ? { message: '当前会话不能删，先新建或切一个会话' } : {}),
+      };
     },
 
     skills() {
@@ -311,25 +396,54 @@ export function createWebApi(options: WebApiOptions): WebApi {
       }));
     },
 
-    history() {
+    history(requested) {
+      // 指定了**别的**会话：按 id 跨目录找文件。找到什么就读什么，找不到就明说
+      // （不退回内存那份 —— 那是**当前**会话的内容，套到别的 id 上就成了另一段历史）。
+      if (requested !== undefined && requested !== '' && requested !== session().id) {
+        const wantedFile = findSessionFileById(requested);
+        const wantedSession = wantedFile === null ? null : readSession(wantedFile);
+        if (wantedFile === null || wantedSession === null) {
+          return { sessionId: requested, cwd: '', file: null, lines: [], missing: true };
+        }
+        return {
+          sessionId: requested,
+          cwd: wantedSession.header.cwd,
+          file: wantedFile,
+          lines: historyLines(wantedSession.entries),
+        };
+      }
       const { id: sessionId, cwd: historyCwd } = session();
-      const file = sessionId === '' ? null : findSessionFile(sessionId, historyCwd);
-      const sessionFile = file !== null && existsSync(file) ? readSession(file) : null;
+      // 先按 cwd（便宜、常态），拼出来的路径不存在时再按 id 跨目录找 —— `resume` 到
+      // 别的项目的会话时，内核 cwd 还是启动那个，文件在它原本那个目录里。
+      const direct = sessionId === '' ? null : findSessionFile(sessionId, historyCwd);
+      const file =
+        direct !== null && existsSync(direct) ? direct : findSessionFileById(sessionId);
+      const sessionFile = file !== null ? readSession(file) : null;
       if (sessionFile !== null) {
         return { sessionId, cwd: historyCwd, file, lines: historyLines(sessionFile.entries) };
       }
       // 还没落盘（新会话、或者文件被删了）：退回内存里那份。
       // 它少了被压缩掉的早期消息，但比一页空白强 —— 页面上会写明「来源：内存」。
-      return {
-        sessionId,
-        cwd: historyCwd,
-        file: null,
-        lines: store.getState().messages.map((message) => ({
-          kind: 'message' as const,
-          at: new Date(message.timestamp).toISOString(),
-          message,
-        })),
-      };
+      //
+      // 头部（system prompt + 工具表）得**单独补一条**：内存里的 `messages` 不含 head
+      // （读会话时它被跳过，见 `session-file` 的 `sessionMessages`），不补的话这一页在
+      // 「还没落盘」时看起来就像模型压根没收到提示词与工具。用的就是发出去的那一份
+      // （`buildPromptHead` + `state.prompt.headTools`，与 `effects.ts` 同一个造法）。
+      const prompt = store.getState().prompt;
+      const lines: WebHistoryLine[] = [];
+      if (prompt.systemPrompt !== '' || prompt.tools.length > 0) {
+        const head = buildPromptHead({
+          systemPrompt: prompt.systemPrompt,
+          ...(prompt.sections !== undefined ? { sections: prompt.sections } : {}),
+          tools: declaredToolSchemas(prompt.headTools ?? prompt.tools),
+        });
+        const message: Message = { ...head, timestamp: Date.now() };
+        lines.push({ kind: 'message', at: new Date().toISOString(), message });
+      }
+      for (const message of store.getState().messages) {
+        lines.push({ kind: 'message', at: new Date(message.timestamp).toISOString(), message });
+      }
+      return { sessionId, cwd: historyCwd, file: null, lines };
     },
 
     setModel(arg) {

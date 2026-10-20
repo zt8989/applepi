@@ -10,6 +10,7 @@ import {
   fileTimestamp,
   findFileById,
   findSessionFile,
+  findSessionFileById,
   findTraceFile,
   listSessions,
   resumeCommand,
@@ -123,6 +124,24 @@ test('findFileById：找到新名，也认旧名，找不到返回 null', async 
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+test('findSessionFileById：只知道 id 也能找到（不在这个 cwd 里的会话同样找到）', async () => {
+  await withHome(async () => {
+    // 两个 cwd、两个会话：`/proj-a` 一条、`/proj-b` 一条。
+    const a = new SessionWriter('by-id-a', '/proj-a');
+    a.start();
+    a.appendMessage({ role: 'user', content: 'a', timestamp: 1 });
+    const b = new SessionWriter('by-id-b', '/proj-b');
+    b.start();
+    b.appendMessage({ role: 'user', content: 'b', timestamp: 1 });
+
+    // 关键那条：调用方只拿到 id（`?sessionId=` 就是这么来的），不知道它当初在哪个 cwd。
+    assert.equal(findSessionFileById('by-id-a'), a.path);
+    assert.equal(findSessionFileById('by-id-b'), b.path);
+    assert.equal(findSessionFileById('nobody'), null, '没有就是 null，不猜路径');
+    assert.equal(findSessionFileById(''), null, '空 id 不扫目录');
   });
 });
 

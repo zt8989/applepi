@@ -40,6 +40,7 @@ import {
   STREAM_NOTICE_ROLE,
   type WebAgentEvent,
   type WebAgentState,
+  type WebAttachment,
   type WebClientMessage,
   type WebModelRef,
   type WebServerMessage,
@@ -49,6 +50,7 @@ import {
 import type {
   Api,
   AssistantMessage,
+  ImageContent,
   Model,
   TextContent,
   ThinkingContent,
@@ -104,6 +106,91 @@ export interface WebBridgeOptions {
    * 见 `prompt-head.ts`）。与终端那边 `send()` 是同一道门。
    */
   ready?: Promise<void> | undefined;
+}
+
+/** 一次提问最多带几份附件 —— 与 pi-web-ui 的 `MessageEditor.maxFiles` 同一口径。 */
+export const MAX_PROMPT_ATTACHMENTS = 10;
+
+/** 单张图片的 base64 上限（20MB 原文件 ≈ 27MB base64；留一点余量就写 30M）。 */
+const MAX_IMAGE_BASE64_CHARS = 30 * 1024 * 1024;
+
+/**
+ * 一次提问所有图片 base64 的合计上限（约 45MB 原文件）。
+ *
+ * 不是为了模型，而是为了**帧**：`ws` 的默认 `maxPayload` 是 100MiB，而
+ * pi-web-ui 那个编辑器允许 10 × 20MB —— 不封顶的话一次粘贴就可能把连接撑断，
+ * 用户只看到「断开，重连中…」。剩下的份数由调用方报一句提示。
+ */
+const MAX_TOTAL_IMAGE_BASE64_CHARS = 60 * 1024 * 1024;
+
+/**
+ * 浏览器传上来的附件 → 能真的带给模型的那几份。
+ *
+ * 不信任客户端：类型 / MIME / 大小 / 文档正文逐项验一遍。丢掉的那些由调用方
+ * 报一句提示（否则用户只看到「图没了」）。
+ */
+export function usablePromptAttachments(
+  attachments: readonly WebAttachment[] | undefined,
+): WebAttachment[] {
+  if (attachments === undefined) return [];
+  const usable: WebAttachment[] = [];
+  let totalImageChars = 0;
+  for (const attachment of attachments) {
+    if (usable.length >= MAX_PROMPT_ATTACHMENTS) break;
+    if (attachment === null || typeof attachment !== 'object') continue;
+    if (typeof attachment.fileName !== 'string' || attachment.fileName === '') continue;
+    if (attachment.type === 'image') {
+      if (typeof attachment.mimeType !== 'string' || !attachment.mimeType.startsWith('image/')) continue;
+      if (typeof attachment.content !== 'string' || attachment.content === '') continue;
+      if (attachment.content.length > MAX_IMAGE_BASE64_CHARS) continue;
+      if (totalImageChars + attachment.content.length > MAX_TOTAL_IMAGE_BASE64_CHARS) continue;
+      totalImageChars += attachment.content.length;
+      usable.push(attachment);
+      continue;
+    }
+    if (attachment.type === 'document') {
+      if (typeof attachment.extractedText !== 'string' || attachment.extractedText.trim() === '') continue;
+      usable.push(attachment);
+    }
+  }
+  return usable;
+}
+
+/**
+ * 附件折成 `user.message` 的 content 块（与 pi-web-ui 的 `convertAttachments()` 同形）。
+ *
+ * - 图片：先一条 `[Image: 文件名]` 文本块，再一条 `image` 块 ——
+ *   前者是给**界面**认文件名用的（`webui/attachments.ts` 会消费掉它），
+ *   模型看到也只多几个 token，但「哪张图叫什么」这件事值得说清楚；
+ * - 文档：一条带 `[Document: 文件名]` 头的文本块（模型只需要正文）。
+ *
+ * 没有附件时返回 `undefined` —— 调用方据此走原来的纯文本路径（消息形状一个字节不变）。
+ */
+export function promptContent(
+  text: string,
+  attachments: readonly WebAttachment[],
+): (TextContent | ImageContent)[] | undefined {
+  if (attachments.length === 0) return undefined;
+  const content: (TextContent | ImageContent)[] = [];
+  if (text !== '') content.push({ type: 'text', text });
+  for (const attachment of attachments) {
+    if (attachment.type === 'image') {
+      content.push({ type: 'text', text: `[Image: ${attachment.fileName}]` });
+      content.push({ type: 'image', data: attachment.content, mimeType: attachment.mimeType });
+      continue;
+    }
+    content.push({
+      type: 'text',
+      text: `\n\n[Document: ${attachment.fileName}]\n${attachment.extractedText ?? ''}`,
+    });
+  }
+  return content;
+}
+
+/** 只有附件、没有说话时，给轨迹 / 队列显示的名字。 */
+export function attachmentLabel(attachments: readonly WebAttachment[]): string {
+  const names = attachments.map((attachment) => attachment.fileName).filter((name) => name !== '');
+  return names.length === 0 ? '（附件）' : `（附件：${names.join('、')}）`;
 }
 
 /** 零用量：流式中的部分消息还没账可算。 */
@@ -454,7 +541,32 @@ export class WebBridge {
     switch (message.type) {
       case 'prompt': {
         const raw = message.text.trim();
-        if (raw === '') return [];
+        // 附件是**可选**的：纯文字一条路径，带附件才折 content 块（消息形状与 TUI 同）。
+        const requested = message.attachments ?? [];
+        const attachments = usablePromptAttachments(requested);
+        if (raw === '' && attachments.length === 0) {
+          // 带了附件却一份都用不了：说清楚为什么，不静默吞掉。
+          return requested.length > 0
+            ? [
+                {
+                  type: 'notice',
+                  level: 'warn',
+                  text: '附件没法用（空文件 / 图片太大 / 文档抽不出正文），这条消息没发出去',
+                },
+              ]
+            : [];
+        }
+        const dropped = requested.length - attachments.length;
+        const warnings: WebServerMessage[] =
+          dropped > 0
+            ? [
+                {
+                  type: 'notice',
+                  level: 'warn',
+                  text: `有 ${dropped} 份附件没法用（空文件 / 图片太大 / 文档抽不出正文），已跳过`,
+                },
+              ]
+            : [];
         // `/skill:<名字>` **不是命令**，而是「把 SKILL.md 展开成 `<skill>` 块发给模型」
         // —— 与 TUI 的 `editor.onSubmit` 同一处逻辑（共用同一个 `expandSkillCommand`）。
         // 展开必须在服务端做：SKILL.md 在磁盘上，浏览器读不到。
@@ -473,10 +585,18 @@ export class WebBridge {
         // 所以未知的 `/xxx` 仍然按用户输入发出去（与终端那边一致，见 `editor.onSubmit`）；
         // 浏览器里的扩展命令在前端已经走 `/api/command` 了，这里只接模板与 skill。
         text = expandPromptTemplate(text, promptTemplatesInPrompt(state));
+        // 轨迹 / 队列那一行要有字可显示：只发附件时没有正文，用文件名顶上。
+        // 带附件时 `content` 才是模型看到的那份（文本 + image / document 块）。
+        const label = text !== '' ? text : attachmentLabel(attachments);
+        const content = promptContent(text, attachments);
+        const payload = content === undefined ? { text } : { text: label, content };
         if (state.phase !== 'idle') {
           // 跑着的时候再发就排队（与 TUI 的 steer 同一个口径），不打断当前回合。
-          this.options.store.dispatch({ type: 'queue.input', text, as: 'steer' });
-          return [{ type: 'notice', level: 'info', text: '环在跑，这条已排队（工具跑完后投递）' }];
+          this.options.store.dispatch({ type: 'queue.input', ...payload, as: 'steer' });
+          return [
+            ...warnings,
+            { type: 'notice', level: 'info', text: '环在跑，这条已排队（工具跑完后投递）' },
+          ];
         }
         // 扩展还在后台装（内核 `deferExtensions`）：等它装完再发 —— 见
         // `WebBridgeOptions.ready` 的注释（为什么要等）。**不丢用户的输入**：
@@ -484,14 +604,15 @@ export class WebBridge {
         if (this.options.ready !== undefined && !this.extensionsReady) {
           const ready = this.options.ready;
           void ready.then(() => {
-            this.options.store.dispatch({ type: 'user.message', text });
+            this.options.store.dispatch({ type: 'user.message', ...payload });
           });
           return [
+            ...warnings,
             { type: 'notice', level: 'info', text: '扩展还在装载（终端那边同样），装载完就发出去' },
           ];
         }
-        this.options.store.dispatch({ type: 'user.message', text });
-        return [];
+        this.options.store.dispatch({ type: 'user.message', ...payload });
+        return warnings;
       }
       case 'abort': {
         abortRun();

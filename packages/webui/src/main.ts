@@ -173,6 +173,8 @@ async function main(): Promise<void> {
     actionsHost: requireElement('ela-context-actions'),
     panelHost: requireElement('ela-context-panels'),
     notice: (text, tone = 'info') => pushNotice(text, tone),
+    // 完整历史那个链接要钉住「点的时候是哪个会话」（新标签页加载前可能已经换了）。
+    sessionId: () => agent.state.sessionId,
   });
 
   /**

@@ -250,6 +250,42 @@ export function findSessionFile(sessionId: string, cwd: string): string {
   return findFileById(sessionDirFor(cwd), sessionId) ?? sessionPath(sessionId, cwd);
 }
 
+/**
+ * **只知道 id** 时找会话文件：扫 `sessions/` 下每个 `--<cwd>--` 目录。
+ *
+ * ## 为什么需要它
+ *
+ * 「按 cwd + id」在一种情况下不够用：`resume` 一个别的项目里的会话时，内核的 cwd 还是
+ * 启动那个（见 `conversation.reset` 的注释：恢复不换工作目录），于是按 cwd 拼出来的路径
+ * 指向一个空目录 —— 文件其实在它**原本**那个项目的目录里。症状是「完整历史」写着
+ * 「还没落盘」，可文件明明在（`GET /api/history?sessionId=<id>` 要的也正是这条能力：
+ * 有个 id 就该能打开那一段，不必先知道它当初在哪儿）。
+ *
+ * 代价是「每个目录一次 `existsSync` + 命中不了才 readdir」：目录个数是个位数到几十，
+ * 而调用点是「人点开一页」那种频率，不是列表那种每帧都要跑的路径。
+ */
+export function findSessionFileById(sessionId: string): string | null {
+  if (sessionId === '') return null;
+  const root = sessionsDir();
+  let dirs: string[];
+  try {
+    dirs = readdirSync(root);
+  } catch {
+    return null;
+  }
+  for (const dir of dirs) {
+    const full = path.join(root, dir);
+    try {
+      if (!statSync(full).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    const hit = findFileById(full, sessionId);
+    if (hit !== null) return hit;
+  }
+  return null;
+}
+
 /** 轨迹文件的实际路径：先按 id 扫目录，找不到就用旧形状拼一个。 */
 export function findTraceFile(sessionId: string): string {
   return findFileById(tracesDir(), sessionId) ?? tracePathFor(sessionId);

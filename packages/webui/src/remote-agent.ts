@@ -24,6 +24,7 @@
 
 import type { WebAgentState, WebClientMessage, WebServerMessage } from '@ela/core/web-protocol';
 import type { QuestionnaireIntent, QuestionnaireSnapshot } from '@ela/core/questionnaire';
+import { extractAttachments, withUserAttachments } from './attachments';
 
 /** 宽松事件类型：pi-web-ui 只按 `type` 分支，其余字段它自己读。 */
 export interface RemoteAgentEvent {
@@ -87,7 +88,9 @@ export class RemoteAgentState {
 
   /** 服务端快照 → 本地。**绕过 setter**（见类注释）。 */
   apply(state: WebAgentState): void {
-    this.messages = stripAssistantUsage(state.messages);
+    // 附件在**展示前**还原：服务端的历史里是 pi 的 content 块，界面要的是
+    // `user-with-attachments`（见 `attachments.ts` 的文件头）。
+    this.messages = withUserAttachments(stripAssistantUsage(state.messages));
     this.currentModel = state.model;
     this.currentThinking = state.thinkingLevel;
     this.isStreaming = state.isStreaming;
@@ -215,13 +218,26 @@ export class RemoteAgent {
     };
   }
 
-  /** pi-web-ui 的发送路径。入参可能是字符串，也可能是一条 `user-with-attachments` 消息。 */
+  /**
+   * pi-web-ui 的发送路径。入参可能是字符串，也可能是一条 `user-with-attachments` 消息。
+   *
+   * ## 附件
+   *
+   * 图片 / 文档从入参里挑出来随 `prompt` 一起发（见 `attachments.ts` 的
+   * `extractAttachments()`）。**斜杠命令只认纯文字**：带附件时那句话是给模型的，
+   * 不能被命令拦下 —— 否则 pi-web-ui 已经清掉的附件就白丢了。
+   */
   async prompt(input: unknown): Promise<void> {
     const text = extractText(input);
-    if (text.trim() === '') return;
+    const attachments = extractAttachments(input);
+    if (text.trim() === '' && attachments.length === 0) return;
     // 斜杠命令：走 HTTP 接口，不发给模型（与 TUI 的 `runCommand` 同一个分工）。
-    if ((await this.hooks.onPrompt?.(text)) === true) return;
-    this.send({ type: 'prompt', text });
+    if (attachments.length === 0 && (await this.hooks.onPrompt?.(text)) === true) return;
+    if (attachments.length === 0) {
+      this.send({ type: 'prompt', text });
+      return;
+    }
+    this.send({ type: 'prompt', text, attachments });
   }
 
   abort(): void {

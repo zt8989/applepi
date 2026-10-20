@@ -34,6 +34,13 @@ export interface ModalHandle {
 
 export interface ModalOptions {
   title: string;
+  /**
+   * 列表上方那块说明文字（与 `setText()` 的正文同一个样式）。
+   *
+   * 与 `setText()` 的区别：`setText()` 是「这个弹窗只有一段文本」（列表收起来）；
+   * `message` 是「先说一句，再让用户选」（取消/删除这种确认框要的就是它）。
+   */
+  message?: string | undefined;
   /** 搜索框的 placeholder；不给就没有搜索框。 */
   searchPlaceholder?: string | undefined;
   onSearch?: ((query: string) => void) | undefined;
@@ -80,8 +87,10 @@ export function openModal(options: ModalOptions): ModalHandle {
   list.className = 'ela-modal-list';
   const pre = document.createElement('pre');
   pre.className = 'ela-modal-pre';
-  pre.hidden = true;
-  panel.append(list, pre);
+  pre.textContent = options.message ?? '';
+  pre.hidden = options.message === undefined;
+  // 说明文字在列表**上面**：确认框读起来是「先说清要做什么，再让人选」。
+  panel.append(pre, list);
 
   const footer = document.createElement('div');
   footer.className = 'ela-modal-hint';
@@ -212,7 +221,9 @@ export function openModal(options: ModalOptions): ModalHandle {
     setRows(next) {
       rows = [...next];
       if (!pickable().includes(selected)) selected = pickable()[0] ?? -1;
-      pre.hidden = true;
+      // `message` 那种说明文字留着（它跟列表是一起看的）；只有 `setText()` 的正文
+      // 会在切回列表时收起来。
+      if (options.message === undefined) pre.hidden = true;
       list.hidden = false;
       render();
     },

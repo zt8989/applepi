@@ -33,7 +33,7 @@ import { parseUnifiedPatch, type SplitDiffCell, type SplitDiffFile } from './spl
 /** 工具结果的形状（只取这个视图用得到的字段）。 */
 interface ToolResultLike {
   isError?: boolean;
-  content?: readonly { type?: string; text?: string }[];
+  content?: readonly { type?: string; text?: string; data?: string; mimeType?: string }[];
   details?: unknown;
 }
 
@@ -41,6 +41,64 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+/** 结果里的一张图：`src` 已经是能给 `<img>` 的 data URL。 */
+export interface ToolResultImage {
+  src: string;
+  /** 给 alt / aria 用的短描述（MIME 就够：模型那边也就这点信息）。 */
+  alt: string;
+}
+
+/**
+ * 工具结果里的**图片块**（`read` 读图时 pi 就是这么返回的）：
+ * `[{type:'text', text:'Read image file [image/png]'}, {type:'image', data, mimeType}]`。
+ *
+ * 也就是「附件」的另一头：`read` 把图读成 base64 给模型看，于是**浏览器里现成的
+ * 那份 data 就在消息里** —— 不必再回服务端取一次（`/api/*` 也没有这条接口）。
+ *
+ * 空 `data` / 认不出的块跳过：宁可少画一张，也不要一个 `src="data:;base64,"` 的破图。
+ */
+export function resultImages(result: ToolResultLike | undefined): ToolResultImage[] {
+  const out: ToolResultImage[] = [];
+  for (const block of result?.content ?? []) {
+    if (block.type !== 'image') continue;
+    const data = block.data;
+    if (typeof data !== 'string' || data === '') continue;
+    const mime = typeof block.mimeType === 'string' && block.mimeType !== '' ? block.mimeType : 'image/png';
+    out.push({ src: `data:${mime};base64,${data}`, alt: mime });
+  }
+  return out;
+}
+
+/**
+ * 点缩略图 → 盖一层看原图（Esc / 点任意处关）。
+ *
+ * 为什么不 `window.open(src)`：`data:` 顶层导航被浏览器拦（Chrome 直接拒绝），
+ * 点了会没反应。也不新写一个 pi-web-ui 的 Overlay：那是给它自己的 `Attachment`
+ * （带 File、能下载）用的，工具结果这里只有一个 data URL。
+ */
+function openImageOverlay(image: ToolResultImage): void {
+  const overlay = document.createElement('div');
+  overlay.className = 'ela-image-overlay';
+  const img = document.createElement('img');
+  img.src = image.src;
+  img.alt = image.alt;
+  overlay.append(img);
+  const close = (): void => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey, true);
+  };
+  function onKey(event: KeyboardEvent): void {
+    if (event.key !== 'Escape') return;
+    // Esc 只关这一层：不 stopPropagation 的话，它顺手还会收掉侧边栏 / 面板。
+    event.preventDefault();
+    event.stopPropagation();
+    close();
+  }
+  overlay.addEventListener('click', close);
+  document.addEventListener('keydown', onKey, true);
+  document.body.append(overlay);
 }
 
 /** 结果里的文本（拿不到给空串）。 */
@@ -285,6 +343,25 @@ export class ElaToolView extends LitElement {
   }
 
   private renderBody(name: string, error: boolean): TemplateResult | typeof nothing {
+    // 图片（`read` 读图）与文字是**并列**的两块：文字按工具类型各有各的排版，图统一
+    // 铺一排缩略图。空结果时 `nothing` 也能直接被包住（Lit 认它）。
+    const images = resultImages(this.result);
+    const body = this.renderTextBody(name, error);
+    if (images.length === 0) return body;
+    return html`${body}<div class="ela-tool-images">${images.map(
+      (image) =>
+        html`<img
+          class="ela-tool-image"
+          src=${image.src}
+          alt=${image.alt}
+          title="点开看大图"
+          loading="lazy"
+          @click=${() => openImageOverlay(image)}
+        />`,
+    )}</div>`;
+  }
+
+  private renderTextBody(name: string, error: boolean): TemplateResult | typeof nothing {
     const text = resultText(this.result);
     if (isEditTool(name)) {
       const diff = extractDiff(this.result);
