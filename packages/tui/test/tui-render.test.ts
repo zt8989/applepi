@@ -26,6 +26,7 @@ import {
   isScrollUp,
   jumpToLatestHint,
   shouldIgnoreKey,
+  shouldYieldInput,
   renderQueuePanel,
   renderTranscript,
   TranscriptChunks,
@@ -1344,15 +1345,34 @@ test('TraceChunks：空树时给一句说明（0 高度会让面板整个消失�
 });
 
 
-test('滚轮键：Alt+↑↓ 与 Ctrl+P/N 认得出来，纯 ↑↓ 不认（留给编辑器移光标）', () => {
+test('翻页键：Alt+↑↓ 与 Ctrl+P/N 认得出来，裸 ↑↓ 不认（留给编辑器与对话框）', () => {
   const ESC = String.fromCharCode(27);
-  assert.equal(isScrollUp(`${ESC}[A`), true, 'Alt+↑');
   assert.equal(isScrollUp(`${ESC}[1;3A`), true, 'Alt+↑ 的 xterm 变体');
+  assert.equal(isScrollUp(`${ESC}Oa`), true, 'Alt+↑ 的 application cursor 变体');
   assert.equal(isScrollUp(String.fromCharCode(16)), true, 'Ctrl+P');
-  assert.equal(isScrollDown(`${ESC}[B`), true, 'Alt+↓');
+  assert.equal(isScrollDown(`${ESC}[1;3B`), true, 'Alt+↓ 的 xterm 变体');
+  assert.equal(isScrollDown(`${ESC}Ob`), true, 'Alt+↓ 的 application cursor 变体');
   assert.equal(isScrollDown(String.fromCharCode(14)), true, 'Ctrl+N');
-  // **纯方向键不能认**：多行提示词里 ↑↓ 是移动光标，抢了就编不了多行。
-  assert.equal(isScrollUp(`${ESC}[A`), true);
-  assert.equal(isScrollUp('p'), false, '字母 p 不是滚轮');
+  // **裸方向键不能认**。它们就是「不支持 Kitty 键盘协议的终端」（Orca 的内嵌终端、
+  // Terminal.app、tmux）发过来的普通 ↑↓：多行提示词里那是移动光标，扩展挂在输入区
+  // 槽位里的对话框（`ask_user_question`）里那是换选项。早先把它当成「Alt+↑ 的 xterm
+  // 变体」列进了名单，于是全局监听器抢先把它们吃成翻页 —— 症状就是「对话框里只有 Tab
+  // 能用，↑↓ 在滚对话区」。这一条就是钉住那个，别再把它加回去。
+  assert.equal(isScrollUp(`${ESC}[A`), false, '裸 ↑ 是编辑器的，不是翻页');
+  assert.equal(isScrollDown(`${ESC}[B`), false, '裸 ↓ 是编辑器的，不是翻页');
+  assert.equal(isScrollUp(`${ESC}OA`), false, '裸 ↑（application cursor 模式）也不是翻页');
+  assert.equal(isScrollUp('p'), false, '字母 p 不是翻页');
   assert.equal(isScrollDown('n'), false);
+});
+
+test('输入监听器的让路判据：overlay 与「输入区被扩展占着」两种情形都算', () => {
+  // 这条钉的是一个具体症状：`ask_user_question` 的对话框不是 overlay（它默认挂在
+  // 输入区槽位里），只判 `hasOverlay()` 时 ↑/↓ 会被全局监听器吃成翻页，
+  // 于是对话框里「只有 Tab 能用」。顺带也盖住同一路径上的 Ctrl+C（Cancel 变退进程）。
+  const noOverlay = { hasOverlay: () => false };
+  const withOverlay = { hasOverlay: () => true };
+  assert.equal(shouldYieldInput(noOverlay, false), false, '没人占键盘时不停手');
+  assert.equal(shouldYieldInput(withOverlay, false), true, 'overlay 栈非空 → 让路');
+  assert.equal(shouldYieldInput(noOverlay, true), true, '输入区槽位被占 → 让路');
+  assert.equal(shouldYieldInput(withOverlay, true), true, '两者都有 → 让路');
 });

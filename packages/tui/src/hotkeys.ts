@@ -57,11 +57,11 @@ function actionRow(action: string, description: string): HotkeyRow {
 /**
  * 一个**不由 pi 的键位表管**的固定键（或多键）。
  *
- * 滚轮的四个键是这种：`app.ts` 里是**逐字节序列**匹配的（`ESC[A` / `ESC[1;3A` /
- * `ESCOa` / `Ctrl+P`），因为 Alt+↑ 在不同终端发的变体不止一种，而 `matchesKey('alt+up')`
- * 只认其中一种（实测 `ESC[A` 会被它认成普通 Up）。那些序列没法用 `KeyId` 表达，
- * 所以它们不进键位表、也不可改 —— 表里照实写出来，但用 `formatKeyText` 而不是
- * `keyDisplayText`（后者查不到会得到空串）。
+ * 滚轮的四个键是这种：`app.ts` 里是**逐字节序列**匹配的（`ESC[1;3A` / `ESCOa` /
+ * `Ctrl+P`），因为 Alt+↑ 在不同终端发的变体不止一种，而 `matchesKey('alt+up')`
+ * 只认其中一种（实测裸的 `ESC[A` 会被它认成普通 Up —— 那也确实就是普通 Up）。
+ * 那些序列没法用 `KeyId` 表达，所以它们不进键位表、也不可改 —— 表里照实写出来，
+ * 但用 `formatKeyText` 而不是 `keyDisplayText`（后者查不到会得到空串）。
  */
 function rawRow(keys: string, description: string): HotkeyRow {
   return { keys: formatKeyText(keys, { capitalize: true }), action: description };

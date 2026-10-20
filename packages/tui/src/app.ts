@@ -732,16 +732,26 @@ export interface StatsLine {
  * （`\x1b[1;3A` / `\x1b[1;5A` / `\x1bOa` …）。列全它们比调一个只会匹配其中
  * 一种的 helper 可靠 —— 少列一种的症状是「在某个终端上 Alt+↑ 没反应」，
  * 而那只有换终端才复现得到。
+ *
+ * ## 裸的 `\x1b[A` / `\x1b[B` **不能**列进来
+ *
+ * 它们就是**没有修饰键**的 ↑/↓ —— 也正是「不支持 Kitty 键盘协议」的终端
+ * （Orca 的内嵌终端、Terminal.app、tmux 里的老配置）发过来的那一串。
+ * 早先这里把裸方向键当成了「Alt+↑ 的 xterm 变体」，后果是：全局监听器比聚焦组件
+ * 先跑，于是**所有** ↑/↓ 都被它吃成翻页 —— 编辑器里改不了多行提示的光标位置，
+ * 扩展挂在输入区槽位里的对话框（`ask_user_question`、`ctx.ui.select` …）也收不到
+ * ↑/↓（症状：只能 Tab 换页，上下键在滚对话区）。
+ *
+ * Alt+↑ 在哪个终端里都**带修饰位**：xterm 系发 `\x1b[1;3A`，application cursor
+ * 模式发 `\x1bOa`（小写字母 = Meta 的那个老约定）。只有这两个是「往上翻」。
  */
 const ESC = String.fromCharCode(27);
 const SCROLL_UP_SEQUENCES: readonly string[] = [
-  `${ESC}[A`, // Alt+↑（xterm 常见）
-  `${ESC}[1;3A`,
+  `${ESC}[1;3A`, // Alt+↑（xterm 系）；裸的 ESC[A 是普通 ↑，不能当它
   `${ESC}Oa`, // Alt+↑（application cursor 模式）
   String.fromCharCode(16), // Ctrl+P
 ];
 const SCROLL_DOWN_SEQUENCES: readonly string[] = [
-  `${ESC}[B`,
   `${ESC}[1;3B`,
   `${ESC}Ob`,
   String.fromCharCode(14), // Ctrl+N
@@ -803,6 +813,32 @@ export function shouldIgnoreKey(data: string): boolean {
   // 粘贴 / 输入框里的普通文本：不可能是快捷键，一律放行。
   if (data.includes(`${ESC}[200~`)) return false;
   return isKeyRelease(data);
+}
+
+/**
+ * 全局输入监听器要不要**整个让路**（不消费，交给聚焦组件）。
+ *
+ * 两种「有人占着键盘」的形态：
+ *
+ * 1. **overlay 栈非空** —— 本项目的 `/model`、`/resume` 那些面板，以及扩展的
+ *    `custom({ overlay: true })`；
+ * 2. **输入区槽位被扩展组件占着** —— 扩展的非 overlay `custom()`（默认就是这条路，
+ *    `ask_user_question` 也走它）与 `ctx.ui.select/confirm/input` 都挂在这一格
+ *    （见 `mountEditorSlot`）。这些组件自己 `handleInput`，而且它们**不在 overlay 栈上**，
+ *    只判 `hasOverlay()` 会漏掉它们。
+ *
+ * 漏掉第 2 种的症状（Orca 里报上来的那条）：`ask_user_question` 的对话框只有 Tab
+ * 能用，↑/↓ 在滚对话区 —— 因为本监听器比聚焦组件先跑，把 ↑/↓ 吃成了翻页
+ * （`isScrollUp()` 的注释里有字节层面的来龙去脉）。同一条缝里还漏过其他全局开关：
+ * 对话框开着的**同时**按 `Ctrl+R` / `Ctrl+O` / `Shift+Tab`，背后的主界面真的会跟着变。
+ *
+ * 与 `hasOverlay()` 那条口径一致：让路 = `return undefined`，**不**消费。
+ */
+export function shouldYieldInput(
+  tui: { hasOverlay(): boolean },
+  inputSlotOccupied: boolean,
+): boolean {
+  return tui.hasOverlay() || inputSlotOccupied;
 }
 
 /**
@@ -2075,7 +2111,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
      */
     if (shouldIgnoreKey(data)) return undefined;
     /**
-     * **有弹窗时，本监听器整个让路。**
+     * **有弹窗 / 输入区被扩展占着时，本监听器整个让路。**
      *
      * pi-tui 的 `inputListeners` 在**聚焦组件之前**跑（`tui.js` 的 `handleInput`）：
      * 没被 `consume` 的按键继续往聚焦组件走，而弹窗聚焦的正是它自己。所以这里
@@ -2090,18 +2126,21 @@ export async function runTui(options: TuiOptions): Promise<number> {
      * 另外几个（切轨迹页 / 展开工具 / 换队列模式）会让弹窗
      * 开着的**同时**背后的主界面也变了，看着像面板没盖住背景。
      *
-     * ## 为什么判「弹窗栈非空」而不是「picker 是否开着」
+     * ## 两种「有人占着键盘」都要判
      *
-     * 后者要 app 持一份状态，而前者白得一个连带好处：扩展用 `ctx.ui.custom()` /
-     * `ctx.ui.select()` 弹的对话框**也自动**拿到同样的让路（它们内部同样把 `Ctrl+C`
-     * 当取消）。那些面板各有自己的 `handleInput`，所以顺序仍然是「面板先、这里后」。
+     * 本项目的面板在 overlay 栈上（`hasOverlay()` 一判就有），但**扩展的对话框不一定**：
+     * `ctx.ui.custom()` 默认走**输入区槽位**（`mountEditorSlot`）而不上 overlay 栈，
+     * `ctx.ui.select/confirm/input` 也在同一格。只判 `hasOverlay()` 漏掉的正是这一批
+     * （`ask_user_question` 就是这一批里最常用的一个 —— 症状见 `shouldYieldInput()`）。
+     * 判据写成了一个纯函数，就是为了这两种形态各自有测试能钉住。
      */
-    if (tui.hasOverlay()) return undefined;
+    if (shouldYieldInput(tui, editorSlotComponent !== undefined)) return undefined;
     /**
-     * 滚轮：**必须在编辑器之前**。
+     * 翻页：**必须在编辑器之前**。
      *
-     * Alt+↑ / Ctrl+P 这些键编辑器不碰，但它们的兄弟（纯 ↑↓）要碰 ——
-     * 所以只要不冲突，就没必要让它晚一步。
+     * 这里只认**带修饰位**的键（`Alt+↑` / `Ctrl+P` / `Ctrl+N`）—— 编辑器不碰它们，
+     * 所以放在前面不会抢谁的键。裸的 ↑/↓ **不在名单里**（见 `isScrollUp()`）：
+     * 那是编辑器的光标与对话框的选项导航。
      *
      * 半页而不是一行：轨迹一行就是**一个节点**，一行一行翻太慢；而对话区
      * 半页刚好是「一屏的一半」，两边都不别扭。
