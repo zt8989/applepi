@@ -55,13 +55,14 @@ function actionRow(action: string, description: string): HotkeyRow {
 }
 
 /**
- * 一个**不由 pi 的键位表管**的固定键（或多键）。
+ * 一个**由一个 `KeyId` 对不上**的行：要么好几个动作挤在一格里，要么键名不是键位表里的。
  *
- * 滚轮的四个键是这种：`app.ts` 里是**逐字节序列**匹配的（`ESC[1;3A` / `ESCOa` /
- * `Ctrl+P`），因为 Alt+↑ 在不同终端发的变体不止一种，而 `matchesKey('alt+up')`
- * 只认其中一种（实测裸的 `ESC[A` 会被它认成普通 Up —— 那也确实就是普通 Up）。
- * 那些序列没法用 `KeyId` 表达，所以它们不进键位表、也不可改 —— 表里照实写出来，
- * 但用 `formatKeyText` 而不是 `keyDisplayText`（后者查不到会得到空串）。
+ * 典型是「一组键共同表示一个意思」那几行（`↑/↓/←/→` 共用一行、`PgUp/PgDn` 共用一行）。
+ * `actionRow()` 只能表达单个动作 id，所以这里直接给最终文字，但用 `formatKeyText`
+ * 而不是 `keyDisplayText`（后者拿不到 id 会得到空串）。
+ *
+ * 注意：**仍然要先过 `keyLabel()`** 拿解析后的键名，不能手写 `Ctrl+P` ——
+ * 手写的键名在用户改了 `keybindings.json` 之后就开始骗人。
  */
 function rawRow(keys: string, description: string): HotkeyRow {
   return { keys: formatKeyText(keys, { capitalize: true }), action: description };
@@ -112,10 +113,14 @@ export function hotkeysMarkdown(extensions: readonly HotkeyExtension[] = []): st
     actionRow('tui.editor.cursorLineEnd', '行尾'),
     actionRow('tui.editor.jumpForward', '跳到下一个字符'),
     actionRow('tui.editor.jumpBackward', '跳到上一个字符'),
-    rawRow(`${keyLabel('tui.editor.pageUp')} / ${keyLabel('tui.editor.pageDown')}`, '整页上/下翻'),
-    // 本项目自己的滚轮（pi 没有这两个绑定）：Alt+↑/Ctrl+P 翻当前页半页。
-    rawRow('alt+up/ctrl+p', '当前页上翻半页（对话页/轨迹页各自滚自己那块）'),
-    rawRow('alt+down/ctrl+n', '当前页下翻半页'),
+    // 翻页用 pi 的 `tui.altScreen.*`（不是 `tui.editor.*`）：这两个键在 altScreen 模式下
+    // 被 altScreen 的 input listener 先接走（构造时就注册了），滚的是 primary ScrollView
+    // —— 也就是当前页。写 `tui.editor.pageUp` 的话键名虽然一样，但用户改它**不会**
+    // 影响这里（真正生效的是 altScreen 那两个 id），那就成了「改键没反应」。
+    rawRow(
+      `${keyLabel('tui.altScreen.pageUp')} / ${keyLabel('tui.altScreen.pageDown')}`,
+      '翻当前页（整页；半页的 `tui.altScreen.halfPageUp/Down` 默认没绑）',
+    ),
   ];
 
   const editing: HotkeyRow[] = [

@@ -137,7 +137,8 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
 
 界面里（键名按当前键位解析，改过 ~/.pi/agent/keybindings.json 就会跟着变）:
   ${keyLabel('app.trace.toggle').padEnd(19)}在「对话」与「轨迹」两页之间切换（顶部有页签）
-  Alt+↑/↓ 或 Ctrl+P/N   翻当前页（半页）；纯 ↑↓ 是移动光标，不拿来滚
+  ${(keyLabel('tui.altScreen.pageUp') + '/' + keyLabel('tui.altScreen.pageDown')).padEnd(19)}翻当前页（整页，只滚当前那一页；半页见 /hotkeys）
+  ${keyLabel('app.message.dequeue').padEnd(19)}把排队消息还回输入框（pi 的 app.message.dequeue）
   ${keyLabel('app.tools.expand').padEnd(19)}展开/收起工具输出的完整内容（默认只留前 12 行）
   ${keyLabel('app.thinking.toggle').padEnd(19)}展开/收起模型的思考块（与 pi 的 app.thinking.toggle 同键）
   ${keyLabel('app.model.select').padEnd(19)}打开模型选择面板（与 pi 的 app.model.select 同键）

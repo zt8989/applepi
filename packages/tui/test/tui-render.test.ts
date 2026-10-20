@@ -22,8 +22,6 @@ import {
   modelLine,
   renderColoredTree,
   TraceChunks,
-  isScrollDown,
-  isScrollUp,
   jumpToLatestHint,
   shouldIgnoreKey,
   shouldYieldInput,
@@ -186,22 +184,20 @@ test('shouldIgnoreKey：只扔 release，press 与普通键都放行', () => {
   assert.ok(!shouldIgnoreKey(String.fromCharCode(18)), '传统 Ctrl+R（非 kitty 协议）要放行');
 });
 
-test('shouldIgnoreKey：粘贴内容放行（isScrollUp 是前缀匹配，误判就会误翻页）', () => {
-  // 粘贴被 `\x1b[200~ … \x1b[201~` 包着。若粘贴的文本以 `ESC[A` 开头
-  // （比如一段方向键转义），`isScrollUp()` 的前缀判断会命中而误翻页，
-  // 所以放行必须在更早的地方发生，而不是在滚轮那一层。
+test('shouldIgnoreKey：粘贴内容放行（整串粘贴不该被当成按键）', () => {
+  // 粘贴被 `\x1b[200~ … \x1b[201~` 包着；里面的内容（包括形状像方向键的片段）
+  // 一个字节都不该被当成快捷键。
   const pasted = `${String.fromCharCode(27)}[200~${String.fromCharCode(27)}[A粘贴的正文${String.fromCharCode(27)}[201~`;
   assert.ok(!shouldIgnoreKey(pasted), '粘贴整体不是 release');
   assert.ok(!isKeyRelease(pasted), 'pi-tui 的 isKeyRelease 也已排除粘贴');
 });
 
-test('shouldIgnoreKey：release 也不能触发滚轮', () => {
-  // 方向键的 release（`ESC[1;5:3A`）如果放行，会被 `SCROLL_UP_SEQUENCES` 之外挡住 ——
-  // 但 kitty 的 release 形式是 `\x1b[1;5:3A`，不带 `[` 后紧跟 A 的原形，
-  // `includes()` 精确匹配不会误判。这条钉住「release 在更早的一层就被滤掉」。
+test('shouldIgnoreKey：release 事件要滤（否则同一个动作会跑两次）', () => {
+  // kitty 协议的 release 形式是 `\x1b[1;5:3A`：`matchesKey()` 也会认它（事件类型那段
+  // 不参与匹配），所以不过滤的话「按一下跑两遍」。
   const releaseArrow = `${String.fromCharCode(27)}[1;5:3A`;
-  assert.ok(!isScrollUp(releaseArrow), '精确匹配不该把 release 当翻页');
-  assert.ok(shouldIgnoreKey(releaseArrow), 'release 仍然要滤');
+  assert.ok(shouldIgnoreKey(releaseArrow), 'release 要滤');
+  assert.ok(!shouldIgnoreKey(`${String.fromCharCode(27)}[1;5:1A`), 'press 放行');
 });
 
 // ─── git 分支：.git 是目录还是文件 ───
@@ -1345,30 +1341,25 @@ test('TraceChunks：空树时给一句说明（0 高度会让面板整个消失�
 });
 
 
-test('翻页键：Alt+↑↓ 与 Ctrl+P/N 认得出来，裸 ↑↓ 不认（留给编辑器与对话框）', () => {
+test('翻页与 Alt+↑ 都归 pi 的键位表管（不再自己列字节序列）', () => {
+  // 这条钉的是「不再自己造键」这个决定（来龙去脉见 `app.ts` 里 `const ESC` 上方那段）：
+  // 翻页 = pi 的 `tui.altScreen.pageUp/pageDown`，`Alt+↑` = pi 的 `app.message.dequeue`，
+  // `Ctrl+P` = pi 的 `app.model.cycleForward`。早先这三样都被本项目的字节序列表抢走。
+  const kb = getKeybindings();
   const ESC = String.fromCharCode(27);
-  assert.equal(isScrollUp(`${ESC}[1;3A`), true, 'Alt+↑ 的 xterm 变体');
-  assert.equal(isScrollUp(`${ESC}Oa`), true, 'Alt+↑ 的 application cursor 变体');
-  assert.equal(isScrollUp(String.fromCharCode(16)), true, 'Ctrl+P');
-  assert.equal(isScrollDown(`${ESC}[1;3B`), true, 'Alt+↓ 的 xterm 变体');
-  assert.equal(isScrollDown(`${ESC}Ob`), true, 'Alt+↓ 的 application cursor 变体');
-  assert.equal(isScrollDown(String.fromCharCode(14)), true, 'Ctrl+N');
-  // **裸方向键不能认**。它们就是「不支持 Kitty 键盘协议的终端」（Orca 的内嵌终端、
-  // Terminal.app、tmux）发过来的普通 ↑↓：多行提示词里那是移动光标，扩展挂在输入区
-  // 槽位里的对话框（`ask_user_question`）里那是换选项。早先把它当成「Alt+↑ 的 xterm
-  // 变体」列进了名单，于是全局监听器抢先把它们吃成翻页 —— 症状就是「对话框里只有 Tab
-  // 能用，↑↓ 在滚对话区」。这一条就是钉住那个，别再把它加回去。
-  assert.equal(isScrollUp(`${ESC}[A`), false, '裸 ↑ 是编辑器的，不是翻页');
-  assert.equal(isScrollDown(`${ESC}[B`), false, '裸 ↓ 是编辑器的，不是翻页');
-  assert.equal(isScrollUp(`${ESC}OA`), false, '裸 ↑（application cursor 模式）也不是翻页');
-  assert.equal(isScrollUp('p'), false, '字母 p 不是翻页');
-  assert.equal(isScrollDown('n'), false);
+  assert.ok(kb.matches(`${ESC}[5~`, 'tui.altScreen.pageUp'), 'PgUp 应该翻上整页');
+  assert.ok(kb.matches(`${ESC}[6~`, 'tui.altScreen.pageDown'), 'PgDn 应该翻下整页');
+  assert.ok(kb.matches(`${ESC}[1;3A`, 'app.message.dequeue'), 'Alt+↑ 应该是「还回排队消息」');
+  assert.ok(kb.matches(String.fromCharCode(16), 'app.model.cycleForward'), 'Ctrl+P 应该是换下一个模型');
+  // 裸 ↑↓ 不属于任何翻页动作 —— 它是编辑器的光标 / 对话框的选项导航。
+  // （Orca 这类不支持 Kitty 键盘协议的终端发来的就是这一串。）
+  assert.ok(!kb.matches(`${ESC}[A`, 'tui.altScreen.pageUp'), '裸 ↑ 不该是翻页');
+  assert.ok(!kb.matches(`${ESC}[B`, 'tui.altScreen.pageDown'), '裸 ↓ 不该是翻页');
 });
 
 test('输入监听器的让路判据：overlay 与「输入区被扩展占着」两种情形都算', () => {
   // 这条钉的是一个具体症状：`ask_user_question` 的对话框不是 overlay（它默认挂在
-  // 输入区槽位里），只判 `hasOverlay()` 时 ↑/↓ 会被全局监听器吃成翻页，
-  // 于是对话框里「只有 Tab 能用」。顺带也盖住同一路径上的 Ctrl+C（Cancel 变退进程）。
+  // 输入区槽位里），只判 `hasOverlay()` 时按键会先被全局监听器看到（早先那里是翻页）。
   const noOverlay = { hasOverlay: () => false };
   const withOverlay = { hasOverlay: () => true };
   assert.equal(shouldYieldInput(noOverlay, false), false, '没人占键盘时不停手');

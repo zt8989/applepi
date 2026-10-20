@@ -715,57 +715,33 @@ export interface StatsLine {
  * 到底什么时候会被看见——而这正是使用这两个键的全部意义。
  */
 /**
- * 滚轮键的字节序列 → 滚轮动作。
+ * 键位这件事，本项目**不再自己造**：翻页用 pi 的 `tui.altScreen.pageUp/pageDown`
+ * （`PgUp`/`PgDn`），`Alt+↑` 与 `Ctrl+P` 归还 pi 的 `app.message.dequeue` /
+ * `app.model.cycleForward`。
  *
- * ## 为什么不用 `matchesKey(data, 'up')`
+ * ## 早先这里有什么，以及为什么删
  *
- * 方向键要先给编辑器：多行提示词里 `↑`/`↓` 是**移动光标**（editor.js 的默认行为），
- * 而在 ScrollView 上只滚一格（且官方没给它默认键）。两者抢同一个键的结果是
- * 「有时滚有时不滚」—— 取决于光标在哪一行，而那是最难复现的一类 bug。
+ * 早先这块是两张**字节序列**表（`SCROLL_UP_SEQUENCES` / `SCROLL_DOWN_SEQUENCES`），
+ * 把 `Alt+↑↓`、`Ctrl+P/N` 匹配成「翻半页」，挂在全局 input listener 上。三个问题：
  *
- * 所以用 **Alt+方向键 / Ctrl+P / Ctrl+N**：编辑器不碰它们，而用户按 `Alt+↑`
- * 的直觉仍然是「往上翻」。
+ * 1. **抢了 pi 的键**：`Alt+↑` 在 pi 里是「把排队消息还回输入框」
+ *    （`app.message.dequeue`），`Ctrl+P` 是「换下一个模型」（`app.model.cycleForward`）。
+ *    两条都被翻页抢走 —— 两边共用的 `keybindings.json` 里就再也表达不出
+ *    「我要 pi 那个动作」（而那正是 `keybindings.ts` 存在的理由）。
+ * 2. **把裸 `\x1b[A` 当成了 `Alt+↑`**：那其实就是普通 ↑。不支持 Kitty 键盘协议的
+ *    终端（Orca 的内嵌终端、Terminal.app、tmux 老配置）发过来的正是这一串，
+ *    于是所有 ↑↓ 都被吃成翻页 —— 编辑器里改不了光标，扩展挂在输入区槽位里的
+ *    对话框（`ask_user_question`）收不到方向键（症状：只有 Tab 能用）。
+ * 3. **没必要**：pi-tui 的 `TuiAltScreen` 本来就有一整套（`tui.altScreen.pageUp` /
+ *    `pageDown` = `PgUp`/`PgDn`、`halfPageUp/Down`、`lineUp/Down`、
+ *    `previousPrompt/nextPrompt`、搜索、滚轮），而且它滚的是 **primary** ScrollView ——
+ *    本项目切页时 `primary` 跟着当前页走（见 `applyLayout`），正好就是「只滚当前页」。
+ *    这些键还能被 `keybindings.json` 改、`/hotkeys` 里也列得出来。
  *
- * ## 为什么列字节序列而不是一个 helper
- *
- * pi-tui 的输入回调拿的是**原始序列**，而 Alt+↑ 在不同终端发的变体不少
- * （`\x1b[1;3A` / `\x1b[1;5A` / `\x1bOa` …）。列全它们比调一个只会匹配其中
- * 一种的 helper 可靠 —— 少列一种的症状是「在某个终端上 Alt+↑ 没反应」，
- * 而那只有换终端才复现得到。
- *
- * ## 裸的 `\x1b[A` / `\x1b[B` **不能**列进来
- *
- * 它们就是**没有修饰键**的 ↑/↓ —— 也正是「不支持 Kitty 键盘协议」的终端
- * （Orca 的内嵌终端、Terminal.app、tmux 里的老配置）发过来的那一串。
- * 早先这里把裸方向键当成了「Alt+↑ 的 xterm 变体」，后果是：全局监听器比聚焦组件
- * 先跑，于是**所有** ↑/↓ 都被它吃成翻页 —— 编辑器里改不了多行提示的光标位置，
- * 扩展挂在输入区槽位里的对话框（`ask_user_question`、`ctx.ui.select` …）也收不到
- * ↑/↓（症状：只能 Tab 换页，上下键在滚对话区）。
- *
- * Alt+↑ 在哪个终端里都**带修饰位**：xterm 系发 `\x1b[1;3A`，application cursor
- * 模式发 `\x1bOa`（小写字母 = Meta 的那个老约定）。只有这两个是「往上翻」。
+ * 半页现在**默认没有键**（与 pi 一致）：想用就在 `keybindings.json` 里给
+ * `tui.altScreen.halfPageUp` / `tui.altScreen.halfPageDown` 绑一个。
  */
 const ESC = String.fromCharCode(27);
-const SCROLL_UP_SEQUENCES: readonly string[] = [
-  `${ESC}[1;3A`, // Alt+↑（xterm 系）；裸的 ESC[A 是普通 ↑，不能当它
-  `${ESC}Oa`, // Alt+↑（application cursor 模式）
-  String.fromCharCode(16), // Ctrl+P
-];
-const SCROLL_DOWN_SEQUENCES: readonly string[] = [
-  `${ESC}[1;3B`,
-  `${ESC}Ob`,
-  String.fromCharCode(14), // Ctrl+N
-];
-
-/** 这一串输入是不是「往上翻」（Alt+↑ 或 Ctrl+P）。 */
-export function isScrollUp(data: string): boolean {
-  return SCROLL_UP_SEQUENCES.includes(data);
-}
-
-/** 这一串输入是不是「往下翻」（Alt+↓ 或 Ctrl+N）。 */
-export function isScrollDown(data: string): boolean {
-  return SCROLL_DOWN_SEQUENCES.includes(data);
-}
 
 /**
  * 这条按键要不要**忽略**。
@@ -828,9 +804,10 @@ export function shouldIgnoreKey(data: string): boolean {
  *    只判 `hasOverlay()` 会漏掉它们。
  *
  * 漏掉第 2 种的症状（Orca 里报上来的那条）：`ask_user_question` 的对话框只有 Tab
- * 能用，↑/↓ 在滚对话区 —— 因为本监听器比聚焦组件先跑，把 ↑/↓ 吃成了翻页
- * （`isScrollUp()` 的注释里有字节层面的来龙去脉）。同一条缝里还漏过其他全局开关：
- * 对话框开着的**同时**按 `Ctrl+R` / `Ctrl+O` / `Shift+Tab`，背后的主界面真的会跟着变。
+ * 能用，↑/↓ 在滚对话区 —— 当时翻页是本项目自己拦的（字节层面的来龙去脉见
+ * `const ESC` 上方那段注释），而本监听器比聚焦组件先跑。
+ * 同一条缝里还漏过其他全局开关：对话框开着的**同时**按 `Ctrl+R` / `Ctrl+O` /
+ * `Shift+Tab`，背后的主界面真的会跟着变。
  *
  * 与 `hasOverlay()` 那条口径一致：让路 = `return undefined`，**不**消费。
  */
@@ -2094,8 +2071,6 @@ export async function runTui(options: TuiOptions): Promise<number> {
   });
 
   // 显式标出回调参数类型：1.x 的 TuiInputListener 是具名类型，不再从上下文推断。
-  /** 当前页的 ScrollView —— 滚轮只滚它（另一个不滚，免得「在轨迹页却滚动了对话区」）。 */
-  const activeScroll = (): ScrollView => (page === 'trace' ? traceScroll : scroll);
   const onInput: TuiInputListener = (data: string) => {
     /**
      * **先扔掉「松开」事件。**
@@ -2136,27 +2111,15 @@ export async function runTui(options: TuiOptions): Promise<number> {
      */
     if (shouldYieldInput(tui, editorSlotComponent !== undefined)) return undefined;
     /**
-     * 翻页：**必须在编辑器之前**。
+     * 翻页**不在这里**。
      *
-     * 这里只认**带修饰位**的键（`Alt+↑` / `Ctrl+P` / `Ctrl+N`）—— 编辑器不碰它们，
-     * 所以放在前面不会抢谁的键。裸的 ↑/↓ **不在名单里**（见 `isScrollUp()`）：
-     * 那是编辑器的光标与对话框的选项导航。
-     *
-     * 半页而不是一行：轨迹一行就是**一个节点**，一行一行翻太慢；而对话区
-     * 半页刚好是「一屏的一半」，两边都不别扭。
+     * `PgUp`/`PgDn` 由 pi-tui 的 `TuiAltScreen` 在它自己那个 input listener 里处理
+     * （构造时就注册了，比本监听器还早），滚的是 **primary** ScrollView —— 而本项目
+     * 切页时让 primary 跟着当前页走（见 `applyLayout`），于是「只滚当前页」这个效果
+     * 本来就是白得的。`Alt+↑` / `Ctrl+P` / 裸 ↑↓ 也全部归还给各自的语义
+     * （取回排队消息 / 换下一个模型 / 编辑光标）。早先这里自己拿字节序列去抢，
+     * 抢出过两个真问题 —— 那段来龙去脉在 `const ESC` 上方那片注释里。
      */
-    if (isScrollUp(data)) {
-      const view = activeScroll();
-      view.scrollBy(-Math.max(1, Math.floor(view.viewportHeight / 2)));
-      refresh();
-      return { consume: true };
-    }
-    if (isScrollDown(data)) {
-      const view = activeScroll();
-      view.scrollBy(Math.max(1, Math.floor(view.viewportHeight / 2)));
-      refresh();
-      return { consume: true };
-    }
     /** 内置的几个开关键。返回 true = 已消费。 */
     const builtins = (): boolean => {
       // `Ctrl+L` = `app.model.select`（打开 /model 面板）—— **用 pi 的动作 id**，

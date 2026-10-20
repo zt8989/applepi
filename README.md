@@ -263,9 +263,10 @@ content 块，历史里的图片画成缩略图、文档画成文件格子。
 实现与边界见 [`docs/architecture/webui.md`](docs/architecture/webui.md)。
 
 界面里：`Ctrl+R` **在「对话」与「轨迹」两页之间切换**（顶部有页签标出当前在哪页），
-`Alt+↑/↓` 或 `Ctrl+P/N` 翻当前页（半页），`Ctrl+O` 展开/收起工具输出，
+`PgUp`/`PgDn` 翻当前页（整页 —— pi-tui 的 `tui.altScreen.pageUp/pageDown`，只滚当前那一页），
+`Ctrl+O` 展开/收起工具输出，
 `Ctrl+T` 展开/收起模型的思考块，`Ctrl+L` 开模型面板。
-**pi 的整套键位都可用**（本轮补齐，冲突以 pi 为准）：`Ctrl+P`/`Shift+Ctrl+P` 循环换模型，
+**pi 的整套键位都可用**（冲突以 pi 为准）：`Ctrl+P`/`Shift+Ctrl+P` 循环换模型，
 `Shift+Tab` 循环思考级别，`Ctrl+G` 交给 `$EDITOR`，`Ctrl+X` 复制最后一条回答，
 `Ctrl+V` 粘贴（文件/图片/文本），`Ctrl+Z` 挂后台，`Alt+Enter`（macOS `Option+Enter`）排 follow-up，
 `Alt+Up` 把排队消息还回输入框。**中断是 `Escape`，`Ctrl+C` 是清空编辑器（连按两次退出）、
@@ -288,14 +289,16 @@ content 块，历史里的图片画成缩略图、文档画成文件格子。
 能刷几百帧）。
 
 外面包一层 `ScrollView` 且 `follow: 'end'`：**新节点往下追加、视口自动贴底**，
-而往上翻能回到任何一个历史节点（滚轮翻半页）。于是：
+而往上翻能回到任何一个历史节点（`PgUp`/`PgDn` 整页、鼠标滚轮）。于是：
 
 - 跑到 26 个节点时，最早那几行被顶出屏幕 —— 但**随时能滚回去**；
 - 节点继续往下追加时视口继续跟随，不会「卡在中间」；
 - `/new` 或恢复别的会话后节点变少时，旧块会被丢掉，不残留。
 
-滚轮用 **Alt+↑/↓ 与 Ctrl+P/N** 而不是纯方向键 —— 后者在多行提示词里是**移动光标**，
-抢了就没法编辑多行（那是「有时滚有时不滚」这类最难复现 bug 的来源）。
+翻页用 **`PgUp`/`PgDn`**（pi-tui 的 `tui.altScreen.pageUp/pageDown`，只滚当前页；鼠标滚轮同理）；
+纯 ↑↓ 在多行提示词里是**移动光标**、`Alt+↑` 是「把排队消息还回输入框」——
+这两个都跟 pi 同键同义，本项目**不抢**（半页想要就自己给
+`tui.altScreen.halfPageUp/halfPageDown` 绑个键，pi 默认也是空的）。
 
 ### 生成中也能说话：steer 与 followUp
 

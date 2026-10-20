@@ -26,6 +26,32 @@
 > 原来的 `app.abort` 动作 id 仍然保留在定义表里（供 `keybindings.json` 覆盖），
 > 但默认不再绑 `ctrl+c`。
 
+## 翻页：交给 pi-tui 的 `tui.altScreen.*`（不再自己抢键）
+
+早先翻页是本项目自己实现的：一张**字节序列表**把 `Alt+↑↓` / `Ctrl+P/N` 匹配成
+「翻半页」，挂在全局 input listener 上。两个问题，都是「与 pi 抢键」：
+
+- `Alt+↑` 是 pi 的 `app.message.dequeue`（把排队消息还回输入框），`Ctrl+P` 是
+  `app.model.cycleForward`（换下一个模型）—— 都被翻页抢走，于是共用一份
+  `keybindings.json` 里表达不出「我要 pi 那个动作」；
+- 表里的裸 `\x1b[A` 被当成了「`Alt+↑` 的 xterm 变体」，其实它就是**普通 ↑**。
+  不支持 Kitty 键盘协议的终端（Orca 的内嵌终端、Terminal.app、tmux 老配置）发来的
+  正是这一串，于是所有 ↑↓ 都被吃成翻页：编辑器里改不了光标，扩展挂在输入区槽位里的
+  对话框（`ask_user_question`）收不到方向键。
+
+现在翻页完全交回 pi-tui：`TuiAltScreen` 构造时自己注册了一个 input listener，
+处理 `tui.altScreen.pageUp/pageDown`（`PgUp`/`PgDn`）、`halfPageUp/Down`、
+`lineUp/Down`、`previousPrompt/nextPrompt`、搜索与滚轮，滚的是 **primary** ScrollView
+—— 而本项目切页时让 `primary` 跟着当前页走（`applyLayout`），正好就是「只滚当前页」。
+
+于是三个后果，都是故意的：
+
+- 半页默认**没有键**（pi 默认也是空的）；想用就给 `tui.altScreen.halfPageUp/Down` 绑一个；
+- `/hotkeys` 里那一行写的是 `tui.altScreen.*` 而不是 `tui.editor.*` —— 同键不同 id，
+  真正生效的是前者（写错了就成了「改键没反应」）；
+- 全局监听器的让路判据多了第二种形态（见 `shouldYieldInput`）：扩展挂在**输入区槽位**
+  里的对话框不在 overlay 栈上，只判 `hasOverlay()` 会漏掉它们。
+
 ## 要补的动作（按 pi 的 id 实现）
 
 | id | 默认键 | 本项目要做的 |
