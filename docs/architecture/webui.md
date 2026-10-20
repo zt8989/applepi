@@ -332,8 +332,11 @@ WS   {type:'resumeSession', id, cwd}  → bridge → 内核的 restoreSession(fi
 - **子会话（子代理）不列**：`parentSession` 有值的那些属于某个父会话，单独列出来只会把
   列表塞满。（顺带修了 `listSessions()` 一个漏字段：`parentSession` 从 header 读到了却
   没放进返回值，见 `config-home.ts`。）
-- **标题**只读文件头 64KB（`readJsonlHead`）。读整个文件（`sessionTitle`）对列表是不可接受
-  的 —— 一个 18MB 的目录就是 18MB 的解析，而那正是 `sessions.md` 里已经付过代价的那类事。
+- **标题不单独读文件**：取 `SessionSummary.firstMessage`（`listSessions()` 那一遍读头部
+  512KB 找 `session_info` 时顺手带出来的）。早先这里自己按 **64KB** 扫一遍找第一句话 ——
+  那是个错假设：pi v3 的 head（system prompt 分段 + 工具表）本身就 ~64KB，用户的第一句话
+  紧跟其后，于是**新会话全都扫不到**，侧边栏那一行显示成一串 uuid（老会话 head 小才碰巧
+  有标题）。读整个文件（`sessionTitle`）同样不可接受：一个 18MB 的目录就是 18MB 的解析。
 - **环在跑时整列与「新建」一起锁上**：换会话会把正在写的那个文件丢掉，所以那段时间
   每行都 `aria-disabled`（点了给一句提示，不静默）。服务端还有第二道闸 —— `bridge`
   收到 `resumeSession` / `newSession` 时判 `phase !== 'idle'` 并回一条警示

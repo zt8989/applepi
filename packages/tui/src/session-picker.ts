@@ -57,7 +57,7 @@ import { listSessions, findTraceFile, type SessionSummary } from '@ela/core/conf
 import { appendSessionName } from '@ela/core/session-file';
 import { installProjectKeybindings } from './keybindings';
 import { composerOverlayOptions } from './composer-overlay';
-import { readJsonlHead, readSessionMessages } from '@ela/core/session-file';
+import { readSessionMessages } from '@ela/core/session-file';
 
 /** `SessionSelectorComponent` 的两个 loader 的第一个参数（进度回调）。 */
 type Progress = SessionListProgress;
@@ -88,20 +88,6 @@ export interface SessionPickerOptions {
 }
 
 /**
- * 标题读多少字节。
- *
- * 会话文件里一条 toolResult 能有几百 KB，而标题只是「用户说的第一句话」，它在文件
- * **前几行**。所以只读开头这么多，且**命中第一条 user 消息就停** —— 读多少只与
- * 「第一个问题有多长」有关，与这个会话聊了多久无关（见 docs/architecture/sessions.md）。
- */
-const TITLE_HEAD_BYTES = 512 * 1024;
-
-/** 去掉控制字符（换行会把一行列表撑成两行）与多余空白。 */
-function oneLine(text: string): string {
-  return text.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim();
-}
-
-/**
  * `SessionSummary` → 官方 `SessionInfo`。
  *
  * ## `modified` 用「最后一次说话」，不是文件 mtime
@@ -129,31 +115,16 @@ function toSessionInfo(session: SessionSummary, title: string): SessionInfo {
   };
 }
 
-/** 标题：会话的第一条 user 消息（就是官方的 `firstMessage`）。只读开头，命中就停。 */
-function sessionTitleFromHead(file: string): string {
-  const { content } = readJsonlHead(file, TITLE_HEAD_BYTES, {
-    stopAfter: (entry) =>
-      entry.type === 'message' && (entry.message as { role?: string } | undefined)?.role === 'user',
-  });
-  for (const entry of content) {
-    if (entry.type !== 'message') continue;
-    const message = entry.message as { role?: string; content?: unknown } | undefined;
-    if (!message || message.role !== 'user') continue;
-    const raw =
-      typeof message.content === 'string'
-        ? message.content
-        : Array.isArray(message.content)
-          ? message.content
-              .map((block) =>
-                block && typeof block === 'object' && 'text' in block
-                  ? String((block as { text: unknown }).text)
-                  : '[image]',
-              )
-              .join(' ')
-          : '';
-    return oneLine(raw) || '(空会话)';
-  }
-  return '(空会话)';
+/**
+ * 标题：会话的第一条 user 消息（就是官方的 `firstMessage`）。
+ *
+ * 取自 `SessionSummary.firstMessage` —— `listSessions()` 那一遍读头部 512KB 找
+ * `session_info` 时顺手带出来的（见 `readSessionMeta`）。这里**不再自己扫文件**：
+ * 早先按 512KB 单独扫一遍，虽然够用，但等于每个会话多读一份头部。
+ */
+function sessionTitleOf(session: SessionSummary): string {
+  const first = session.firstMessage;
+  return first === undefined || first === '' ? '(空会话)' : first;
 }
 
 /**
@@ -168,7 +139,7 @@ function sessionTitleFromHead(file: string): string {
  */
 function loadSessions(filter: { cwd?: string } | undefined, onProgress?: Progress): Promise<SessionInfo[]> {
   const sessions = listSessions(filter);
-  const out = sessions.map((s) => toSessionInfo(s, sessionTitleFromHead(s.file)));
+  const out = sessions.map((s) => toSessionInfo(s, sessionTitleOf(s)));
   onProgress?.(out.length, out.length, out);
   return Promise.resolve(out);
 }
@@ -233,7 +204,7 @@ export function openSessionPicker(options: SessionPickerOptions): () => void {
   // 官方组件从空列表起步、自己 `void this.loadScope('current')`，那一次 load 要走完
   // 一个 promise 才出内容 —— 于是首帧是「Loading ...」然后才跳出来。这里先把同步那份
   // 塞进去，省掉那次跳。官方随后的 load 会用**同样的**数据覆盖（幂等）。
-  const currentSessions = listed.map((s) => toSessionInfo(s, sessionTitleFromHead(s.file)));
+  const currentSessions = listed.map((s) => toSessionInfo(s, sessionTitleOf(s)));
 
   const selector = new SessionSelectorComponent(
     // scope = current：只有 cwd 是当前进程那个目录的会话。

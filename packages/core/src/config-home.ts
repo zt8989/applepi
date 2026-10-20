@@ -69,6 +69,7 @@ import {
 import {
   readJsonlHead,
   readJsonlTail,
+  type SessionEntry,
   type SessionHeader,
   type SessionInfoEntryLike,
 } from './session-file';
@@ -334,6 +335,15 @@ export interface SessionSummary {
   entries: number;
   /** 用户给会话起的名字（`session_info` entry）。没起过就 undefined。 */
   name?: string | undefined;
+  /**
+   * **第一条 user 消息**（压成一行，见 `firstMessageText`）。没有就 undefined。
+   *
+   * 列表里的标题就是「名字 → 这一句 → id」那一串（见 `web/api.ts` 的 `sessionListTitle`）。
+   * 把它放在这里，是因为**只能在这一遍读里拿**：pi v3 的 head（system prompt 分段 +
+   * 工具表）本身就 ~64KB，而用户的第一句话紧跟在它后面 —— 另一处再按 64KB 去扫正好
+   * 扫不到，症状是列表里那一行显示成一串 uuid（真发生过）。
+   */
+  firstMessage?: string | undefined;
   /** 分叉来源（header 的 `parentSession`）。本项目还没接 fork，所以通常 undefined。 */
   parentSession?: string | undefined;
   /**
@@ -557,9 +567,15 @@ export function listSessions(filter?: { cwd?: string }): SessionSummary[] {
  * 「不扫全文」付出过代价。所以这里明确选「扫前 512KB」，并把这条限制写在上面。
  * 对**当前**正在聊的会话改名（正是面板的主要用途），那条 entry 就在前几 KB 里，一定命中。
  */
-function readSessionMeta(file: string): { name?: string; parentSession?: string } | undefined {
+function readSessionMeta(
+  file: string,
+): { name?: string; parentSession?: string; firstMessage?: string } | undefined {
   // 不给 `stopAfter`：见上面的「为什么不能提前停」。
   const { content } = readJsonlHead(file, 512 * 1024);
+  // 顺带取**第一条 user 消息**：调用方要拿它当标题（列表那一行、`/resume` 面板）。
+  // 它必须借用这一遍读 —— 窗口是 512KB，而单独再去读 64KB 会落在 head（~64KB）里，
+  // 正好漏掉紧跟其后的第一句话。
+  const firstMessage = firstUserMessageText(content);
   // pi 的语义：**最后一条** `session_info` 说了算，且空串 = 显式清名。
   //
   // `name === undefined` **不能**直接当「还没找到」的哨兵 —— 因为空串那条会让它重新变回
@@ -584,10 +600,51 @@ function readSessionMeta(file: string): { name?: string; parentSession?: string 
       if (fromHeader !== undefined && fromHeader !== '') parentSession = fromHeader;
     }
   }
-  // 空名字 = 没取到；两者都没取到就返回 undefined，调用方于是不写这两个字段。
-  return name === undefined && parentSession === undefined
+  // 一个都没取到就返回 undefined，调用方于是不写这几个字段。
+  return name === undefined && parentSession === undefined && firstMessage === undefined
     ? undefined
-    : { ...(name !== undefined ? { name } : {}), ...(parentSession !== undefined ? { parentSession } : {}) };
+    : {
+        ...(name !== undefined ? { name } : {}),
+        ...(parentSession !== undefined ? { parentSession } : {}),
+        ...(firstMessage !== undefined ? { firstMessage } : {}),
+      };
+}
+
+/**
+ * 会话里的**第一条 user 消息**，压成一行（控制字符与连续空白都折成单个空格）。
+ *
+ * 折成一行是刻意的：它会被塞进侧边栏那一行（`text-overflow: ellipsis`），
+ * 一个换行会把那一行的排版拆坏。纯附件（只有图片、没有文字）的那条跳过 ——
+ * 拿一个空标题不如用后面那句。
+ */
+function firstUserMessageText(entries: readonly SessionEntry[]): string | undefined {
+  for (const entry of entries) {
+    if (entry?.type !== 'message') continue;
+    const message = (entry as { message?: { role?: unknown; content?: unknown } }).message;
+    if (message?.role !== 'user') continue;
+    const text = oneLine(messageText(message.content));
+    if (text !== '') return text;
+  }
+  return undefined;
+}
+
+/** 消息内容（字符串 / 内容块数组）→ 纯文本。图片块给一个占位，别的块跳过。 */
+function messageText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((block) => {
+      if (typeof block !== 'object' || block === null) return '';
+      const record = block as { type?: unknown; text?: unknown };
+      return record.type === 'text' && typeof record.text === 'string' ? record.text : '';
+    })
+    .join(' ');
+}
+
+/** 控制字符与连续空白折成一个空格（标题要一行）。 */
+function oneLine(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 /**

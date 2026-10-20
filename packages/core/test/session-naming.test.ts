@@ -12,6 +12,7 @@ import {
   findSessionFile,
   findSessionFileById,
   findTraceFile,
+  sessionPath,
   listSessions,
   resumeCommand,
   sessionFileName,
@@ -124,6 +125,48 @@ test('findFileById：找到新名，也认旧名，找不到返回 null', async 
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+test('listSessions：head 有 100KB+ 时 firstMessage 仍取得到（64KB 窗口那个坑）', async () => {
+  await withHome(async () => {
+    // pi v3 的 head（system prompt 分段 + 工具表）本身就能到 ~64KB，用户的第一句话紧跟其后。
+    // 早先侧边栏按 64KB 单独扫一遍找标题，于是**新会话全都扫不到**、显示成一串 uuid。
+    // 现在那句由 `listSessions()` 的 512KB 读顺手带出来，这条钉住它。
+    const id = 'big-head';
+    const cwd = '/proj-big';
+    const file = sessionPath(id, cwd);
+    mkdirSync(path.dirname(file), { recursive: true });
+    const stamp = new Date().toISOString();
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: 'session', version: 3, id, timestamp: stamp, cwd }),
+        JSON.stringify({
+          type: 'message',
+          id: 'e1',
+          parentId: null,
+          timestamp: stamp,
+          message: {
+            role: 'system',
+            content: '',
+            timestamp: 1,
+            sections: { rules: 'x'.repeat(70_000), docs: 'y'.repeat(40_000) },
+          },
+        }),
+        JSON.stringify({
+          type: 'message',
+          id: 'e2',
+          parentId: 'e1',
+          timestamp: stamp,
+          message: { role: 'user', content: 'head 之后的第一句话\n换行也要压掉', timestamp: 2 },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    const summary = listSessions().find((session) => session.id === id);
+    assert.equal(summary?.firstMessage, 'head 之后的第一句话 换行也要压掉', '压成一行，且没被 64KB 截掉');
   });
 });
 

@@ -41,7 +41,7 @@ import {
   readSidebarState,
   setArchivedSessions,
 } from '@ela/core/sidebar-state';
-import { readSession, readJsonlHead } from '@ela/core/session-file';
+import { readSession } from '@ela/core/session-file';
 import { historyLines } from './history';
 import {
   DEFAULT_THINKING_LEVEL,
@@ -150,44 +150,24 @@ function busyResult(): WebActionResult {
   return { ok: false, message: '上一回合还没结束，先中断再改' };
 }
 
-/**
- * 列表阶段为了一个标题最多读文件头多少字节。
- *
- * 读整个文件（`sessionTitle`）对列表来说是不可接受的：一个 18MB 的目录就是 18MB 的
- * 解析。而第一句话几乎总在头几 KB 里 —— 也就够了。读不到的（超长首条、或没有用户
- * 消息）退到 id，不为了一个标题去扫全文（见 `readJsonlHead` 的注释）。
- */
-const TITLE_HEAD_BYTES = 64 * 1024;
 const TITLE_MAX_LENGTH = 60;
-
-/** 消息内容 → 纯文本（与 `session-file.ts` 的 `contentToText` 同一口径，但它不对外）。 */
-function contentText(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content
-    .map((block) =>
-      typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'text'
-        ? String((block as { text?: unknown }).text ?? '')
-        : ' ', // 图片块占一个词，不把前后文粘在一起
-    )
-    .join(' ');
-}
 
 /**
  * 侧边栏一行显示什么：用户起的名字 → 第一句话 → id。
  *
- * 名字在 `SessionSummary` 里（`listSessions` 已经读过头部 512KB 的 `session_info`）；
- * 第一句话只能自己从头读一段找 —— 见 `TITLE_HEAD_BYTES`。
+ * 两样都来自 `SessionSummary`，**这里不再自己读文件**：`listSessions()` 那一遍已经把
+ * 头部 512KB 读进来找 `session_info`（名字），顺手把第一条 user 消息也带出来了
+ * （`SessionSummary.firstMessage`）。
+ *
+ * 早先这里自己按 64KB 扫一遍找第一句话 —— 那是个错假设：pi v3 的 head（system prompt
+ * 分段 + 工具表）本身就 ~64KB，用户的第一句话紧跟其后，于是**新会话全都扫不到**，
+ * 侧边栏那一行显示成一串 uuid（老会话的 head 小，才碰巧有标题）。
  */
 function sessionListTitle(summary: SessionSummary): string {
   if (summary.name !== undefined && summary.name !== '') return summary.name;
-  const { content } = readJsonlHead(summary.file, TITLE_HEAD_BYTES);
-  for (const entry of content) {
-    const message = (entry as { message?: { role?: unknown; content?: unknown } }).message;
-    if (message?.role !== 'user') continue;
-    const line = contentText(message.content).trim().split('\n')[0]?.trim() ?? '';
-    if (line === '') continue;
-    return line.length > TITLE_MAX_LENGTH ? `${line.slice(0, TITLE_MAX_LENGTH - 1)}…` : line;
+  const first = summary.firstMessage;
+  if (first !== undefined && first !== '') {
+    return first.length > TITLE_MAX_LENGTH ? `${first.slice(0, TITLE_MAX_LENGTH - 1)}…` : first;
   }
   return summary.id;
 }

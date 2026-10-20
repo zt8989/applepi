@@ -200,8 +200,9 @@ kernel.restore(messages);      // 只灌（消息已读出来时）
 理由写在那个文件的头注释里。
 
 浏览器那边还有一个更轻的入口：**侧边栏的历史会话**（`GET /api/sessions` +
-WS 的 `resumeSession`）—— 同一个 `listSessions()`，但只读文件头 **64KB** 找第一句话，
-分组与恢复的细节见 [webui](webui.md) 的「侧边栏」。
+WS 的 `resumeSession`）—— 同一个 `listSessions()`，标题取 `SessionSummary.firstMessage`
+（下面那遍 512KB 读顺手带出来的，不再单独读一次），分组与恢复的细节见
+[webui](webui.md) 的「侧边栏」。
 
 面板的完整交互（与 pi 逐行一致）：
 
@@ -242,7 +243,7 @@ WS 的 `resumeSession`）—— 同一个 `listSessions()`，但只读文件头 
 | --- | --- | --- |
 | header（cwd / id / 时间） | 只读开头 64KB（`config-home.readHead`） | header 是首行，永远在这截里 |
 | 条数 | 分块流式数换行（`countLines`） | 精确；不把全文读进内存，也不建几十万元素的 `split` 数组 |
-| 标题 | 只读开头 512KB，且**命中第一条 user 消息就停**（`readJsonlHead({stopAfter})`） | 读多少只与「第一个问题有多长」有关，与聊了多久无关 |
+| 标题 | **搭上**扫名字那遍 512KB（`SessionSummary.firstMessage`） | pi v3 的 head（system prompt 分段 + 工具表）本身就 ~64KB，第一句话紧跟其后；单独按 64KB 扫会正好漏掉（症状：新会话在侧边栏显示成一串 uuid） |
 | 名字（`session_info`） | 扫开头 512KB，**不提前停** | 改名可以反复发生，要的是**最后**一条（见下） |
 | 最后说话时间 | 只读**末尾** 256KB（`readJsonlTail`） | 消息 timestamp 在每行里，但最后那次几乎总在末尾 |
 | 分叉来源（`parentSession`） | header 那一行（`readHead`） | 子会话（子代理）靠它从列表里排掉；`readSessionMeta` 读不到它（header 那一行不进 `content`） |

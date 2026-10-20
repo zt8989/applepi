@@ -1541,3 +1541,50 @@ test('web api：完整历史把图像块画成 <img>（用户附件与工具结�
     await ctx.dispose();
   }
 });
+
+/**
+ * 侧边栏标题：head（system prompt 分段 + 工具表）很大时，仍然是用户的第一句话。
+ *
+ * 这条是现象驱动的回归：`/api/sessions` 的标题早先自己按 64KB 扫文件头找第一句话，
+ * 而 pi v3 的 head 本身就有 ~64KB —— 于是**新会话全显示成一串 uuid**，老会话（head 小）
+ * 才碰巧有标题。现在那句由 `listSessions()` 的 512KB 读顺手带出来（`firstMessage`）。
+ */
+test('web api：/api/sessions 的标题是 head 之后的第一句话，不是 uuid', async () => {
+  const ctx = await start();
+  try {
+    const id = 'sess-big-head';
+    const cwd = '/tmp/ela-web-bighead';
+    const file = findSessionFile(id, cwd);
+    mkdirSync(path.dirname(file), { recursive: true });
+    const stamp = new Date().toISOString();
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({ type: 'session', version: 3, id, timestamp: stamp, cwd }),
+        JSON.stringify({
+          type: 'message',
+          id: 'e1',
+          parentId: null,
+          timestamp: stamp,
+          message: { role: 'system', content: '', timestamp: 1, sections: { rules: 'x'.repeat(70_000) } },
+        }),
+        JSON.stringify({
+          type: 'message',
+          id: 'e2',
+          parentId: 'e1',
+          timestamp: stamp,
+          message: { role: 'user', content: 'head 之后的第一句话', timestamp: 2 },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+
+    const info = (await (await fetch(`${ctx.server.url}api/sessions`)).json()) as {
+      sessions: { id: string; title: string }[];
+    };
+    const row = info.sessions.find((session) => session.id === id);
+    assert.equal(row?.title, 'head 之后的第一句话');
+  } finally {
+    await ctx.dispose();
+  }
+});
