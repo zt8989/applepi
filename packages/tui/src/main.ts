@@ -467,10 +467,12 @@ async function main(): Promise<void> {
         // 终端那一份由扩展自己画、浏览器那一份走 `ctx.ui.externalQuestionnaire` 交给我们，
         // 两边同时开着、谁先答都算数 —— 不需要把宿主装成非终端宿主（那反而会把扩展
         // 自己那份 TUI 问卷整个关掉）。
-        // 底栏那一行（与终端**逐字同形**）：`↑362k ↓310k R121M CH99.9% 52%/1.0M`。
+        // 底栏那一行（与终端**逐字同形**）：`↑362k ↓310k R121M CH99.9% 52%/1.0M (auto)`。
         // 浏览器那边 pi-web-ui 自带的 `formatUsage` 只到 `R`/`W` —— 所以由服务端
         // 算好整行发过去，而不是让它再算一份（口径一漂，两端对不上）。
-        stats: (state) => statsLine(state),
+        // 自动压缩那个开关也在这里取（同一个 `kernel.autoCompactEnabled()`，与
+        // `/settings` 面板、`/api/settings` 同源）—— 否则浏览器底栏少一段 `(auto)`。
+        stats: (state) => statsLine(state, kernel.autoCompactEnabled()),
         // 底栏左端那一行（与终端底栏逐字同形）：家目录缩 `~` + git 分支。
         cwdLabel: (state) => cwdLine(state.session.cwd, gitBranch(state.session.cwd)),
         // 扩展装载完成的门：浏览器那侧发消息也要等它（与终端 `send()` 同一道门）——
@@ -523,6 +525,9 @@ async function main(): Promise<void> {
         }
         return kernel.extensions.commands.run(name, arg);
       },
+      // 设置 › 插件 / 子代理：同样是**取值函数**，扩展后台装完之后再读才有内容。
+      extensions: () => kernel.extensions.entries,
+      extensionErrors: () => kernel.extensions.errors,
     });
     try {
       web = await startWebServer({

@@ -13,8 +13,11 @@
 
 import type {
   WebActionResult,
+  WebAgentInfo,
   WebCommandInfo,
+  WebMcpInfo,
   WebModelsInfo,
+  WebPluginsInfo,
   WebSessionDeleteInfo,
   WebSessionsInfo,
   WebSettingsInfo,
@@ -55,6 +58,12 @@ export const elaApi = {
   deleteSessions: (ids: readonly string[]): Promise<WebSessionDeleteInfo> =>
     post('/api/sessions/delete', { ids }),
   skills: (): Promise<WebSkillInfo[]> => request('/api/skills'),
+  /** 设置 › 子代理：磁盘上的 agent 定义（只读）。 */
+  agents: (): Promise<WebAgentInfo[]> => request('/api/agents'),
+  /** 设置 › 插件：settings.json 的 packages + 已装载扩展（只读）。 */
+  plugins: (): Promise<WebPluginsInfo> => request('/api/plugins'),
+  /** 设置 › MCP：mcp.json 里的服务器（只读，不连接）。 */
+  mcp: (): Promise<WebMcpInfo> => request('/api/mcp'),
   thinking: (): Promise<WebThinkingInfo> => request('/api/thinking'),
   settings: (): Promise<WebSettingsInfo> => request('/api/settings'),
   /** 顶栏「系统」：模型实际收到的系统提示词。 */
