@@ -39,6 +39,8 @@ TUI 之外的第二块界面：**浏览器里的 pi-web-ui**，环仍然是终�
 | `src/model-picker.ts` | `@ela/webui` | 模型选择器（**接管**了 pi-web-ui 自带那个，见下） |
 | `src/stats.ts` | `@ela/webui` | composer 下面那一行：左端工作目录、右端统计（两段都由服务端算好） |
 | `src/sidebar.ts` | `@ela/webui` | 左侧边栏：历史会话（按 cwd 分组）+ 新建 / 搜索 + 底栏三个入口 |
+| `src/panel-resize.ts` | `@ela/webui` | 侧边栏宽度：拖中缝 / 键盘 / 双击复位，最小最大与记忆（口径同 Pi Web） |
+| `src/smooth-scroll.ts` | `@ela/webui` | 会话列表的自动滚动：Motion 驱动的平滑跟随（接掉 pi-web-ui 的“瞬间跳底”） |
 | `src/format.ts` | `@ela/webui` | 界面上的纯格式化（相对时间、路径末段） |
 | `src/main.ts` | `@ela/webui` | 外壳（侧边栏 + 主区）、挂 `ChatPanel`、铺 `AppStorage`、连 `/ws` |
 
@@ -310,6 +312,35 @@ content 块界面也不会画。两头都补上之后是这么走的：
   于是那份 base64 **本来就在消息里** —— 不必再回服务端取一次。`tool-view.ts` 把它们拼成
   `<img>` 缩略图（封顶 180px；一张截图铺满对话列会把上下文冲走），点开是盖一层的原图
   （`openImageOverlay()`；不走 `window.open`，因为 `data:` 顶层导航会被浏览器拦掉）。
+- **工具执行期间那 12px 的坑要抹掉**。同一个事件会落到两个容器：`message-list` 把
+  「含 pending 工具调用」的那条助手消息也画一遍（`hidePendingToolCalls` 把卡藏了，
+  剩下一个 0 高度的空壳），`streaming-message-container` 再把那张卡画一次。两个容器
+  各有自己的 `gap-3`，空壳自己又是一个 flex 项 —— 结果「上一张**完成的**卡」到
+  「**进行中**的卡」是 24px，等工具跑完、空壳变成卡片后又是 12px（看起来就像“跑完
+  间隙缩了一下”）。`app.css` 里用 `message-list assistant-message:not(:has(> div > *))`
+  把空壳 `display: none`（不用 `:empty`：根 `div` 里总有 Lit 模板带出来的空白文本节点；
+  必须 `!important`：`assistant-message` 在 `connectedCallback()` 里写了内联
+  `style.display = 'block'`）。
+
+## 会话列表的平滑滚动
+
+聊天区那个滚动容器（pi-web-ui 的 `.overflow-y-auto`）现在由 `smooth-scroll.ts` 接管：
+内容变高时用 [Motion](https://motion.dev) 的 `animate()` 平滑跟到底部，而不是
+`scrollTop = scrollHeight` 那样每几帧蹦一下。
+
+- **先把 pi-web-ui 自己的自动滚动关掉**：它的 `AgentInterface` 在 `ResizeObserver` 里
+  直接写 `scrollTop`。那个 `_autoScroll` 是 TS 私有字段，运行时只是个普通属性，锁成
+  `get: () => false` 就不会再跳（字段不在时安静退化，不报错）。
+- **跟随策略**：内容变高 → 从当前位置动画到新底部（`scrollDuration()`：距离越远越久，
+  上限 0.45s，`easeOutQuint` 形状）；上一段还在跑时不打断，只记一个「还欠一次」，
+  跑完再补（流式时打断会一抖一抖）。
+- **用户优先**：`wheel` / 触摸一发生就停动画（`onUpdate` 每帧都在写 `scrollTop`，光等
+  `scroll` 事件会把用户的上滚盖掉，手感上就是“拖不动”）；往上翻且离底还远 → 暂停跟随，
+  直到他自己滚回贴底、或发了一条新消息（`user-message` 出现就恢复）。
+  为什么按「`scrollTop` 变小」而不是 wheel 方向判断：内容变高时 `scrollTop` 根本不变，
+  而用户上翻一定会让它变小。
+- **不播动画的两种情形**：切换会话 / 一次要跳超过一屏半（`shouldJump()`）—— 那是
+  “打开历史”的形状，从顶上滚下来一大段只是噪音；系统开了「减少动态效果」时一律直接定位。
 
 ## 侧边栏：历史会话（按 cwd）+ 恢复
 
@@ -373,6 +404,34 @@ WS   {type:'resumeSession', id, cwd}  → bridge → 内核的 restoreSession(fi
   删当前会话会被服务端拒绝 —— 记录器还拿着那个文件，下一次说话会写进一个已删掉的文件里。
 
 ## 外壳（会话 id 不显示，cwd 在输入框左下）
+
+### 侧边栏宽度与窄屏折叠
+
+侧边栏与主区之间那条中缝（`#ela-sidebar-resize`）可以拖。实现是
+[`panel-resize.ts`](../../packages/webui/src/panel-resize.ts)，口径照 Pi Web 的
+`useResizablePanel` —— 但 webui 是原生 TS + Lit，没有 React，`react-resizable-panels`
+那一类库在这里没有落脚点，所以那套规矩（最小 / 最大、记忆、键盘、双击复位）是照抄的，
+不是引库得来的。
+
+- **宽度写成一个 CSS 变量**（`--ela-sidebar-width`，挂在 `<aside>` 自己身上）。布局
+  读它，拖拽只改这一个数：不碰 class、不重建 DOM。收起时的 `flex-basis: 0` 由 CSS
+  负责，所以变量始终是「用户想要的宽度」，展开回来还是它。
+- **规矩**：最小 180px、默认 260px、上限 480px，且上限还要被视口再压一次
+  （`sidebarMaxWidth()`：给对话留 360px）。这几个数与面板无关，纯函数在
+  `test/pure.test.ts` 里钉住。
+- **「偏好」与「现在」分开**：窗口一时变窄会把面板压到下限，但那是窗口的事。只有
+  拖拽 / 键盘 / 双击会更新偏好与 `localStorage`，`resize` 只按偏好重算当下能显示多少
+  —— 否则把压窄后的值写回去，窗口放大时它就长不回来了。
+- **存档与键盘**：`ArrowLeft/Right` 挪 12px（Shift 32），`Home`/`End` 到两头，`Enter`
+  或双击复位。手柄是 `role="separator"` + `aria-valuenow/min/max`，`tabindex=0`。
+- **手柄是 `<aside>` 的兄弟**，不是子节点：侧边栏 `overflow: hidden`，装在里面会被
+  裁掉一半。`margin: 0 -6px` 让它在布局上净占 0（版面一个像素都不让），手感上仍是
+  12px 的把子。
+- **窄屏自动折叠**：`sidebar.ts` 里「开没开」是**两份**状态 —— 宽屏那份是用户的偏好
+  （存 `localStorage`），窄屏（`max-width: 768px`）那份是这一次的临时开关（不存）。
+  窗口跨过断点时读的是对应的那一份，于是「手机上自动收起、回到桌面自动还原」是同一个
+  机制的两面；也不会把手机上一收一开写进桌面偏好。窄屏那一档中缝用 `display: none`
+  藏掉（抽屉宽度是 `78vw` 的比例，拖它没有意义）。
 
 - 顶栏只剩：侧边栏开关、那三个入口、连接状态。**会话 id 不显示** ——
   它是内部身份，人认的是标题（侧边栏那一列）。早先它是 `id · cwd` 一行；

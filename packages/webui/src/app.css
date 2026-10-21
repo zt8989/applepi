@@ -107,7 +107,9 @@ body {
 
 .ela-sidebar {
   display: flex;
-  flex: 0 0 260px;
+  /* 宽度是 `panel-resize.ts` 写在这个元素上的 CSS 变量：拖中缝只改这一个数。
+     兜底值与默认宽度一致（脚本没跑起来时也不会变成一条缝）。 */
+  flex: 0 0 var(--ela-sidebar-width, 260px);
   min-width: 0;
   flex-direction: column;
   overflow: hidden;
@@ -120,6 +122,70 @@ body {
 .ela-sidebar.is-collapsed {
   flex-basis: 0;
   border-right-width: 0;
+}
+
+/* 收起时没有可拖的边界了：手柄跟着藏掉（它也占着一个 flex 位置）。 */
+.ela-sidebar.is-collapsed + .ela-resize-handle {
+  display: none;
+}
+
+/* 拖拽中不要过渡：0.18s 的缓动会让指针跑在手柄前面，越拖越偏。 */
+.ela-sidebar.is-resizing {
+  transition: none;
+}
+
+/*
+ * 侧边栏与主区之间的中缝。它是 `<aside>` 的**兄弟**（见 `main.ts` 的 shell）：
+ * 侧边栏是 `overflow: hidden` 的，装在里面的手柄会被裁掉一半。
+ *
+ * 12px 宽、负 margin 抵消掉占位（净占 0）—— 两边版面一个像素都不让它，
+ * 但手按上去有一个宽把子。平时透明，只有悬停 / 键盘聚焦 / 拖拽时现出那条竖线。
+ */
+.ela-resize-handle {
+  position: relative;
+  z-index: 30;
+  flex: 0 0 12px;
+  width: 12px;
+  margin: 0 -6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+
+/*
+ * 悬停 / 聚焦 / 拖拽时才现形的**短竖条**（居中约 44px），不是一条顶天立地的分界线：
+ * 全高 2px 的实线在浅色主题里就是一条黑线，把本来就有的 `border-right` 盖得更重。
+ * 这里只给一个「这里能拖」的手感提示，颜色也只到 `muted-foreground` 的透明混合。
+ */
+.ela-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 5px;
+  width: 2px;
+  height: 0;
+  border-radius: 999px;
+  pointer-events: none;
+  background: transparent;
+  transform: translateY(-50%);
+  transition:
+    height 0.14s ease,
+    background 0.12s ease;
+}
+
+.ela-resize-handle:hover::after,
+.ela-resize-handle:focus-visible::after {
+  height: 44px;
+  background: color-mix(in srgb, var(--muted-foreground, #6b7280) 28%, transparent);
+}
+
+/* 拖拽中：长一点、浓一点（指针已经在按着了，需要看得见的反馈）。 */
+.ela-resize-handle.is-resizing::after {
+  height: 64px;
+  background: color-mix(in srgb, var(--muted-foreground, #6b7280) 60%, transparent);
 }
 
 /*
@@ -491,9 +557,17 @@ body {
 
 /*
  * 窄屏：侧边栏是**盖上来**的一层（挤出去会把对话列压到没法看）。
- * 它默认收起（`main.ts` 不强制），点顶栏那个按钮展开。
+ * 它默认收起（`sidebar.ts` 的 `mobileOpen`），点顶栏那个按钮展开；宽屏那份偏好
+ * 不受影响 —— 回到宽屏自动还原。
+ *
+ * 这一档不要中缝：抽屉的宽度是视口的一个比例（`78vw`），拖它没有意义，
+ * 而那条 12px 的把子会盖在对话上。
  */
 @media (max-width: 768px) {
+  .ela-resize-handle {
+    display: none;
+  }
+
   .ela-sidebar {
     position: fixed;
     top: 0;
@@ -1231,12 +1305,33 @@ input.ela-q-box {
 }
 
 /*
+ * 工具执行期间的**空壳**消息不占位。
+ *
+ * pi-web-ui 的两个容器在这里会各自渲染同一件事：`message-list` 把「含 pending 工具
+ * 调用」的那条 assistant 消息也画一遍（`hidePendingToolCalls` 把卡藏了），于是留下
+ * 一个 0 高度的空壳；`streaming-message-container` 再把那张卡画一次。两个容器各有
+ * 自己的 `gap-3`，空壳自己又是一个 flex 项 —— 于是上一张**完成的**卡与**进行中**的卡
+ * 之间是 24px，等工具跑完、空壳变成卡片后又是 12px（看起来就像「跑完间隙缩了一下」）。
+ *
+ * 空壳本来也没东西可看：`display: none` 的项不是 flex item，不再产生 gap。
+ *
+ * 两个写法上的注意：
+ *
+ *   - 用 `:not(:has(> div > *))` 而不是 `:empty`：那条消息的根 `div` 里总有几个
+ *     模板带出来的空白文本节点（Lit 的缩进），`:empty` 永远不成立。
+ *   - `!important` 是因为 `assistant-message` 自己在 `connectedCallback()` 里写了
+ *     内联 `style.display = 'block'`，样式表里的普通声明赢不了内联。
+ */
+message-list assistant-message:not(:has(> div > *)) {
+  display: none !important;
+}
+
+/*
  * 工具结果里的图片（`read` 读图，见 `tool-view.ts` 的 `resultImages()`）。
  *
  * 缩略图封顶 180px 高：一张截图铺满整个对话列会把上下文冲走；点开才看原图。
  * 底色给白：透明 PNG 在深色主题下直接贴在卡片底上会看不清内容。
- */
-.ela-tool-images {
+ */.ela-tool-images {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
