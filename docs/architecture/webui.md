@@ -453,6 +453,10 @@ WS   {type:'resumeSession', id, cwd}  → bridge → 内核的 restoreSession(fi
 - **开场那条「已装扩展：…」不再进浏览器**（`main.ts` 不再把它放进桥的 notices）。
   扩展清单是终端那边的开场信息（`[Extensions]`），在 web 里一条盖一条只占地方；
   装载**诊断**（加载失败）照旧发 —— 那是要人看见的。
+- **图标全部照 Pi Web**：侧边栏底栏那三个入口（模型 / 技能 / 设置）用的是它的
+  `SettingsSectionIcon`（`components/SettingsPanel.tsx`，`section: models / skills / general`）；
+  浏览器标签页的图标直接拷了它的 `public/icons/`（同一套产品，图标只有一套，两个
+  标签页才不会被认成两个应用）。两侧都是 24 格、`currentColor` 描边，hover 只改颜色。
 
 ## 顶栏那三个入口（完整历史 / 系统 / 工具）
 
