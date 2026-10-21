@@ -403,6 +403,15 @@ async function serveApi(
       case 'GET /api/skills':
         sendJson(res, 200, api.skills());
         return;
+      case 'GET /api/agents':
+        sendJson(res, 200, api.agents());
+        return;
+      case 'GET /api/plugins':
+        sendJson(res, 200, api.plugins());
+        return;
+      case 'GET /api/mcp':
+        sendJson(res, 200, api.mcp());
+        return;
       case 'GET /api/thinking':
         sendJson(res, 200, api.thinking());
         return;

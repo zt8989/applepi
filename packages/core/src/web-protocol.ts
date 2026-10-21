@@ -357,6 +357,69 @@ export interface WebSettingsInfo {
   defaultThinkingLevel: string;
 }
 
+/** `GET /api/agents`：磁盘上的子代理定义（内置 / 包 / 用户 / 项目）。 */
+export interface WebAgentInfo {
+  name: string;
+  description: string;
+  source: 'builtin' | 'package' | 'user' | 'project';
+  /** 包里带过来的 agent 标上包名（界面上区分 pi-subagents 与其他包）。 */
+  packageName?: string | undefined;
+  filePath: string;
+  tools: string[];
+  model: string | null;
+  thinking: string | null;
+  enabled: boolean;
+}
+
+/** `GET /api/plugins` 里的一条：真的装上来的扩展。 */
+export interface WebPluginInfo {
+  name: string;
+  version: string | null;
+  description: string | null;
+  /** `npm:<pkg>` / `git:<url>` / `local` / `path`。 */
+  source: string;
+  /** 扩展入口文件。 */
+  path: string;
+  baseDir: string | null;
+  hidden: boolean;
+}
+
+/** `GET /api/plugins`。 */
+export interface WebPluginsInfo {
+  /** `settings.json` 的 `packages` 原样（可能带版本）。 */
+  packages: string[];
+  extensions: WebPluginInfo[];
+  /** 装载诊断（包找不到、扩展加载失败…）。 */
+  errors: string[];
+}
+
+/** `GET /api/mcp` 里的一条：`mcp.json` 里的服务器（只读配置，不连接）。 */
+export interface WebMcpServerInfo {
+  name: string;
+  scope: 'global' | 'project';
+  /** 定义它的文件。 */
+  source: string;
+  enabled: boolean;
+  exposure: string;
+  description: string | null;
+  /** `stdio: cmd args` / `http: url`。 */
+  transport: string;
+  /** stdio 的环境变量名（**不传值** —— 里面有凭据）。 */
+  envKeys: string[];
+  /** HTTP 的请求头名（同样不传值）。 */
+  headerKeys: string[];
+}
+
+/** `GET /api/mcp`。 */
+export interface WebMcpInfo {
+  servers: WebMcpServerInfo[];
+  errors: string[];
+  globalPath: string;
+  projectPath: string;
+  projectExists: boolean;
+  autoEnableCodemode: boolean | null;
+}
+
 /** `POST /api/*` 的回执。 */
 export interface WebActionResult {
   ok: boolean;

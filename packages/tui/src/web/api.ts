@@ -54,10 +54,13 @@ import { skillCommands, skillsInPrompt } from '@ela/core/skills';
 import { promptCommands, promptTemplatesInPrompt } from '@ela/core/prompts';
 import type {
   WebActionResult,
+  WebAgentInfo,
   WebCommandInfo,
   WebHistoryInfo,
   WebHistoryLine,
+  WebMcpInfo,
   WebModelsInfo,
+  WebPluginsInfo,
   WebSessionDeleteInfo,
   WebSessionRef,
   WebSessionsInfo,
@@ -67,6 +70,8 @@ import type {
   WebThinkingInfo,
   WebToolDefinitionInfo,
 } from '@ela/core/web-protocol';
+import { agentInfos, mcpInfos, pluginInfos } from '@ela/core/config-inspect';
+import type { ExtensionEntry } from '@ela/core/extension-host';
 import { buildPromptHead, declaredToolSchemas } from '@ela/core/prompt-head';
 import { supportedThinkingLevels } from '../pi-actions';
 import { modelRefs } from './bridge';
@@ -107,6 +112,10 @@ export interface WebApiOptions {
   commands: () => readonly WebCommandSource[];
   /** 跑一条**扩展**命令（内置的不走这里 —— 它们的界面在浏览器侧）。 */
   runExtensionCommand: (name: string, arg: string) => Promise<void>;
+  /** 装好的扩展入口（设置 › 插件 / 子代理用）。 */
+  extensions: () => readonly ExtensionEntry[];
+  /** 扩展装载诊断（设置 › 插件那一页显示）。 */
+  extensionErrors: () => readonly string[];
 }
 
 export interface WebApi {
@@ -121,6 +130,12 @@ export interface WebApi {
   /** 真删磁盘上的一批会话（会话文件 + 轨迹文件），归档标记跟着清。 */
   deleteSessions(ids: readonly string[]): WebSessionDeleteInfo;
   skills(): WebSkillInfo[];
+  /** 子代理定义（只读：按 pi-subagents 的约定扫出来的 `*.md`）。 */
+  agents(): WebAgentInfo[];
+  /** 插件 / 扩展（只读：settings.json 的 packages + 已装载入口）。 */
+  plugins(): WebPluginsInfo;
+  /** MCP 服务器（只读：mcp.json；不连接、不显示凭据值）。 */
+  mcp(): WebMcpInfo;
   thinking(): WebThinkingInfo;
   settings(): WebSettingsInfo;
   /** 发给模型的那段系统提示词（顶栏「系统」）。 */
@@ -340,6 +355,18 @@ export function createWebApi(options: WebApiOptions): WebApi {
         description: skill.description,
         filePath: skill.filePath,
       }));
+    },
+
+    agents() {
+      return agentInfos(cwd(), options.extensions());
+    },
+
+    plugins() {
+      return pluginInfos(options.extensions(), options.extensionErrors());
+    },
+
+    mcp() {
+      return mcpInfos(cwd());
     },
 
     thinking() {

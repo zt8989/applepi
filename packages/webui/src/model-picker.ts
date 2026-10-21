@@ -1,5 +1,5 @@
 /**
- * 模型选择器（浏览器侧）。
+ * 模型选择器（浏览器侧）—— composer 右下角那个模型按钮的**下拉菜单**。
  *
  * ## 为什么不用 pi-web-ui 自带的 `ModelSelector`
  *
@@ -11,14 +11,20 @@
  * `AgentInterface` 留了口子：设了 `onModelSelect` 就**不弹**它自己的 selector
  * （见 pi-web-ui `components/AgentInterface.js` 的 `onModelSelect` 分支）。
  *
+ * ## 形状：贴着按钮开的下拉，不是整屏模态框
+ *
+ * 与 pi-web 的 `ModelSelector` 同一个交互：点 composer 上那个模型按钮，菜单在按钮
+ * **正上方**弹出来（下面空间不够时才往下），宽度固定、右侧对齐；点外面 / `Esc` 关掉。
+ * 列表按 provider 分组，当前模型打勾并自动滚到它；目录有 500+ 条，所以顶部常驻搜索框。
+ *
  * ## 对齐 TUI 的哪些行为
  *
  * | TUI（`ModelSelectorComponent`） | 这里 |
  * | --- | --- |
- * | 列表 = 已配置 provider 的可用模型 | 同一份（服务端在 `hello` 里给） |
+ * | 列表 = 已配置 provider 的可用模型 | 同一份（服务端 `/api/models`） |
  * | 有作用域时默认 `Scope: scoped` | 有作用域时默认「只看已启用」 |
  * | `tab` 切 all / scoped | `Tab` 同一个意思 |
- * | 当前模型置顶 + 打勾 | 同 |
+ * | 当前模型打勾 | 同（并自动滚到它） |
  * | 搜索按 id / 名字 | 同（外加 provider） |
  *
  * 刻意**没有**做的：`Ctrl+S` 存默认、后台刷新目录、`default` 前缀直达。它们是
@@ -29,10 +35,15 @@ import type { WebModelRef } from '@ela/core/web-protocol';
 
 export interface ModelPickerOptions {
   models: readonly WebModelRef[];
-  /** 当前模型（置顶 + 打勾）。拿不到就给 `null`。 */
+  /** 当前模型（打勾 + 打开时滚到它）。拿不到就给 `null`。 */
   current: { provider: string; id: string } | null;
   /** 作用域：`null` = 全开；非空 = 默认只看这些（与 TUI 同一个默认）。 */
   scopedModelIds: readonly string[] | null;
+  /**
+   * 贴着哪个元素开 —— composer 上那个模型按钮（`composerModelButton()` 找）。
+   * `null` = 找不到锚点，退化成视口底部居中。
+   */
+  anchor?: HTMLElement | null | undefined;
   onSelect(model: WebModelRef): void;
 }
 
@@ -81,12 +92,42 @@ export function scopedKeys(patterns: readonly string[]): Set<string> {
 }
 
 /**
- * 开一个模态选择器。返回关闭函数。
+ * 在 composer 里找「显示当前模型」的那个按钮 —— 下拉贴着它开。
+ *
+ * `message-editor` 的按钮顺序是 附件 / 思考级别（`role="combobox"`）/ 模型 / 发送；
+ * 模型那个的文字就是当前 id。找不到 id（刚换模型、还没重画）时退化成「文字非空的
+ * 最后一个非 combobox 按钮」—— 附件与发送都只有图标，所以这一条也是稳的。
+ */
+export function composerModelButton(
+  root: ParentNode,
+  modelId: string | null,
+): HTMLElement | null {
+  const editor = root.querySelector('message-editor');
+  if (editor === null) return null;
+  const buttons = [...editor.querySelectorAll('button')];
+  if (modelId !== null) {
+    const hit = buttons.find((button) => (button.textContent ?? '').trim().includes(modelId));
+    if (hit !== undefined) return hit;
+  }
+  const labeled = buttons.filter(
+    (button) =>
+      (button.textContent ?? '').trim() !== '' && button.getAttribute('role') !== 'combobox',
+  );
+  return labeled[labeled.length - 1] ?? null;
+}
+
+/** 同时只开一个（再点一次按钮 / `/model` 时先把旧的收掉）。 */
+let activePicker: (() => void) | null = null;
+
+/**
+ * 打开模型下拉。返回关闭函数。
  *
  * 纯 DOM（不用 Lit）：这里没有响应式状态要维护，而 Lit 的装饰器要给本项目再配一套
  * 编译开关。pi-web-ui 自己的组件照旧是 Lit，互不影响。
  */
 export function openModelPicker(options: ModelPickerOptions): () => void {
+  activePicker?.();
+
   const scoped =
     options.scopedModelIds !== null && options.scopedModelIds.length > 0
       ? scopedKeys(options.scopedModelIds)
@@ -107,178 +148,263 @@ export function openModelPicker(options: ModelPickerOptions): () => void {
   let onlyScoped = scoped !== null;
   let selected = 0;
 
-  const backdrop = document.createElement('div');
-  backdrop.className = 'ela-modal-backdrop';
-  const panel = document.createElement('div');
-  panel.className = 'ela-modal';
-  backdrop.append(panel);
+  const popover = document.createElement('div');
+  popover.className = 'ela-select-popover';
 
   const search = document.createElement('input');
-  search.className = 'ela-modal-search';
+  search.className = 'ela-select-search';
   search.type = 'text';
   search.placeholder = '搜索模型（id / 名字 / provider）…';
   search.spellcheck = false;
 
-  const scopeLabel = document.createElement('label');
-  scopeLabel.className = 'ela-modal-scope';
-  const scopeBox = document.createElement('input');
-  scopeBox.type = 'checkbox';
-  scopeBox.checked = onlyScoped;
-  // 计数用**原始条目数**，不用 `scoped.size` —— 带级别后缀的那条会展开成两个 key，
-  // 拿它当计数会显示「只看已启用（2）」而 `settings.json` 里只有一条。
-  scopeLabel.append(
-    scopeBox,
-    document.createTextNode(` 只看已启用（${options.scopedModelIds?.length ?? 0}）`),
-  );
-
   const list = document.createElement('ul');
-  list.className = 'ela-modal-list';
+  list.className = 'ela-select-list';
 
-  const hint = document.createElement('div');
-  hint.className = 'ela-modal-hint';
-  hint.textContent =
-    scoped === null
-      ? '↑↓ 选择 · Enter 确认 · Esc 取消'
-      : '↑↓ 选择 · Enter 确认 · Tab 切换 all/scoped · Esc 取消';
+  const foot = document.createElement('div');
+  foot.className = 'ela-select-foot';
 
-  panel.append(search, list);
-  if (scoped !== null) panel.append(scopeLabel);
-  panel.append(hint);
+  let scopeBox: HTMLInputElement | null = null;
+  if (scoped !== null) {
+    const label = document.createElement('label');
+    label.className = 'ela-select-scope';
+    scopeBox = document.createElement('input');
+    scopeBox.type = 'checkbox';
+    scopeBox.checked = onlyScoped;
+    // 计数用**原始条目数**，不用 `scoped.size` —— 带级别后缀的那条会展开成两个 key，
+    // 拿它当计数会显示「只看已启用（2）」而 `settings.json` 里只有一条。
+    label.append(
+      scopeBox,
+      document.createTextNode(` 只看已启用（${options.scopedModelIds?.length ?? 0}）`),
+    );
+    scopeBox.addEventListener('change', () => {
+      onlyScoped = scopeBox?.checked === true;
+      selected = 0;
+      render();
+    });
+    foot.append(label);
+  }
+  const hint = document.createElement('span');
+  hint.className = 'ela-select-hint';
+  hint.textContent = scoped === null ? '↑↓ · Enter · Esc' : '↑↓ · Enter · Tab all/scoped · Esc';
+  foot.append(hint);
 
-  /** 当前筛选结果（顺序：当前模型置顶，其余按 provider 再 id）。 */
-  function visible(): WebModelRef[] {
+  popover.append(search, list, foot);
+  document.body.append(popover);
+
+  /** 当前筛选结果：按 provider 归堆（保持服务端给的顺序，不重排）。 */
+  function visibleGroups(): [provider: string, models: WebModelRef[]][] {
     const needle = query.trim().toLowerCase();
-    const models = all.filter((model) => {
-      if (onlyScoped && scoped !== null && !scoped.has(`${model.provider}/${model.id}`)) {
-        return false;
+    const groups = new Map<string, WebModelRef[]>();
+    for (const model of all) {
+      if (onlyScoped && scoped !== null && !scoped.has(`${model.provider}/${model.id}`)) continue;
+      if (needle !== '') {
+        const hit =
+          model.id.toLowerCase().includes(needle) ||
+          model.name.toLowerCase().includes(needle) ||
+          model.provider.toLowerCase().includes(needle);
+        if (!hit) continue;
       }
-      if (needle === '') return true;
-      return (
-        model.id.toLowerCase().includes(needle) ||
-        model.name.toLowerCase().includes(needle) ||
-        model.provider.toLowerCase().includes(needle)
-      );
-    });
-    return models.sort((a, b) => {
-      const aCurrent = isCurrent(a, options.current) ? 0 : 1;
-      const bCurrent = isCurrent(b, options.current) ? 0 : 1;
-      if (aCurrent !== bCurrent) return aCurrent - bCurrent;
-      if (a.provider !== b.provider) return a.provider < b.provider ? -1 : 1;
-      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-    });
+      const group = groups.get(model.provider);
+      if (group === undefined) groups.set(model.provider, [model]);
+      else group.push(model);
+    }
+    return [...groups];
+  }
+
+  function visibleModels(groups: [string, WebModelRef[]][]): WebModelRef[] {
+    return groups.flatMap(([, models]) => models);
   }
 
   function render(): void {
-    const models = visible();
+    const groups = visibleGroups();
+    const models = visibleModels(groups);
     if (selected >= models.length) selected = models.length === 0 ? 0 : models.length - 1;
     list.replaceChildren();
     if (models.length === 0) {
       const empty = document.createElement('li');
-      empty.className = 'ela-modal-empty';
+      empty.className = 'ela-select-empty';
       empty.textContent = all.length === 0 ? '内核没有列出任何模型（provider 装配降级了？）' : '没有匹配的模型';
       list.append(empty);
       return;
     }
-    models.forEach((model, index) => {
-      const item = document.createElement('li');
-      item.className = index === selected ? 'ela-modal-item is-selected' : 'ela-modal-item';
-      const check = document.createElement('span');
-      check.className = 'ela-modal-check';
-      check.textContent = isCurrent(model, options.current) ? '✓' : '';
-      const id = document.createElement('span');
-      id.className = 'ela-modal-model';
-      id.textContent = `${model.id} [${model.provider}]`;
-      item.append(check, id);
-      if (model.name !== model.id) {
-        const name = document.createElement('span');
-        name.className = 'ela-modal-name';
-        name.textContent = model.name;
-        item.append(name);
-      }
-      item.addEventListener('mousedown', (event) => {
-        event.preventDefault();
-        selected = index;
-        choose(model);
-      });
-      item.addEventListener('mousemove', () => {
-        if (selected !== index) {
-          selected = index;
-          render();
+
+    let index = 0;
+    for (const [provider, group] of groups) {
+      const header = document.createElement('li');
+      header.className = 'ela-select-group';
+      header.textContent = provider;
+      list.append(header);
+      for (const model of group) {
+        const at = index;
+        index += 1;
+        const item = document.createElement('li');
+        const classes = ['ela-select-item'];
+        if (at === selected) classes.push('is-selected');
+        if (isCurrent(model, options.current)) classes.push('is-current');
+        item.className = classes.join(' ');
+
+        const check = document.createElement('span');
+        check.className = 'ela-select-check';
+        check.textContent = isCurrent(model, options.current) ? '✓' : '';
+
+        const names = document.createElement('span');
+        names.className = 'ela-select-names';
+        if (model.name !== model.id) {
+          const name = document.createElement('span');
+          name.className = 'ela-select-name';
+          name.textContent = model.name;
+          const id = document.createElement('span');
+          id.className = 'ela-select-id';
+          id.textContent = model.id;
+          names.append(name, id);
+        } else {
+          const name = document.createElement('span');
+          name.className = 'ela-select-name is-mono';
+          name.textContent = model.id;
+          names.append(name);
         }
-      });
-      list.append(item);
-    });
+
+        item.append(check, names);
+        item.addEventListener('mousedown', (event) => {
+          event.preventDefault();
+          selected = at;
+          choose(model);
+        });
+        item.addEventListener('mousemove', () => {
+          if (selected !== at) {
+            selected = at;
+            render();
+          }
+        });
+        list.append(item);
+      }
+    }
     list.querySelector('.is-selected')?.scrollIntoView({ block: 'nearest' });
   }
 
   function choose(model: WebModelRef): void {
-    close();
+    close(false);
     options.onSelect(model);
+    const textarea = options.anchor?.closest('message-editor')?.querySelector('textarea');
+    textarea?.focus();
+  }
+
+  function place(): void {
+    const margin = 8;
+    const width = Math.min(360, window.innerWidth - margin * 2);
+    popover.style.width = `${width}px`;
+
+    const anchor = options.anchor;
+    if (anchor === null || anchor === undefined || !anchor.isConnected) {
+      popover.style.left = `${Math.round((window.innerWidth - width) / 2)}px`;
+      popover.style.top = 'auto';
+      popover.style.bottom = '96px';
+      popover.style.maxHeight = 'min(60vh, 440px)';
+      return;
+    }
+
+    const rect = anchor.getBoundingClientRect();
+    const spaceAbove = rect.top - margin;
+    const spaceBelow = window.innerHeight - rect.bottom - margin;
+    const up = spaceAbove >= 240 || spaceAbove >= spaceBelow;
+    const left = Math.max(margin, Math.min(rect.right - width, window.innerWidth - width - margin));
+    popover.style.left = `${Math.round(left)}px`;
+    popover.style.maxHeight = `${Math.round(Math.max(180, Math.min(up ? spaceAbove : spaceBelow, 440)))}px`;
+    if (up) {
+      popover.style.top = 'auto';
+      popover.style.bottom = `${Math.round(window.innerHeight - rect.top + 6)}px`;
+    } else {
+      popover.style.top = `${Math.round(rect.bottom + 6)}px`;
+      popover.style.bottom = 'auto';
+    }
   }
 
   function onKeyDown(event: KeyboardEvent): void {
-    if (event.key === 'Escape' || (event.key === 'c' && event.ctrlKey)) {
+    if (event.key === 'Escape') {
       event.preventDefault();
-      close();
-      return;
-    }
-    if (event.key === 'ArrowDown') {
-      event.preventDefault();
-      selected += 1;
-      if (selected >= visible().length) selected = 0;
-      render();
-      return;
-    }
-    if (event.key === 'ArrowUp') {
-      event.preventDefault();
-      selected -= 1;
-      if (selected < 0) selected = Math.max(0, visible().length - 1);
-      render();
-      return;
-    }
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      const model = visible()[selected];
-      if (model) choose(model);
+      close(true);
       return;
     }
     if (event.key === 'Tab' && scoped !== null) {
       event.preventDefault();
       onlyScoped = !onlyScoped;
-      scopeBox.checked = onlyScoped;
+      if (scopeBox !== null) scopeBox.checked = onlyScoped;
       selected = 0;
       render();
+      return;
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const models = visibleModels(visibleGroups());
+      if (models.length === 0) return;
+      selected =
+        event.key === 'ArrowDown'
+          ? (selected + 1) % models.length
+          : (selected - 1 + models.length) % models.length;
+      render();
+      return;
+    }
+    if (event.key === 'Enter') {
+      const model = visibleModels(visibleGroups())[selected];
+      if (model !== undefined) {
+        event.preventDefault();
+        choose(model);
+      }
     }
   }
+
+  function onPointerDown(event: MouseEvent): void {
+    const target = event.target;
+    if (!(target instanceof Node)) return;
+    if (popover.contains(target)) return;
+    if (options.anchor?.contains(target) === true) return;
+    close(false);
+  }
+
+  function onWindowChange(): void {
+    close(false);
+  }
+
+  function onScroll(event: Event): void {
+    const target = event.target;
+    if (target instanceof Node && popover.contains(target)) return;
+    close(false);
+  }
+
+  let closed = false;
+  function close(restoreFocus: boolean): void {
+    if (closed) return;
+    closed = true;
+    document.removeEventListener('keydown', onKeyDown, true);
+    document.removeEventListener('mousedown', onPointerDown, true);
+    document.removeEventListener('scroll', onScroll, true);
+    window.removeEventListener('resize', onWindowChange);
+    popover.remove();
+    if (activePicker === closeRef) activePicker = null;
+    if (restoreFocus) options.anchor?.focus();
+  }
+
+  const closeRef = (): void => close(true);
+  activePicker = closeRef;
 
   search.addEventListener('input', () => {
     query = search.value;
     selected = 0;
     render();
   });
-  // 注意：键盘**不在这里**再挂一份 —— `onKeyDown` 挂在 `document` 的捕获阶段上
-  // （见文件末尾），它覆盖整个弹窗（含复选框）。再在输入框上挂一次，一次按键会跑两遍：
-  // 副作用翻倍的那种当场看得出来（Tab 切两次 = 没切），而 `close()` 那种幂等的则静静重复。
-  scopeBox.addEventListener('change', () => {
-    onlyScoped = scopeBox.checked;
-    selected = 0;
-    render();
-  });
-  backdrop.addEventListener('mousedown', (event) => {
-    if (event.target === backdrop) close();
-  });
 
-  let closed = false;
-  function close(): void {
-    if (closed) return;
-    closed = true;
-    document.removeEventListener('keydown', onKeyDown, true);
-    backdrop.remove();
-  }
+  // 打开时把选中项落在**当前模型**上，并滚到它 —— 目录有 500+ 条，不这么做每次都要找。
+  const initial = visibleModels(visibleGroups());
+  const currentIndex = initial.findIndex((model) => isCurrent(model, options.current));
+  selected = currentIndex === -1 ? 0 : currentIndex;
 
-  document.addEventListener('keydown', onKeyDown, true);
+  place();
   render();
-  document.body.append(backdrop);
+  document.addEventListener('keydown', onKeyDown, true);
+  document.addEventListener('mousedown', onPointerDown, true);
+  document.addEventListener('scroll', onScroll, true);
+  window.addEventListener('resize', onWindowChange);
   search.focus();
-  return close;
+
+  return closeRef;
 }

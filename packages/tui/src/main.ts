@@ -523,6 +523,9 @@ async function main(): Promise<void> {
         }
         return kernel.extensions.commands.run(name, arg);
       },
+      // 设置 › 插件 / 子代理：同样是**取值函数**，扩展后台装完之后再读才有内容。
+      extensions: () => kernel.extensions.entries,
+      extensionErrors: () => kernel.extensions.errors,
     });
     try {
       web = await startWebServer({

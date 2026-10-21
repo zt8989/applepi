@@ -27,6 +27,7 @@ TUI 之外的第二块界面：**浏览器里的 pi-web-ui**，环仍然是终�
 | `web-protocol.ts` | `@ela/core` | **线协议 + HTTP 接口的形状**（前后端唯一共同语言） |
 | `web/bridge.ts` | `@ela/tui` | 内核 → 线协议：订阅 store、映射状态、派发提问/中止/换模型 |
 | `web/api.ts` | `@ela/tui` | **非会话数据的 HTTP 接口**（`/api/*`：命令表、模型目录、settings…） |
+| `config-inspect.ts` | `@ela/core` | 设置后三页的**只读**投影：子代理 / 插件 / MCP |
 | `web/history.ts` | `@ela/tui` | 「完整历史」那一页的服务端渲染（`GET /api/history`） |
 | `web/server.ts` | `@ela/tui` | HTTP 静态资源 + `/api/*` + `/ws`（WebSocket） |
 | `src/remote-agent.ts` | `@ela/webui` | 线协议 → pi-web-ui：`Agent` 形状的替身 |
@@ -148,18 +149,21 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 「可用模型」（按 provider 分组、显示 `8/12 已启用`，勾一下即写 `settings.json`）。
 `/scoped-models` 仍然能用 —— 它落在同一块面板的同一个分区。
 
-## 设置面板（常规 / 模型 / 技能）
+## 设置面板（常规 / 模型 / 技能 / 子代理 / 插件 / MCP）
 
 照 pi-web 的**整页设置**：1080px 宽、84vh 高，顶部是标题 + 分区 tab + 关闭按钮，
 下面一整块内容区 —— 不再是「一列行的小模态框」。入口是 `/settings`（侧边栏底部的
 「设置」）、`/scoped-models`（落在「模型」）与 `/skills`（落在「技能」）；侧边栏底部的
 「模型」「技能」也分别落在对应分区（与 pi-web 同一个分工）。
 
-| 分区 | 形状 | 写哪儿 |
+| 分区 | 形状 | 写哪儿 / 从哪读 |
 | --- | --- | --- |
 | 常规 | 整页滚动的设置项（带一行说明的拨杆 / 值按钮） | `compaction.enabled` / `hideThinkingBlock` / `defaultThinkingLevel` |
 | 模型 | 左侧 provider 列表 + 右侧该 provider 的模型开关（搜索 / 全部开启 / 全部关闭） | `settings.json` 的 `enabledModels`（`null` = 全开） |
-| 技能 | 左侧 skill 列表 + 右侧详情（描述 / 范围 / 文件路径，只读） | — |
+| 技能 | 左侧 skill 列表 + 右侧详情（描述 / 范围 / 文件路径，只读） | `GET /api/skills` |
+| 子代理 | 左侧 agent 列表 + 右侧详情（描述 / 工具 / 模型 / 文件，只读） | 磁盘上的 `*.md`（pi-subagents 约定） |
+| 插件 | 左侧扩展列表 + 右侧详情（来源 / 入口 / 包目录，只读） | `settings.json` 的 `packages` + 已装载扩展 |
+| MCP | 左侧服务器列表 + 右侧详情（传输 / 暴露方式 / 环境变量名，只读） | `mcp.json`（全局 + 项目；不连接） |
 
 几条口径：
 
@@ -171,6 +175,9 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
   全开，所以界面在点下去之前拦住。
 - 带思考级别后缀的条目（`provider/id:high`）与目录里对不上的旧条目都**原样写回** ——
   我们看不懂的配置不替用户删；只有「全部开启」会清空作用域。
+- 后三页（子代理 / 插件 / MCP）与「技能」一样是**只读**：它们看清「现在装了什么、
+  配置在哪儿」，写仍然走 pi（`pi install` / `pi remove`、手改 `mcp.json`）。MCP 只传
+  **环境变量 / 请求头的名字**，不把值发到浏览器。
 - 键盘用**原生控件**：`Tab` / `Shift+Tab` 走浏览器焦点，开关是 `role="switch"`、模型是
   checkbox；只接管 `Esc` 关闭（默认思考级别那个子对话框自己管键盘）。
 
@@ -209,6 +216,9 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 | `GET /api/sessions` | 侧边栏那份会话列表（每个 cwd 的历史会话，**不含**已归档的；另带 `archivedCount`） |
 | `GET /api/sessions/archived` | 归档那一栏的明细（带 `archivedAt`，按归档时刻倒序） |
 | `GET /api/skills` | 进了 prompt 的 skill 清单 |
+| `GET /api/agents` | 子代理定义（内置 / 包 / 用户 / 项目；只读） |
+| `GET /api/plugins` | `settings.json` 的 `packages` + 已装载扩展入口（只读） |
+| `GET /api/mcp` | `mcp.json` 里的服务器（只读，不连接、不传凭据值） |
 | `GET /api/thinking` | 当前档位 + 这个模型支持的档位 + 默认档 |
 | `GET /api/settings` | 自动压缩 / 隐藏思考块 / 默认思考级别 |
 | `GET /api/system-prompt` | 模型实际收到的系统提示词（`text` + `sections`） |

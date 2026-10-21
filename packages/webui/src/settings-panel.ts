@@ -20,7 +20,11 @@
  */
 
 import type {
+  WebAgentInfo,
+  WebMcpInfo,
   WebModelRef,
+  WebPluginInfo,
+  WebPluginsInfo,
   WebSettingsInfo,
   WebSkillInfo,
   WebThinkingInfo,
@@ -42,7 +46,7 @@ import {
   type ScopeState,
 } from './settings-scope';
 
-export type SettingsTab = 'general' | 'models' | 'skills';
+export type SettingsTab = 'general' | 'models' | 'skills' | 'agents' | 'plugins' | 'mcp';
 
 export interface SettingsPanelOptions {
   /** 打开时落在哪个分区（`/settings` → general，`/scoped-models` → models…）。 */
@@ -55,7 +59,17 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: '常规' },
   { id: 'models', label: '模型' },
   { id: 'skills', label: '技能' },
+  { id: 'agents', label: '子代理' },
+  { id: 'plugins', label: '插件' },
+  { id: 'mcp', label: 'MCP' },
 ];
+
+const AGENT_SOURCE_LABEL: Record<WebAgentInfo['source'], string> = {
+  builtin: '内置',
+  package: '包',
+  user: '用户',
+  project: '项目',
+};
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -118,6 +132,21 @@ export function openSettingsPanel(options: SettingsPanelOptions): () => void {
   let skills: WebSkillInfo[] | null = null;
   let skillsLoading = false;
   let skillsError: string | null = null;
+
+  let agentList: WebAgentInfo[] | null = null;
+  let agentsLoading = false;
+  let agentsError: string | null = null;
+  let selectedAgent: string | null = null;
+
+  let pluginInfo: WebPluginsInfo | null = null;
+  let pluginsLoading = false;
+  let pluginsError: string | null = null;
+  let selectedPlugin: string | null = null;
+
+  let mcpInfo: WebMcpInfo | null = null;
+  let mcpLoading = false;
+  let mcpError: string | null = null;
+  let selectedServer: string | null = null;
 
   /** 一次只存一个（勾太快会让两次写盘抢同一份 settings.json）。 */
   let saving = false;
@@ -193,6 +222,70 @@ export function openSettingsPanel(options: SettingsPanelOptions): () => void {
     const body = element('div', mono ? 'ela-settings-field-value is-path' : 'ela-settings-field-value', value);
     node.append(element('span', 'ela-settings-field-label', label), body);
     return node;
+  }
+
+  function detailHead(title: string, meta: string): HTMLElement {
+    const head = div('ela-settings-detail-head');
+    const info = div('ela-settings-detail-info');
+    info.append(
+      element('h3', 'ela-settings-detail-title', title),
+      element('p', 'ela-settings-detail-meta', meta),
+    );
+    head.append(info);
+    return head;
+  }
+
+  interface SplitEntry {
+    key: string;
+    label: string;
+    tag: string;
+  }
+
+  /**
+   * 「左侧列表 + 右侧详情」那一页的骨架（模型 / 技能 / 子代理 / 插件 / MCP 同一形状）。
+   *
+   * 点左侧只改高亮与右侧内容，不重建整页 —— 否则点一次会丢滚动位置。
+   */
+  function mountSplit(config: {
+    heading: string;
+    entries: readonly SplitEntry[];
+    selected: () => string | null;
+    select: (key: string) => void;
+    paint: (host: HTMLElement) => void;
+  }): void {
+    const split = div('ela-settings-split');
+    const side = div('ela-settings-side');
+    side.append(element('div', 'ela-settings-side-head', `${config.heading}（${config.entries.length}）`));
+    const list = div('ela-settings-side-list');
+    const detail = div('ela-settings-detail');
+    const buttons = new Map<string, HTMLButtonElement>();
+
+    for (const entry of config.entries) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'ela-settings-side-item';
+      const active = config.selected() === entry.key;
+      if (active) button.classList.add('is-active');
+      button.setAttribute('aria-current', active ? 'true' : 'false');
+      button.append(span('ela-settings-side-name', entry.label), span('ela-settings-tag', entry.tag));
+      button.addEventListener('click', () => {
+        if (config.selected() === entry.key) return;
+        config.select(entry.key);
+        for (const [key, item] of buttons) {
+          const on = key === entry.key;
+          item.classList.toggle('is-active', on);
+          item.setAttribute('aria-current', on ? 'true' : 'false');
+        }
+        config.paint(detail);
+      });
+      list.append(button);
+      buttons.set(entry.key, button);
+    }
+
+    side.append(list);
+    split.append(side, detail);
+    main.append(split);
+    config.paint(detail);
   }
 
   // ── 常规 ──
@@ -744,6 +837,289 @@ export function openSettingsPanel(options: SettingsPanelOptions): () => void {
     paintSkillDetail();
   }
 
+  // ── 子代理 ──
+
+  async function loadAgents(): Promise<void> {
+    if (agentsLoading) return;
+    agentsLoading = true;
+    agentsError = null;
+    if (active === 'agents') renderAgents();
+    try {
+      agentList = await elaApi.agents();
+    } catch (error) {
+      agentsError = `拿不到子代理清单：${errorText(error)}`;
+    } finally {
+      agentsLoading = false;
+      if (active === 'agents') renderAgents();
+    }
+  }
+
+  function paintAgentDetail(host: HTMLElement): void {
+    const agent = agentList?.find((item) => item.filePath === selectedAgent);
+    host.replaceChildren();
+    if (agent === undefined) return;
+
+    const source = `${AGENT_SOURCE_LABEL[agent.source]}${agent.packageName === undefined ? '' : ` · ${agent.packageName}`}${agent.enabled ? '' : ' · 已停用'}`;
+    host.append(detailHead(agent.name, source));
+    const fields = div('ela-settings-fields');
+    fields.append(
+      field('描述', agent.description === '' ? '（没有描述）' : agent.description),
+      field('工具', agent.tools.length === 0 ? '默认（不限制）' : agent.tools.join(', ')),
+      field('模型', agent.model ?? '继承当前会话'),
+      field('思考级别', agent.thinking ?? '继承当前会话'),
+      field('文件', agent.filePath, true),
+    );
+    host.append(fields);
+    host.append(
+      element(
+        'div',
+        'ela-settings-note',
+        '只读：agent 定义来自磁盘上的 *.md（pi-subagents 的约定），改动后重启生效。',
+      ),
+    );
+  }
+
+  function renderAgents(): void {
+    main.replaceChildren();
+    if (agentsLoading) {
+      main.append(makeState('读取子代理定义…'));
+      return;
+    }
+    if (agentsError !== null) {
+      main.append(makeState(agentsError, true));
+      return;
+    }
+    if (agentList === null) {
+      main.append(makeState('读取子代理定义…'));
+      if (!agentsLoading) void loadAgents();
+      return;
+    }
+    if (agentList.length === 0) {
+      main.append(makeState('没有发现子代理定义（pi-subagents 未安装，或没有 agents 目录）'));
+      return;
+    }
+
+    if (selectedAgent === null || !agentList.some((agent) => agent.filePath === selectedAgent)) {
+      selectedAgent = agentList[0]!.filePath;
+    }
+    mountSplit({
+      heading: '子代理',
+      entries: agentList.map((agent) => ({
+        key: agent.filePath,
+        label: agent.name,
+        tag: AGENT_SOURCE_LABEL[agent.source],
+      })),
+      selected: () => selectedAgent,
+      select: (key) => {
+        selectedAgent = key;
+      },
+      paint: paintAgentDetail,
+    });
+  }
+
+  // ── 插件 ──
+
+  async function loadPlugins(): Promise<void> {
+    if (pluginsLoading) return;
+    pluginsLoading = true;
+    pluginsError = null;
+    if (active === 'plugins') renderPlugins();
+    try {
+      pluginInfo = await elaApi.plugins();
+    } catch (error) {
+      pluginsError = `拿不到插件清单：${errorText(error)}`;
+    } finally {
+      pluginsLoading = false;
+      if (active === 'plugins') renderPlugins();
+    }
+  }
+
+  function pluginPackagesSection(info: WebPluginsInfo): HTMLElement {
+    const node = section('settings.json · packages', '安装 / 删除 / 升级仍用 pi install / pi remove。');
+    node.append(
+      field('packages', info.packages.length === 0 ? '（没有配置 packages）' : info.packages.join('\n'), true),
+    );
+    if (info.errors.length > 0) node.append(field('装载诊断', info.errors.join('\n')));
+    return node;
+  }
+
+  function paintPluginDetail(host: HTMLElement): void {
+    const info = pluginInfo;
+    if (info === null) return;
+    const plugin: WebPluginInfo | undefined = info.extensions.find(
+      (item) => item.path === selectedPlugin,
+    );
+    host.replaceChildren();
+    if (plugin === undefined) return;
+
+    const meta = `${plugin.source}${plugin.version === null ? '' : ` · ${plugin.version}`}${plugin.hidden ? ' · 隐藏' : ''}`;
+    host.append(detailHead(plugin.name, meta));
+    const fields = div('ela-settings-fields');
+    fields.append(
+      field('描述', plugin.description ?? '（没有描述）'),
+      field('来源', plugin.source),
+      field('入口', plugin.path, true),
+      field('包目录', plugin.baseDir ?? '—', true),
+      field('packages', info.packages.length === 0 ? '（没有配置）' : info.packages.join('\n'), true),
+    );
+    if (info.errors.length > 0) fields.append(field('装载诊断', info.errors.join('\n')));
+    host.append(fields);
+    host.append(
+      element(
+        'div',
+        'ela-settings-note',
+        '只读：这里显示 settings.json 的 packages 与真正装上的扩展；安装 / 删除 / 升级仍走 pi 的包管理器。',
+      ),
+    );
+  }
+
+  function renderPlugins(): void {
+    main.replaceChildren();
+    if (pluginsLoading) {
+      main.append(makeState('读取插件清单…'));
+      return;
+    }
+    if (pluginsError !== null) {
+      main.append(makeState(pluginsError, true));
+      return;
+    }
+    if (pluginInfo === null) {
+      main.append(makeState('读取插件清单…'));
+      if (!pluginsLoading) void loadPlugins();
+      return;
+    }
+    if (pluginInfo.extensions.length === 0) {
+      const page = div('ela-settings-page');
+      page.append(pluginPackagesSection(pluginInfo));
+      main.append(page);
+      return;
+    }
+
+    if (
+      selectedPlugin === null ||
+      !pluginInfo.extensions.some((plugin) => plugin.path === selectedPlugin)
+    ) {
+      selectedPlugin = pluginInfo.extensions[0]!.path;
+    }
+    // 同一个包里可能有多个扩展入口（如 pi-background-tasks 两个），同名时补上入口文件名。
+    const nameCounts = new Map<string, number>();
+    for (const plugin of pluginInfo.extensions) {
+      nameCounts.set(plugin.name, (nameCounts.get(plugin.name) ?? 0) + 1);
+    }
+    mountSplit({
+      heading: '插件',
+      entries: pluginInfo.extensions.map((plugin) => {
+        const entryFile = plugin.path.split(/[\\/]/).pop() ?? plugin.path;
+        return {
+          key: plugin.path,
+          label: (nameCounts.get(plugin.name) ?? 0) > 1 ? `${plugin.name} · ${entryFile}` : plugin.name,
+          tag: plugin.version ?? '本地',
+        };
+      }),
+      selected: () => selectedPlugin,
+      select: (key) => {
+        selectedPlugin = key;
+      },
+      paint: paintPluginDetail,
+    });
+  }
+
+  // ── MCP ──
+
+  async function loadMcp(): Promise<void> {
+    if (mcpLoading) return;
+    mcpLoading = true;
+    mcpError = null;
+    if (active === 'mcp') renderMcp();
+    try {
+      mcpInfo = await elaApi.mcp();
+    } catch (error) {
+      mcpError = `拿不到 MCP 配置：${errorText(error)}`;
+    } finally {
+      mcpLoading = false;
+      if (active === 'mcp') renderMcp();
+    }
+  }
+
+  function paintMcpDetail(host: HTMLElement): void {
+    const info = mcpInfo;
+    if (info === null) return;
+    const server = info.servers.find((item) => item.name === selectedServer);
+    host.replaceChildren();
+    if (server === undefined) return;
+
+    host.append(
+      detailHead(
+        server.name,
+        `${server.scope === 'project' ? '项目' : '全局'} · ${server.exposure} · ${server.enabled ? '已启用' : '已停用'}`,
+      ),
+    );
+    const fields = div('ela-settings-fields');
+    fields.append(
+      field('描述', server.description ?? '（没有描述）'),
+      field('传输', server.transport, true),
+    );
+    if (server.envKeys.length > 0) fields.append(field('环境变量（只列名字）', server.envKeys.join(', ')));
+    if (server.headerKeys.length > 0) fields.append(field('请求头（只列名字）', server.headerKeys.join(', ')));
+    fields.append(field('来源文件', server.source, true));
+    if (info.autoEnableCodemode !== null) {
+      fields.append(field('autoEnableCodemode', String(info.autoEnableCodemode)));
+    }
+    if (info.errors.length > 0) fields.append(field('诊断', info.errors.join('\n')));
+    host.append(fields);
+    host.append(
+      element(
+        'div',
+        'ela-settings-note',
+        `只读：改 mcp.json 后重启生效，浏览器不会去连服务器。全局：${info.globalPath}；项目：${info.projectPath}${info.projectExists ? '' : '（不存在）'}。`,
+      ),
+    );
+  }
+
+  function renderMcp(): void {
+    main.replaceChildren();
+    if (mcpLoading) {
+      main.append(makeState('读取 MCP 配置…'));
+      return;
+    }
+    if (mcpError !== null) {
+      main.append(makeState(mcpError, true));
+      return;
+    }
+    if (mcpInfo === null) {
+      main.append(makeState('读取 MCP 配置…'));
+      if (!mcpLoading) void loadMcp();
+      return;
+    }
+    if (mcpInfo.servers.length === 0) {
+      const page = div('ela-settings-page');
+      const node = section('MCP 服务器', '修改 mcp.json 后重启生效；这里不会去连服务器。');
+      node.append(field('全局文件', mcpInfo.globalPath, true));
+      node.append(field('项目文件', `${mcpInfo.projectPath}${mcpInfo.projectExists ? '' : '（不存在）'}`, true));
+      if (mcpInfo.errors.length > 0) node.append(field('诊断', mcpInfo.errors.join('\n')));
+      page.append(node);
+      main.append(page);
+      return;
+    }
+
+    if (selectedServer === null || !mcpInfo.servers.some((server) => server.name === selectedServer)) {
+      selectedServer = mcpInfo.servers[0]!.name;
+    }
+    mountSplit({
+      heading: 'MCP 服务器',
+      entries: mcpInfo.servers.map((server) => ({
+        key: server.name,
+        label: server.name,
+        tag: `${server.scope === 'project' ? '项目' : '全局'}${server.enabled ? '' : ' · 停用'}`,
+      })),
+      selected: () => selectedServer,
+      select: (key) => {
+        selectedServer = key;
+      },
+      paint: paintMcpDetail,
+    });
+  }
+
   // ── 分区切换 / 开关 ──
 
   function paintTabs(): void {
@@ -763,7 +1139,10 @@ export function openSettingsPanel(options: SettingsPanelOptions): () => void {
   function renderBody(): void {
     if (active === 'general') renderGeneral();
     else if (active === 'models') renderModels();
-    else renderSkills();
+    else if (active === 'skills') renderSkills();
+    else if (active === 'agents') renderAgents();
+    else if (active === 'plugins') renderPlugins();
+    else renderMcp();
   }
 
   function switchTab(tab: SettingsTab): void {

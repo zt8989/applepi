@@ -26,7 +26,7 @@ import {
 import { html } from 'lit';
 import { STREAM_NOTICE_ROLE } from '@ela/core/web-protocol';
 import { RemoteAgent, type UiQuestionnaire, type UiRequest } from './remote-agent';
-import { openModelPicker } from './model-picker';
+import { openModelPicker, composerModelButton } from './model-picker';
 import { openConfirmDialog, openInputDialog, openSelectDialog } from './dialogs';
 import { openQuestionnaireModal, type QuestionnaireModalHandle } from './questionnaire';
 import { installToolMessageView, setToolTimings } from './tool-view';
@@ -199,6 +199,7 @@ async function main(): Promise<void> {
    * 不再随 `hello` 来 —— 那些是「非会话数据」，改成接口后由前端按需取（也更新鲜：
    * TUI 里刚改过作用域，这里再开就是新的）。
    */
+  let chatPanelRef: ChatPanel | null = null;
   async function openModelPickerFromApi(): Promise<void> {
     try {
       const info = await elaApi.models();
@@ -206,6 +207,10 @@ async function main(): Promise<void> {
         models: info.models,
         current: info.current,
         scopedModelIds: info.scoped,
+        anchor:
+          chatPanelRef === null
+            ? null
+            : composerModelButton(chatPanelRef, info.current?.id ?? null),
         onSelect: (model) => {
           // 走接口换（服务端才是真相）——它会推一份新状态回来。
           void elaApi.setModel(`${model.provider}/${model.id}`).then((result) => {
@@ -219,6 +224,7 @@ async function main(): Promise<void> {
   }
 
   const chatPanel = new ChatPanel();
+  chatPanelRef = chatPanel;
   /** 现在开着的扩展对话框（id → 只拆 DOM 的 close）。 */
   const openDialogs = new Map<string, () => void>();
   /** 开着的问卷（id → 那份弹窗的句柄）。同一份问卷会收到很多帧，所以得留着。 */
