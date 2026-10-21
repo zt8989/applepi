@@ -1,46 +1,31 @@
 /**
  * `ctx.ui` 的宿主实现 —— 扩展界面能力的**唯一**接缝。
  *
- * ## 两块能力：`custom()`（组件）与 `select/confirm/input`（原生对话框）
- *
- * 第一块是 `custom()` —— 把一块扩展自己的组件铺进来、拿键盘焦点，用户答完或按 ESC
- * 之后 resolve 一个结果。它有**两种形态**，pi 两种都实现：
+ * 两块能力。第一块是 `custom()`（把扩展自己的组件铺进来、拿焦点，答完或 ESC 后 resolve）。
+ * 它有两种形态，pi 两种都实现：
  *
  * | `custom()` 的参数 | pi 的落点 | 本项目的落点 |
  * | --- | --- | --- |
  * | `{ overlay: true }` | `ui.showOverlay()`（自己抢焦点，`hide()` 还焦点） | 同一个 |
- * | 不给 / `{ overlay: false }` | **换掉 `editorContainer` 里的 composer** | 同一个槽位（见下） |
+ * | 不给 / `{ overlay: false }` | 换掉 `editorContainer` 里的 composer | 同一个槽位 |
  *
- * inline 那条路以前是「明说不支持」的（`ask_user_question` 2.12 只要 overlay）。
- * 2.13 起它**默认**走 inline（Pi 的 editor slot，`presentation.ts` 的
- * `resolvePresentation()`），overlay 反而只在「已经有另一个浮层」时降级用 —— 于是
- * 那个显式报错变成了「这个扩展在本项目里必挂」。现在补上：宿主提供一个
- * `mountEditorSlot`，把组件放进输入区那一格（pi 的 `editorContainer.clear();
- * addChild(component)`）。
+ * inline 那条路必须支持：`ask_user_question` 2.13 起**默认**走 inline（Pi 的 editor slot），
+ * overlay 只在「已经有另一个浮层」时降级用 —— 宿主得提供 `mountEditorSlot` 把组件放进输入区
+ * 那一格，否则那个扩展在本项目里必挂。
  *
- * 第二块是 `select` / `confirm` / `input`（pi 给 VS Code pendant / Zed 那种宿主的
- * 「RPC 弹窗协议」）与**问卷**那一份接缝：
+ * 第二块是 `select` / `confirm` / `input` 与问卷：前三个走 `raceDialog`（**两端各出一份、谁先
+ * 回答谁算数** —— 终端那份由 `tuiDialogs` 挂进同一个输入区槽位，浏览器那份由 `DialogHost` 发
+ * 过去）；问卷另走 `externalQuestionnaire`（见 `questionnaire.ts`）。
  *
- * - `select` / `confirm` / `input` 是 `raceDialog`：**两端各出一份、谁先回答谁算数** ——
- *   终端那一份由 `tui/app.ts` 的 `tuiDialogs` 挂进同一个输入区槽位，浏览器那一份由
- *   `web/bridge.ts` 的 `DialogHost` 发过去；
- * - **问卷**（`ask_user_question`）另走一条：它是本项目的内置扩展（带 patch），
- *   终端那一份由扩展自己的组件画，浏览器那一份走 `externalQuestionnaire` 交给我们
- *   （`questionnaire.ts` 的 `QuestionnaireHost` + `HostUiOptions.questionnaire`）。
+ * 刻意**不接**：`setFooter` / `setHeader`（那要接 pi 的应用层布局）。
  *
- * 刻意**不接**的：`setFooter` / `setHeader`（那要接 pi 的应用层布局，见 `surfaces.md`）。
+ * **没实现的方法一律 reject，不静默 no-op**：一个 `select()` 静默 resolve `undefined` 的话，
+ * 扩展会把「用户没选」当成真的答复发回模型 —— 模型拿着假答案继续干活，人还不知道。`undefined`
+ * 在 pi 的契约里明确表示「用户取消了」，给假值等于撒谎。
  *
- * ## 没实现的方法怎么给
- *
- * **一律 reject，不静默 no-op。** 一个 `select()` 静默 resolve `undefined` 的话，扩展会
- * 把「用户没选」当成真的答复发回模型 —— 那是最坏的一种：模型拿着一个假答案继续干活，
- * 人还不知道。`undefined` 在 pi 的契约里明确表示「用户取消了」，给假值等于**撒谎**。
- *
- * ## 为什么「有没有界面」由外面决定，而不是这里
- *
- * 一次性模式（`-p`）与测试里**不造这个对象**（`extension-host.ts` 干脆不绑 UI），
- * 于是 `ctx.hasUI` 为 false，扩展自己走 `no_ui` 分支。给一个「假装有界面」的 ctx 只会
- * 让非交互运行卡在一个没人能回答的对话框上。
+ * 「有没有界面」由外面决定：一次性模式与测试里不造这个对象（`extension-host.ts` 不绑 UI），
+ * 于是 `ctx.hasUI` 为 false、扩展自己走 `no_ui` 分支。假装有界面只会让非交互运行卡在一个没人
+ * 能回答的对话框上。
  */
 import type { Component, TUI, TuiInputListener, OverlayOptions } from '@earendil-works/pi-tui';
 import { getKeybindings, isKeyRelease, Text } from '@earendil-works/pi-tui';
@@ -184,19 +169,14 @@ export interface ExtensionHostUi {
    */
   setEditorText(text: string): void;
   /**
-   * 底栏里的一个**状态段**（pi 的 `ctx.ui.setStatus(key, text)`）。
+   * 底栏里的一个**状态段**（pi 的 `ctx.ui.setStatus(key, text)`）：按 key 存，同一个 key 再设
+   * 就是替换，`undefined` / 空串就是清掉那一格。
    *
-   * 按 key 存：同一个 key 再设一次就是替换，`undefined`（或空串）就是清掉那一格 ——
-   * 与官方的语义逐字一致。
+   * `pi-background-tasks` 每次任务状态变化都无条件调它：少了这个成员那一步就抛
+   * `ctx.ui.setStatus is not a function`，它在自己的 catch 里把 `currentCtx` 清成 undefined ——
+   * 于是**之后所有后台任务事件都不再更新界面**。`pi-subagents` 的 `/agents` 面板同理。
    *
-   * 为什么必须有它：`pi-background-tasks` 每次任务状态变化都调它
-   * （`updateUi()` 里无条件是 `ctx.ui.setStatus(...)`），少了这个成员那一步就抛
-   * `ctx.ui.setStatus is not a function` —— 它在自己的 catch 里打一行日志、顺手把
-   * `currentCtx` 清成 `undefined`，于是**之后所有后台任务事件都不再更新界面**。
-   * `pi-subagents` 的 `/agents` 面板同理（`subagent-slash` 那个段）。
-   *
-   * 宿主没有底栏（一次性 `-p`、测试探针）时**丢掉**而不是抛：状态段只是显示，
-   * 与 `setWidget` 同一口径 —— 丢一条状态不该把整轮对话带崩。
+   * 宿主没有底栏时**丢掉**而不是抛：状态段只是显示，丢一条不该把整轮对话带崩。
    */
   setStatus(key: string, text: string | undefined): void;
   /**
@@ -355,24 +335,13 @@ export function sanitizeStatusText(text: string): string {
 /**
  * 造一个 `ctx.ui`。
  *
- * ## 为什么参数是**惰性的**（`() => options`）
+ * 参数是**惰性**的（`() => options`）：内核装扩展时界面还没起来，早先在这里就求值会拿到空的
+ * `uiRef.current`，扩展第一次访问 `ctx.ui` 就在自己渲染里炸，而栈里没有本项目的帧。每次用的时候
+ * 才求值：内核拿到一个当场能用的壳（`hasUI` 为 true，与 pi 一致），真的要 TUI 的方法在被调时
+ * 才读引用。
  *
- * 内核装扩展时界面**还没起来**（`runTui` 里才建 tui），而 `setUIContext` 要的是一个
- * 现成的 UI 对象。早先在这里就把 options 求值（`createHostUi(uiOptions())`），
- * 那个时刻 `uiRef.current` 还是空的 —— 于是 `tui` 是 undefined，扩展的第一次
- * `ctx.ui` 访问就在自己的渲染里炸（`requestRender` of undefined），而栈里
- * **完全没有本项目的帧**：症状离真因隔了三层。
- *
- * 改成「每次用的时候才求值」之后：内核拿到一个当场能用的 UI 壳（`hasUI` 为 true，
- * 与 pi 一致），而它内部那些真的要 TUI 的方法（`custom`）在**真的被调**时才
- * 读引用 —— 那时界面早就好了。
- *
- * ## 焦点是 pi-tui 管的，我们不插手
- *
- * `showOverlay` 抢焦点、`hide()` 还焦点。`custom()` 因此**必须**在 `done()` 里
- * `handle.hide()` —— 不 hide 的话浮层永远挂在 overlay 栈上、输入再也回不到编辑器，
- * 界面看着「答完了却还能打字」。（pi 自己的 `showExtensionCustom` 也在 `close()` 里
- * `hideOverlay()`，同一个道理。）
+ * 焦点由 pi-tui 管：`showOverlay` 抢焦点、`hide()` 还焦点。所以 `custom()` **必须**在 `done()`
+ * 里 `handle.hide()` —— 不 hide 的话浮层永远挂在 overlay 栈上、输入回不到编辑器。
  */
 export function createHostUi(
   source: () => HostUiOptions,
@@ -647,7 +616,6 @@ export function createHostUi(
             questionnaire.open(handoff),
         }),
 
-    // ── 明确不支持 ──
     // 这些方法故意**不在**返回类型里（`ExtensionHostUi` 只声明了真能做的三个）：
     // 扩展若去调，拿到的是 undefined，于是「TypeError: not a function」出现在它自己
     // 的栈里 —— 比我们静默返回假值诚实。

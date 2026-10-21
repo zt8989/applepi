@@ -1,41 +1,24 @@
 /**
- * webui ↔ tui 的**线协议**。
+ * webui ↔ tui 的**线协议**：只定义形状，不含逻辑。
  *
- * ## 为什么要有一份独立的协议文件
+ * 必须有一份独立的：浏览器用 pi-web-ui 的 `ChatPanel` / `AgentInterface`，它们只认一个
+ * pi-agent-core 形状的 `Agent`，而本项目的环跑在 tui 侧的内核里（Redux Loop）。所以两头都得
+ * 知道同一份「什么算状态、什么算事件」—— tui 的 `web/bridge.ts` 往这里映射，webui 的
+ * `RemoteAgent` 把收到的装回 `Agent` 的样子。
  *
- * 浏览器那一侧要用 `@earendil-works/pi-web-ui` 的 `ChatPanel`/`AgentInterface`，它们
- * 只认一个 `pi-agent-core` 形状的 `Agent`（`state` / `subscribe` / `prompt` / `abort`）。
- * 而本项目的环在 **tui 这一侧的内核**里跑（Redux Loop），不在浏览器里。
- *
- * 所以两头都得知道同一份「什么算状态、什么算事件」——那就是本文件。它只定义**形状**，
- * 不含任何逻辑，谁都能引：
- *
- *   - tui：`web/bridge.ts` 把内核的 `AgentState` 映射成这里的形状往外发；
- *   - webui：浏览器里那个 `RemoteAgent` 把收到的形状装回 `Agent` 的样子。
- *
- * ## 为什么不直接复用 pi-agent-core 的类型
- *
- * `WebAgentState` / `WebAgentEvent` 刻意与 pi-agent-core 的 `AgentState` / `AgentEvent`
- * **同一个口径**（角色的名字、事件的种类都一样），但不直接引它：那个包是浏览器侧的
- * 对端，tui 引它会把「前端」拖进服务端的依赖里。这里只引 pi-ai 的**消息类型**
- * （那是真的线上要传的东西）。
+ * 不直接引 pi-agent-core 的 `AgentState` / `AgentEvent`：那个包是浏览器侧的对端，tui 引它
+ * 会把前端拖进服务端的依赖里。这里只引 pi-ai 的**消息类型**（线上真要传的东西）。
  */
 
 import type { Api, AssistantMessage, Message, Model } from '@earendil-works/pi-ai';
 import type { QuestionnaireIntent, QuestionnaireSnapshot } from './questionnaire';
 
 /**
- * 协议版本。对不上就拒绝连接 —— 比半懂不懂地解析强。
+ * 协议版本。对不上就拒绝连接 —— 比半懂不懂地解析强（旧前端收到不认识的帧会当未知消息）。
  *
- * v3：`hello` 不再塞模型目录 / 作用域 —— 那些（以及命令表这类非会话数据）改成
- * HTTP 接口（`/api/*`，见 [api.ts](@ela/tui 的 web/api.ts)），前端按需取。
- *
- * v4：问卷（`ui-questionnaire` / `ui-questionnaire-intent`）—— 多题 tab 那种提问的
- * 整份快照与意图。加消息种类也算"对不上就拒绝"（旧前端收到不认识的帧会当未知消息），
- * 所以版本号跟着走。
- *
- * v5：`prompt` 带附件（`attachments`）—— 浏览器把图片 / 文档折成 content 块发给内核。
- * 旧前端不知道这个字段，带附件的消息会**静默丢掉附件**；所以版本号跟着走。
+ * v3：`hello` 不再塞模型目录 / 作用域，那些（以及命令表这类非会话数据）改成 HTTP 接口。
+ * v4：问卷（`ui-questionnaire` / `ui-questionnaire-intent`）—— 整份快照与意图。
+ * v5：`prompt` 带附件（`attachments`）—— 旧前端会**静默丢掉附件**，所以版本号跟着走。
  */
 export const WEB_PROTOCOL_VERSION = 5;
 
@@ -49,13 +32,9 @@ export const WEB_PROTOCOL_VERSION = 5;
 export const STREAM_NOTICE_ROLE = 'ela-notice';
 
 /**
- * 列表里的一条模型（**紧凑投影**，不是整份 `Model`）。
- *
- * ## 为什么不在线协议里传整份 Model
- *
- * 目录里有四百多条（本机是 436），整份序列化 ~250KB；而选择器真正用到的只有
- * 「provider / id / 名字 / 能不能思考」。当前模型仍是**整份**（在 `state.model`）——
- * 那是要显示在输入框底下、要打得开模型详情的那一个。
+ * 列表里的一条模型（**紧凑投影**，不是整份 `Model`）：目录里四百多条，整份序列化 ~250KB，
+ * 而选择器只用到「provider / id / 名字 / 能不能思考」。当前模型仍是**整份**（在
+ * `state.model`）—— 它要显示在输入框底下、还要打得开详情。
  */
 export interface WebModelRef {
   provider: string;
@@ -68,13 +47,9 @@ export interface WebModelRef {
 /**
  * 浏览器侧传上来的一份附件（对应 pi-web-ui 的 `Attachment`）。
  *
- * ## 为什么文档只带 `extractedText`
- *
- * 模型要的是可读文本，不是那份二进制；而 `content`（原文件的 base64）会跟着 WS 帧
- * 传一遍、再被内核写进会话文件 —— 一份 10MB 的 PDF 变成几十 MB 的轨迹。图片不同：
- * 模型**真的**要看图，所以 `content` 必须带上（它就是 `ImageContent.data`）。
- *
- * `preview` 只有界面用（PDF 首页缩略图），服务端不需要 —— 所以这里不传。
+ * 文档只带 `extractedText`：模型要的是可读文本，而 `content`（原文件 base64）会跟着 WS 帧
+ * 传一遍、再被写进会话文件（一份 10MB 的 PDF 变成几十 MB 的轨迹）。图片不同 —— 模型**真的**
+ * 要看图，所以 `content` 必须带上。`preview` 只有界面用，服务端不需要。
  */
 export interface WebAttachment {
   id: string;
@@ -147,16 +122,11 @@ export interface WebAgentState {
   /** 工具名（展示用）。 */
   toolNames: string[];
   /**
-   * 每个工具调用的耗时（`toolCallId` → 毫秒）—— 工具卡上那个 `1.2s`。
+   * 每个工具调用的耗时（`toolCallId` → 毫秒），取自内核的 `state.toolTimings`。
    *
-   * 取自内核的 `state.toolTimings`。
-   *
-   * ## 为什么不让浏览器自己计时
-   *
-   * 工具在**服务端**跑，浏览器只看到「开始 / 结束」两条消息 —— 拿这两个时刻相减，
-   * 算进去的是**传输延迟 + 渲染延迟**，而不是命令本身跑了多久。恢复历史时更糟：
-   * 早跑完的工具连「开始」那条消息都没有。reducer 那边（`tool/start` / `tool.result`）
-   * 是唯一同时拿得到开始时刻与结束时刻的地方。
+   * 不让浏览器自己计时：工具在**服务端**跑，拿「开始/结束」两条消息相减算进去的是传输与渲染
+   * 延迟，恢复历史时更糟（早跑完的工具连「开始」那条都没有）。reducer 那边是唯一同时拿得到
+   * 开始与结束时刻的地方。
    */
   toolTimings: Record<string, number>;
   /**
@@ -262,13 +232,11 @@ export type WebClientMessage =
    */
   | { type: 'ui-questionnaire-intent'; id: string; intent: QuestionnaireIntent };
 
-// ─────────────────────────────────────────────────────────────────────────────
 // 非会话数据的 HTTP 接口（`/api/*`）
 //
 // 这些**不进** WebSocket：它们与「环跑到哪一步」无关，按需取就行。放 HTTP 是为了
 // 让前端不必把服务端的事实抄一份（模型目录、命令表、作用域、settings 都在服务端）。
 // 形状定义在这里，因为它与线协议一样是**前后端唯一共同语言**。
-// ─────────────────────────────────────────────────────────────────────────────
 
 /** `GET /api/sessions` 里的一条：侧边栏列表要的**紧凑投影**。 */
 export interface WebSessionRef {
@@ -391,10 +359,14 @@ export interface WebToolDefinitionInfo {
 }
 
 /**
- * `GET /api/history` 里的一行。
+ * `GET /api/history[?sessionId=<id>]`：**完整历史**（顶栏那个按钮打开的那一页）。
  *
- * 消息原样给（渲染是前端/服务端页面的事），配置变更降级成一条注记 —— 界面只要
- * 「读得下去的时间线」，不需要知道轨迹里的 entry 形状。
+ * 不带 `sessionId` = 当前会话；带上它就能开**任意**一个会话（按 id 跨每个 `sessions/` 目录
+ * 找文件，不必先知道它当初在哪个 cwd 里）。找不到时 `missing: true`，服务端回 404。
+ *
+ * 读会话文件而不是内存里的 `messages`：内存那份是**压缩之后**的当前上下文，被 `/compact`
+ * 掉的早期消息在那里根本不存在，而那一段正是「完整历史」要给人看的。文件还没落盘（新会话
+ * 一句话都没说过）时才退回内存那份。
  */
 export type WebHistoryLine =
   | { kind: 'message'; at: string; message: Message }

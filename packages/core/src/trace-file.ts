@@ -1,10 +1,8 @@
 /**
  * Node 端的轨迹落盘：追加写 `traces/<时间戳>_<id>.jsonl`。
  *
- * 选 JSONL 而不是整树覆盖写，是因为它像 git 的 reflog：
- *   - 崩溃只丢最后没 flush 的一行，历史完好；
- *   - 追加写不会重写整个文件，长会话也不会越来越慢；
- *   - 一行一个节点，`wc -l` 就知道这次会话发生过多少次尝试。
+ * 用 JSONL 追加而不是整树覆盖写：崩溃只丢最后没 flush 的一行；长会话不会越写越慢；
+ * `wc -l` 就知道这次会话发生过多少次尝试。
  */
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -19,11 +17,8 @@ import type { TraceTree } from './trace';
 import { tracesDir, findFileById, traceFileName, sessionIdFromFileName } from './config-home';
 
 /**
- * 轨迹目录。**默认落在配置家目录里**（`~/.redux-agent/traces/`），不再是项目下的
- * `.trace/` —— 轨迹是会话级产物，和会话文件放一起才对；放项目里会在每个仓库留一堆
- * 垃圾，而且换个目录就「找不到历史」。
- *
- * 传字符串则用该目录（相对路径相对进程 cwd），测试用。
+ * 轨迹目录；不给就落在配置家目录（`~/.redux-agent/traces/`）—— 轨迹是会话级产物，
+ * 跟会话文件放一起才对。传字符串则用该目录（相对路径相对进程 cwd），测试用。
  */
 export type TraceDir = string | null;
 
@@ -36,9 +31,8 @@ function resolveDir(dir?: TraceDir): string {
 /**
  * 某个会话的轨迹 JSONL 路径。
  *
- * **先按 id 扫目录**（新名 `<时间戳>_<id>.jsonl` 与旧名 `<id>.jsonl` 都认）；
- * 找不到就按新形状拼一个（时间戳取现在）—— 调用方多是「准备写」，那时拼新名是对的。
- * 真正需要「这个文件存在吗」的调用方自己 `existsSync`（它拿到的是盘上的真路径）。
+ * **先按 id 扫目录**（新名 `<时间戳>_<id>.jsonl` 与旧名 `<id>.jsonl` 都认）；找不到就
+ * 按新形状拼一个（时间戳取现在）—— 调用方多是「准备写」。真要判存在自己 `existsSync`。
  */
 export function tracePath(sessionId: string, dir?: TraceDir): string {
   const target = resolveDir(dir);
@@ -61,7 +55,6 @@ export function createFileSink(filePath: string): TraceSink {
         .then(async () => {
           const dir = path.dirname(filePath);
           if (!existsSync(dir)) await mkdir(dir, { recursive: true });
-          // 补一个换行：每条记录独立成行。
           await appendFile(filePath, `${line}\n`, 'utf8');
         })
         .catch((error: unknown) => {
@@ -78,7 +71,7 @@ export function createFileSink(filePath: string): TraceSink {
 }
 
 /**
- * 读回一个会话：轨迹树 + 对话消息（零 token 复现一轮对话）。
+ * 读回一个会话：轨迹树 + 对话消息（不复用模型地重现一轮对话）。
  * 文件不存在就返回 null。
  */
 export async function loadSession(
@@ -91,7 +84,7 @@ export async function loadSession(
   return replaySession(text, sessionId);
 }
 
-/** 读回一个会话的轨迹树（只要树，不要消息；老调用方用它）。 */
+/** 只读回轨迹树（不要消息）。 */
 export async function loadTrace(
   sessionId: string,
   dir?: TraceDir,
@@ -105,7 +98,7 @@ export async function loadTrace(
 /**
  * 列出所有已落盘的**轨迹**会话 id。
  *
- * 注意这不是「会话列表」—— 后者在 config-home 的 `listSessions()`，那是给人看的历史。
+ * 注意这不是「会话列表」—— 后者在 `config-home` 的 `listSessions()`。
  */
 export async function listSessions(dir?: TraceDir): Promise<string[]> {
   const { readdir } = await import('node:fs/promises');

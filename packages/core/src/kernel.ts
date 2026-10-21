@@ -1,15 +1,11 @@
 /**
  * 内核 —— 整个应用**唯一**跑环的地方。
  *
- * 只有一个权威 Loop。界面层（`packages/tui/src/`）只是它的渲染层：订阅 store、画状态、把输入 dispatch 回去。
- * 这不是洁癖，是必需的 —— 如果另有一处跑环，就会出现「两处都发起 LLM 调用」「两处的消息流不一致」，
- * 而环本身是有副作用的（真的调模型、真的改文件）。
+ * 只有一个权威 Loop：界面层只是渲染层（订阅 store、画状态、把输入 dispatch 回去）。这不是洁癖
+ * 而是必需的 —— 另有一处跑环就会出现「两处都发起 LLM 调用」「两处消息流不一致」，而环本身是有
+ * 副作用的（真的调模型、真的改文件）。
  *
- * 装配一次，得到：
- *   - store       Redux Loop 的状态树（环的收敛点）
- *   - persistence 轨迹落盘器（错误也落盘）
- *
- * 界面层只做两件事：把用户输入 dispatch 进去，以及订阅 store 把状态画出来。
+ * 装配一次得到 `store`（环的收敛点）与 `persistence`（轨迹落盘器，错误也落盘）。
  */
 import {
   createFauxRuntime,
@@ -47,17 +43,12 @@ import type { ExtensionHost } from './extension-host';
 import { loadSkillRegistry } from './skills';
 import { loadPromptRegistry } from './prompts';
 /**
- * 从 Model 对象上读我们关心的三个能力。
+ * 从 Model 对象上读我们关心的三个能力。位置不一样：`supportsMidConvo*` 在 **BaseModel** 顶层，
+ * `supportsDeveloperRole` 在 **compat** 里（只有 openai 一族有）。
  *
- * 位置不一样，所以分开取：
- *   - `supportsMidConvoSystemMessages` / `supportsMidConvoToolAdditions` 在 **BaseModel** 上（顶层）；
- *   - `supportsDeveloperRole` 在 **compat** 里，而且只有 openai 一族的 compat 有这个字段。
- *
- * 读不到就当 false（保守）—— 「以为支持但实际不支持」会让 pi-ai 把消息发出去然后被
- * provider 拒，而那种失败长得像「随机 400」。
- *
- * 导出是因为 `setModel()` 与它的测试都要用**同一个读法**：两处各写一份的话它们会漂移，
- * 而漂移的症状是「底栏换了、实际请求还是按旧能力发」（那类失败极难归因）。
+ * 读不到就当 false（保守）：「以为支持但实际不支持」会让 pi-ai 把消息发出去然后被 provider 拒，
+ * 那种失败长得像「随机 400」。导出是因为 `setModel()` 与测试要用**同一个读法** —— 两处各写
+ * 一份会漂移，症状是「底栏换了、实际请求还是按旧能力发」。
  */
 export function readCapabilities(model: Model<any>): ModelCapabilities {
   // 这两个标志声明在 BaseModel 上，但 pi-ai 的 Model 类型没把它们带进公开面，
@@ -135,29 +126,20 @@ export interface KernelOptions {
    */
   uiOptions?: (() => HostUiOptions) | undefined;
   /**
-   * **不等扩展装载**：`createKernel()` 在 store 与 `model.init` 就绪之后就返回，
-   * 扩展装载（jiti，实测 2~3s）与它后面的 prompt 装配在**后台**跑，
-   * `kernel.ready` 表示「装完了」。
+   * **不等扩展装载**：`createKernel()` 在 store 与 `model.init` 就绪之后就返回，扩展装载
+   * （jiti，实测 2~3s）与它后面的 prompt 装配在**后台**跑，`kernel.ready` 表示「装完了」。
    *
-   * ## 为什么需要它
+   * 需要它是因为交互式界面的首帧要等 `createKernel()` 返回，而那 2~3s 全在扩展装载上。
+   * 打开这一档之后：
    *
-   * 交互式界面的**首帧**要等 `createKernel()` 返回。而那 2~3s 全在扩展装载上 ——
-   * 用户在启动时看到的就是「敲了命令，2~3 秒内什么都没发生」。打开这一档，界面
-   * 立刻画出来（底栏、输入框、开场先报到手的那部分），扩展在后台接着装。
+   * 1. **`ready` 之前不许发消息**：那一刻 `state.prompt.tools` 还是「没有扩展」的形状，先发的
+   *    消息会把缺工具集的 head 写进会话与轨迹（head 是不可改的历史）。界面把发送挂在 `ready` 上，
+   *    一次性模式**不打开这一档**。
+   * 2. **`kernel.extensions.*` 是活视图**：界面不能把「现在读到的内容」当成终局，开场横幅要在
+   *    `ready` 之后重报一次。
    *
-   * ## 用它的地方必须做什么
-   *
-   * 1. **`ready` 之前不许发消息**：`state.prompt.tools` 与 system prompt 那一刻还是
-   *    「没有扩展」的形状，先发出去的那条消息会把一份缺工具集的 head 写进会话与轨迹
-   *    （而 head 是不可改的历史，见 `prompt-head.ts`）。界面那边把发送挂在 `ready` 上
-   *    （`tui/app.ts` 的 `send()`），一次性模式**不打开这一档**（没有首帧可提前）。
-   * 2. **读 `kernel.extensions.*` 要能在就绪后才读**：它是活视图（见 `Kernel.extensions`），
-   *    界面不能把「现在读到的内容」当成终局 —— 开场横幅要在 `ready` 之后重报一次。
-   *
-   * ## 失败怎么表现
-   *
-   * 这一档下装载失败**不抛**（界面已经在跑了，抛没人接）：收进 `kernel.extensions.errors`
-   * 由界面报出来。默认（不打开）那条路上失败照旧往外抛 —— 一次性模式该响亮地失败。
+   * 这一档下装载失败**不抛**（界面已经在跑），收进 `kernel.extensions.errors` 由界面报出来；
+   * 默认那条路照旧往外抛 —— 一次性模式该响亮地失败。
    */
   deferExtensions?: boolean | undefined;
   /** 跳过扩展装载（测试用；也省掉 jiti 那一跳的开销）。 */
@@ -175,16 +157,10 @@ export interface Kernel {
   /**
    * 扩展宿主（`deferExtensions` 时是**活视图**）。
    *
-   * ## 为什么是「活视图」而不是「那一刻的那个对象」
-   *
-   * `deferExtensions` 下这个字段在 `ready` 之前指向一个**空宿主**（与 `--no-extensions`
-   * 同形），就绪后指向真的那个。而界面在 `createKernel()` 返回时就把里面几个引用
-   * 抓走了（`extensions.commands`、开场横幅那份 `entries`）—— 换对象等于它们永远看到
-   * 空的那份，症状是「扩展的斜杠命令不见了」而没有任何报错。
-   *
-   * 所以这里转发**每次读**：`kernel.extensions.commands.list()` 在就绪后念的是扩展的
-   * 命令。代价是「读到的内容会变」—— 界面据此在 `ready` 之后重新报一次开场（见
-   * `deferExtensions` 的注释）。
+   * 必须转发**每次读**：`ready` 之前它指向一个**空宿主**、就绪后指向真的那个，而界面在
+   * `createKernel()` 返回时就把里面几个引用抓走了（`extensions.commands`、开场横幅那份
+   * `entries`）—— 换对象等于它们永远看到空的那份，症状是「扩展的斜杠命令不见了」且没有报错。
+   * 代价是「读到的内容会变」，界面据此在 `ready` 之后重报一次开场。
    */
   readonly extensions: ExtensionHost;
   /**
@@ -217,24 +193,18 @@ export interface Kernel {
   /**
    * 换模型。**真换** —— 之后的每个回合都发给新的那个。
    *
-   * ## 一条 action 就够：`model.changed` 带**整套**模型参数
+   * `model.changed` 带**整套**模型参数（与 `model.init` 载荷完全一致）：能力与窗口是模型之间
+   * 不一样的，一个支持中途插 system 的网关换成一个不支持的、还按旧的来会发出 provider 拒收的
+   * 请求（那种失败长得像「随机 400」）。所以一步把能力 / 窗口装到位，不需要「先保守清零再补」。
    *
-   * 能力（`capabilities`）与窗口（`contextWindow`）是**模型之间不一样**的：一个支持中途插
-   * system 的网关换成一个不支持的，还按旧的来会发出一份 provider 拒收的请求 —— 而那种
-   * 失败长得像「随机 400」，极难归因。所以 `model.changed` 与 `model.init` **载荷完全一致**
-   * （`ModelSpec`），一步把能力 / 窗口装到位，**不需要**「先保守清零、再补一条」的中间态。
+   * 两条 action 只差语义：`model.changed` 是「**切**成了什么」（轨迹里看得见），`model.init`
+   * 是「**装载**了什么」。
    *
-   * 两条 action 只差语义：`model.changed` 是「**切**成了什么」（轨迹里应当看得见），
-   * `model.init` 是「**装载**了什么」（开局那一次）。
+   * 思考级别不是「带着走」而是按 pi 的 `_getThinkingLevelForModelSwitch` **重新解析**（作用域
+   * 条目 / per-model 覆盖 / 全局默认排在「当前这一档」前面，最后 clamp）—— 没配过 settings 时
+   * 结果与带着走相同，配过时才分得出来。
    *
-   * 思考级别**带着走**（从 state 读再传回去）：换模型不该顺手把 `high` 改成 `off`。
-   *
-   * 准确说：按 pi 的 `_getThinkingLevelForModelSwitch` **重新解析**一遍（作用域条目 /
-   * per-model 覆盖 / 全局默认都排在「当前这一档」前面，最后 clamp 到新模型支持的那几档）——
-   * 没配过 settings 时结果与「带着走」相同，配过时才分得出来（见实现里的注释）。
-   *
-   * @returns 换成功没有。找不到那个模型就返回 `false` 并**不 dispatch** ——
-   *   状态原封不动，比 dispatch 一次半换更安全。
+   * @returns 换成功没有。找不到那个模型就返回 `false` 并**不 dispatch**。
    */
   setModel(
     provider: string,
@@ -279,7 +249,6 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         ...(options.model ? { model: options.model } : {}),
       });
 
-  // ── 会话级资源（可以换） ──
   //
   // 「开新会话」要换 sessionId，而轨迹 sink / 装载段 sink / 会话记录器都是**绑在 id 上**
   // 的（文件名由 id 决定），所以要能整体替换。用一个 holder 持有当前的三个，
@@ -331,21 +300,16 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   const sessionId = current.sessionId;
   const cwd = path.resolve(options.cwd ?? process.cwd());
 
+  // 思考级别的顺序：命令行 > 会话文件里那条 > per-model 覆盖 > 全局默认 > 内置 `medium`，
+  // 最后 clamp 到当前模型支持的那几档。三个坑：
   //
-  // ── 思考级别：与 pi 同一套解析顺序（`core/sdk.js:120-142`） ──
-  //
-  // 顺序要点：命令行 > 会话文件里那条 > per-model 覆盖 > 全局默认 > 内置 `medium`，
-  // 最后 clamp 到当前模型支持的那几档。三条来源各有一个坑：
-  //
-  // 1. **只在命令行真的给了 sessionId 时才去扫会话目录**。不给时 sessionId 是刚生成的
-  //    UUIDv7，盘上一定没有这个文件 —— 扫一遍是白扫，而扫目录是启动路径上唯一的
-  //    文件系统操作。pi 那边也一样：它只知道 `--continue` / `--session` 指的那个会话。
+  // 1. **只在命令行真的给了 sessionId 时才去扫会话目录**：不给时 sessionId 是刚生成的 UUIDv7，
+  //    盘上一定没有，而扫目录是启动路径上唯一的文件系统操作。
   // 2. 「文件在那」不等于「这是一个已有的会话」：pi 的 `hasExistingSession` 是
-  //    `messages.length > 0`（空壳文件不算），而「不算」的后果是它会走「新会话」分支
-  //    （于是 per-model 覆盖**会**被看到）。差别只在那一个布尔值上，照抄。
-  // 3. clamp 在这里做（这个函数知道 model，pi 的 `createAgentSession` 也在这里做）——
-  //    早先这里没有 clamp，而 `medium` 在 deepseek-v4.1-flash 上不是合法档位，
-  //    症状是「底箱写着 medium，请求里发的是模型不认的 reasoning 值」。
+  //    `messages.length > 0`（空壳文件不算），不算时它走「新会话」分支（per-model 覆盖**会**被
+  //    看到）。差别只在那一个布尔值上，照抄。
+  // 3. clamp 在这里做（这个函数知道 model）：`medium` 在 deepseek-v4.1-flash 上不是合法档位，
+  //    不夹就是「底箱写着 medium，请求里发的是模型不认的 reasoning 值」。
   const startupSession =
     options.sessionId === undefined
       ? undefined
@@ -371,22 +335,12 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   /**
    * 生命周期事件的**唯一出口**：先落成 action（于是进轨迹、可回放），再发给扩展。
    *
-   * ## 为什么是「先 dispatch 再 emit」
+   * 只此一个函数：轨迹树是 action 的产物，而扩展是当场就要收到事件的，两件事各写一遍必然漂。
    *
-   * 轨迹树是 action 的产物（reducer 把 `extension.lifecycle` 记成一条注释节点），
-   * 而前端扩展是**当场**就要收到事件的 —— 两件事不能各写一遍：写两遍必然漂
-   * （某条事件记得发却忘了记，或者反过来）。所以只有这一个函数。
+   * dispatch 排在 emit 前面：`emitLifecycle` 会同步跑扩展的 handler，而 handler 可能又去
+   * dispatch（`pi.sendMessage` 之类）—— 先把事实写进状态再通知别人，扩展读到的状态才不缺这条。
    *
-   * ## 为什么 dispatch 排在 emit 前面
-   *
-   * `emitLifecycle` 会同步开始跑扩展的 handler，而 handler 有可能又去 `dispatch`
-   * （`pi.sendMessage` 之类）。先把「这件事发生过」写进状态，再去通知别人，顺序才是
-   * 「先事实后反应」；反过来的话，扩展在 handler 里读到的状态会缺一条自己刚触发的事件。
-   *
-   * ## 循环风险
-   *
-   * dispatch 会再触发 store 订阅器（相位级事件就是订阅器发的）。那一路看的是
-   * `phase` 有没有变，没变就直接 return —— 所以嵌套一层就停了，不会自激。
+   * 循环风险：dispatch 会再触发订阅器，那一路看 `phase` 有没有变、没变就 return，嵌套一层即停。
    */
   function recordLifecycle(event: ExtensionLifecycleEvent): void {
     store.dispatch({ type: 'extension.lifecycle', event } as AgentAction);
@@ -418,20 +372,15 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     ...(options.onTraceError ? { onTraceError: options.onTraceError } : {}),
   });
 
-  // ── 相位级生命周期事件（`agent_start` / `agent_end` / `agent_settled`）──
+  // 相位级生命周期事件（`agent_start` / `agent_end` / `agent_settled`）用订阅器发：reducer 是
+  // 纯函数，发事件不属于它，而「环刚停下来」在 redux-loop 里没有对应的 action（见 store.ts）。
   //
-  // 为什么用订阅器而不是在 reducer 里：reducer 是纯函数，发事件不属于它；而「环刚停下来」
-  // 这个时刻在 redux-loop 里没有对应的 action（与 `createAutoCompact` 同一个理由，
-  // 见 store.ts 的头注释）。订阅器盯 `phase`，任何停止路径都不漏。
+  // 事件走 `recordLifecycle()`：先记进轨迹，再发给扩展。宿主还没装上时只是没人收，**记录照旧**
+  // —— 轨迹是历史，不该因为那一刻没有监听者就漏掉真实发生过的事。
   //
-  // 事件走 `recordLifecycle()`：先记进轨迹，再发给扩展。宿主还没装上
-  // （`deferExtensions` 的首帧那几秒）时只是没人收，**记录照旧** —— 轨迹是历史，
-  // 不该因为那一刻没有监听者就把一段真实发生过的事漏掉。
-  //
-  // `agent_start` 的判据是 idle → 非 idle；`agent_end` / `agent_settled` 是反过来那一下。
-  // **两个一起发**：pi 的 `agent_end` 是「这一轮结束」（可能还会继续），`agent_settled` 是
-  // 「真的静了」；相位回到 idle 就是两者同时成立的那一点。扩展自己按 `agentSettledSupported`
-  // 决定认哪个（Orca 的状态扩展就只认后者），所以两个都发，不替它选。
+  // `agent_start` 是 idle → 非 idle；`agent_end` / `agent_settled` 是反过来那一下，**两个一起发**
+  // （pi 的 `agent_end` 是「这一轮结束」，`agent_settled` 是「真的静了」，相位回 idle 就是两者同时
+  // 成立的那一点）。扩展自己按 `agentSettledSupported` 决定认哪个，所以不替它选。
   let agentWasRunning = false;
   const unsubscribeAgentLifecycle = store.subscribe(() => {
     const state = store.getState();
@@ -446,7 +395,6 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     }
   });
 
-  // ── 扩展宿主的**活视图**（`deferExtensions` 用）──
   //
   // 见 `Kernel.extensions` 的注释（为什么不能直接换对象）。
   //
@@ -493,21 +441,12 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     dispose: () => currentHost().dispose(),
   };
 
-  // ── 装载：`model.init` 与 prompt 各走一条 action 打进状态树 ──
+  // 装载走 action 而不是直接写进 `createInitialState`：「装载」与「跑一轮对话」都是状态迁移，
+  // 走 action 才能被落盘、被回放 —— 回放时读到 init 段就知道当时发给模型的是什么。
   //
-  // 为什么走 action 而不是直接写进 createInitialState：
-  // 「装载」和「跑一轮对话」是同一类事（都是状态迁移），走 action 才能被落盘、被回放。
-  // 回放时读到 init 段就知道当时发给模型的是什么，不必重装配工具、不必再问 provider 能力。
-  //
-  // 放在 store 建好之后：它们本身就是 dispatch，得走真实的 store。
-  //
-  // ## 两块为什么拆开：model 不依赖扩展，prompt 依赖
-  //
-  // `deferExtensions`（交互式界面靠它把首帧提前 2~3 秒，见 `KernelOptions`）只把
-  // **prompt 那一块**推到后台：底栏在首帧就要显示 `(provider) model`，而那份数据只
-  // 来自 runtime 与启动解析出来的档位。把它留在后面的话，扩展装载的那几秒里底栏是
-  // `() `（看着像坏了）。轨迹不受这个顺序影响：`beginTrace()` 只认
-  // `state.prompt.seeded` / `state.model.seeded`，而它要等用户发出第一句话才跑。
+  // 两块拆开是因为 model 不依赖扩展、prompt 依赖：`deferExtensions` 只把 **prompt 那一块**推到
+  // 后台。底栏首帧就要显示 `(provider) model`，把它留到后面的话，扩展装载那几秒里底栏是
+  // `()`（看着像坏了）。
   store.dispatch({
     type: 'model.init',
     provider: runtime.spec.provider,
@@ -520,18 +459,12 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     contextWindow: runtime.model.contextWindow ?? 0,
   });
 
-  // ── 会话记录器：**必须在扩展装载之前建** ──
+  // 会话记录器**必须在扩展装载之前建**：扩展的 `ctx.sessionManager.getSessionFile()` 要报「这个
+  // 会话的文件是哪个」，而它在 `session_start` 那一刻被读走、之后不再刷新。Orca 那类宿主靠这个
+  // 路径认「对话记录在哪」，拿不到就一直显示 loading。
   //
-  // 顺序不是随手排的：扩展的 `ctx.sessionManager.getSessionFile()` 要报「这个会话的
-  // 文件是哪个」，而它在 `session_start` 那一刻就被读走、之后不再刷新（那是 pi 的
-  // 状态扩展自己的逻辑）。Orca 那类宿主靠这个路径把「对话记录在哪」认下来 ——
-  // 拿不到就只能一直显示 loading。
-  //
-  // 报的是**计划路径**（`SessionWriter.path`），不是「文件已经在盘上」：本项目
-  // 空会话不建文件（见 session-file.ts），而状态扩展读的时候自己会 `existsSync` 重试
-  // （`getPersistedSessionMetadata`），第一条消息落盘之后那份元数据就真的带上去了 ——
-  // 与 pi 自己的注释「Pi publishes its planned path before creating the transcript」
-  // 同一回事。
+  // 报的是**计划路径**（`SessionWriter.path`），不是「文件已在盘上」：空会话不建文件，而状态
+  // 扩展读的时候自己会 `existsSync` 重试，第一条消息落盘后那份元数据就真的带上去了。
   const openRecorder = (
     id: string,
     resumeFrom?: number,
@@ -686,19 +619,14 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     ready = Promise.resolve();
   }
 
-  // 装载段落盘：**写进同一个轨迹文件的前两行**（不再单独一个 `<id>.init.jsonl`）。
-  // 有了它，回放时不必重装配工具、不必再问 provider「这个模型支持中途插 system 吗」。
+  // 装载段落盘：**写进同一个轨迹文件的前两行**。有了它，回放时不必重装配工具、不必再问 provider
+  // 「这个模型支持中途插 system 吗」。
   //
-  // ## 什么时候写：用户发出第一句话之后（不是内核一装配）
+  // 时机与用户发出第一句话绑定：内核在这里**不**直接调它，而是盯住 `traceBegun` 翻转的那一刻
+  // （见下面那个订阅）—— 「进来看一眼就退出」不该留下一个只有装载段、零条对话的文件。
   //
-  // 与会话文件那边同一个决定：「进来看一眼就退出」不该在盘上留一个只有装载段、
-  // 零条对话的文件。所以内核**不在这里调它**，而是在 store 里盯住
-  // `traceBegun` 翻转的那一刻（见下面那个订阅）。
-  //
-  // 走 delegator（同一个 sink）而不是另开一个文件：少一半文件，目录里全是 jsonl 很难翻。
-  // 位置在几条 add 记录之后（`tools` 要从 store 读，那上面才有完整的工具定义，
-  // 而装载节点由 user.message 开出并先被 flush）—— 这没问题：回放是按 op 类型收集的，
-  // 与行的先后无关。
+  // 走 delegator（同一个 sink）而不是另开文件：少一半文件。位置在几条 add 记录之后也没问题，
+  // 回放是按 op 类型收集的，与行序无关。
 
   const writeInit = (): void => {
     const capabilities = readCapabilities(runtime.model);
@@ -732,23 +660,16 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     void delegator.append(records.map((r) => JSON.stringify(r)).join('\n'));
   };
 
+  // 「会话已开始」的信号 → 写装载段。判据是 reducer 在第一条 `user.message` 里置上的
+  // `state.traceBegun`，于是「什么时候算这段会话开始」只有一个定义，不依赖调用方记得调
+  // writeInit（忘了就等于这次会话的 init 段永远缺失）。
   //
-  // 「会话已开始」的信号 → 写装载段。
+  // 必须绕一圈才能先于落盘器的 flush：落盘器与本订阅都是 store 订阅器，而它在前面注册 ——
+  // 所以这里不靠订阅顺序，而是让 delegator 在「traceBegun 翻转」后放行，于是落盘器那一轮 flush
+  // 先把装载节点的 add 写出去，init 记录补在后面一行（回放按 op 收集，与行序无关）。
   //
-  // 订阅而不是让界面/调用方来通知：判据是 `state.traceBegun`，而它是 reducer 在**第一条
-  // user.message** 里置上的（与装载节点同一刻）。于是「什么时候算这段会话开始」只有一个定义，
-  // 不依赖每个调用方记得调 writeInit —— 忘了就等于这次会话的 init 段永远缺失（回放时
-  // 只能重新装配工具）。
-  //
-  // **必须先于落盘器的 flush**（顺序理由见下面 activeSink 的注释）：落盘器是 store 订阅器，
-  // 而这个也是。订阅者按注册的顺序被通知，而本文件里 createPersistentStore 在前，
-  // 于是顺序反了 —— 所以这里不靠订阅顺序，而是**绕一圈**：
-  // 观察到的变化（traceBegun 翻转）恰好让 delegator 放行，落盘器那一轮 flush 就会先把
-  // 装载节点的 add 写出去；init 记录补在**后面**一行，而回放按 op 收集、与行序无关
-  // （这正是 init 记录从一开始就与 add 记录混在同一个文件的前提）。
-  //
-  // `restoreSession` 灌回的是**已经**有轨迹文件的历史：那棵树的 init 段在文件里，
-  // 所以那里把 `wroteInit` 直接置真，再补一份就是磁盘上的垃圾行。
+  // `restoreSession` 灌回的是**已经**有轨迹文件的历史：init 段在文件里，所以那里把 `wroteInit`
+  // 直接置真。
   let wroteInit = false;
   const unsubscribeStart = store.subscribe(() => {
     if (wroteInit) return;
@@ -781,17 +702,13 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     /**
      * 换模型：一条 `model.changed`（载荷与 `model.init` 一样，带全能力 / 窗口）。
      *
-     * ## 先查存在再 dispatch
+     * **先查存在再 dispatch**：取不到那个 Model 对象就什么都不做 —— 那说明配置与当前目录对不上，
+     * 此时「说要用某个模型、但没人知道它的能力」比拒绝更糟（底栏显示新名字，请求却带着清零的
+     * 能力发出去）。
      *
-     * 从 `runtime.models` 取那个 Model 对象 —— 能力与 contextWindow 都从它读。
-     * **取不到就不 dispatch**：那说明配置与当前目录对不上（比如 `models.json` 刚被改坏），
-     * 此时让状态停在一个「说要用某个模型、但没人知道它的能力」的状态比拒绝更糟 ——
-     * 底栏会显示一个新名字，而请求会带着**清零的能力**发出去。
-     *
-     * 为什么不**换掉** `runtime.spec` / `runtime.model`：那是降级路径之外的**初始**装配，
-     * `extensionModelRegistry()` / `createRuntime()` 那些都还指着它。改那两个字段等于
-     * 「把历史也改了」——`/new` 之后本该能回到命令行给的那个模型，而现在回不去了。
-     * effect 表是每次请求现取的（`store.ts` 的 `resolveModel`），所以只换 state 就够。
+     * 不换掉 `runtime.spec` / `runtime.model`：那是**初始**装配，`extensionModelRegistry()` /
+     * `createRuntime()` 还指着它 —— 改了等于把历史也改掉，`/new` 之后回不到命令行给的模型。
+     * effect 表每次请求现取（`resolveModel`），所以只换 state 就够。
      */
     setModel(
       provider: string,
@@ -800,18 +717,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     ): boolean {
       const model = runtime.models.getModel(provider, modelId);
       if (!model) return false;
-      // 换模型之后用哪一档：逐条照抄 pi 的 `_getThinkingLevelForModelSwitch` +
-      // `setThinkingLevel` 里的 clamp ——
-      // 作用域条目写死的档位（`/scoped-models` 的 `p/i:high`）→ per-model 覆盖 →
-      // 全局默认 → **当前那一档**（pi 的 `?? this.thinkingLevel`）。
-      //
-      // 为什么不是「一律带着旧级别走」：那是本项目早先的行为，而它与 pi 在**配过**
-      // `defaultThinkingLevel` / `modelThinkingLevels` 的人那里不一致 —— 症状正是
-      // 「pi 换过去是 high、本项目换过去还是旧的 low」。没配过时两条规则结果相同
-      // （全局默认没有 → 退回当前值），所以这个改动对默认配置无感。
-      //
-      // clamp 在这里是必需的：换到一个只认 high/max 的模型而手上是 medium，
-      // 不夹就会发出模型不认的 reasoning 值。
+      // 换模型之后用哪一档：作用域条目写死的档位 → per-model 覆盖 → 全局默认 → **当前那一档**
+      // （逐条照抄 pi 的 `_getThinkingLevelForModelSwitch`）。最后必须 clamp：换到只认 high/max
+      // 的模型而手上是 medium 时，不夹就会发出模型不认的 reasoning 值。
       const thinkingLevel = thinkingLevelForModelSwitch(model, {
         scopedLevel: modelOptions?.thinkingLevel,
         perModelLevel: readModelThinkingLevel(provider, modelId, cwd),
@@ -906,12 +814,10 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       const previous = current;
       previous.recorder?.dispose();
       current = openResources(id);
-      // 轨迹树也要读回来。早先只读消息，于是恢复后对话区有内容（含粘贴的图片），
-      // 而轨迹面板**空的** —— 而 `traces/<时间戳>_<id>.jsonl` 明明在盘上。
-      // 那个症状特别有欺骗性：图像看得见、消息都在，只有轨迹没了。
+      // 轨迹树也要读回来：只读消息的话恢复后对话区有内容、而轨迹面板是空的（文件明明在盘上），
+      // 那类症状特别有欺骗性。
       //
-      // 读不到（旧会话、或当时开了 --no-trace）不是错误：那就发不带树的那条 action，
-      // 行为与修复前完全一致。
+      // 读不到（旧会话、或当时开了 --no-trace）不是错误：发不带树的那条 action。
       const traceDir = options.traceDir;
       const tree =
         id !== '' && traceDir !== null ? await loadTrace(id, traceDir ?? undefined) : null;

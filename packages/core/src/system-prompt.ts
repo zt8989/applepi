@@ -1,42 +1,23 @@
 /**
  * System prompt 构建 —— **全部交给 pi**，包括「我们自己那条规则」。
  *
- * ## 我们不写一个字
+ * 本文件只做两件事：**按 pi 的规则找输入**、**调 `buildSystemPrompt`**。规则不写进代码，
+ * 因为代码里的 prompt 缺官方踩过坑才写下的细节，而且规则住在文件里用户才能自己改；
+ * 两处并存（`promptGuidelines` 里塞默认值 + 文件里也写）的后果是用户改了文件却发现某条
+ * 还在，排查时根本想不到去看代码。
  *
- * `packages/core/src/system-prompt.ts` 只做两件事：**按 pi 的规则找输入**、**调 `buildSystemPrompt`**。
- *
- * 早先这里手写三行中文（"你是编码助手 / 用工具查 / 简短直给"），后来又加了
- * `OWN_GUIDELINES = ['Always respond in the user\'s language.']`。两处都是错的：
- *
- * - 手写的 prompt 缺 `edit` 的那些坑（oldText 必须精确匹配…），而那是官方**踩过才写下**的；
- * - 更要紧的是**规则不该住在代码里** —— 它该住在文件里，那样用户能自己改。
- *
- * ## 「用用户的语言回答」现在放哪
- *
- * pi 有一套完整的文件发现机制（`resource-loader.ts`），我们原样复用：
+ * 「用用户的语言回答」走 pi 的文件发现机制（`resource-loader.ts`，我们原样复用）：
  *
  * | 文件 | 位置 | 进哪一段 |
  * | --- | --- | --- |
- * | `SYSTEM.md` | `<cwd>/.pi/SYSTEM.md`（项目信任时）或 `~/.pi/agent/SYSTEM.md` | 顶掉 preamble |
+ * | `SYSTEM.md` | `<cwd>/.pi/SYSTEM.md` 或 `~/.pi/agent/SYSTEM.md` | 顶掉 preamble |
  * | `APPEND_SYSTEM.md` | 同上两个位置 | `<addendum>` 段 |
  * | `AGENTS.md` / `AGENTS.override.md` / `CLAUDE.md` | 家目录 + 项目 + 每一层祖先目录 | `<project_context>` 段 |
  *
- * 所以「用用户的语言回答」是 `~/.pi/agent/APPEND_SYSTEM.md` 里的一行 —— 用户自己写、
- * 想改就改、不用改代码。而 `AGENTS.md` 已经是那套机制的一部分（之前就在扫，
- * 只是没人往里面写规则）。
- *
- * **为什么不给代码里留一个后门**：`promptGuidelines` 参数确实存在，留一条「项目自己的
- * 默认值」是很自然的想法。但那会让「规则在代码里」和「规则在文件里」**并存** ——
- * 用户改了文件却发现某条还在，排查时根本想不到去看代码。
- *
- * ## 一处与 pi 的差异：项目信任
- *
- * pi 的项目级 `SYSTEM.md` 需要 `settingsManager.isProjectTrusted()`（防止在不受信任的
- * 目录里被文件劫持 prompt）。我们不读项目设置，所以**不实现这个信任判断** ——
- * 项目级的 `SYSTEM.md` / `APPEND_SYSTEM.md` 一律生效。
- *
- * 这个取舍是安全的：我们跑在用户自己的机器上、工具的路径边界也只圈在 `--cwd` 里，
- * 而读一份项目内的 `.pi/SYSTEM.md` 与读同目录的 `AGENTS.md` 风险相同（后者无条件生效）。
+ * 一处与 pi 的差异：pi 的项目级 `SYSTEM.md` 需要 `isProjectTrusted()`（防在不受信任的目录里
+ * 被文件劫持 prompt），我们不读项目设置，所以项目级那份一律生效。取舍是安全的：我们跑在
+ * 用户自己的机器上、工具边界只圈在 `--cwd` 里，读 `.pi/SYSTEM.md` 与读同目录 `AGENTS.md`
+ * 风险相同。
  */
 import { buildSystemPrompt, buildSystemPromptSections, type BuildSystemPromptOptions } from '@earendil-works/pi-coding-agent/dist/core/system-prompt.js';
 import { loadProjectContextFiles } from '@earendil-works/pi-coding-agent/dist/core/resource-loader.js';
@@ -67,22 +48,14 @@ export interface PromptInputs {
   /** 装进来的 skill（进 `<skills>` 段）。 */
   skills?: readonly SkillInfo[] | undefined;
   /**
-   * 显式的自定义前言（`--system`）。
+   * 显式的自定义前言（`--system`）。给它就**顶掉** pi 的 preamble，但 tools / rules /
+   * project_context / cwd 那些段照旧拼上（「我是这个项目的专用助手」不该顺带丢掉工具怎么用）。
    *
-   * 给它就**顶掉** pi 的 preamble（官方语义：`customPrompt` = replaces the default
-   * prefix）。但 tools / rules / project_context / cwd 那些段照旧拼上 ——
-   * 官方那个行为是对的：「我是这个项目的专用助手」不该顺带丢掉工具怎么用。
-   *
-   * **优先级低于文件**：`SYSTEM.md` 存在时用它（那是 pi 的规范，用户能自己改）。
+   * **优先级低于文件**：`SYSTEM.md` 存在时用它。
    */
   customPrompt?: string | undefined;
   /**
-   * 追加到 `<addendum>` 段的文字。
-   *
-   * 同样**优先级低于文件**：`APPEND_SYSTEM.md` 存在时用它。
-   *
-   * 为什么不留「代码里的默认规则」：那会让规则在代码与文件两处并存，用户改了文件
-   * 却发现某条还在 —— 排查时根本想不到去看代码。
+   * 追加到 `<addendum>` 段的文字。同样**优先级低于文件**：`APPEND_SYSTEM.md` 存在时用它。
    */
   appendPrompt?: string | undefined;
   /**
@@ -104,21 +77,13 @@ export interface PromptToolLike {
 /**
  * 从官方工具定义上取出 snippet / guideline。
  *
- * 为什么用 `create*ToolDefinition()` 而不是 `create*Tool()`：`create*Tool()` 返回的是
- * `AgentTool`，它**不带** `promptSnippet` / `promptGuidelines`（那是给 prompt 用的
- * 扩展点，只在 `ToolDefinition` 上）。而 TUI 那边本来就用的是 `create*ToolDefinition()`
- * —— 同一个实例，不额外建。
+ * 用 `create*ToolDefinition()` 而不是 `create*Tool()`：后者返回的 `AgentTool` **不带**
+ * `promptSnippet` / `promptGuidelines`，那两个只在 `ToolDefinition` 上。
  *
- * ## 只取**开着**的那些 —— 与 `tools.ts` 的 `getTools()` 同源
- *
- * 这里是 prompt 侧那份清单。若它与「真能跑的表」不一致，后果很具体：
- * prompt 告诉了模型 `grep` 怎么用，而工具表里没有 `grep` —— 模型一调就回
- * 「未知工具」，而日志里**看不到任何异常**（工具是按名字查表，查不到就是查不到）。
- * 反过来（表里有、prompt 不说）只是模型不知道有它，不算坏。
- *
- * 所以开关走 `selectedBuiltinToolNames()` —— 与 `getTools()` **同一个函数**。
- * 不是「两份各自读 settings.json 碰巧一致」，那种一致性只在没改配置时成立，
- * 而它一破就是静默的（见 `tools.ts` 里那个函数的注释）。
+ * 只取**开着**的那些，且开关走 `selectedBuiltinToolNames()` —— 与 `getTools()` 同一个函数。
+ * 若 prompt 侧与「真能跑的表」不一致：prompt 教了模型怎么用 `grep` 而表里没有，模型一调就回
+ * 「未知工具」，而日志里**看不到任何异常**。两份各自读 settings.json 的「碰巧一致」只在不改
+ * 配置时成立，一破就是静默的。
  */
 export function promptToolsFrom(cwd: string): PromptToolLike[] {
   const factory: Record<string, (dir: string) => ToolDefinition<any, any>> = {
@@ -143,20 +108,11 @@ export function promptToolsFrom(cwd: string): PromptToolLike[] {
 }
 
 /**
- * 找到 `SYSTEM.md` / `APPEND_SYSTEM.md`（pi 的规范，优先级与官方一致）。
+ * 找到 `SYSTEM.md` / `APPEND_SYSTEM.md`（优先级照抄官方 `discoverSystemPromptFile`）：
+ * `<cwd>/.pi/SYSTEM.md` → `~/.pi/agent/SYSTEM.md` → undefined。
  *
- * ## 优先级（照抄官方 `discoverSystemPromptFile`）
- *
- * 1. `<cwd>/.pi/SYSTEM.md` —— 项目级
- * 2. `~/.pi/agent/SYSTEM.md` —— 全局
- * 3. 都没有 → undefined
- *
- * **与 pi 的唯一差异**：官方还要求 `settingsManager.isProjectTrusted()` 才认项目级那份
- * （防止在不受信任的目录里被文件劫持 prompt）。我们不读项目设置，所以不实现那个判断 ——
- * 见文件头的「一处与 pi 的差异」。
- *
- * 项目目录名用官方常量 `CONFIG_DIR_NAME`（= `.pi`），不手写字符串：pi 改了我们不会
- * 静默地指向别处。
+ * **与 pi 的唯一差异**：官方还要求 `isProjectTrusted()` 才认项目级那份，我们不读项目设置，
+ * 所以不实现那个判断（理由见文件头）。项目目录名用官方常量 `CONFIG_DIR_NAME`。
  */
 function findSystemFile(cwd: string, filename: 'SYSTEM.md' | 'APPEND_SYSTEM.md'): string | undefined {
   const project = path.join(cwd, CONFIG_DIR_NAME, filename);
@@ -200,10 +156,8 @@ export function promptFileSources(cwd: string): PromptFileSources {
 /**
  * 「哪几个文件进了 prompt 的上下文」—— 开场 `[Context]` 那一节的清单。
  *
- * 与 `buildPromptOptions()` **同一个来源**（同样的三个函数）否则界面报的与模型收到
- * 可能分家，而症状是「界面上说有 AGENTS.md，可模型显然不知道里面写了什么」。
- *
- * 顺序与 pi 一致（system prompt 源 → append 源 → AGENTS.md 家目录/项目/祖先）。
+ * 与 `buildPromptOptions()` 同一个来源（同样的三个函数），否则界面报的与模型收到会分家，
+ * 症状是「界面上说有 AGENTS.md，可模型显然不知道里面写了什么」。顺序与 pi 一致。
  */
 export function contextFilePaths(cwd: string): string[] {
   const sources = promptFileSources(cwd);
@@ -289,14 +243,9 @@ export interface PromptParts {
   /**
    * 分段（段名 → 渲染后的文本；`preamble` 是唯一不带 tag 的段）。
    *
-   * ## 为什么要单独留一份
-   *
-   * pi 的 transcript 是**增量**的：后来的 system 消息按**段名** patch（`sections: {
-   * preamble: …, skills: null }`），而不是重发整段。只有拿得到「当初那几段」，
-   * 中途的 prompt 变更才可能做到「只把变了的段追加成新消息、已有消息一个字节不动」
-   * ——而那正是前缀缓存能活下来的原因（见 `prompt-head.ts`）。
-   *
-   * 只存渲染后的整段的话，中途任何一个字节的变更都得整段重发，缓存必断。
+   * 必须单独留一份：pi 的 transcript 是**增量**的，后来的 system 消息按**段名** patch，
+   * 而不是重发整段。只有拿得到「当初那几段」，中途的 prompt 变更才能做到「只把变了的段
+   * 追加成新消息、已有消息一个字节不动」（前缀缓存因此能活下来，见 `prompt-head.ts`）。
    */
   sections: Record<string, string>;
 }
@@ -304,10 +253,9 @@ export interface PromptParts {
 /**
  * 装配 prompt 的两份形态。
  *
- * skill 清单一律由调用方传进来（内核在 `assembleExtensions` 里 await 一次
- * `loadSkillRegistry()`）—— **这里不再自己扫目录**。早先那个 `loadSkills: true` 选项
- * 会在这里同步再扫一遍，回放 / 测试里很容易拿到与落盘不同的那份；现在 skill 是
- * `async` 加载的（pi 的 `DefaultResourceLoader` 是异步接口），prompt 装配本身保持纯函数。
+ * skill 清单一律由调用方传进来（内核 `await loadSkillRegistry()` 一次）—— 这里不自己扫目录：
+ * pi 的 `DefaultResourceLoader` 是异步的，而 prompt 装配保持纯函数；在这里再扫一遍的话，
+ * 回放 / 测试里很容易拿到与落盘不同的那份。
  */
 export function buildPromptParts(inputs: PromptInputs): PromptParts {
   const options = buildPromptOptions({ ...inputs, skills: inputs.skills ?? [] });

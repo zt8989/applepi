@@ -1,23 +1,12 @@
 /**
  * 会话流（session stream）—— **从轨迹树派生的时间线**。
  *
- * ## 为什么要这一层
+ * 界面要画的是「这场对话发生过什么」。`state.messages` 不适合当那个真相（会被上下文
+ * 压缩整段替换、被恢复历史整批重灌、system 声明也混在里面），界面各处的临时提示也不适合
+ * （不持久、两个界面各记一份）。轨迹树只追加不改写，落盘、回放、恢复都是它，
+ * 所以时间线从它派生 —— 一份派生逻辑，两个界面共用。
  *
- * 界面要画的是「这场对话发生过什么」。以前这个答案有两个来源：
- *
- *   - `state.messages` —— 发给模型的**那份历史**。它会被上下文压缩整段替换、
- *     会被恢复历史整批重灌，中途的 system 声明也混在里面；
- *   - 界面上各处自己记的临时提示（TUI 的 `statusCards`、WebUI 的顶部提示条）。
- *
- * 两个来源都不适合当「发生过什么」的真相：前者会被改写，后者不持久、
- * 两个界面各记一份（于是 WebUI 看不到 TUI 的提示，反之亦然）。
- *
- * 轨迹树才是那份真相：一次尝试一节点，只追加不改写，落盘、回放、恢复都是它。
- * 于是时间线从它派生 —— **一份派生逻辑，两个界面共用**。
- *
- * ## 派生规则
- *
- * 按 `tree.order`（= 发生顺序）走一遍，每个节点最多产出一条条目：
+ * 派生规则：按 `tree.order`（= 发生顺序）走一遍，每个节点最多产出一条条目。
  *
  * | 节点 | 条目 |
  * | --- | --- |
@@ -29,16 +18,11 @@
  * | 容器（`turn.*` / `step.*`）与 `tool.call` | 不产出（工具调用在助手消息里，结果由 toolResult 出） |
  * | `prompt.base` / `prompt.tools` / `prompt.skills` | 不产出（是上下文装载，不是对话） |
  *
- * ## 旧轨迹的退路
+ * 旧轨迹的退路：旧文件里消息单独落在 `op:'message'` 行、节点上没有 `message`，
+ * 那时整体退回 `fallbackMessages`。判据是「**所有**会产生消息的节点都带了 message 吗」，
+ * 混合状态也整体退回：半份派生出来的时间线比不派生更误导。
  *
- * 节点上的 `message` 是新加的字段。旧轨迹文件里消息单独落在 `op:'message'` 行、
- * 节点上没有它 —— 那时整体退回 `fallbackMessages`（内核从会话文件读回来的那份），
- * 行为与改动前一致。判据是「**所有**会产生消息的节点都带了 message 吗」，
- * 混合状态（一半有一半没有）也整体退回：半份派生出来的时间线比不派生更误导。
- *
- * ## 纯函数
- *
- * 没有 IO、没有 `Date.now()`。同一棵树必然产出同一份流。
+ * 纯函数：没有 IO、没有 `Date.now()`，同一棵树必然产出同一份流。
  */
 import type { Message } from '@earendil-works/pi-ai';
 import type { TraceNode, TraceNodeKind, TraceTree } from './trace';
@@ -93,7 +77,7 @@ const KNOWN_CAUSES: ReadonlySet<string> = new Set<StopCause>([
   'compact-error',
 ]);
 
-/** 从节点的 meta 里取停止原因（没有就返回 undefined）。 */
+/** 从节点的 meta 里取停止原因。 */
 function causeOf(node: TraceNode): StopCause | undefined {
   const cause = node.meta?.['cause'];
   return cause !== undefined && KNOWN_CAUSES.has(cause) ? (cause as StopCause) : undefined;
@@ -218,7 +202,7 @@ export function deriveStream(
   return entries;
 }
 
-/** 只取消息条目（给「只想看对话」的调用方用）。 */
+/** 只取消息条目。 */
 export function streamMessages(entries: readonly StreamEntry[]): Message[] {
   const out: Message[] = [];
   for (const entry of entries) {

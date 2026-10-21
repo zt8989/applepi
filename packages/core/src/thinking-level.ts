@@ -1,26 +1,13 @@
 /**
  * 思考级别（reasoning effort）—— **解析与落盘的唯一入口**，规则逐条照抄 pi。
  *
- * ## 为什么单独一个文件
+ * 「启动时用哪一档」在 pi 那边有五条来源（命令行 / 会话文件 / settings 的 per-model 覆盖 /
+ * settings 的全局默认 / 内置 `medium`）和一道 clamp（模型支持哪几档）。散在各处各写一份的
+ * 症状是「启动那个档位与 `/thinking` 面板上打勾的那个不是同一个」，而且**只在配了 settings
+ * 时才看得出来**。所以这里一份纯函数 + 一份 settings 读写。
  *
- * 「启动时用哪一档」在 pi 那边是 `core/sdk.js:84-142` 那二十来行，看着简单，其实有五条
- * 来源（命令行 / 会话文件 / settings 的 per-model 覆盖 / settings 的全局默认 / 内置
- * `medium`）和一道 clamp（模型支持哪几档）。散在 `tui.ts` / `kernel.ts` / 界面里各写一份
- * 的症状是「启动那个档位与 `/thinking` 面板上打勾的那个不是同一个」——而且**只在配了
- * settings 时才看得出来**，极难归因。所以这里一份纯函数 + 一份 settings 读写。
- *
- * ## 与 pi 的对应关系
- *
- * | 这里的 | pi 的 |
- * | --- | --- |
- * | `resolveStartupThinkingLevel` | `core/sdk.js:120-142`（`createAgentSession` 里那段） |
- * | `thinkingLevelForModelSwitch` | `AgentSession._getThinkingLevelForModelSwitch` + `setThinkingLevel` 的 clamp |
- * | `clampForModel` | pi-ai 的 `clampThinkingLevel`（**转调，不自己实现**） |
- * | `writeDefaultThinkingLevel` | `SettingsManager.setDefaultThinkingLevel`（`/thinking` 里 `Ctrl+S`） |
- * | `readModelThinkingLevel` | `SettingsManager.getModelThinkingLevel`（`/settings` 的 per-model 覆盖） |
- *
- * clamp 直接用 pi-ai 导出的那个函数而不是自己写一遍：那张「哪些档位映射成什么」的表在
- * pi-ai 的模型目录里，抄一份必然漂移，而漂移的症状是「pi 显示 high，本项目显示 low」。
+ * clamp 转调 pi-ai 导出的 `clampThinkingLevel`：那张「哪些档位映射成什么」的表在 pi-ai 的
+ * 模型目录里，抄一份必然漂移（症状：pi 显示 high，本项目显示 low）。
  */
 import {
   clampThinkingLevel,
@@ -32,10 +19,8 @@ import { SettingsManager } from '@earendil-works/pi-coding-agent/dist/core/setti
 import { piAgentDir } from './pi-config';
 
 /**
- * 全部合法档位，**顺序就是 pi 的顺序**（`EXTENDED_THINKING_LEVELS`）。
- *
- * 顺序有意义：clamp 是「先往上找、找不到再往下找」，而 pi-ai 内部按同一顺序排；这里排错
- * 会让「非法值」的校验通过（顺序本身不影响 clamp，因为 clamp 在 pi-ai 那边）。
+ * 全部合法档位，**顺序就是 pi 的顺序**（`EXTENDED_THINKING_LEVELS`）—— 这里只用来校验
+ * 「是不是一个合法档位」，clamp 本身在 pi-ai 那边。
  */
 export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 
@@ -43,7 +28,7 @@ export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhig
  * 内置默认档位（pi 的 `core/defaults.js` 的 `DEFAULT_THINKING_LEVEL`）。
  *
  * 是 `medium` 而不是 `high` —— 「默认就是 high」是「默认 medium + 模型只认 low/high/max +
- * 向上取整」三步的结果（见 `clampForModel` 的注释），不是 pi 把默认写成了 high。
+ * 往上取整」三步的结果，不是 pi 把默认写成了 high。
  */
 export const DEFAULT_THINKING_LEVEL: ModelThinkingLevel = 'medium';
 
@@ -53,17 +38,13 @@ export function isThinkingLevel(value: unknown): value is ModelThinkingLevel {
 }
 
 /**
- * 把级别 clamp 到模型支持的那几档（pi-ai 的 `clampThinkingLevel`）。
+ * 把级别 clamp 到模型支持的那几档（转调 pi-ai 的 `clampThinkingLevel`）。
  *
- * ## 为什么 `medium` 会变成 `high`
+ * 判据是模型的 `thinkingLevelMap`：映射成 `null` 的档位**不支持**，没写这个键的默认支持
+ * （`xhigh` / `max` 例外：必须显式映射）。clamp 是「从当前档位往上找第一个支持的」，所以
+ * 只支持 low/high/max 的模型上 `medium` → `high`、`off` → `low`（**根本关不掉思考**）。
  *
- * 判据是模型的 `thinkingLevelMap`：映射成 `null` 的档位**不支持**，没写这个键的档位默认
- * **支持**（`xhigh` / `max` 例外：必须显式映射）。例如 `qwen-token-plan-cn/deepseek-v4.1-flash`
- * 是 `{off:null, minimal:null, low:'low', medium:null, high:'high', xhigh:null, max:'max'}`：
- * 支持集 = `low` / `high` / `max`，而 clamp 是「从当前档位往上找第一个支持的」，
- * 于是 `medium` → `high`、`off` → `low`（**这个模型上根本关不掉思考**）。
- *
- * 模型给不出来（没装配）时返回 `off` —— 与 pi 的 `if (!model) thinkingLevel = "off"` 同一句。
+ * 模型给不出来（没装配）时返回 `off`（与 pi 的 `if (!model) thinkingLevel = "off"` 同一句）。
  */
 export function clampForModel(
   model: Model<any> | undefined,
@@ -94,21 +75,16 @@ export interface StartupThinkingInput {
  * 解析启动档位（**不含 clamp** —— clamp 要模型，而模型在装配之后才有）。
  *
  * 顺序与 pi 的 `core/sdk.js:120-142` 逐条一致：
- *
  * 1. `--thinking`；
  * 2. 会话里有 `thinking_level_change` → 用它；
  * 3. 会话**存在但没有那条记录** → `defaultThinkingLevel ?? medium`；
  * 4. 以上都还没有 → per-model 覆盖；
  * 5. 还没有 → `defaultThinkingLevel ?? medium`。
  *
- * ## 为什么第 3 步就短路了（照抄 pi 的一个怪处）
+ * 第 3 步就短路了（照抄 pi 的一个怪处）：于是「老会话 + 配了 per-model 覆盖」时用的是全局
+ * 默认而不是 per-model。改了它，症状是「同一个会话在 pi 与本项目里恢复出来的档位不一样」。
  *
- * 第 3 步已经给了一个值，于是第 4 步的 per-model 覆盖**不会被看到** —— 也就是说
- * 「老会话（早先的版本没写过 thinking 条目）+ 配了 per-model 覆盖」时，pi 用的是全局默认
- * 而不是 per-model。这是 pi 的实际行为，照抄：改了它，症状是「同一个会话在 pi 与本项目里
- * 恢复出来的档位不一样」，而那正是本文件要消灭的那类分歧。
- *
- * 非法值（手改过 settings.json / 会话文件）当作「没给」—— 不抛，退到下一级。
+ * 非法值（手改过 settings.json / 会话文件）当作「没给」，退到下一级。
  */
 export function resolveStartupThinkingLevel(input: StartupThinkingInput): ModelThinkingLevel {
   if (isThinkingLevel(input.cliLevel)) return input.cliLevel;
@@ -124,10 +100,10 @@ export function resolveStartupThinkingLevel(input: StartupThinkingInput): ModelT
 /**
  * 换模型之后用哪一档（pi 的 `_getThinkingLevelForModelSwitch` + clamp）。
  *
- * 顺序：作用域里给这个模型写死的档位（`/scoped-models` 的 `p/i:high`）→ per-model 覆盖 →
- * 全局默认 → **当前这一档**（照抄 pi：模型没配过时级别**带着走**，不会顺手改成 `medium`）。
- * 最后 clamp 到新模型支持的那几档 —— 换到一个不支持当前档位的模型时必须夹，否则会发出
- * 一个 provider 拒收的 reasoning 值。
+ * 顺序：作用域里给这个模型写死的档位 → per-model 覆盖 → 全局默认 → **当前这一档**
+ * （照抄 pi：模型没配过时级别带着走，不会顺手改成 `medium`）。
+ *
+ * 最后必须 clamp 到新模型支持的那几档：否则会发出一个 provider 拒收的 reasoning 值。
  */
 export function thinkingLevelForModelSwitch(
   model: Model<any> | undefined,
@@ -157,13 +133,10 @@ function defaultWithFallback(defaultLevel: string | undefined): ModelThinkingLev
   return isThinkingLevel(defaultLevel) ? defaultLevel : DEFAULT_THINKING_LEVEL;
 }
 
-// ─── settings.json 那一侧（与 `model-scope.ts` 的 `enabledModels` 同一份 settings） ───
-
 /**
  * 读 `settings.json` 的 `defaultThinkingLevel`（**原文，不校验**）。
  *
- * 读不到（没配过 / 文件坏了 / 没权限）返回 `undefined`：级别是可选功能，读不出来就当
- * 「没配过」，退到下一级来源 —— 与 `readHideThinkingBlock` 同一处理。
+ * 读不到返回 `undefined` → 当作「没配过」，退到下一级来源。
  */
 export function readDefaultThinkingLevel(cwd: string = process.cwd()): string | undefined {
   try {
@@ -189,8 +162,8 @@ export function readModelThinkingLevel(
 /**
  * 读**全部** per-model 覆盖（`/settings` 面板那一行要报「配了几个」）。
  *
- * 读不到（没配过 / 文件坏了 / 没权限）返回 `{}`：空对象与「没配过」在面板上是同一句
- * `none`，而返回 `undefined` 会让调用方多一个分支。
+ * 读不到返回 `{}`：空对象与「没配过」在面板上是同一句 `none`，返回 `undefined` 会让调用方
+ * 多一个分支。
  */
 export function readAllModelThinkingLevels(cwd: string = process.cwd()): Record<string, string> {
   try {
@@ -203,18 +176,13 @@ export function readAllModelThinkingLevels(cwd: string = process.cwd()): Record<
 /**
  * 读 `settings.json` 的 `thinkingBudgets`（各档 token 预算）。
  *
- * ## 只有四档，而且只在「按 token 算预算」的 provider 上有用
+ * 只有 `minimal` / `low` / `medium` / `high` 四档（`xhigh` / `max` 取预算时归成 `high`）。
+ * 思考与正文共一个 `max_tokens`，没有预算时一轮重度思考能把整个回复吃光。
  *
- * `minimal` / `low` / `medium` / `high` 就是 pi 的全部键（`xhigh` / `max` 在取预算时会被
- * 归成 `high`，见 pi-ai 的 `clampReasoning`）。它影响的是**思考占多少 token**：
- * 思考与正文共一个 `max_tokens`，没有预算时一轮重度思考能把整个回复吃光、一句话都
- * 不出来（pi-ai 的 `thinkingTokenBudgetField` 注释里就是这个场景）。
+ * 非法值（手改过：字符串、负数、NaN）**逐项丢掉**而不是整个字段作废 —— 丢一项只少一个
+ * 预算，整个作废会让另外三项也失效。
  *
- * 非法值（手改过：字符串、负数、NaN）**逐项丢掉**，而不是整个字段作废 —— 丢掉一项
- * 只少一个预算，而整个作废会让另外三项也失效。
- *
- * 与 pi 同一步：它也是**开局读一次**（`core/sdk.js:275` 递给 Agent 的那个字段），
- * 所以这轮聊到一半手改 settings.json 不会生效 —— 跟 pi 一样。
+ * 与 pi 同一步：**开局读一次**，所以聊到一半手改 settings.json 不会生效。
  */
 export function readThinkingBudgets(cwd: string = process.cwd()): ThinkingBudgets | undefined {
   let raw: unknown;
@@ -237,14 +205,11 @@ export function readThinkingBudgets(cwd: string = process.cwd()): ThinkingBudget
 /**
  * 写 `defaultThinkingLevel`（`/thinking` 面板里的 `Ctrl+S`）。
  *
- * 落的是**用户请求的那一档，不是 clamp 之后的那一档** —— 与 pi 的
- * `setThinkingLevel(level, { persist: true })` 一致（它 `setDefaultThinkingLevel(level)` 传的是
- * 请求值）。所以在 `deepseek-v4.1-flash` 上「存 medium」等于「存 high」：下次启动会再 clamp
- * 一次，结果一样。**不**在写之前 clamp：那样换个模型再换回来时，用户存的那一档就被永久
- * 改写了（用户以为存的是 medium，盘上却是 high）。
+ * 落的是**用户请求的那一档，不是 clamp 之后的那一档**（与 pi 的 `persist: true` 一致）。
+ * 写之前 clamp 的话，换模型再换回来时用户存的那一档就被永久改写了 —— 用户以为存的是
+ * medium，盘上却是 high。下次启动会再 clamp 一次，结果一样。
  *
- * async + `flush()` 的理由与 `writeHideThinkingBlock` 同一句：pi 的 `save()` 是入队异步写，
- * 不等它落盘的话，调用方紧接着读会读到旧值，而写失败也拿不到。
+ * `await flush()` 的理由见 `writeHideThinkingBlock`：pi 的 `save()` 是入队异步写。
  */
 export async function writeDefaultThinkingLevel(
   level: ModelThinkingLevel,

@@ -1,39 +1,21 @@
 /**
  * 问卷（`ask_user_question` 那种多题提问）在**宿主这一侧**的状态。
  *
- * ## 分工：终端归扩展，浏览器归我们
+ * 分工：`ask_user_question` 是本项目内置的扩展（`@juicesharp/rpiv-ask-user-question` 的
+ * pinned 依赖 + `patches/*.patch`），**终端那一份由扩展自己画**（多题 tab、预览面板、备注…），
+ * **浏览器那一份由我们画**（`webui/questionnaire.ts` 的弹窗 + 桥上的 `ui-questionnaire` 帧）。
+ * 两边同时开着同一份问卷，谁先答完都算数 —— 这是补丁里的握手段 `externalQuestionnaire`：
  *
- * `ask_user_question` 是本项目**内置**的一个扩展（`@juicesharp/rpiv-ask-user-question`
- * 的 pinned 依赖 + `patches/*.patch`，见 `extension-host.ts` 的「内置扩展」一节）：
+ *   扩展 execute() → 题目交给我们（开浏览器那份）+ 挂它自己的组件（终端那份）
+ *   谁先答：浏览器答 → handoff.answer(raw)（扩展收掉自己的组件继续）
+ *           终端答   → handoff.done()（我们收掉浏览器那份）
  *
- * - **终端那一份由扩展自己画**（它自己的 `QuestionnaireSession` 组件：多题 tab、预览面板、
- *   每题备注、折叠……）。那是它的强项，我们不去复刻。
- * - **浏览器那一份由我们画**（`webui/questionnaire.ts` 的弹窗 + 桥上的
- *   `ui-questionnaire` 帧）。扩展那边没有浏览器这个概念。
+ * 答案只回**表面**上的东西（第几题、选了哪个 label、自定义原文、备注），扩展补丁里的
+ * `toExternalResult` 负责翻成内部的 `QuestionnaireResult` —— 于是 core 不需要知道扩展内部的
+ * 形状。
  *
- * 两边**同时开着**同一份问卷，谁先答完都算数 —— 这是补丁里的握手段
- * （`externalQuestionnaire`，见 `patches/`）：
- *
- * ```
- *   扩展 execute()
- *     ├─ 把题目交给我们（handoff.params）        → 我们：开浏览器那份，等人答
- *     ├─ 挂它自己的组件（ctx.ui.custom）        → 终端那份，等人答
- *     ├─ 谁先答：浏览器答 → handoff.answer(raw)  → 扩展收掉自己的组件、用这份答案继续
- *     │          终端答   → 扩展 finally 里 handoff.done() → 我们收掉浏览器那份
- *     └─ buildQuestionnaireResponse(result, typed) → 模型看到的信封
- * ```
- *
- * ## 答案怎么变回扩展认识的东西
- *
- * 扩展的补丁里带了一个翻译（`toExternalResult`）：我们只回**表面**上的东西 ——
- * 第几题、选了哪个 label / 哪几个 label、自定义原文、备注 —— 由它翻成内部的
- * `QuestionnaireResult`（`preview` 这类只有题目里才有的东西在那里回填）。
- * 于是本文件（以及整个 core）**不需要**知道扩展内部的形状。
- *
- * ## 留空是合法的
- *
- * 没答的题压根不出现在 `answers` 里：扩展的信封会把它们列成 `unanswered:`（partial
- * submit），与它自己那份 TUI 一致。取消整份走 `cancelled`。
+ * 没答的题压根不出现在 `answers` 里（扩展的信封会把它们列成 `unanswered:`，与它自己那份
+ * TUI 一致）；取消整份走 `cancelled`。
  */
 export interface QuestionnaireOption {
   label: string;
@@ -331,12 +313,9 @@ export class QuestionnaireSession {
         if (intent.index < 0 || intent.index >= question.options.length) return false;
         this.answerList[this.activeIndex] = { kind: 'option', index: intent.index };
         this.settledFlags[this.activeIndex] = true;
-        // 单选一选定就是"这题答完了" —— 直接进**下一页**（与扩展自己那份的
-        // `computeAutoAdvanceTab` 同一条规则：最后一题答完就落到提交页）。
-        //
-        // 上一步这里只走到"最后一道题"、不跳提交页，理由是"怕回车顺手把问卷提交了"。
-        // 但那是**键盘重复**造成的（按住回车 → 第二下落在提交页上），而重复已经在两个
-        // 渲染器里都滤掉了 —— 一次回车只会推进一页，提交仍然只能在提交页上手动按。
+        // 单选一选定就是「这题答完了」—— 直接进**下一页**（与扩展自己那份的
+        // `computeAutoAdvanceTab` 同一条规则：最后一题答完就落到提交页）。键盘重复已经把
+        // 「一下回车推进两页」滤掉了，所以提交仍然只能在提交页上手动按。
         this.activeIndex = Math.min(this.activeIndex + 1, this.submitIndex);
         break;
       }
@@ -452,10 +431,11 @@ export interface ExternalQuestionnaireBridge {
 }
 
 /**
+/**
  * 宿主侧的问卷：接住扩展交过来的题目、开浏览器那一份、把答案回给扩展。
  *
- * 与上一版（拦 `ctx.ui.select` 猜题目）比，这里的输入是**权威**的：题目来自扩展
- * 归一化+校验之后的 `params`，不需要按标题前缀猜"这一次 select 是不是这份问卷的"。
+ * 输入是**权威**的：题目来自扩展归一化 + 校验之后的 `params`，不必按标题前缀猜
+ * 「这次 select 是不是这份问卷的」。
  */
 export class QuestionnaireHost {
   private session: QuestionnaireSession | undefined;

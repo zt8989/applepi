@@ -104,27 +104,16 @@ export interface ModelSpec {
 
 export type AgentAction =
   /**
-   * ═══ prompt 侧 ═══
+   * prompt 侧：人说了什么 + 装载 prompt。
    *
-   * 与 model 分开装载：prompt 是「跟模型说什么」，model 是「用哪个模型说」。两者独立变，
-   * 而且将来会有洋葱式 middleware 挂上来（见 packages/core/src/middleware.ts），它在 action 前后插手，
-   * 对 prompt 和对模型一视同仁 —— 所以 prompt 这块只管装载，不管扩展。
-   */
-  /**
-   * 人说了什么。`content` 是可选的：Web 侧带附件时，adapter 会把附件折成
-   * text/image content 块一起带进来，消息仍是标准的 pi-ai user 消息。
-   */
-  /**
-   * ═══ prompt 侧 ═══
+   * prompt 与 model 分开装载（「跟模型说什么」vs「用哪个模型说」），两者独立变；将来挂上来的
+   * 洋葱式 middleware（见 `middleware.ts`）对二者一视同仁，所以这块只管装载，不管扩展。
    *
-   * 这三条独立于 model：system prompt 后面要挂 Hooks（按事件追加片段、改写、注入），
-   * 那属于 prompt 的事，不该和「用哪个模型」混在一起。model.init 只管模型与能力。
-   */
-  /**
-   * 装载 prompt：基础 system prompt + 工具定义 + （将来）hook 产生的片段。
+   * `user.message` 的 `content` 可选：Web 侧带附件时 adapter 把附件折成 text/image content
+   * 块一起带进来，消息仍是标准的 pi-ai user 消息。
    *
-   * `tools` 是**完整定义**（name/description/parameters），不只是名字 —— 这些要原样进
-   * LLM 请求，所以落进 state 后回放不必重跑。
+   * `prompt.init` 装基础 system prompt + 完整工具定义 + skill 清单。`tools` 是**完整定义**
+   * （不只是名字）—— 它们要原样进 LLM 请求，落进 state 后回放不必重跑。
    */
   | {
       type: 'prompt.init';
@@ -142,14 +131,10 @@ export type AgentAction =
       /** 工具的完整定义。 */
       tools: PromptToolDefinition[];
       /**
-       * 装进来的 skill 清单（`skills.ts` 加载，官方 `loadSkills()`）。
+       * 装进来的 skill 清单，与 `systemPrompt` 一起定下来（skill 清单是它的一部分）。
+       * 单独存一份是为了界面能画清单、能判「这个 skill 这一轮到底在不在 prompt 里」。
        *
-       * 与 `systemPrompt` 一起定下来 —— 因为 `formatSkillsForPrompt()` 的输出是
-       * system prompt 的一部分。单独存一份是为了界面能画清单、能判「这个 skill 这一轮
-       * 到底在不在 prompt 里」（`/skill:x` 之前要查）。
-       *
-       * 没有就是没装（旧轨迹回放、测试）—— 判据是 `undefined`，不是空数组：
-       * 空数组也可能意味着「装了但一个都没有」。
+       * 判据是 `undefined` 而不是空数组：空数组也可能意味着「装了但一个都没有」。
        */
       skills?: SkillInfo[] | undefined;
       /** 加载诊断（重名 / frontmatter 不合法…），TUI 开场要显示。 */
@@ -167,19 +152,13 @@ export type AgentAction =
       promptDiagnostics?: string[] | undefined;
     }
   /**
-   * 中途追加一段 prompt（`system` 或 `developer` role）。
+   * 中途追加一段 prompt（`system` 或 `developer` role）。落进 `state.messages`，所以会被一起
+   * 落盘、一起回放。模型支不支持中途插由 `ModelCapabilities.midConvoSystemMessages` 决定，
+   * 不支持时 pi-ai 会把后来的 system 消息折进开头那条，我们不自己折。
    *
-   * 落进 `state.messages` —— 即 Conversation 的一部分，所以它会被一起落盘、一起回放。
-   * 模型支不支持中途插：`ModelCapabilities.midConvoSystemMessages`。不支持时 pi-ai 会把后来的
-   * system 消息折进开头那条，我们不自己折。
-   *
-   * ## `sections`：按**段名** patch（而不是再接一整段文本）
-   *
-   * pi 的形状：head 里带着全量 sections（`preamble` 加其余包 `tag` 的段），后来的消息
-   * 只需带上**变了的段**——`null` 表示删掉那一段。这样已有消息一个字节不动，
-   * 前缀缓存能活下来（而不支持中途插 system 的模型由 pi-ai 折叠）——见 `prompt-head.ts`。
-   *
-   * 带 `sections` 时 `text` 通常为空（`''`）：内容全在段里。
+   * `sections` 按**段名** patch（而不是再接一整段文本）：只需带上**变了的段**，`null` 表示
+   * 删掉那一段 —— 这样已有消息一个字节不动，前缀缓存能活下来（见 `prompt-head.ts`）。
+   * 带 `sections` 时 `text` 通常为空。
    */
   | {
       type: 'prompt.segment.added';
@@ -223,24 +202,16 @@ export type AgentAction =
       content?: (TextContent | ImageContent)[] | undefined;
     }
   /**
-   * ═══ steer / followUp ═══
+   * steer / followUp：环在跑的时候人还能说话。两种队列只差**投递时机**（与 pi 的
+   * `steer()` / `followUp()` 一致）：
    *
-   * 环在跑的时候人还能说话。两种队列只差**投递时机**（语义与 pi 的
-   * `AgentSession.steer()` / `followUp()` 一致）：
+   * - `as: 'steer'`：当前 step 的工具跑完后、下一次 LLM 调用前插入，会打断「模型→工具→模型」
+   *   的延续，让模型看见新的话；
+   * - `as: 'followUp'`：等模型没有工具调用了才插，然后开一个新回合。不打断任何东西。
    *
-   * - `queue.input` + `as: 'steer'`：当前 step 的工具跑完后、下一次 LLM 调用前插进去。
-   *   它会打断「模型→工具→模型」的延续，让模型看见新的话。
-   * - `queue.input` + `as: 'followUp'`：等模型没有工具调用了（回合本该收工）才插，
-   *   然后开一个新回合。不打断任何东西，只是「接着聊」。
-   *
-   * 两条队列各自 FIFO、互不排队（与 pi 同）。
-   *
-   * ## 为什么不用 `user.message` 表达
-   *
-   * `user.message` 的语义是「开始一个新回合」—— 它会开 user 节点、清 `turns`、
-   * 把相位从 idle 拉到 thinking。而 steer 发生时相位正在 thinking/calling-tools，
-   * 走那条路会把正在跑的回合重置掉（用户看到「对话重来了一遍」）。
-   * 两者必须是不同的 action。
+   * 两条队列各自 FIFO、互不排队。**不能**用 `user.message` 表达：那条的语义是「开始一个新
+   * 回合」（开 user 节点、清 `turns`、把相位从 idle 拉到 thinking），而 steer 发生时相位正在
+   * thinking / calling-tools，走那条路会把正在跑的回合重置掉。
    */
   | {
       type: 'queue.input';
@@ -249,17 +220,12 @@ export type AgentAction =
       as: QueueKind;
     }
   /**
-   * 一条排队的输入**已被取出并组装成 user 消息**。
+   * 一条排队的输入**已被取出并组装成 user 消息**：reducer 据此把消息插进 `messages`，
+   * 并开一个 user 轨迹节点。
    *
-   * 由接线在「此刻该投递了」的那一刻发出；reducer 据此把消息插进 `messages`，
-   * 并顺带开一个 user 轨迹节点。
-   *
-   * ## 为什么投递本身也是一条 action
-   *
-   * 因为「什么时候该投递」是**状态决定的**（steer 在 step 收尾、followUp 在回合收工），
-   * 而 reducer 是唯一知道状态的地方。接线只能在收到某个 action 后读**迁移后**的
-   * state，判断出「队列头该走了」，再发这一条 —— 于是投递成了环上的一环，
-   * 而不是某个 effect 里的隐藏副作用。
+   * 投递本身也是 action：「什么时候该投递」是**状态决定的**（steer 在 step 收尾、followUp
+   * 在回合收工），而只有 reducer 知道状态。于是投递成了环上的一环，而不是 effect 里的隐藏
+   * 副作用。
    */
   | {
       type: 'queue.delivered';
@@ -268,35 +234,22 @@ export type AgentAction =
       as: QueueKind;
     }
   /**
-   * 清空两条队列（不再投递）。
+   * 清空两条队列（不再投递）。pi 的 `Alt+Up` = `app.message.dequeue`。
    *
-   * ## 为什么需要它（pi 的 `Alt+Up` = `app.message.dequeue`）
-   *
-   * 「把排队的消息还回编辑器」意味着「这些我先不发了」。还回编辑器只是界面侧的动作
-   * （把文本拼回输入框），而**队列本身必须一并清掉** —— 否则下一次投递点它们照样会
-   * 插进对话，于是编辑器里留一份、对话里再冒出一份，看着像说重了。
-   *
-   * 不带任何参数、也不还回内容：还回是界面的事（它手上有那两条队列的文本），
-   * reducer 只负责把「已决定要发」的账平掉。
+   * 「把这些消息还回编辑器」意味着「我先不发了」：还回文本是界面的事，但**队列必须一并清掉**
+   * —— 否则下一次投递点它们照样插进对话，编辑器里一份、对话里又一份。
    */
   | { type: 'queue.clear' }
   /**
-   * ═══ turn / step 两层容器 ═══
-   *
-   * 这四条把原先的 `llm.attempt` 容器换掉了。新的层级：
+   * turn / step 两层容器：`turn.start` / `turn.end` 是一次用户输入引发的整个回合，
+   * `step.start` / `step.end` 是一次 LLM 调用加上它触发的工具批次。
    *
    *   user.message → turn.start → step.start → llm.result → tool.*
    *                                        → step.end
    *                  → turn.end
    *
-   * - `turn.start` / `turn.end`：一次用户输入引发的整个回合。
-   * - `step.start` / `step.end`：一次 LLM 调用加上它触发的工具批次。
-   *
-   * ## 重试的开叉位置不变（但多了一层）
-   *
-   * 原先重试是在「同一个 tip 下开多个 `llm.attempt`」。现在容器（turn/step）都不推进 tip，
-   * 一次失败也不推进 tip，所以**重试开的新 step 仍然挂回同一个 turn 节点** ——
-   * 于是在 turn 下面长出分叉，与之前语义一致。
+   * 容器（turn/step）都不推进 tip、一次失败也不推进 tip，所以**重试开的新 step 仍然挂回
+   * 同一个 turn 节点**，在 turn 下面长出分叉。
    */
   | { type: 'turn.start' }
   /**
@@ -369,12 +322,11 @@ export type AgentAction =
   /**
    * 工具执行中的**流式增量**（长命令边跑边送）。
    *
-   * `content` 是「到目前为止的**全部**输出」，不是 diff —— 界面直接整个替换。
-   * 工具跑完时 `tool.result` 会把终值写进 `messages`，这条只是给界面看的中间态。
+   * `content` 是「到目前为止的**全部**输出」，不是 diff —— 界面直接整个替换。终值由
+   * `tool.result` 写进 `messages`，这条只是给界面看的中间态。
    *
-   * **为什么单独一条 action**：输出是工具执行里的事情，而工具执行由 effect 驱动
-   * （它拿到那个 `onUpdate` 回调）。所以「工具报了新输出」就得从 effect 回流到 reducer ——
-   * 跟 `llm.delta` 是同一个形状。
+   * 单独一条 action：输出是 effect 驱动的工具执行里的事情，要回流到 reducer 只能这样
+   * （与 `llm.delta` 同一个形状）。
    */
   | {
       type: 'tool.progress';
@@ -398,39 +350,24 @@ export type AgentAction =
   /**
    * 一个 **pi agent 生命周期事件**（内核自己发的那些）。
    *
-   * ## 为什么它是一条 action，而不是内核里一个直接回调
+   * 它必须是 action：「状态只能由 action 改」，而轨迹树是 action 的产物 —— 只有走了 store 的
+   * 事才会被记进树上、被落盘、被回放。「扩展/宿主收到了什么」本身就是该留下证据的历史。
    *
-   * 本项目的不变式是「状态只能由 action 改」，而**轨迹树是 action 的产物**：
-   * 只有走了 store 的事才会被 reducer 记进树上、被落盘、被回放。
-   * 生命周期事件（`agent_start` / `tool_execution_*` / `message_end` …）同理：
-   * 它们得是 action，才能在轨迹里看得见 —— 「扩展/宿主收到了什么」本身就是一段
-   * 该留下证据的历史（Orca 那类状态面板全靠它，出了问题也就靠它查）。
+   * 落点是 kind 为 `extension.event` 的轨迹节点（**不推进 tip**）。但已经有专属节点的事件
+   * 不再另开节点：`message_end` → `llm.result`，`tool_execution_*` → `tool.call` /
+   * `tool.result`，`model_select` → `model.changed`。所以真正落 `extension.event` 的只有
+   * 相位级三条（`agent_start` / `agent_end` / `agent_settled`）。
    *
-   * 落点是 kind 为 `extension.event` 的轨迹节点（**不推进 tip** —— 它是注释，
-   * 不是「发生过的一件事」的推进点）。但**已经有专属节点的事件不再另开节点**：
-   *
-   * | 生命周期事件 | 专属节点（信息更全，就不重复记了） |
-   * | --- | --- |
-   * | `message_end` | `llm.result`（带完整 Message） |
-   * | `tool_execution_start` / `tool_execution_end` | `tool.call` / `tool.result`（带参数、结果、消息） |
-   * | `model_select` | `model.changed` |
-   *
-   * 所以真正落 `extension.event` 的只有相位级三条（`agent_start` / `agent_end` /
-   * `agent_settled`）—— 它们没别处记。也就是说 `tool_execution_*` **不能**代替
-   * `tool.call` / `tool.result`：前者是通知（只有 id / 名字 / isError），后者才是记录。
-   *
-   * 发出与记录在**同一处**（kernel 的 `recordLifecycle()`）：先 dispatch（进轨迹），
-   * 再 `ExtensionHost.emitLifecycle()`（发给扩展）。分开做两遍必然会漂。
+   * 发出与记录在同一处（kernel 的 `recordLifecycle()`）：先 dispatch（进轨迹），再
+   * `emitLifecycle()`（发给扩展）—— 分开做两遍必然会漂。
    */
   | { type: 'extension.lifecycle'; event: ExtensionLifecycleEvent }
-  // ── 上下文压缩 ──
   /**
-   * 开始一次压缩。**不携带结果** —— 它只是「我要压」，真正干活的是 effect
-   * （要花钱、要打网络），结果从 `compact.done` / `compact.failed` 回来。
+   * 开始一次压缩。**不携带结果** —— 真正干活的是 effect（要花钱、要打网络），结果从
+   * `compact.done` / `compact.failed` 回来。
    *
-   * 为什么要有这条：压缩不能写成 `user.message` 之后的自动副作用 ——
-   * 自动压的话，用户永远不知道对话刚刚被改写过（而「模型忘了什么」正是最难查的一类问题）。
-   * 显式一条 action，界面就能在对话区画出一条「已压缩」的节点。
+   * 不把压缩写成 `user.message` 之后的自动副作用，是为了**看得见**：自动压的话用户永远不知道
+   * 对话刚被改写过，而「模型忘了什么」正是最难查的一类问题。
    */
   | {
       type: 'compact.request';
@@ -478,48 +415,28 @@ export type AgentAction =
   /**
    * 恢复历史：把一条**已有会话里读回来的**消息塞进 messages。
    *
-   * 它跟 `user.message` / `llm.done` 的区别是：消息不是「刚发生的」，是「上次发生的」。
-   * 迁移时**不能**开新的 user 节点、也不能推进 tip —— 轨迹是那一轮的东西，这里只是把
-   * 对话补齐。所以相位不动、树不动。
-   *
-   * 零 token：不重跑模型，纯粹是把 JSONL 里读到的内容灌回状态。
+   * 消息不是「刚发生的」而是「上次发生的」：迁移时**不**开新的 user 节点、也不推进 tip，
+   * 相位不动、树不动 —— 只是把对话补齐。零 token：不重跑模型。
    */
   | { type: 'session.restored'; message: Message }
   /**
    * 恢复历史：**一次**把整批消息灌回去（清对话 + 换会话 id）。
    *
-   * ## 为什么不能靠 N 条 `session.restored`
+   * 不能靠 N 条 `session.restored`：界面每个 dispatch 都重渲染整段对话，成本与 messages
+   * 长度成正比 —— 逐条灌 N 条就是 O(N²)（390 条实测 62 秒）。合成一条只渲染一次。
    *
-   * 界面每个 dispatch 都会重渲染整段对话，而重渲染的成本与 messages 长度成正比 ——
-   * 逐条灌 N 条就是 O(N²)。390 条消息实测 62 秒（`tmp-bench` 那份脚本就是这个数），
-   * 用户看到的是「卡了一分钟」。合成一条 dispatch 只渲染一次，代价降到 O(N)。
-   *
-   * ## 与逐条版的差别
-   *
-   * 状态结果完全一样（messages 等于这批，`phase`/`trace` 不动）。另外因为它带着
-   * `sessionId`，恢复时**顺带换了会话 id** —— 界面用它就不必再单独 dispatch 一次
-   * `conversation.reset`，那次 dispatch 在这个组合里是多余的（第 0 次消息没有、
-   * 但每次都白白重渲染一整屏）。
+   * 带着 `sessionId` 顺带换了会话 id，所以界面不必再单独 dispatch `conversation.reset`。
    */
   | { type: 'conversation.restored'; sessionId: string; messages: Message[] }
   /**
    * 恢复历史：**连轨迹树一起**灌回去。
    *
-   * ## 为什么 `conversation.restored` 不够
+   * 只带 `messages` 不够：迁移时会造一份**全新的空树**，于是对话区有内容但轨迹面板是**空的**
+   * —— 症状特别有欺骗性（消息都在，只有轨迹没了，很容易归因为「恢复不完整」，而真因是那条树
+   * 压根没被读回来）。
    *
-   * 早先恢复只带 `messages`，而 `conversation.restored` 的迁移里用 `createInitialState`
-   * 造了一份**全新的空树** —— 于是恢复后对话区有内容（含粘贴的图片），但轨迹面板**空的**。
-   *
-   * 症状特别有欺骗性：图像能看见、消息都在，只有轨迹没了，于是很容易归因为「恢复不完整」，
-   * 而真因是那条树压根没被读回来（`traces/<时间戳>_<id>.jsonl` 明明在盘上）。
-   *
-   * ## 为什么要单独一条而不是给 `conversation.restored` 加个可选字段
-   *
-   * 因为「有没有轨迹文件」是**运行期事实**（那个文件存在吗），不是「想要什么」。
-   * 可选字段会让两处各判一次：内核判「要不要带」、迁移判「带了用不用」——
-   * 一旦不一致，症状又是「有时恢复有轨迹有时没有」，而那更难复现。
-   *
-   * 带了就用；没带（或文件不存在）就是空树，与之前行为完全一致。
+   * 单独一条而不是给 `conversation.restored` 加可选字段：「有没有轨迹文件」是**运行期事实**，
+   * 可选字段会让内核与迁移各判一次，一旦不一致就是「有时恢复有轨迹有时没有」。
    */
   | {
       type: 'trace.restored';

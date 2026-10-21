@@ -4,34 +4,17 @@ import type { AgentTool, AgentToolResult } from './agent-tool';
 /**
  * 内置工具集。
  *
- * 这里的工具**不再是自己实现的** —— 来自 `@earendil-works/pi-coding-agent`
- * （源码在那个仓库的 `packages/coding-agent/src/core/tools/`），也就是 Pi 官方
- * coding agent 用的那套：`read` / `write` / `edit` / `bash`。
+ * 工具本身来自 `@earendil-works/pi-coding-agent`（Pi 官方 coding agent 那套 `read` / `write` /
+ * `edit` / `bash`），换来路径边界检查、文件变更串行化（`withFileMutationQueue`）、截断策略、
+ * bash 超时与进程回收 —— 自己写要花很多功夫，而且容易写漏。
  *
- * 换来的好处是实打实的：路径边界检查、文件变更串行化（`withFileMutationQueue`）、
- * 截断策略、bash 超时与进程回收 —— 这些自己写要花很多功夫，而且容易写漏。
+ * 这一层适配只做签名收窄：官方的 execute 多两个尾参 `(toolCallId, params, signal, onUpdate,
+ * ctx)`，我们的 effect 只用前四个（`ctx` 由对方运行时注入），所以丢掉 `ctx`、把 `onUpdate`
+ * 转成本项目的 `AgentToolUpdate` —— `effects.ts` 完全不知道 pi-coding-agent 的存在。
  *
- * ## 为什么要一层适配
- *
- * 官方的 `AgentTool`（来自 pi-agent-core）execute 签名多两个尾参：
- *
- *   execute(toolCallId, params, signal, onUpdate, ctx)
- *
- * 我们自己的 effect 只需要前四个（ctx 由对方运行时注入，不在公开契约里）。
- * 所以这里把第五个丢掉、把第四个**转成本项目的 `AgentToolUpdate`**，
- * 签名收窄成本项目的形状 —— `effects.ts` 完全不知道 pi-coding-agent 的存在。
- *
- * ## `onUpdate` 这一层是干什么的
- *
- * 官方的 bash 工具有一个 `onUpdate` 回调：每收到一块输出就调一次（内部有节流），
- * 于是长命令（`npm install`、`sleep 30 && echo done`）能**边跑边显示**，
- * 而不是「卡住几十秒然后突然蹦出一坨」。
- *
- * 早先这里传的是 `undefined`，那条路完全没用上：界面直到命令结束才动 ——
- * 而「不知道它在跑什么」与「以为卡死了」只差一秒。
- *
- * `parameters` 那边也有个细节：官方用的是 typebox 的 `TObject`，本项目声明的是
- * pi-ai 的 `TSchema`。两者同源（都出自 typebox），直接给即可。
+ * `onUpdate` 是官方 bash 工具的流式回调（内部有节流），长命令能**边跑边显示**而不是卡几十秒
+ * 后突然蹦出一坨。`parameters` 那边官方的 `TObject` 与本项目声明的 `TSchema` 同源
+ * （都出自 typebox），直接给即可。
  */
 import {
   createBashTool,
@@ -81,24 +64,17 @@ function adapt(official: OfficialTool<any>, label: string): AgentTool {
  */
 
 /**
- * 八个内置工具：哪些默认开、哪些默认关。
- *
- * 与 pi 完全一致（`DEFAULT_TOOL_NAMES` + 它帮助里的那张表）：
+ * 八个内置工具：哪些默认开、哪些默认关（与 pi 的 `DEFAULT_TOOL_NAMES` 及其帮助一致）：
  *
  * | 工具 | 默认 | 说明 |
  * | --- | --- | --- |
  * | `read` / `write` / `edit` / `bash` | **开** | 四个基本工具 |
  * | `powershell` | **关** | Windows 原生 shell；`bash` 走 Git Bash/WSL，用 `+powershell` 显式开 |
- * | `grep` / `find` / `ls` | **关** | 只读检索类，pi 觉得多数时候用 bash 就够了 |
+ * | `grep` / `find` / `ls` | **关** | 只读检索类，多数时候 bash 就够了 |
  *
- * ## 为什么自己维护这张表而不调 pi 的 `createCodingTools()`
- *
- * 官方那两个工厂的分组表达不了这四件事：`powershell` 不在 `createCodingTools()`
- * 里（它在 `createAllTools()`），而 `createAllTools()` 返回的是 map 不是数组；
- * 更关键的是它**不区分默认开关** —— 语义上「有哪些工具」与「默认开哪些」是两件事。
- *
- * 默认集合从 pi 的 `DEFAULT_TOOL_NAMES` **读**（见 `resolveToolSelection`），
- * 这样一个字都不重复维护：pi 改了默认清单，我们跟着变。
+ * 自己维护这张表而不调 `createCodingTools()` / `createAllTools()`：那两个工厂表达不了「有哪些
+ * 工具」与「默认开哪些」的区别（`powershell` 不在 coding tools 里，`createAllTools()` 返回 map
+ * 且不区分默认开关）。默认集合从 pi 的 `DEFAULT_TOOL_NAMES` **读**，一个字都不重复维护。
  */
 
 /** 官方工具名（与 pi 的 `ToolName` 同一套拼写）。 */
@@ -140,22 +116,17 @@ function piDefaultToolNames(): readonly string[] {
 }
 
 /**
- * 解出「默认开哪些工具」。
- *
- * ## 语义**逐条照抄** pi 的 `resolveDefaultTools()`
- *
- * 1. `entries` 为空（没有任何 `defaultTools` 配置）→ 用 `DEFAULT_TOOL_NAMES`；
+ * 解出「默认开哪些工具」。语义**逐条照抄** pi 的 `resolveDefaultTools()`：
+ * 1. `entries` 为空 → 用 `DEFAULT_TOOL_NAMES`；
  * 2. 出现**不带前缀**的名字 → 整份清单被**替换**（不是追加），`+`/`-` 再在上面打补丁；
  * 3. 只有 `+name` / `-name` → 先取默认清单，再按顺序应用增删。
  *
- * 为什么自己写而不调官方的 `SettingsManager`：那一整套要读磁盘上的多层 settings
- * （项目 / 全局 / 内置），而本项目只认 `~/.pi/agent/settings.json` 一个文件
- * （见 `pi-config.ts` 的 `loadPiSettings`）。引整个设置管理器会连它自己的
- * 多层合并规则一起引进来，而我们只用得上最后那一步 —— 两处各有一份「最终值」
- * 反而更危险。规则本身照抄，所以结果与 pi 一致。
+ * 不调官方的 `SettingsManager`：它要读多层 settings（项目 / 全局 / 内置），而本项目只认
+ * `~/.pi/agent/settings.json` 一个文件；引它会把多层合并规则也引进来，两处各有一份「最终值」
+ * 反而更危险。规则照抄，结果与 pi 一致。
  *
- * 未知名字**不报错也不剔除** —— 用户写错一个名字时的表现应该和 pi 一样：
- * 那个工具不存在，于是没开成。（严格剔掉反而会让人以为「写了但被禁用了」。）
+ * 未知名字**不报错也不剔除** —— 用户写错一个名字时的表现应该和 pi 一样（那个工具不存在，
+ * 于是没开成）。
  *
  * @param settings `settings.json` 的 `defaultTools`；undefined = 没配。
  */
@@ -243,18 +214,10 @@ function allBuiltins(cwd: string): readonly AgentTool[] {
 /**
  * 记住上次算出来的开关。
  *
- * ## 为什么需要它
- *
- * `getTool(name)` 在**每次工具执行**时都调一次（`effects.ts` 的 `runToolCall`），
- * 而它走 `getTools()`。而开关来自 `settings.json` —— 每次都 `readFileSync` 的话，
- * 「跑一次工具」就变成「多一次同步磁盘读」。长会话里工具调用几十上百次，
- * 那是白花开销，而配置文件在进程生命周期内基本不变。
- *
- * ## 什么时候重算
- *
- * 换 cwd（key 变了）→ 重算；测试调 `resetTools()` → 重算。
- * 中途手改 settings.json **不**触发重算 —— 与 pi 一致（它的 `defaultTools` 也是
- * 启动时读一次），改完重开即生效。
+ * `getTool(name)` 在**每次工具执行**时都调一次，而开关来自 `settings.json` —— 每次都
+ * `readFileSync` 就是「跑一次工具多一次同步磁盘读」。配置在进程生命周期内基本不变，所以
+ * 换 cwd（key 变了）或测试调 `resetTools()` 时重算；中途手改 settings.json 不触发
+ * （与 pi 一致，改完重开生效）。
  */
 let cachedOn: { key: string; names: ReadonlySet<string> } | undefined;
 
@@ -278,27 +241,17 @@ export function selectedBuiltinToolNames(cwd: string = process.cwd()): ReadonlyS
 /**
  * 扩展提供的工具（`extension-host.ts` 装出来的）。
  *
- * ## 为什么要**单独**一份而不是直接并进 `registries`
+ * **单独**一份而不是并进 `registries`：官方工具在**构造时**把 cwd 烤进闭包（路径边界检查靠
+ * 它），必须按 cwd 缓存；扩展工具已经自己拿到了 `ctx.cwd`，不依赖注册表的 cwd，也**不能**按
+ * cwd 重建（重建等于把 jiti 装载好的模块重新适配一遍）。所以两层：按 cwd 的官方工具（缓存）
+ * + 一份全局的扩展工具，`getTools()` / `getTool(name)` 合起来查 —— 环那边看不出区别。
  *
- * 官方工具在**构造时**把 cwd 烤进闭包（路径边界检查靠它），所以它们必须按 cwd 缓存。
- * 扩展工具相反 —— 它们已经自己拿到了 `ctx.cwd`（`extension-tools.ts` 里拼的），
- * 不依赖注册表的 cwd，**也不能**按 cwd 重建：重建等于把 jiti 已经装载好的模块
- * 重新适配一遍，白花开销。
- *
- * 所以分成两层：按 cwd 的官方工具（缓存）+ 一份全局的扩展工具。`getTools()` 把它们
- * 合起来，`getTool(name)` 从合并后的表里找 —— 环那边**看不出**这个区别。
- *
- * 装载顺序：内核在 `prompt.init` **之前**调 `registerExtraTools()`（见 kernel.ts）。
- * 反过来的话 `prompt.init` 已经把工具清单装进 state 了，扩展工具就只存在于注册表、
- * 模型看不见 —— 而症状是「工具调用永远回「未知工具」」。
+ * 装载顺序：内核必须在 `prompt.init` **之前**调 `registerExtraTools()`。反过来的话
+ * `prompt.init` 已经把工具清单装进 state，扩展工具就只存在于注册表、模型看不见。
  */
-// ─── 暴露方式（exposure）───
-//
-// 同名的概念在 pi 那边叫 `ToolExposure`（`core/extensions/types.ts`）。本项目这一层
-// 早先只有一种暴露：**全部 declared**（都进模型的工具表）。接 MCP + codemode 之后必须
-// 分开「声明给模型」与「脚本能调」—— MCP 的默认工具**不进模型的工具表**，只能从
-// codemode 脚本里调。这不是省事，是 token 与准确率的取舍：服务器几十个工具全塞进
-// 工具表既贵又让模型挑错。
+// 同名的概念在 pi 那边叫 `ToolExposure`。接 MCP + codemode 之后必须分开「声明给模型」与
+// 「脚本能调」：MCP 的默认工具**不进模型的工具表**，只能从 codemode 脚本里调 —— 服务器几十个
+// 工具全塞进工具表既贵又让模型挑错。
 //
 // | exposure | 声明给模型 | 能从脚本调 | 谁给 |
 // | --- | --- | --- | --- |
@@ -308,11 +261,10 @@ export function selectedBuiltinToolNames(cwd: string = process.cwd()): ReadonlyS
 // | `deferred` | 否 | 开 | `tool_search` 装载（搜到才声明），或 codemode 脚本直接调 |
 // | `hidden` | 否 | 否 | 服务器已撤下的工具 |
 //
-// **`deferred` 与 `codemode` 的差别只在「谁来装载」**：`tool_search` 把两者都能搜出来并
-// 装进声明（`isSearchable(exposure)` 就是这两个值）。早先本项目不装 `tool_search`
-// （理由是「工具集装载时定死」，那条已经换成「变了要声明」，见 `extension-tools.ts`），
-// 于是 deferred 只能从 codemode 脚本调（pi 文档原话：either indirect mechanism）。
-// 现在两条路都通：搜得到的进声明，搜不到/不想搜的照样能从脚本调。
+// `deferred` 与 `codemode` 的差别只在「谁来装载」：`tool_search` 把两者都能搜出来并装进声明
+// （`isSearchable(exposure)` 就是这两个值），搜不到或不想搜的照样能从脚本调。
+
+
 export type ToolExposure = 'direct' | 'model-only' | 'codemode' | 'deferred' | 'hidden';
 
 /** 一组相关工具（比如一个 MCP 服务器的全部工具）。codemode 按它分组展示。 */
@@ -407,22 +359,14 @@ export function getExtensionTools(): readonly AgentTool[] {
   return extensionEntries.filter((e) => e.exposure !== 'hidden').map((e) => e.tool);
 }
 
-// ─── 激活集：哪些工具**对模型可见** ───
-//
 // 激活集 = 发给模型的工具声明的名字集合（pi 的 `getActiveTools` / `setActiveTools` 同义）。
-// 内置工具的开关来自 `settings.json` 的 `defaultTools`（照旧）；扩展工具里 `direct` /
-// `model-only` 的默认激活，`codemode` / `deferred` 的要显式激活（`+codemode`，或 MCP
-// 发现有 codemode 工具时自己激活）。
+// 内置工具的开关来自 `settings.json` 的 `defaultTools`；扩展工具里 `direct` / `model-only`
+// 默认激活，`codemode` / `deferred` 要显式激活（`+codemode`，或 MCP 发现有 codemode 工具时
+// 自己激活）。`activeOverride` 一旦被 `setActiveToolNames()` 设过就**以它为准**。
 //
-// `activeOverride` 一旦被 `setActiveToolNames()` 设过就**以它为准**：那正是 pi 的
-// `setActiveTools()` 语义（MCP 在 `session_start` 里加 codemode、`pi-web-access` 的
-// `web_enable` 在会话中途加 web 工具，走的都是它）。
-//
-// **会话中途真的能改**（早先这里有个 `frozen` 把窗口外一律拒绝）。能改的前提不是
-// 「改这里」，而是「改了要被声明出去」：工具集变了，模型得被告知。
-// 那一步在 `reducer.ts` 的 `agent.run`（发起请求前 diff 出 `toolsAdded` / `toolsRemoved`
-// 追加成一条 system 消息，与 pi-agent-core 的 `declareToolChanges` 同一步），
-// 于是**已有的消息一个字节不动**（前缀缓存），而 `state.prompt.tools` 更新成新声明。
+// **会话中途真的能改**。前提不是「改这里」，而是「改了要被声明出去」：工具集变了，模型得被告
+// 知 —— `agent.run` 在请求前 diff 出 `toolsAdded` / `toolsRemoved` 追加成一条 system 消息，
+// 于是已有的消息一个字节不动（前缀缓存），而 `state.prompt.tools` 更新成新声明。
 let activeOverride: ReadonlySet<string> | undefined;
 
 /** 当前激活（= 声明给模型）的工具名。 */

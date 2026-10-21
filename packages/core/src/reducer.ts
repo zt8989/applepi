@@ -18,28 +18,18 @@ import type { ExtensionLifecycleEvent } from './extension-events';
 /**
  * 一张纯表：action → (下一个状态, 该发哪些 effect)。
  *
- * 没有 if (kind === 'agent')，没有 driver/mode：reducer 只做两件事，
- * 算状态、查「这个 action 类型的 effect 是谁」。`agent.run` 与 `tool.call` 在这里
- * 完全平级 —— 它们各自有一行，各自的效果来自注入的 effect 表。
- *
+ * 没有 `if (kind === 'agent')`、没有 driver/mode：reducer 只做两件事 —— 算状态、查「这个 action
+ * 类型的 effect 是谁」。`agent.run` 与 `tool.call` 完全平级，各自的效果来自注入的 effect 表。
  * 环写出来就是这个表自己接上的：
+ *
  *   user.message    → [turn.start → step.start → agent.run]
- *   step.start      → [agent.run]
  *   agent.run       → [llm.started → llm.delta* → llm.done]（effect 回流）
- *   llm.done        → 无工具：[queue.delivered?] / [turn.end]（回合收工）
- *                   ／有工具：[tool.call]
- *   tool.call       → [tool.batch.done]（effect 回流）
- *   tool.batch.done → steer 有货：[queue.delivered → step.start]
- *                   ／否则：[step.start → agent.run]   ← 环在这里闭合
+ *   llm.done        → 无工具：[queue.delivered?] / [turn.end]；有工具：[tool.call]
+ *   tool.batch.done → steer 有货：[queue.delivered → step.start]；否则：[step.start → agent.run]
  *
- * ## 两层容器：turn 与 step
- *
- * - **turn** = 一次用户输入引发的整个回合（user → 若干 step → 收工）。
- * - **step** = 一次 LLM 调用 **加上它触发的工具批次**（取代了原先的 `llm.attempt`）。
- *
- * 轨迹树于是是 `user → turn → step → llm.result / tool.*`。
- * 重试的分叉发生在 **step 这一层**：容器与失败都不推进 tip，所以重试的新 step
- * 仍然挂回同一个 turn 节点。
+ * 两层容器：**turn** = 一次用户输入引发的整个回合，**step** = 一次 LLM 调用加上它触发的工具批次。
+ * 轨迹树于是是 `user → turn → step → llm.result / tool.*`；重试的分叉发生在 **step 这一层**
+ * （容器与失败都不推进 tip，所以重试的新 step 仍挂回同一个 turn 节点）。
  */
 export type ReducerEffects = {
   [K in AgentActionType]: (
@@ -268,22 +258,12 @@ function summarize(text: string): string {
 /**
  * 给重复的 tool call id 改名，保证一轮里的 id 唯一。
  *
- * ## 为什么必须做
+ * 协议要求一个 assistant 消息里有几个 toolCall 就有几个对应的 toolResult、且靠 id 配对。模型偶尔
+ * 会返回**重复的 id**，于是 toolResult 的判重会把第二个结果丢掉（消息流变成「2 个 call、1 个
+ * result」，协议非法、表现为会话莫名停掉），`openToolNodeIds[id]` 也会互相覆盖。
  *
- * 协议要求：一个 assistant 消息里有几个 toolCall，就必须有几个对应的 toolResult，
- * 且靠 id 配对。模型偶尔会返回**重复的 id**（同一批里两个都叫 `call_1`），于是：
- *   - `toolResult` 的判重会把第二个结果丢掉，消息流变成「2 个 call、1 个 result」——协议非法，
- *     provider 报错或行为异常，表现为**会话莫名停掉**；
- *   - `openToolNodeIds[id]` 也会互相覆盖，第一个工具的轨迹节点永远闭合不了。
- *
- * 去重是错的（丢掉模型真要执行的调用），必须在我们这一层把 id 变唯一。
- *
- * ## 怎么改
- *
- * id 在会话里出现过就加 `#2`、`#3` 后缀。id 对模型只是占位符（它下一轮看到的是我们回传的
- * toolResult 与新 id 的配对），所以改写是安全的 —— 而且**必须**改写。
- *
- * 同一批内的重复、以及与历史消息的重复，都算「出现过」。
+ * 去重是错的（丢掉模型真要执行的调用），必须在这里把 id 变唯一：id 在会话里出现过就加 `#2`、
+ * `#3` 后缀（对模型只是占位符，改写是安全的）。同一批内重复、与历史消息重复都算「出现过」。
  *
  * @returns 改写后的 message、toolCalls，以及「原 id → 新 id」的映射（排障用）。
  */
@@ -344,9 +324,8 @@ function dedupeToolCallIds(
 /**
  * 把一份 `ModelSpec` 装进 state —— `model.init` 与 `model.changed` **共用这一份**。
  *
- * 载荷一致的好处就在这里：两条 action 只差「该不该在轨迹上留痕」，状态迁移一字不差。
- * 早先 `model.changed` 只改标识、把能力保守清成 false（等 `model.init` 补），
- * 于是存在一个「说要用新模型、却不知道它支持什么」的中间态 —— 现在没有了。
+ * 载荷一致，于是状态迁移一字不差：不会出现「说要用新模型、却不知道它支持什么」的中间态
+ * （那会让请求带着清零的能力发出去）。
  */
 function applyModelSpec(state: AgentState, spec: ModelSpec): AgentState {
   return {
@@ -434,21 +413,12 @@ function appendModelNode(
 /**
  * 把一个 **pi 生命周期事件**记成一条注释节点（kind `extension.event`）。
  *
- * 只会走到这里的是**没有专属节点**的相位级事件（`agent_start` / `agent_end` /
- * `agent_settled`）—— 其余的在 `'extension.lifecycle'` 迁移里就返回原状态了
- * （见那里的表）。
+ * 只会走到这里的正是**没有专属节点**的相位级事件，其余的在 `'extension.lifecycle'` 迁移里就返回
+ * 原状态。它不推进 tip（`extension.event` 不在 `TIP_ADVANCING_KINDS` 里），于是作为「当前 tip 的
+ * 旁注」挂着 —— 这正是要的：它是「内核刚才告诉了扩展什么」。
  *
- * ## 为什么不推进 tip / 不开新分支
- *
- * `appendNode` 只在 kind 属于 `TIP_ADVANCING_KINDS` 时才推进 tip，而
- * `extension.event` 不在那里 —— 所以它会作为「当前 tip 的旁注」挂一份。
- * 这正是要的：它是「内核刚才告诉了扩展什么」，不是「发生过的一件事」。
- *
- * ## meta 只放读得懂的
- *
- * 只有 `agent_end` 放一个消息数。不放事件对象全文（那是几 KB 的 JSON，一行一条
- * 会把轨迹文件撑大，而回放时也没人会看）。真正重的 payload（工具参数、消息正文）
- * 在 `tool.call` / `tool.result` / `llm.result` 那些专属节点上。
+ * meta 只放读得懂的（`agent_end` 放一个消息数）：不放事件全文，那是几 KB 的 JSON 会把轨迹文件
+ * 撑大。重的 payload 在 `tool.call` / `tool.result` / `llm.result` 那些专属节点上。
  */
 function appendLifecycleNode(
   tree: TraceTree,
@@ -480,26 +450,15 @@ function lifecycleEventHasOwnNode(type: ExtensionLifecycleEvent['type']): boolea
 /**
  * 补上装载段的轨迹节点 —— **用户发出第一句话的那一刻**。
  *
- * ## 为什么要有这一步
+ * 装载（prompt / tools / skills / model）必须立刻可用（开场报清单、`/skill:x` 要能展开、底栏要
+ * 显示模型），所以它们只改 state、不进轨迹树；而在树上留痕应该等到**真的有对话** —— 只装了东西
+ * 一句话没说的会话，树上只有四个装载节点、文件里也只有装载记录，纯噪声。
  *
- * 装载（prompt / tools / skills / model）必须**立刻**可用：开场就要报 skill 清单、
- * `/skill:x` 要立刻能展开、底栏要显示模型。所以那些留在 `prompt.init` / `model.init` 里，
- * 它们只改 state，**不进轨迹树**。
+ * 节点内容从 state 读：补出来的必然是**这一刻生效**的那一版（期间热重载过 prompt 也算数），与
+ * 模型真正看到的一致。
  *
- * 而「在树上留痕」应该等到**真的有对话** —— 一个只装了东西、一句话都没说的会话，
- * 轨迹树上只有四个装载节点、文件里也只有装载记录：纯噪声。
- * （会话文件那边早就是这么做的：`SessionWriter.start()` 记下 header 但不落盘，
- * 见 docs/architecture/sessions.md「空会话不落盘」。这里是它的轨迹侧对应物。）
- *
- * ## 为什么节点内容从 state 读
- *
- * 补出来的必然是**这一刻生效**的那一版装载（期间热重载过 prompt 也算数）——
- * 与模型真正看到的一致，而不是内核初始化时快照下来的那一版。
- *
- * ## 幂等
- *
- * `traceBegun` 守卫：已经补过就原样返回，不会把装载节点追加第二遍。
- * （开局之后再来一条 `prompt.init` = 热重载，**那一条自己**会追加新节点，见 transitions。）
+ * 幂等：`traceBegun` 守卫，已经补过就原样返回。开局之后的 `prompt.init` 是热重载，那一条自己会
+ * 追加新节点。
  *
  * @returns 带上装载节点的树（不推进 tip —— 上下文不是「发生过的事」）。
  */
@@ -514,17 +473,12 @@ function beginTrace(state: AgentState, now: number): TraceTree {
 /**
  * 把「模型 / 思考级别变了」补成**一个** `model.init` 节点 —— 推迟到下次真要发消息时补。
  *
- * ## 为什么不在 `model.init` / `thinking.changed` 里当场补
+ * 不在 `model.init` / `thinking.changed` 里当场补：那两个是**界面动作**，而轨迹树要回答的是
+ * 「这一轮实际发出去的是什么」。所以来回切三次 = 树上**一个**节点（内容是最后那版），且落在
+ * user 节点**之前**，读起来就是「这一轮带着这个模型/档位」。
  *
- * 那两个 action 是**界面动作**（`/model`、`Ctrl+P`、`Shift+Tab`、`/thinking`、设置面板
- * 里改某一档），而轨迹树要回答的是「这一轮实际发出去的是什么」。所以：
- *
- * - 来回切三次、或先换模型再调思考级别 = 树上**一个**节点，内容是最后那版；
- * - 节点落在 user 节点**之前**（也就是 `turn.start` 之前），读起来就是
- *   「这一轮带着这个模型/档位」，与 `beginTrace()` 补装载节点同一个口径。
- *
- * 标记（`modelTraceDirty`）只在 `traceBegun` 之后置上：树还没开时本来就不建节点，
- * `beginTrace()` 会从 state 里读出那一刻生效的那一版（包含刚改的档位）。
+ * 标记只在 `traceBegun` 之后置上：树还没开时本来就不建节点，`beginTrace()` 会从 state 读出
+ * 那一刻生效的那一版。
  */
 function flushModelChange(state: AgentState, now: number): AgentState {
   if (!state.modelTraceDirty) return state;
@@ -539,21 +493,15 @@ function flushModelChange(state: AgentState, now: number): AgentState {
 /**
  * 请求即将发起时，把**工具集的变化**声明进消息流。
  *
- * `state.prompt.tools` 是「能执行什么」，transcript 里的声明是「模型能调什么」；
- * 两者不一致就追加一条 `toolsAdded` / `toolsRemoved` 的 system 消息 —— 与
- * pi-agent-core 的 `declareToolChanges(context, pendingMessages)` 同一步。
+ * `state.prompt.tools` 是「能执行什么」，transcript 里的声明是「模型能调什么」；两者不一致就
+ * 追加一条 `toolsAdded` / `toolsRemoved` 的 system 消息（与 pi-agent-core 的
+ * `declareToolChanges` 同一步）。
  *
- * ## 为什么 head 要拿 `headTools`
+ * head 必须拿 `headTools`：它是 `messages[0]` 的**不可变历史**，`toolsAdded` 得一直是装载时那批。
+ * 拿「当前工具集」去构造的话，`web_enable` 一启用新工具 head 就变，前面所有 token 的缓存前缀全废。
  *
- * head 是 `messages[0]` 的**不可变历史**，它的 `toolsAdded` 必须一直是装载时那批。
- * 拿「当前工具集」去构造 head 的话，`web_enable` 一启用新工具，head 就跟着变，
- * 前面所有 token 的缓存前缀全废 —— 那是这次改动要防的头号事故。
- * 变更只能作为**新的** system 消息追加（`toolDeclarationDelta` 算出来的差）。
- *
- * ## 为什么放在 `agent.run` 而不是 effect 里
- *
- * 状态只能由 action 改。`agent.run` 正是「请求即将发起」那一步（下一件事就是
- * `callLlm`），所以声明在这里落地最准 —— effect 里改 state 会绕过 reducer。
+ * 放在 `agent.run` 而不是 effect 里：状态只能由 action 改，而 `agent.run` 正是「请求即将发起」
+ * 那一步（下一件事就是 `callLlm`）。
  */
 function withToolDeclarations(state: AgentState): Message[] {
   const changes = toolDeclarationDelta({
@@ -577,39 +525,24 @@ function withToolDeclarations(state: AgentState): Message[] {
 }
 
 const transitions: TransitionHandlers = {
-  // ── prompt 侧装载 ──
 
   /**
- * 装载 prompt：**已经拼好的那一整段 system prompt** + 工具的**完整定义**。
- *
- * tools 落进 state 之后，`effects.ts` 就不用每次 `getTools()` 现算了 —— 既少一次 IO，
- * 也让回放时不必重新装配工具就能知道当时发给模型的是什么。
- *
- * ## 这里**不开**轨迹节点，也不拼 prompt
- *
- * 装载节点（prompt.base / prompt.tools / prompt.skills）改由 `beginTrace()` 补上 ——
- * 也就是**用户真的发出第一句话时**才建。
- *
- * 为什么推迟：内核一装配就 dispatch 这两条装载，于是「打开界面还没说话」也已经有了
- * 四个节点（切到轨迹页一打开就是一屏提示词与工具名），并且 `traces/<id>.jsonl` 立刻被建出来。
- * 而「进来看一眼就退出」是常态 —— 那些会话文件里只有装载段、零条对话，
- * 是纯粹的噪声（会话文件那边早就有同样的处理：`SessionWriter.start()` 不落盘，
- * 见 docs/architecture/sessions.md「空会话不落盘」；这里是它的轨迹侧对应物）。
- *
- * ## 为什么这里**不再**拼 skill 清单
- *
- * 早先是 `systemPrompt + formatSkillsForPrompt(skills)` —— 手工往尾巴上接。
- * 现在 prompt 由 pi 的 `buildSystemPrompt` 拼，skill 清单进它自己的 `<skills>` 段
- * （见 [system-prompt.ts](system-prompt.ts)）。
- *
- * 差别不只是「谁拼的」：接在尾巴上时，那段清单是**没有标签的裸文本**，模型不知道
- * 那是系统给的规则还是用户说的话；而 `<skills>` 是有边界的段。
- * 更要紧的是**只有一处**会拼 —— 两处各拼一遍（内核拼一次、reducer 再接一次）迟早漂移，
- * 而症状是「prompt 里 skill 清单出现两次」，token 白花且模型困惑。
- *
- * **state 里该有的东西一个字不少** —— prompt、tools、skills、诊断全都立刻可用，
- * 界面开场就能报 skill 清单、`/skill:x` 就能展开。推迟的只是「在树上留痕」与「落盘」。
- */
+   * 装载 prompt：**已经拼好的那一整段 system prompt** + 工具的**完整定义**。
+   *
+   * tools 落进 state 之后 `effects.ts` 不必每次 `getTools()` 现算 —— 少一次 IO，回放时也不必
+   * 重新装配工具就知道当时发给模型的是什么。
+   *
+   * 这里**不开**轨迹节点：装载节点（`prompt.base` / `prompt.tools` / `prompt.skills`）由
+   * `beginTrace()` 在**用户真的发出第一句话时**才补。否则「打开界面还没说话」就已有四个节点、
+   * `traces/<id>.jsonl` 也立刻被建出来，而「进来看一眼就退出」是常态（会话文件那边同样处理）。
+   *
+   * 这里也**不拼** skill 清单：prompt 由 pi 的 `buildSystemPrompt` 拼，清单进它自己的 `<skills>`
+   * 段。接在尾巴上的话那是一段无标签裸文本（模型分不清是系统规则还是用户说的话），而且两处各拼
+   * 一遍迟早漂移（症状：prompt 里清单出现两次）。
+   *
+   * **state 里该有的东西一个字不少** —— prompt、tools、skills、诊断都立刻可用，推迟的只是
+   * 「在树上留痕」与「落盘」。
+   */
   'prompt.init': (state, action) => {
     const prompt = {
       // 原样接收：内核拼好的那一段就是最终形态（工具规则 / AGENTS.md / cwd / skills）。
@@ -700,32 +633,19 @@ const transitions: TransitionHandlers = {
   }),
 
   /**
-   * 一个 pi 生命周期事件：记成一条**注释节点**（`extension.event`）。
+   * 一个 pi 生命周期事件：记成一条**注释节点**（`extension.event`）。只改 `trace` —— 相位 /
+   * 消息 / 工具集在发这条 action 之前已由各自的 action 改好。
    *
-   * 只改 `trace`，别的什么也不动 —— 事件本身是「内核告诉了扩展什么」，
-   * 相位 / 消息 / 工具集在发这条 action 之前就已经由各自的 action 改好了。
-   *
-   * ## 已经有专属节点的事件**不再另开节点**
-   *
-   * 一件事两条节点是纯噪声，而且两条迟早会不一致。所以只给**没别处记**的相位级事件
-   * （`agent_start` / `agent_end` / `agent_settled`）落节点，其余交给它们的专属节点：
-   *
-   * | 生命周期事件 | 专属节点（信息更全） |
-   * | --- | --- |
-   * | `message_end` | `llm.result`（带完整 Message） |
-   * | `tool_execution_start` / `tool_execution_end` | `tool.call` / `tool.result`（带参数、结果、消息） |
-   * | `model_select` | `model.changed` |
-   *
-   * 所以 `tool_execution_*` **不能**反过来代替 `tool.call` / `tool.result` —— 它只有
-   * `toolCallId` / `toolName` / `isError`，没有结果内容、没有 Message、不推进 tip，
-   * 而且未知工具 / 被阻止的调用根本不会发它。它是**通知**，那两条才是**记录**。
+   * 已经有专属节点的事件**不再另开节点**（一件事两条节点是纯噪声，且迟早不一致）：
+   * `message_end` → `llm.result`，`tool_execution_*` → `tool.call` / `tool.result`，
+   * `model_select` → `model.changed`。所以 `tool_execution_*` **不能**反过来代替后两条 —— 它只有
+   * id / 名字 / isError，没有结果内容、不推进 tip，未知工具与被阻止的调用根本不会发它。
    */
   'extension.lifecycle': (state, action) => {
     if (!lifecycleEventHasOwnNode(action.event.type)) return state;
     return { ...state, trace: appendLifecycleNode(state.trace, action.event, Date.now()) };
   },
 
-  // ── model 侧装载 ──
 
   /**
    * 装载模型：provider / model / 思考级别 + 这个模型支持什么。
@@ -1176,22 +1096,16 @@ const transitions: TransitionHandlers = {
     // 它的闭合点是 tool.batch.done。只有「无工具」才在这一步就把 step 关掉。
     const closed = closeLlmSuccess(state, Date.now(), text, message);
     const hasTools = toolCalls.length > 0;
-    //
     // **用户按了停止**（pi-ai 把那份部分消息以 `stopReason: 'aborted'` 交回来）。
     //
-    // ⚠️ **超时进来的不算这一支**：`callLlm` 在把消息交给这里之前就按 `timedOut` 把它
-    // 拦成了 `LlmTimeoutError`（超时要报错、要重试，不能伪装成用户的选择）。
-    // 所以「一份 aborted 消息走到这里」只能是手动中断（或内核关停）。
-    // 以前超时也会落到这里 —— 症状是 120s 的 step 记成 `ok` + 空的 llm.result
-    // + 「用户中断」，错误一个字都不留（见 effects.ts `callLlm` 里那段注释）。
+    // ⚠️ **超时进来的不算这一支**：`callLlm` 在把消息交给这里之前就按 `timedOut` 把它拦成了
+    // `LlmTimeoutError`（超时要报错、要重试，不能伪装成用户的选择）。
     //
-    // 这一支必须在这里分：以前无论什么 stopReason 都写成 `completed`，于是界面显示
-    // 「✗ 模型自己说完了：Request was aborted」+「按 Ctrl+R 看轨迹树」—— 用户自己按的
-    // 停止，却像被程序报了个错，而那句「模型自己说完了」也是错的。
+    // 必须在这里分：以前无论什么 stopReason 都写成 `completed`，于是界面显示「✗ 模型自己说完了：
+    // Request was aborted」—— 用户自己按的停止却像被程序报了个错。
     //
-    // 保留那份**部分消息**（pi 也这么做：中止不会把已经流出来的话吞掉），中止说明由
-    // 渲染那一层交给 pi 的 `AssistantMessageComponent` 自己画（`stopReason === 'aborted'`
-    // → 它画 `Operation aborted`，与 pi 逐字一致）。
+    // 保留那份**部分消息**（pi 也这么做：中止不会把已经流出来的话吞掉），中止说明由渲染那一层交给
+    // pi 的 `AssistantMessageComponent` 自己画。
     const aborted = message.stopReason === 'aborted';
     // 中止时**不接手那些工具调用**：用户都喊停了，再跑 `rm -rf` 就很离谱。
     const continues = hasTools && !aborted;
@@ -1528,27 +1442,16 @@ const transitions: TransitionHandlers = {
     modelTraceDirty: state.traceBegun ? true : state.modelTraceDirty,
   }),
 
-  // ── 上下文压缩 ──
 
   /**
-   * 开始压缩：只置相位标记 + 开一个 `compact` 节点（pending）。
+   * 开始压缩：只置相位标记 + 开一个 `compact` 节点（pending）。**只改状态，不动 messages** ——
+   * 真正干活的是 effect，这条 action 本身不花钱。
    *
-   * **只改状态，不动 messages** —— 真正干活的 effect 拿一条 `compact.done` /
-   * `compact.failed` 回来。这条 action 本身不花钱。
+   * 守卫一：压缩期间不能再来一次 —— 摘要要打网络（几秒），两条同时基于同一份 messages 生成，
+   * 回来时后写的覆盖先写的，白花钱还丢信息。
    *
-   * ## 守卫：压缩期间不能再来一次
-   *
-   * 摘要要打网络（几秒）。这段时间里如果又来一条 `compact.request`，
-   * 两个摘要会**同时**基于同一份 messages 生成，回来时后写的覆盖先写的 ——
-   * 其中一份摘要的内容已经被丢掉了（不是错，是白花的钱 + 丢信息）。
-   * 所以这里直接忽略。
-   *
-   * ## 守卫：环在跑时不许压
-   *
-   * 压缩会把 `messages` 整份换掉。若在「LLM 正在流 / 工具正在跑」时换掉，
-   * 那条流回来时看到的已经不是它请求的那份历史了 ——
-   * 更糟的是 `tool.result` 会找不到它的 `toolCallId`，消息序列变成非法的。
-   * 用户要压就等这一轮结束（界面也会拦），这不是自动压。
+   * 守卫二：环在跑时不许压 —— 压缩整份换掉 messages，而正在流的那条请求回来时看到的已经不是它
+   * 请求的那份历史，`tool.result` 更会找不到它的 `toolCallId`（消息序列非法）。
    */
   'compact.request': (state, action) => {
     if (state.compacting) return state;
@@ -1567,17 +1470,10 @@ const transitions: TransitionHandlers = {
   /**
    * 压完了：整份换掉 messages，闭合 `compact` 节点（它推进 tip）。
    *
-   * ## 为什么 `compact` 节点推进 tip
+   * `compact` 必须推进 tip：压缩之后的那条线是从摘要开始的，不是从被压掉的那段历史延续的 ——
+   * 不推进的话下一个 `user` 节点会挂在「压缩前最后一个节点」下面，树上看起来像从旧历史里长出来。
    *
-   * 压缩之后的那条线是从摘要开始的，不是从被压掉的那段历史延续的。
-   * 不推进 tip 的话，下一个 `user` 节点会挂在「压缩前最后一个节点」下面 ——
-   * 树上看起来像是从旧历史里长出来的，而实际上中间已经换过内容了。
-   * 这与 git 里 squash 一段历史之后接上新提交是同一个形状。
-   *
-   * ## 为什么 label 里带条数
-   *
-   * 「压掉了多少」是这个操作唯一值得看的信息：条数没降说明切点没找到
-   * （可压的还不够），那就是个可疑的静默退化。
+   * label 里带条数：「压掉了多少」是这个操作唯一值得看的信息，条数没降说明切点没找到。
    */
   'compact.done': (state, action) => {
     const now = Date.now();
@@ -1691,26 +1587,17 @@ const transitions: TransitionHandlers = {
   /**
    * 恢复历史：清对话 + 换会话 id + **一次**灌完整批消息。
    *
-   * 结果与「`conversation.reset` + N 条 `session.restored`」完全一样，但只 dispatch 一次
-   * —— 界面每 dispatch 一次就重渲染整段对话，逐条灌是 O(N²)，一条灌是 O(N)。
+   * 结果与「`conversation.reset` + N 条 `session.restored`」一样，但只 dispatch 一次：界面每
+   * dispatch 一次就重渲染整段对话，逐条灌是 O(N²)。
    *
-   * 为什么 `conversation.reset` 的那些字段一个都不能少：轨迹树要换 id（于是换落盘文件）、
-   * `persistedSeq` 要带过来（那条游标属于轨迹文件，不是这次对话的）。漏掉任一个，
-   * 恢复之后发出去的第一句话要么写进旧轨迹文件、要么把旧轨迹重写一遍。
+   * `conversation.reset` 的那些字段一个都不能少：轨迹树要换 id（于是换落盘文件）、`persistedSeq`
+   * 要带过来（那条游标属于轨迹文件）。漏掉任一个，恢复之后的第一句话要么写进旧轨迹文件、要么把
+   * 旧轨迹重写一遍。
    *
-   * 不动 `phase` / `trace`（除了换 id 之外）：这些消息是「上次发生的」，开新节点或推进 tip
-   * 会把历史伪装成这一轮 —— 与 `session.restored` 同一个理由。
-   *
-   * ## 相位为什么要带着走（不能只靠 createInitialState）
-   *
-   * `createInitialState` 给的是 `idle`。如果恢复动作把相位一并清成 idle，而恢复之前环
-   * 正在跑（比如「上一回合没结束就切会话」），那么：正在等 token 的那条流回来时看到
-   * 相位是 idle → 当成过期丢弃；而新的输入又可以发出去 —— 于是**两处都跑**，
-   * 消息流会交叉。
-   *
-   * 恢复历史在界面上确实要求相位是 idle（`/resume` 里「上一回合没结束」会先拒绝），
-   * 但那条守卫属于界面与内核的入口策略，不是这条迁移的职责 —— reducer 不该假设
-   * 「没人会趁环在跑的时候恢复」。所以这里原样带着走。
+   * 不动 `phase` / `trace`（除了换 id）：这些消息是「上次发生的」，开新节点或推进 tip 会把历史
+   * 伪装成这一轮。**相位必须带着走**：清成 idle 的话，恢复前正在等 token 的那条流回来时会被当成
+   * 过期丢弃，而新输入又能发出去 —— 两处都跑，消息流交叉。界面确实要求恢复时是 idle，但那属于
+   * 入口策略，reducer 不该假设「没人会趁环在跑的时候恢复」。
    */
   'conversation.restored': (state, action) =>
     restoredConversationState(state, action.sessionId, action.messages),
@@ -1787,33 +1674,19 @@ export function createAgentReducer(
 }
 
 /**
- * 环的接线。**每个字都是 Cmd** —— 没有一行 `if`，也没有一个直接的函数调用。
+ * 把一条 action 重新 dispatch 出去：让 reducer 再看到它一次，于是它自己的那行接线发出下一个 Cmd。
  *
- * 关键点：`llm.done` 之后发的是 `Cmd.action(tool.call)`，不是 `table.runTools(...)`。
- * 也就是说「LLM 说要调工具」这件事本身也要**再走一次 dispatch**，被 reducer 重新看到一次，
- * 然后 `tool.call` 那一行才发出真正干活的 `runTools`。这样整条环上没有一个环节是
- * 「上一个 effect 直接调用下一个 effect」—— 每一步都是 action 进、action 出。
- */
-/**
- * 把一条 action 重新 dispatch 出去：让 reducer 再看到它一次，于是它自己的那行接线才发出下一个 Cmd。
+ * 于是环上没有一个环节是「上一个 effect 直接调用下一个 effect」：每一步都是 action 进、
+ * action 出（`llm.done` 之后发的也是 `Cmd.action(tool.call)`，而不是直接调 `runTools`）。
  *
- * 这不是「直接调用下一个 effect」—— 中间隔着一次完整的 dispatch，状态先更新，接线再读新状态。
- * 少了这一步，`step.start` 的迁移就不会跑，轨迹树上也就永远开不出 step 节点。
+ * 中间隔着一次完整 dispatch，状态先更新、接线再读新状态 —— 少了这一步 `step.start` 的迁移不会
+ * 跑，轨迹树上永远开不出 step 节点。
  *
- * ## **不能**包成 `Cmd.list`（曾经在这里踩了很久）
- *
- * `createAgentReducer` 收一个命令数组：长度为 1 走 `loop(state, cmd)`，
- * 大于 1 才走 `loop(state, Cmd.list(cmds))`。
- * 若本函数返回 `Cmd.list([...])` 而接线又把它当一个命令放回数组，
- * 就得到 `Cmd.list([Cmd.list([...])])` —— **嵌套的 LIST**。
- *
- * 而 redux-loop 的 `handleParallelList` 对**嵌套**的非 batch LIST 走这条分支：
- * `cmds.map(nested => executeCmdInternal(nested, ctx).then(r => Promise.all(r.map(wrappedDispatch))))`。
- * 内层 LIST 返回的 `[]` 于是既没被 dispatch 也没被报错 —— 那条 action **静默消失**。
- *
- * 症状极其隐蔽：reducer 迁移照跑（该开的节点都开了），只是链路在最后一步断掉，
- * 表现为「回合永远关不上 / 环再也不转」，而代码里找不到任何错误。
- * 这就是为什么这里写死**裸 Cmd**：打包是 `createAgentReducer` 的职责，不是接线的。
+ * **不能**包成 `Cmd.list`：`createAgentReducer` 收命令数组，长度 1 走 `loop(state, cmd)`、大于 1
+ * 走 `Cmd.list(cmds)`；若本函数返回 `Cmd.list([...])` 又被当一条命令放回数组，就得到嵌套的 LIST，
+ * 而 redux-loop 对嵌套 LIST 的返回 `[]` 既没被 dispatch 也没报错 —— 那条 action **静默消失**，
+ * 症状是「回合永远关不上 / 环再也不转」而代码里找不到任何错误。所以这里写死**裸 Cmd**，
+ * 打包是 `createAgentReducer` 的职责。
  */
 function redispatch(action: AgentAction): CmdType {
   // **裸 Cmd，不能包成 `Cmd.list`**（注释在上一段的 doc 里）。
@@ -1849,29 +1722,12 @@ function deliverQueued(steer: boolean, state: AgentState): CmdType | null {
 /**
  * 回合真的收工了（相位已 idle）之后的一步：**把回合容器关上**。
  *
- * ## 为什么绕一圈
+ * 绕一圈是因为「收工」对几乎所有路都是「从 effect 里回到 reducer」那个时刻才发生的，而那时
+ * `install()` enhancer 的 cmdsQueue 已被外层 dispatch 取走 —— 从那里 redispatch 出去的 action
+ * 没人冲刷，环就停在 idle 不再转。
  *
- * 「关回合」对几乎所有路都是「从 effect 里回到 reducer」那个时刻才发生的
- * （llm.failed / llm.giveup / tool.batch.done 都是 Cmd.run 回来的）。
- * 而那时 `install()` enhancer 的 cmdsQueue 已经被外层 dispatch 取走 ——
- * 从那里 `redispatch` 出去的 action 没人冲刷，环就停在 idle 不再转。
- *
- * 所以这里**只**发一条 `turn.end`。它到达 reducer 时相位已是 idle，
- * 于是 `turn.end` 的迁移自己判断「要不要开下一回合」（有 followUp 就开），
- * 而那个判断是 reducer 做的 —— 接线不需要、也不应该在半路替它决定。
- */
-/**
- * 回合真的收工了（相位已 idle）之后的一步：**把回合容器关上**。
- *
- * ## 为什么绕一圈（而不是在迁移里直接关）
- *
- * 「收工」对几乎所有路都是「从 effect 里回到 reducer」那个时刻才发生的
- * （llm.failed / llm.giveup / tool.batch.done 都是 Cmd.run 回来的）。
- * 而那时 `install()` enhancer 的 cmdsQueue 已经被外层 dispatch 取走 ——
- * 从那里 `redispatch` 出去的 action 没人冲刷，环就停在 idle 不再转。
- *
- * 所以这里**只**发一条 `turn.end`。它到达 reducer 时相位已是 idle，
- * 迁移会关掉容器、算出结局标签，**并且**顺手开下一个 followUp 回合。
+ * 所以这里**只**发一条 `turn.end`：它到达 reducer 时相位已是 idle，迁移会关掉容器、算出结局
+ * 标签，并且顺手开下一个 followUp 回合 —— 该不该开下一回合是 reducer 的判断，接线不替它决定。
  */
 function closeTurn(): CmdType {
   // 裸 Cmd（不包 list）—— 理由见 `redispatch()` 的注释：包了会被

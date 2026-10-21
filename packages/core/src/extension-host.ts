@@ -1,50 +1,23 @@
 /**
  * pi 扩展宿主 —— 让**别人写的** pi 扩展能在本项目的环里跑起来。
  *
- * ## 为什么不自己重写扩展提供的那部分功能
+ * 不自己重写扩展那部分功能：第一个接的 `ask_user_question` 两千多行，带着一堆踩过才写出来的
+ * 处理（jiti 缓存中毒后无法在进程内恢复、overlay 折叠后必须有 raw input 才能复原、notes 草稿被
+ * submit 键静默吞掉…），重写一遍会漂移。所以走官方运行时：`loadExtensions()` 装载 +
+ * `ExtensionRunner` 驱动，本项目只提供自己那一半 —— 环、store、工具执行、overlay 宿主。
  *
- * 第一个接的是 `@juicesharp/rpiv-ask-user-question`（见 `docs/architecture/extensions.md`）：
- * 它给模型一个 `ask_user_question` 工具 —— 一个结构化的多选对话框，带多问题 tab、
- * 单题/多选、notes、`preview` 侧栏、`Ctrl+]` 折叠、ESC 放弃。那套交互两千多行，
- * 而且带着一堆踩过才写出来的处理（jiti 缓存中毒后无法在进程内恢复、overlay 折叠后
- * 必须有 raw input 才能复原、notes 草稿被 submit 键静默吞掉…）。
+ * 复用的官方件：`DefaultPackageManager.resolve()`（包清单 → 入口路径）、`loadExtensions()`（jiti
+ * 装载，**必需** —— 扩展的 `typebox` / `pi-tui` / `pi-coding-agent` 是 pi 注入的虚拟模块）、
+ * `ExtensionRunner`（事件分发、上下文创建）、`wrapRegisteredTool` 那层形状。
  *
- * 重写一遍等于把它重做一次，而且会漂移。所以走 pi 官方的扩展运行时：
- * `loadExtensions()` 装载 + `ExtensionRunner` 驱动。扩展要什么
- * （`registerTool` / `ui.custom` / `before_agent_start` / `getActiveTools`）都由官方代码
- * 处理，本项目只提供**自己那一半**：环、store、工具执行、overlay 宿主。
+ * 必须自己给的三样：`ctx.ui.custom()`（pi-tui 的 `showOverlay`，见 `extension-ui.ts`）、工具执行
+ * （`tools.ts` 的注册表）、`setActiveTools()`（reducer 里的一条 action）。
  *
- * ## 复用了官方的哪几样
- *
- * | 官方件 | 干什么 |
- * | --- | --- |
- * | `DefaultPackageManager.resolve()` | `settings.json` 的 `packages` → 扩展入口路径（含去重、信任判断） |
- * | `loadExtensions()` | jiti 装载（**必需**：扩展的 `typebox`/`pi-tui`/`pi-coding-agent` 是 pi 注入的虚拟模块） |
- * | `ExtensionRunner` | 事件分发、上下文创建、工具上下文 |
- * | `wrapRegisteredTool` 那层形状 | 工具的 `parameters` / `execute` 契约 |
- *
- * ## 我们必须自己给的三样
- *
- * | 扩展要什么 | 本项目给什么 |
- * | --- | --- |
- * | `ctx.ui.custom()` | pi-tui 的 `showOverlay()`（`extension-ui.ts` 里的 `custom()`） |
- * | 工具执行 | 自己的 `getTool()` 注册表（`tools.ts`） |
- * | `setActiveTools()` | reducer 里的一条 action —— 状态只能由 action 改（见 `extension-tools.ts`） |
- *
- * ## 一处刻意的偏差
- *
- * 扩展的 prompt 注入在 pi 那边是**每轮现拼**，而工具集在本项目是**声明的**：
- * `state.prompt.tools` 是「现在能执行什么」，transcript 里的 system 消息是
- * 「模型被允许调什么」。会话中途可以变（`pi.setActiveTools()` 真的生效，
- * `web_enable` / `subagents_enable` 那些 loader 工具靠的就是它）—— 前提是**变了要声明**：
- * `reducer.ts` 的 `agent.run` 在请求前 diff 出 `toolsAdded` / `toolsRemoved`
- * 追加一条消息（pi-agent-core 的 `declareToolChanges` 同一步）。
- * 于是**已有消息一个字节不动**（prompt-cache 的前缀因此活下来），模型也明确知道工具变了。
- *
- * 由此推出一条**已知无效**的路径：`ask_user_question` 自带的 `before_agent_start`
- * 协调器（非交互时把工具摘掉）在本项目里是 no-op —— 工具集在会话中途不变，
- * 而本项目只有交互式一种模式（`hasUI` 恒为真）。这不是 bug，是上面那个决定的
- * 必然结果，测试里钉住了（`packages/core/test/extension-host.test.ts`）。
+ * 一处刻意的偏差：工具集在本项目是**声明的** —— `state.prompt.tools` 是「现在能执行什么」，
+ * transcript 里的 system 消息是「模型被允许调什么」。会话中途可以变，前提是**变了要声明**：
+ * `agent.run` 在请求前 diff 出 `toolsAdded` / `toolsRemoved` 追加一条消息，于是已有消息一个字节
+ * 不动（前缀缓存活下来）。由此推出 `ask_user_question` 自带的 `before_agent_start` 协调器在本
+ * 项目里是 no-op —— 本项目只有交互式一种模式，测试里钉住了。
  */
 import {
   loadExtensions,
@@ -109,10 +82,9 @@ import type { PromptToolLike } from './system-prompt';
  * 开场那一节要报的是「装了哪些**扩展**」，而扩展的身份是它的入口文件 + 来自哪里
  * （npm 包 / git 仓库 / 本地路径）—— 与它注册了几个工具无关。
  *
- * 早先那一节报的是 `tools`（扩展注册的工具名），于是界面上写着 `[扩展] ask_user_question`，
- * 看起来像「装了一个叫 ask_user_question 的扩展」。那既不是扩展的名字，也不是 pi 的口径：
- * pi 的开场报的是入口（`pi-web-access:dist`），工具清单在别处（`/` 的工具列表）。
- * 那个字段仍要留着（诊断里会用到），但**不用于那一节**。
+ * 那一节不能报 `tools`（扩展注册的工具名）：那样界面上写着 `[扩展] ask_user_question`，
+ * 看起来像「装了一个叫 ask_user_question 的扩展」。pi 的开场报的是入口
+ * （`pi-web-access:dist`），工具清单在别处。`tools` 仍留着（诊断用），但不用于那一节。
  */
 export interface ExtensionEntry {
   /** 扩展入口文件（绝对路径）。 */
@@ -200,21 +172,14 @@ export interface ExtensionHost {
   /**
    * 发一个 pi 的 **agent 生命周期事件**（`agent_start` / `agent_end` / `message_end` / …）。
    *
-   * 为什么由内核显式发而不是让 runner 自己感知：pi 那边这些事件来自 AgentSession
-   * （它订阅自己的 agent 事件再转成扩展事件），而本项目的环是 redux-loop，
-   * 没有 AgentSession。所以接线在**内核**：store 相位变化发 `agent_start` / `agent_end` /
-   * `agent_settled`，effect 里的 LLM/工具调用来龙去脉发 `message_end` /
-   * `tool_execution_start` / `tool_execution_end`。
+   * 由内核显式发而不是让 runner 自己感知：pi 那边这些事件来自 AgentSession，而本项目的环是
+   * redux-loop、没有 AgentSession。所以接线在内核 —— store 相位变化发相位级三条，effect 里的
+   * LLM/工具调用发 `message_end` / `tool_execution_*`。
    *
-   * **发出去的顺序 = 调用顺序**（同步开始执行 handler），且 handler 报错只记诊断、
-   * 不让环崩（与 `beforeToolCall` 同一口径）。
+   * 顺序 = 调用顺序（同步开始执行 handler），handler 报错只记诊断、不让环崩。
    *
-   * **内核不直接叫它**：走 kernel 的 `recordLifecycle()` —— 先 dispatch 一条
-   * `extension.lifecycle` action（于是进轨迹、可回放），再调这里发给扩展。
-   * 轨迹树是 action 的产物，「扩展/宿主收到了什么」也得先成为 action 才留得住。
-   *
-   * `tool_call` **不在这里**：它是有返回值的门（`beforeToolCall`），
-   * 因为权限类扩展要靠它阻止调用、MCP 要靠它等服务器。
+   * **内核不直接叫它**：走 `recordLifecycle()` —— 先 dispatch `extension.lifecycle`（进轨迹、
+   * 可回放），再调这里发给扩展。`tool_call` **不在这里**：它是有返回值的门（`beforeToolCall`）。
    */
   emitLifecycle(event: ExtensionLifecycleEvent): void;
   /**
@@ -248,20 +213,12 @@ export interface LoadExtensionHostOptions {
    */
   runtime?: AgentRuntime | undefined;
   /**
-   * 造 `ctx.ui` 的**工厂**（不是实例）。
+   * 造 `ctx.ui` 的**工厂**（不是实例）：UI 依赖活着的 pi-tui 实例，而内核不知道界面的存在。
    *
-   * 为什么是工厂：UI 依赖活着的 pi-tui 实例（浮层、raw input、焦点），那是界面层的
-   * 东西，而内核不知道界面的存在。
-   *
-   * ## 不给 = 「真的没有界面」
-   *
-   * 此时**不调** `setUIContext`，于是官方的 `hasUI` 读出 false，扩展自己的
-   * `if (!ctx.hasUI) return rejectWithoutUi()` 会先把工具**从清单里摘掉**。
-   *
-   * 这比「给一个什么都不做的 UI」重要得多：那个空 UI 里 `tui` 是 undefined，扩展
-   * 一旦调 `ctx.ui.custom()` 就会在自己的渲染里炸
-   * （`Cannot read properties of undefined (reading 'requestRender')` —— 实测过）。
-   * 也就是说：**假装有界面比承认没有界面坏得多**。让扩展自己的 `hasUI` 判断说话。
+   * 不给工厂 = 「真的没有界面」：此时**不调** `setUIContext`，官方 `hasUI` 读出 false，扩展自己
+   * 的 `if (!ctx.hasUI)` 分支会先把工具摘掉。**假装有界面比承认没有界面坏得多** —— 空 UI 里
+   * `tui` 是 undefined，扩展一调 `ctx.ui.custom()` 就在自己的渲染里炸
+   * （`Cannot read properties of undefined (reading 'requestRender')`）。
    */
   uiOptions?: (() => HostUiOptions) | undefined;
   /** ���试注入：跳过整个装载流程。 */
@@ -460,46 +417,21 @@ function isAskUserQuestionSource(source: string): boolean {
 /**
  * 把**本地扩展目录**与 `settings.json` 的 `packages` 合成一份扩展入口表。
  *
- * ## 顺序与 pi 一致：项目本地 → 全局 → packages
+ * 顺序与 pi 一致（`discoverAndLoadExtensions()`）：`<cwd>/.pi/extensions/` →
+ * `<agentDir>/extensions/` → `settings.json` 的 `packages`。顺序**是语义**：工具表是同名先注册
+ * 者优先，「谁顶掉谁」只能由这份顺序决定。
  *
- * `pi` 的 `discoverAndLoadExtensions()` 就是这个顺序（见它的实现）：
+ * 本地目录必须扫：`pi` 的本地扩展（`~/.pi/agent/extensions/*.ts`）**不在** `settings.json` 里，
+ * 是「放到那儿就生效」—— Orca 给 pi 装的托管扩展走的正是这条路，只读 `packages` 就永远装不上。
  *
- * 1. `<cwd>/.pi/extensions/`（项目本地）
- * 2. `<agentDir>/extensions/`（全局 —— Orca 那三个托管扩展就装在这里）
- * 3. `settings.json` 的 `packages`
+ * 包那一半用官方的 `DefaultPackageManager`：两份 settings 的合并、同包两处的项目优先、
+ * 项目信任判断、npm 安装目录解析，自己写必然落成「pi 装到哪儿我们不知道」。**取不到就当没装**，
+ * 不自动 `npm install`（本项目不是包管理器）。
  *
- * 顺序**是语义**：工具表是「同名先注册者优先」，所以「谁顶掉谁」只能由这份顺序决定。
- * 自己改一个顺序，症状是「pi 那边生效的扩展在 ela 这边不生效」，而两边的配置一模一样。
- *
- * ## 为什么必须扫这两个本地目录
- *
- * pi 的本地扩展（`~/.pi/agent/extensions/*.ts`）**不在** `settings.json` 里 ——
- * 它们是「放到那儿就生效」。Orca 给 pi/omp 安装的托管扩展走的正是这条路。
- * 只读 `packages` 的话，那些扩展永远装不上（症状：Orca 里的状态/标题扩展一个没跑，
- * 面板永远停在 loading）。
- *
- * ## 包那一半：直接用官方的 `DefaultPackageManager`
- *
- * 它做的事比自己写一版多得多且都是必须的：用户级与项目级两份 settings 的合并、
- * 同一个包两处出现时项目优先（`autoload:false` 时是 delta 而非替换）、项目信任判断、
- * npm 包的安装目录解析（全局 npm root 还是 pi 自己那个 `npm/` 目录，取决于 pi 版本）。
- *
- * 自己读 `settings.json` 再拼路径，最后必然是「pi 装到哪儿我们不知道」——
- * 症状是 `pi list` 明明有，这边说没装。**取不到就当没装**（`onMissing: skip`），
- * 不自动 `npm install`：本项目不是包管理器，替 pi 装东西会让两边状态分家。
- *
- * ## 为什么连包的 `metadata` 一起带回来
- *
- * `loadExtensions(paths)` **不带**包信息：它的 `createExtension()` 给每个扩展硬写
- * `source: 'local'`、`baseDir = dirname(入口文件)`。于是 npm 包里的 `dist/index.js`
- * 被当成一个本地文件，开场清单会报成 `index.js`（而不是 `pi-web-access:dist`）——
- * 而 `settings.json` 里明明写的是 `@juicesharp/pi-web-access`。用户照着那一行找
- * 找不到自己配的包。
- *
- * 官方的 `DefaultResourceLoader` 有一步 `applyExtensionSourceInfo()` 专门补这个
- * （它把 metadata 写到 `extension.sourceInfo` 上）。我们不接那整个 ResourceLoader，
- * 所以自己补这一步 —— 用的还是它给的那份 metadata，不是自己猜的。
- * 本地目录里发现的扩展不需要这一步：它们**就是** `local`。
+ * 连包的 `metadata` 一起带回来：`loadExtensions()` 会给每个扩展硬写 `source: 'local'` 与
+ * `baseDir = dirname(入口文件)`，于是 npm 包的 `dist/index.js` 在开场清单里报成 `index.js`，
+ * 而用户配的是 `@juicesharp/pi-web-access` —— 照着那一行找不到自己配的包。本地目录里发现的
+ * 扩展不需要这一步：它们**就是** `local`。
  */
 async function resolveExtensionEntries(
   cwd: string,
@@ -560,17 +492,11 @@ async function resolveExtensionEntries(
 /**
  * 把包元数据写到每个扩展的 `sourceInfo` 上（官方 `applyExtensionSourceInfo` 的那一步）。
  *
- * ## 为什么连 command / tool 的 `sourceInfo` 一起改
+ * 连 `commands` / `tools` 里每一项的 `sourceInfo` 一起改：扩展会用
+ * `tool.sourceInfo.source` 判断「我这个工具是不是被 `refreshTools` 重载过」，不改的话那些代码
+ * 在 pi 那边对、在这边读到 `'local'`，行为就分家。
  *
- * 官方那一步也顺带改了 `extension.commands` 与 `extension.tools` 里每一项的
- * `sourceInfo`。扩展自己读 `tool.sourceInfo.source` 来判断「我这个工具是不是
- * 被 `refreshTools` 重载过」（那种写法存在）—— 不改的话那些代码在 pi 那边是对的、
- * 在这边读到 `'local'`，于是行为分家。**跟官方同步**，不自己发明一小份。
- *
- * ## 逐级回退到祖先目录
- *
- * metadata 是按**包根**记的，而扩展入口是包里的某个文件（`dist/index.js`）。
- * 精确命中拿不到时就沿父目录往上找 —— 与官方 `findSourceInfoForPath()` 同一口径。
+ * metadata 按**包根**记而扩展入口是包里的某个文件，精确命中拿不到时沿父目录往上找。
  */
 function applyExtensionSourceInfo(
   extensions: readonly Extension[],
@@ -668,27 +594,15 @@ export async function loadExtensionHost(
   // **共享一个 runtime**：内置扩展与文件扩展必须挂在同一个 runtime 上，否则
   // `pi.registerMcpServer()` 写进的注册表、runner 绑定的 refreshTools 会是两份。
   const runtimeHandle = createExtensionRuntime();
-  // ── 并行装载（为什么不是一次 `loadExtensions(所有路径)`）──
   //
-  // 官方那个函数内部是**串行**的：一个扩展 import 完再下一个。而每个扩展的装载是
-  // 各自独立的重活（jiti 转译 + 它自己的模块图），互相之间不等待 —— 实测三个 npm
-  // 扩展串行 2.7s、并行 1.4s，而这段时间整个在启动的关键路径上（首帧之前）。
+  // 官方的 `loadExtensions()` 内部是串行的（一个 import 完再下一个），而每个扩展的装载互不等待
+  // —— 实测三个 npm 扩展串行 2.7s、并行 1.4s，而这段时间整个在首帧之前的关键路径上。
   //
-  // **并行不改变语义**，三件事各自成立：
+  // 并行不改变语义：`eventBus` / `runtimeHandle` 仍共用同一个（事件在 `startSession()` 才统一
+  // 发，与谁先注册无关）；结果**按原顺序**拼回去（工具表是同名先注册者优先，顺序漂了重名工具谁
+  // 生效就变成随机）；一个扩展失败只收进 `errors`，与串行时的诊断一样。
   //
-  // 1. `eventBus` 与 `runtimeHandle` 仍然共用同一个 —— 扩展之间靠它们互相看见
-  //    （谁先 import 完谁先去 `on()`，而事件是 `startSession()` 那一刻才统一发的，
-  //    所以「谁先注册 handler」与这里的并行无关）。
-  // 2. 结果**按原顺序**拼回去（`results[i]` 对应 `resolvedEntries[i]`），所以下游
-  //    看到的扩展顺序还是 `settings.json` 里的顺序 —— 这是必须的：工具表是
-  //    「同名先注册者优先」（`runner.getAllRegisteredTools()` 按 extensions 顺序走，
-  //    见下面的 `syncExtensionTools`），顺序一漂，重名工具谁生效就变成随机的。
-  // 3. 一个扩展失败不影响别的：官方已经把它收成 `errors` 里的一条（不抛），
-  //    拼起来之后与串行时的诊断一模一样。
-  //
-  // 代价：装载期同时开 N 份 jiti 转译，峰值 CPU 与内存高一点（实测首帧总 CPU 反而
-  // 更低：串行那份 CPU 有一部分是 I/O 等待）。扩展个数很少（`packages` 里几个），
-  // 不需要限流。
+  // 扩展个数很少，不需要限流。
   const results = await Promise.all(
     resolvedEntries.map((entry) => loadExtensions([entry.path], cwd, eventBus, runtimeHandle)),
   );
@@ -703,24 +617,16 @@ export async function loadExtensionHost(
   applyExtensionSourceInfo(loaded.extensions, resolvedEntries);
   for (const e of loaded.errors) errors.push(`扩展 ${shortPath(e.path)}：${e.error}`);
 
-  // ── pi 的内置扩展（MCP + codemode）───
   //
-  // 与 pi 的 CLI 同一个做法：`codemode` 与 `mcp` 都是**内置扩展**（`createCodemodeExtension()`
-  // / `createMcpExtension()`），不是内核里的特殊代码。本项目不重写它们：MCP 客户端、
-  // OAuth、工具命名、资源工具、`/mcp` 面板都是官方那几十个文件。
+  // 与 pi 的 CLI 同一个做法：`codemode` 与 `mcp` 都是**内置扩展**，本项目不重写它们（MCP 客户端、
+  // OAuth、工具命名、资源工具、`/mcp` 面板都是官方那几十个文件）。放在文件扩展**之后**：同名先
+  // 注册者优先，而 pi 对这两个是 `replaceable`（第三方同名扩展顶掉内置）。
   //
-  // **放在文件扩展之后**：本项目的工具收集是同名先注册者优先，而 pi 对
-  // codemode / mcp 这两个是 `replaceable`（第三方同名扩展顶掉内置）—— 同样效果。
-  //
-  // `tool_search` 也装：它把 `codemode` / `deferred` 暴露的工具「装载」成声明
-  // （BM25 搜一轮，命中的下一轮就进工具表）。早先不装的理由是「本项目的工具集装载时
-  // 定死」，那条在工具集可变 + 声明链路就位之后不成立了 —— 它依赖的三样
-  // （`getAllTools` 的 exposure/namespace、`getActiveTools`、真的生效的
-  // `setActiveTools`）本项目都有，且它装载的结果会走 `tools.changed` → `agent.run`
-  // 的声明增量，与前缀缓存那条约束不冲突。
-  //
-  // 它注册为 `defaultActive: false`（pi 也一样）：要用得在 `settings.json` 的
-  // `defaultTools` 里写 `+tool_search`。
+  // `tool_search` 也装：它把 `codemode` / `deferred` 暴露的工具「装载」成声明（BM25 搜一轮，
+  // 命中的下一轮进工具表）。它依赖的三样（`getAllTools` 的 exposure/namespace、
+  // `getActiveTools`、真的生效的 `setActiveTools`）本项目都有，装载结果也走 `tools.changed` →
+  // `agent.run` 的声明增量，与前缀缓存那条约束不冲突。它注册为 `defaultActive: false`：
+  // 要用得在 `defaultTools` 里写 `+tool_search`。
   if (withBuiltins) {
     const builtins: ReadonlyArray<{ factory: ExtensionFactory; path: string }> = [
       { factory: createMcpExtension(), path: 'builtin:mcp' },
@@ -779,7 +685,6 @@ export async function loadExtensionHost(
     extensionModelRegistry(effectiveRuntime) as never,
   );
 
-  // ── 问卷的**浏览器那一份**（终端那一份由扩展自己的组件画）──
   //
   // `createHostUi` 把它挂成 `ctx.ui.externalQuestionnaire`：扩展（patch 过的那份）
   // 在画自己的终端组件之前把题目交过来，我们开浏览器那份弹窗。两边谁先答都算数。
@@ -837,12 +742,10 @@ export async function loadExtensionHost(
       // 被单独点名。pi 自己就是这个处理（它只把有 snippet 的收进 `_toolPromptSnippets`，
       // 没有 snippet 的不吭声）。
       //
-      // 早先这里报一条诊断，理由是「没 snippet = 不告诉模型它存在」—— 那句对项目自己的
-      // 四个工具成立（它们的用法全在 snippet 里），但对扩展不成立。实际的预警是
-      // `pi-subagents` 0.77 的 `bg_wait`：它只有 `description`，而且**故意**不宣传
-      // （它是 subagent 那条流里的补位工具，用法写在 `subagent` 的 snippet 里）。
-      // 报出来就变成启动横幅上一句永远修不掉的 “[Extension issues]”，那就不是预警、
-      // 是噪音了 —— 而噪音会让人把**真的**诊断一起忽略掉。
+      // 没 snippet 不报诊断：那句「没 snippet = 不告诉模型它存在」只对项目自己的四个工具成立
+      // （用法全在 snippet 里），对扩展不成立 —— `pi-subagents` 的 `bg_wait` 只有
+      // `description` 且**故意**不宣传（用法写在 `subagent` 的 snippet 里）。报出来就是启动横幅
+      // 上一句永远修不掉的 “[Extension issues]”，而噪音会让人把**真的**诊断一起忽略掉。
       if (d.promptSnippet !== undefined && d.promptSnippet !== '') {
         snaps.push({
           name,
@@ -1274,19 +1177,13 @@ function bindCore(options: BindCoreOptions): void {
 }
 
 /**
- * 官方的 `getAllTools()` 该看到什么 —— **本项目的工具注册表**，带真的元数据。
+ * 官方的 `getAllTools()` 该看到什么 —— **本项目的工具注册表**，带真的元数据：
  *
- * 早先这里只给 `exposure: 'direct'`（「本项目不接 codemode 那套动态暴露」）。接了 MCP
- * 之后它就**必须**是真的：
- *
- * - `exposure`：MCP 扩展自己在 `ensureDiscoveryActive()` 里读它判断「有没有 codemode 工具
- *   需要被激活」。恒给 `direct` 会让它以为一个 codemode 工具都没有 —— 于是 codemode 不会
- *   被激活，MCP 工具全部不可达（而警告说的是「neither is active」，指向错的地方）。
- * - `namespace` / `annotations`：codemode 按 namespace 分组、权限扩展读 annotations 决定
- *   要不要确认。丢了两者都会静默退化。
- * - `sourceInfo`：给一个合法形状（`{ source: 'local' }`）而不是 undefined —— 扩展会在
- *   `getAllTools().find(...)` 之后去读它，给 undefined 会炸在一个假字段上，
- *   而那个堆栈与真因隔了三层。
+ * - `exposure`：MCP 扩展在读它判断「有没有 codemode 工具需要被激活」。恒给 `direct` 会让它以为
+ *   一个都没有 —— 于是 codemode 不被激活、MCP 工具全部不可达。
+ * - `namespace` / `annotations`：codemode 按 namespace 分组、权限扩展读 annotations 决定要不要
+ *   确认。丢了两者都会静默退化。
+ * - `sourceInfo`：给合法形状（`{ source: 'local' }`）而不是 undefined —— 扩展会去读它。
  */
 function allToolsInfo(cwd: string): ToolInfo[] {
   return registeredToolInfos(cwd).map((info) => ({

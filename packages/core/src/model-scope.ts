@@ -1,23 +1,14 @@
 /**
  * 模型作用域（`Ctrl+P` 循环的候选集）—— `/scoped-models` 改的就是它。
  *
- * ## 为什么不放 state
+ * 不放 state：它不是「这次对话的事实」，而是「这个会话拿哪几个模型循环」。进 state 就得在
+ * `restoredConversationState` 的恢复清单里再加一项，漏掉的症状是「`/new` 之后循环集莫名变了」。
  *
- * 因为它**不是「这次对话的事实」**，而是「这个会话拿哪几个模型循环」。state 里的东西会被
- * `conversation.reset` / `conversation.restored` / `trace.restored` 三处各带一次
- * （`reducer.ts` 的 `restoredConversationState` 把「哪些要跟着走」列成了一份清单）——
- * 作用域进 state 就得在那份清单里再加一项，而漏掉它的症状是「`/new` 之后循环集莫名变了」，
- * 比「作用域不跟着恢复」更难归因。
+ * 所以它是一个内存里的对象 + 一个 settings 键（与 pi 一致：会话内生效，`Ctrl+S` 才落盘）。
  *
- * 所以它是**一个内存里的对象 + 一个 settings 键**（与 pi 完全一致：会话内生效，
- * `Ctrl+S` 才落盘）。
- *
- * ## 落盘用 `settings.json` 的 `enabledModels`（与 pi 同一个键）
- *
- * `~/.pi/agent/settings.json` 是共用的（`pi-config.ts` 的 `configHome()` 就是 pi 的
- * `getAgentDir()`），所以这里写的 `enabledModels` **pi 那边也认**。写之前先读
- * `SettingsManager` 已有的值再合并，而不是整份覆写 —— settings.json 里有 `theme`、
- * `defaultProvider`、项目信任等等一堆别的键，整份覆写会把它们全弄丢。
+ * 落盘用 `settings.json` 的 `enabledModels`，pi 那边也认（`configHome()` 就是 pi 的
+ * `getAgentDir()`）。写之前先读已有值再合并，**不整份覆写** —— 那份文件里还有 `theme`、
+ * `defaultProvider`、项目信任等一堆键。
  */
 import type { Model } from '@earendil-works/pi-ai';
 import { SettingsManager } from '@earendil-works/pi-coding-agent/dist/core/settings-manager.js';
@@ -27,13 +18,10 @@ import { fallbackProviderSpec } from './provider';
 /**
  * 一个作用域条目：模型 + 可选的思考级别（`provider/id:high` 那种带级别的写法）。
  *
- * ## 形状必须与官方 `ModelSelectorComponent` 的 `scopedModels` 逐字一致
- *
- * 那个接口在 `scoped-models-selector.d.ts` 里**没有导出**（只作为构造参数的结构类型存在），
- * 而本项目开了 `exactOptionalPropertyTypes` —— 所以 `thinkingLevel?: string | undefined`
- * 与官方的 `thinkingLevel?: string` **不是**同一个类型（前者多允许显式 undefined）。
- * 复制一份过来时把 `| undefined` 去掉，否则 `scope.models` 传进官方构造会报类型不匹配，
- * 而那类 cast 会把一个真类型错误压成运行时崩溃。
+ * 形状必须与官方 `ModelSelectorComponent` 的 `scopedModels` 逐字一致。那个接口没有导出，
+ * 而本项目开了 `exactOptionalPropertyTypes` —— 所以这里**不能**写
+ * `thinkingLevel?: string | undefined`（与官方的 `thinkingLevel?: string` 不是同一个类型），
+ * 否则传进官方构造会报类型不匹配，而那类 cast 会把真类型错误压成运行时崩溃。
  */
 export interface ScopedModelItem {
   model: Model<any>;
@@ -42,10 +30,10 @@ export interface ScopedModelItem {
 
 export interface ModelScope {
   /**
-   * 启用列表。`null` = **全开**（官方的特例：显式列表刚好处���全集时会折叠回 `null`）。
+   * 启用列表。`null` = **全开**（官方的特例：显式列表恰好等于全集时会折叠回 `null`）。
    *
-   * 为什么是「全开」而不是「此刻的全集」：provider 的模型目录会随 refresh 变化
-   * （网关加了个新模型），「全开」要跟着变，而存一份具体列表就固化了。
+   * 存「全开」而不是「此刻的全集」：provider 的模型目录会随 refresh 变化，「全开」跟着变，
+   * 存一份具体列表就固化了。
    */
   readonly enabledModelIds: readonly string[] | null;
   /** 面板要显示的条目（`enabledModelIds` 解析出来的）。 */
@@ -58,9 +46,8 @@ export const NO_SCOPE: ModelScope = { enabledModelIds: null, models: [] };
 /**
  * 读 `settings.json` 的 `enabledModels`。
  *
- * 读不到 / 不是数组 / 空 → `null`（= 全开）。**空数组也当全开**：官方那边
- * 「全部禁用」会被 `normalizeEnabled()` 折叠回去，落到盘上写成 `[]` 与不写是同一件事，
- * 区别只在本次会话的临时状态。
+ * 读不到 / 不是数组 / 空 → `null`（= 全开）。**空数组也当全开**：官方那边「全部禁用」会被
+ * `normalizeEnabled()` 折叠回去，落到盘上 `[]` 与不写是同一件事。
  */
 export function readScopedModels(cwd: string = process.cwd()): string[] | null {
   try {
@@ -90,32 +77,19 @@ export function writeScopedModels(
 }
 
 /**
- * 默认模型引用（`settings.json` 的 `defaultProvider` / `defaultModel`）。
+ * 面板上的 `· default`（provider + 模型 id），读 `settings.json` 的 `defaultProvider` /
+ * `defaultModel`。两个键要**同时**有才算 —— 只有 model 没有 provider 是配坏了的形态，
+ * 给一个半截引用会让 `· default` 挂在解析不出来的模型上。
  *
- * 官方 `ModelSelectorComponent` 拿它排「· default」并支持搜 `default` 前缀直达。
- * 两个键要**同时**有才算（只有 `defaultModel` 没有 provider 是配坏了的形态 ——
- * 那时给一个半截引用会让「· default」挂在一个解析不出来的模型上）。
+ * 读不到时用 `provider.ts` 的 `fallbackProviderSpec()` 兜底（models.json 的第一个 provider，
+ * 再不行是内置 `anthropic`）。**不写死任何 provider 名**：写死的话换台机器配置里没这个
+ * provider 时，启动就报「未知 provider」。与 `provider.ts` 共用同一个兜底也是刻意的 ——
+ * 各写一份，症状是「启动用的默认」与「面板上标 default 的那个」对不上。
  *
- * 读不到时用**同一个**动态兜底（`provider.ts` 的 `fallbackProviderSpec()`：models.json
- * 里的第一个 provider；再不行就是内置的 `anthropic`）。**不写死任何一个 provider 名** ——
- * 早先这里与 `provider.ts` 都写死 `workbuddy` / `cn:space-bunny`，症状是换台机器（配置家目录
- * 里没这个 provider）时启动就报「未知 provider：workbuddy」，而面板上那个 `· default`
- * 也挂着一个解析不出来的模型。
- *
- * 两者共享同一个函数是刻意的：写死两遍、或各写一份兜底，症状就是「启动用的默认」与
- * 「面板上标 default 的那个」在配置不同时对不上 —— 而它们本该是同一个东西。
- */
-/**
- * 面板上的 `· default`（provider + 模型 id）。
- *
- * 官方 `DefaultModelReference` 的 `id` 是必填的 `string`，所以拿不到具体模型时只能
- * 返回 `undefined`（官方组件接受它 —— 那样就只是不显示 `· default` 那一行）。
- *
- * `runtime` 用来把「只有 provider」补成「provider + 它的第一个模型」：兜底选的 provider
- * 来自 models.json 的**第一个**条目时，它的第一个模型本来就在 models.json 里；而
- * 兜底退到内置 `anthropic` 时目录有 1500 条，得问 runtime 才不猜。
- *
- * 不传 `runtime`（测试、纯 settings 读取）时没有模型可补，就返回 undefined。
+ * 官方 `DefaultModelReference` 的 `id` 是必填 `string`，所以拿不到具体模型时只能返回
+ * `undefined`（官方组件接受它 —— 那就不显示 `· default` 那一行）。`runtime` 用来把
+ * 「只有 provider」补成「provider + 它的第一个模型」：兜底退到内置 `anthropic` 时目录有
+ * 1500 条，得问 runtime 才不猜。
  */
 export function defaultModelRef(
   cwd: string = process.cwd(),
@@ -151,14 +125,10 @@ export function writeDefaultModel(provider: string, modelId: string, cwd: string
 /**
  * 思考块是否默认折叠（`settings.json` 的 `hideThinkingBlock`）。
  *
- * 与 pi **同一个键、同一个文件** —— 在 pi 那边按 `Ctrl+T` 折过一次之后，
- * 本项目启动时也默认折叠（反之亦然）。读不到（没配过 / 文件坏了 / 没权限）就当 `false`：
- * 展开是默认值（与 pi 的 `settings.hideThinkingBlock ?? false` 一致）。
+ * 与 pi **同一个键、同一个文件**：在 pi 那边折过一次之后，本项目启动时也默认折叠。
+ * 读不到（没配过 / 文件坏了 / 没权限）就当 `false`（与 pi 的 `?? false` 一致）。
  *
- * ## 为什么是**同步**的
- *
- * 它在界面启动那一刻就要一个值（决定首次渲染怎么画思考块），而那里不是 async 上下文。
- * pi 那个 `SettingsManager` 的读是同步的（只有写是异步的），所以这里也同步。
+ * 同步读：界面启动那一刻就要这个值（决定首次渲染怎么画思考块），而那里不是 async 上下文。
  */
 export function readHideThinkingBlock(cwd: string = process.cwd()): boolean {
   try {
@@ -171,11 +141,8 @@ export function readHideThinkingBlock(cwd: string = process.cwd()): boolean {
 /**
  * 写 `hideThinkingBlock`（`Ctrl+T` 切换时落盘，与 pi 的 `setHideThinkingBlock` 同一效果）。
  *
- * ## 为什么是 async
- *
- * pi 的 `save()` 是**入队异步写**（`enqueueWrite`），`setHideThinkingBlock()` 返回时
- * 可能一个字节都还没落盘。这里 `await flush()` 等它真的写完 —— 否则调用方紧接着
- * `readHideThinkingBlock()` 会读到旧值（而写失败也拿不到）。
+ * 必须 `await flush()`：pi 的 `save()` 是入队异步写，`setHideThinkingBlock()` 返回时可能
+ * 一个字节都还没落盘 —— 调用方紧接着读到旧值，写失败也拿不到。
  */
 export async function writeHideThinkingBlock(hide: boolean, cwd: string = process.cwd()): Promise<boolean> {
   try {

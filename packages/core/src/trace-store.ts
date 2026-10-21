@@ -1,19 +1,14 @@
 /**
- * 轨迹持久化 —— 追加写 JSONL，像 git 自己的 reflog 那样只追加、不改写。
+ * 轨迹持久化 —— 追加写 JSONL，只追加、不改写。
  *
- * 为什么不覆盖写整棵树：
- *   - 崩溃/断电只丢最后没 flush 的一行，之前的历史完好；
- *   - 一行一个节点，回放就是逐行重放，天然幂等且能中途接着写；
- *   - 多个进程/多个标签页各写各的也不会互相踩坏已有内容。
+ * 不覆盖写整棵树：崩溃/断电只丢最后没 flush 的一行，一行一个节点，回放就是逐行重放；
+ * 多个进程各写各的也不会踩坏已有内容。
  *
- * 同一个文件里混着五类记录，每行带一个 op：
+ * 同一个文件里混着几种记录，每行带一个 op：
  *   - `prompt.init` / `model.init` 系统装载，各一条，落在所有节点之前
  *   - `message`    一条对话消息（user / assistant / toolResult / 中途插的 system 段）
  *   - `add`        轨迹节点首次出现（带完整字段）
  *   - `close`      轨迹节点闭合（只带 id / status / endedAt，回放时打补丁）
- *
- * 前三种是为了**回放**：读一遍 JSONL 就能把「当时发给模型的是什么」和「模型答了什么」
- * 全部重建出来，一次 token 都不用花。
  *
  * Node 端落文件，浏览器端落 localStorage，接口一致（都是 append 一个字符串）。
  */
@@ -21,12 +16,9 @@ import { applyTraceRecord, createTraceTree, type SerializedTraceNode, type Trace
 import type { SkillInfo } from './skills';
 
 /**
- * 装载记录（`prompt.init` / `model.init`）。两种，各一条。
+ * 装载记录（`prompt.init` / `model.init`），两种、各一条，混在轨迹文件的前几行。
  *
- * 它们**混在轨迹文件的前几行**，不另开文件。
- * 拆出去过的理由（"回放要先跳过无关的装载记录"）不成立 —— 回放只认自己那几种 op，
- * 其余一律忽略；而且每个会话多一个文件，目录里全是 jsonl 很难翻。
- * 老会话的 `.init.jsonl` 已由一次性迁移脚本合并，不再有回退读的代码路径。
+ * 不另开文件：回放只认自己那几种 op，装载记录混在前面不影响回放，而少一半文件少一半噪声。
  */
 
 export type InitRecord =
@@ -70,11 +62,9 @@ export interface ReplayedInit {
 }
 
 /**
- * 一行轨迹 / 对话记录。`message` 让回放能重建 messages（零 token 复现一轮对话）。
+ * 一行轨迹 / 对话记录。`message` 让回放能重建 messages（零 token 重放一轮对话）。
  *
- * `prompt.init` / `model.init` 也在这里面（不另开 `<id>.init.jsonl`）：
- * 回放只认自己那几种 op、其余忽略，所以装载记录混在前面**不影响**回放，
- * 而少一半文件对「目录里全是 jsonl」的观感差别很大。
+ * 装载记录也走这里（不另开文件）：回放只认自己那几种 op、其余忽略。
  */
 export type TraceRecord = InitRecord | { op: 'message'; message: unknown } | { op: 'add'; node: SerializedTraceNode } | { op: 'close'; id: string; status: string; endedAt: number | null };
 
@@ -84,8 +74,6 @@ export interface TraceSink {
   /** 关闭（Node 端 flush 缓冲）。 */
   close?(): void | Promise<void>;
 }
-
-// ─── 收集器：从状态树算出「还没落盘的那几行」 ───
 
 /**
  * 算出要追加写的记录。
@@ -120,8 +108,6 @@ function toRecord(node: SerializedTraceNode): SerializedTraceNode {
   return { ...node };
 }
 
-// ─── 回放 ───
-
 /** 回放一份轨迹/对话 JSONL。 */
 export interface ReplayedSession {
   tree: TraceTree;
@@ -134,8 +120,8 @@ export interface ReplayedSession {
 /**
  * 从 JSONL 文本重建轨迹树**和**对话消息。坏行跳过（最后一行可能是崩溃时截断的）。
  *
- * messages 一并重建是「零 token 复现一轮对话」的关键：回放出来的会话里，模型答过什么、
- * 工具返回了什么，全都在，不必再调一次模型。
+ * 一并重建 messages 是「零 token 重放一轮对话」的关键：模型答过什么、工具返回了什么全在，
+ * 不必再调一次模型。
  */
 export function replaySession(text: string, sessionId: string): ReplayedSession {
   let tree = createTraceTree(sessionId);
@@ -182,28 +168,22 @@ export function toJsonl(records: readonly TraceRecord[]): string {
   return records.map((r) => JSON.stringify(r)).join('\n');
 }
 
-// ─── 驱动器：盯住 store，把新节点刷进 sink ───
-
 /**
- * 轨迹持久化驱动器。挂到 store 上，每次状态变化就把「还没落盘的节点」追加写出去。
+ * 轨迹持久化驱动器：挂到 store 上，每次状态变化就把「还没落盘的节点」追加写出去。
  *
- * 为什么不把落盘做成 effect 表里的 Cmd：
- *   - 它跟 LLM/工具那些 effect 不是一回事，几乎每次 dispatch 都要跑（token 增量也会触发），
- *     走 Cmd 会把环搅乱；
- *   - 而「错误也要持久化」这个需求恰恰要求它**不能**因为出错路径而不执行。
- *     一个订阅器对成功/失败一视同仁，这正是我们要的语义。
+ * 不做成 effect 表里的 Cmd：它几乎每次 dispatch 都要跑（token 增量也触发），走 Cmd 会把环
+ * 搅乱；而「错误也要持久化」恰恰要求它**不能**因为出错路径而不执行 —— 订阅器对成功/失败
+ * 一视同仁。
  *
- * 写失败（磁盘满、权限）不会打断环：只报一次警告，游标不动，下次状态变化再试。
+ * 写失败（磁盘满、权限）不打断环：报一次错，游标不动，下次状态变化再试。
  */
 export interface TracePersistence {
   /**
    * 恢复历史之后告诉落盘器「前 N 条消息已经在文件里了，别再写一遍」。
    *
-   * 为什么需要它：`restoreSession` 会 `conversation.reset`（清空 messages）再逐条 `session.restored`
-   * 把 N 条历史灌回来。那些内容**本来就在文件里**，不是新产生的 —— 但落盘器只看 messages 有没有变长，
-   * 于是从游标 0 开始把整批重写一遍，轨迹文件里就出现了「同一批消息出现两次」。
-   *
-   * 与 `dispose` 一样是给内核用的出口：store 只有一个，落盘器也只有这一个，所以由它来归位游标。
+   * `restoreSession` 会 `conversation.reset` 再逐条 `session.restored` 灌回 N 条历史，
+   * 那些内容本来就在文件里 —— 落盘器只看 messages 有没有变长的话会整批重写一遍，
+   * 轨迹文件里就出现「同一批消息两次」。
    */
   skipMessages(count: number): void;
   dispose(): void;

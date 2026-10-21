@@ -16,21 +16,11 @@ import { createTraceTree, newSessionId, type TraceTree } from './trace';
 export type Phase = 'idle' | 'thinking' | 'calling-tools';
 
 /**
- * 排队的用户输入 —— 环在跑的时候人还能说话（与 pi 的 steer / followUp 同一个口径）。
+ * 排队的用户输入 —— 环在跑的时候人还能说话（与 pi 的 steer / followUp 同一个口径，
+ * 两种队列的差别与为什么不用 `user.message` 见 `actions.ts`）。
  *
- * ## 两种队列的差别是**投递时机**，不是优先级
- *
- * - `steer`：当前 step 的工具跑完后、**下一次 LLM 调用之前**插入。
- *   也就是说它会打断「模型→工具→模型」这个循环的延续，让模型看到新的话。
- * - `followUp`：等到模型**没有工具调用了**（回合本该收工）才插入，然后开一个新回合。
- *   它不打断任何东西，只是「接着聊」。
- *
- * 两者都是 FIFO，各自独立成列（pi 也是两列：两个队列的元素互不排队）。
- *
- * ## 为什么入队的是 text 而不是 Message
- *
- * 与 `user.message` 一样，附件在装载时折成 content 块 —— 入队的就是「一句话」，
- * 真要发出去时才组装成消息（见 reducer 的 `queue.delivered`）。
+ * 入队的是 text 而不是 Message：附件在装载时折成 content 块，真要发出去时才组装成消息
+ * （见 reducer 的 `queue.delivered`）。
  */
 export interface QueuedInput {
   text: string;
@@ -58,15 +48,10 @@ export interface ExecutingTool {
 /**
  * 一个正在跑的工具当前的**中间输出**。
  *
- * ## 为什么要单独一份而不是提前写进 messages
- *
- * `messages` 是**发给模型的那份历史**，它只该有终值。中间态一旦进去就有三个麻烦：
- *   - 每个增量都要 append 一条，最终得去重、还得让模型看到一堆中间状态；
- *   - 流式过程中随时可能被 Ctrl-C 掉，于是 messages 里留下一个**没有结果**的工具调用
- *     —— 协议非法（下一个请求直接被 provider 拒）；
- *   - 落盘器会把中间态一起写进会话文件，恢复出来是一堆垃圾。
- *
- * 所以中间态只放这里（纯展示），终值才进 `messages`。
+ * 不提前写进 `messages`：那是**发给模型的那份历史**，只该有终值。中间态进去会有三个麻烦 ——
+ * 每个增量都 append 一条（最终得去重、模型还得看一堆中间状态）、流式过程中被 Ctrl-C 后
+ * messages 里留下一个**没有结果**的工具调用（协议非法，下一个请求直接被 provider 拒）、
+ * 落盘器把中间态一起写进会话文件。所以中间态只放这里（纯展示），终值才进 `messages`。
  */
 export interface ToolProgress {
   toolCallId: string;
@@ -79,34 +64,24 @@ export type LlmErrorKind = 'timeout' | 'network' | 'auth' | 'model' | 'aborted' 
 /**
  * 回合为什么停了 —— 界面据此区分「正常收工」和「被砍」。
  *
- * ## 为什么不能靠 errorKind 猜
- *
- * `errorKind` 说的是「LLM 调用失败的原因」，它对「撞轮数上限」这种**根本没失败**的情况没有定义
- * （一直是 null）。而 `error` 又只是一句给人看的字符串，界面没法拿它做判断。
- * 结果就是：撞上限、LLM 报错、手动中断在界面上长得一模一样，只能靠猜。
- *
- * - `completed`：模型自己说完了，正常的。
- * - `maxTurns`：撞了单回合轮数上限，被砍。
- * - `error`：LLM 调用失败（配 `errorKind` 看是哪一类）。
- * - `aborted`：用户手动中断。
+ * 不能靠 `errorKind` 猜：它说的是「LLM 调用失败的原因」，对「撞轮数上限」这种**根本没失败**
+ * 的情况没有定义；而 `error` 只是一句给人看的字符串。
  */
 export type StopReason = 'completed' | 'maxTurns' | 'error' | 'aborted';
 /**
- * ═══ 停止的**具体原因** ═══
+ * 停止的**具体原因**。
  *
- * `StopReason` 只说「这一轮是哪种结局」，它把好几件事压成了一个 `error`：模型超时、网络抖动、
- * 鉴权失败、工具批次整体挂掉、用户自己按了中断 —— 界面上全都长得一样（一条红字）。
+ * `TurnEndReason` 把好几件事压成了一个 `error`：超时、网络抖动、鉴权失败、工具批次整体挂掉、
+ * 用户按了中断 —— 界面上全都长得一样（一条红字）。这一层拆细，界面与日志直接念它：
  *
- * 这一层把「为什么停」拆细，界面与日志直接念它，不必去猜 `error` 的文案：
+ * - `user`：用户手动中断（**不是故障**，不该弹红框）；
+ * - `timeout` / `network` / `auth` / `model` / `llm-error`：LLM 调用失败，细分到能对上处置办法；
+ * - `tool-error`：工具批次整体挂掉（LLM 根本没在跑）；
+ * - `maxTurns`：撞单回合轮数上限；
+ * - `completed`：模型自己说完了；
+ * - `shutdown`：进程/内核被关停。
  *
- *   - `user`：用户手动中断（Ctrl-C / Web 的停止按钮）。**不是故障**，不该弹红框。
- *   - `timeout` / `network` / `auth` / `model` / `llm-error`：LLM 调用失败，细分到能对上处置办法。
- *   - `tool-error`：工具批次整体挂掉（LLM 根本没在跑）。
- *   - `maxTurns`：撞单回合轮数上限。
- *   - `completed`：模型自己说完了。
- *   - `shutdown`：进程/内核被关停（主动 abort 的非用户来源）。
- *
- * 它由 `llm.failed` / `llm.giveup` 这两条 action 带进来 —— 见 actions.ts 的 `cause` 字段。
+ * 由 `llm.failed` / `llm.giveup` 带进来（见 actions.ts 的 `cause` 字段）。
  */
 export type StopCause =
   | 'completed'
@@ -169,14 +144,11 @@ export interface PromptState {
   /** 基础 system prompt（渲染好的整段）。 */
   systemPrompt: string;
   /**
-   * 整段 prompt 的**分段**（pi 的 `SystemPromptSections`：段名 → 文本）。
+   * 整段 prompt 的**分段**（段名 → 文本）。`systemPrompt` 是它的渲染结果，而这个才是原料：
+   * 有了它中途的变更才能**按段 patch**（只有变了的段进新消息，前缀缓存因此保住）。
    *
-   * `systemPrompt` 是它的渲染结果，而这个才是原料：有了它，中途的 prompt 变更才能
-   * **按段 patch**（只有变了的段进新消息，已有消息一个字节不动 —— 前缀缓存因此保住）。
-   * 没它的话任何变更都得整段重发。
-   *
-   * **可选**：旧轨迹文件的 init 段里没有这个字段。没有时只能当「一整段 prompt」
-   * （head 用 `content` 而不是 `sections`，见 `prompt-head.ts`）。
+   * **可选**：旧轨迹文件的 init 段里没有它，那时只能当「一整段 prompt」（head 走 `content`，
+   * 见 `prompt-head.ts`）。
    */
   sections?: Record<string, string>;
   /**
@@ -213,12 +185,11 @@ export interface PromptState {
    */
   skillDiagnostics?: string[];
   /**
-   * 装进来的 prompt 模板（`prompts.ts` + 官方 `DefaultResourceLoader`）。
+   * 装进来的 prompt 模板（`prompts.ts`）。
    *
-   * 与 skill 不同，模板**不进** system prompt —— 它只是 `/名字` 展开成的那段提示词。
-   * 但同样要留在状态里：开场横幅要报清单、补全要列命令、回车时要判断「这条是不是
-   * 模板」。而装载发生在内核装配那一刻，换会话（`/new` / `/resume`）时状态块带着走，
-   * 所以界面不必自己再存一份。
+   * 与 skill 不同，模板**不进** system prompt —— 它只是 `/名字` 展开成的那段提示词。但同样要
+   * 留在状态里：开场横幅要报清单、补全要列命令、回车时要判断「这条是不是模板」，而装载发生在
+   * 内核装配那一刻，换会话时状态块带着走。
    *
    * **可选**：旧轨迹回放与测试里没有这个字段（判据是 `undefined`，不是空数组）。
    */
@@ -262,21 +233,10 @@ export interface ModelState {
 /**
  * 会话身份：这一轮对话属于哪个会话、边界在哪。
  *
- * ## 为什么它必须在 `AgentState` 里
- *
- * 同一个进程里有**两个界面**（TUI 与 web），它们都要回答「现在是哪个会话」。
- * 早先这两样东西不在状态里：
- *
- *   - `sessionId` 住在内核闭包里（`current.sessionId`，那是**资源句柄**——
- *     轨迹 sink / 会话文件绑在哪个 id 上），界面只能通过一个 getter 去问内核；
- *   - `cwd` 是内核常量 + `WebBridge` **构造时**抄的一份，开着就不再变。
- *
- * 于是「共享同一个 store」在**会话身份**这里不成立：两端各自去问、或者各自抄一份，
- * 只要有一处忘了跟（或抄的时间不对），症状就是「浏览器点了新会话，另一边还是老 id」
- * —— 而那类不同步在界面上看不出原因。
- *
- * 放进状态后只剩一个真相：谁要 id / cwd 都读它（`state.session`）。内核里那对
- * `current` 仍然是资源句柄（它管文件），但**不再是对外的会话身份**。
+ * 必须在 `AgentState` 里：同一个进程有**两个界面**（TUI 与 web）都要回答「现在是哪个会话」。
+ * 身份放在内核闭包里的话，两端各自去问或各自抄一份，只要有一处忘了跟，症状就是「浏览器点了
+ * 新会话，另一边还是老 id」—— 那类不同步在界面上看不出原因。放进状态后只剩一个真相。
+ * 内核里那对 `current` 仍然是资源句柄（它管文件），但不再是会话身份。
  */
 export interface SessionState {
   /** 会话 id（开新会话与恢复历史时会变）；会话文件名由它决定。 */
@@ -293,7 +253,6 @@ export interface AgentState {
 
   // ── prompt 侧（与 model 分开，因为 system prompt 后面要挂 Hooks） ──
   prompt: PromptState;
-  // ── model 侧 ──
   model: ModelState;
 
   /**
@@ -324,22 +283,15 @@ export interface AgentState {
   /** 已完成的 LLM 轮数。 */
   turns: number;
   maxTurns: number;
-  // ─── turn / step 两层容器（轨迹树与统计的唯一真相） ───
   /**
    * 当前回合（turn）的序号，从 1 开始；不在回合里时为 0。
    *
-   * ## turn 与 step 的边界
+   * - **turn** = 一次用户输入引发的整个回合（中间可以有好几个 step）；
+   * - **step** = 一次 LLM 调用 **加上它触发的工具批次**。
    *
-   * - **turn** = 一次用户输入引发的**整个回合**：从那条消息进来，到模型没有工具调用、
-   *   这一轮真正收工为止。中间可以有好几个 step。
-   * - **step** = 一次 LLM 调用 **加上它触发的工具批次**。它在轨迹树上就是原先
-   *   `llm.attempt` 的位置（那个容器已被 `step.start` 取代）。
-   *
-   * 于是树形是 `user → turn → step → llm.result / tool.*`，
-   * 而重试的开叉发生在 **step 这一层**（同父下多个 step.start），不是 turn 层。
-   *
-   * 与 pi 的 `turn_start` / `turn_end` 对齐（`step` 是本项目细分出来的，
-   * pi 把「LLM 调用 + 工具」整段当一个 turn）。
+   * 树形是 `user → turn → step → llm.result / tool.*`，重试的开叉发生在 **step 这一层**
+   * （同父下多个 `step.start`）。与 pi 的 `turn_start` / `turn_end` 对齐（`step` 是本项目
+   * 细分出来的）。
    */
   turnIndex: number;
   /** 当前回合在跑的 step 序号，从 1 开始；不在 step 里时为 0。 */
@@ -351,7 +303,6 @@ export interface AgentState {
    * 每次新回合归零。两者名字相近但含义不同，所以这里写清楚。
    */
   totalSteps: number;
-  // ─── 排队中的用户输入（steer / followUp） ───
   /** steer 队列：在下一次 LLM 调用前插入。FIFO。 */
   steerQueue: readonly QueuedInput[];
   /** followUp 队列：回合收工时才插入，然后开新回合。FIFO。 */
@@ -404,32 +355,24 @@ export interface AgentState {
   retrying: boolean;
   aborted: boolean;
 
-  // ─── 轨迹树（trace tree） ───
   /** 像 git log 一样的一次尝试一节点的执行历史。 */
   trace: TraceTree;
   /**
    * 轨迹是否**开过**（用户发出过第一句话）。
    *
-   * 为什么要有这个标记：装载（prompt / tools / skills / model）在内核一装配时就已经进 state，
-   * 但它们的**轨迹节点**推迟到用户发出第一句话才补上（见 `user.message` 里的 beginTrace）。
-   * 所以「装载了但树还是空的」是一个正常状态，而不是漏了东西 ——
-   * 界面上的「（还没有任何节点）」说的正是这句。
-   *
-   * 顺带当幂等守卫：补过装载段之后再来第二句话，不会把装载节点追加第二遍。
+   * 装载（prompt / tools / skills / model）在内核装配时就进了 state，但它们的**轨迹节点**
+   * 推迟到第一句话才补上（见 `user.message` 的 `beginTrace`）—— 所以「装载了但树是空的」是
+   * 正常状态。顺带当幂等守卫：补过装载段之后不会追加第二遍。
    */
   traceBegun: boolean;
   /**
-   * 树开过之后换过模型 / 思考级别（`model.init` / `thinking.changed`），但**还没写进树**。
+   * 树开过之后换过模型 / 思考级别，但**还没写进树**。
    *
-   * ## 为什么不换一次就追加一个节点
+   * 不换一次就追加一个节点：树上该回答的是「这一轮实际用的上下文是什么」，来回切三次会在
+   * 对话中间堆三个夹在两句人话之间的 `model.init`，而它们什么也没解释。
    *
-   * 切换是界面上的动作，而树上该回答的是「这一轮实际用的上下文是什么」。来回切三次、
-   * 或先换模型再改思考级别，就会在对话中间多堆三个夹在两句人话之间的 `model.init`，
-   * 而它们什么也没解释（真正生效的只有最后一个）。
-   *
-   * 现在只置一个标记，等到下一次真要发消息时由 `flushModelChange()` 补**一个**节点，
-   * 内容是那一刻生效的那一版，位置在 user 节点**之前** —— 与装载节点的口径一致
-   * 见 `beginTrace()`：发过话才留痕，而且留的是当时真正生效的那一版。
+   * 所以只置标记，等下一次真要发消息时由 `flushModelChange()` 补**一个**节点，内容是那一刻
+   * 生效的那一版，位置在 user 节点之前（与 `beginTrace()` 同一口径：发过话才留痕）。
    */
   modelTraceDirty: boolean;
   /** 当前在跑的 LLM 尝试节点 id；没有则 null。 */
@@ -467,23 +410,15 @@ export interface AgentState {
   /**
    * 已完成工具的**耗时**（毫秒），key 是 toolCallId。
    *
-   * ## 为什么单独存一份，而不是去轨迹树上刨
+   * 不去轨迹树上刨（`tool.call.createdAt` / `endedAt`）：那条路要「按 toolName 猜是哪个
+   * 节点」，同名工具连着调两次就猜错，而猜错的表现是**显示一个错的数字**、不报错。
+   * `tool.result` 拿得到这次调用的 id 与时刻，直接记一份 —— 唯一真相、零猜测。
    *
-   * 界面要显示 `Took 0.5s`（pi 的 bash 块底部那行）。轨迹树上其实也有时间戳
-   * （`tool.call.createdAt` / `endedAt`），但那条路要「按 toolName 猜是哪个节点」——
-   * 同名工具连着调两次就猜错了，而猜错的表现是**显示一个错的数字**，不报错，最难发现。
-   *
-   * reducer 的 `tool.result` 拿得到这次调用的 id 与时刻，直接记一份即可：
-   * **唯一真相、零猜测**。它只进界面，不进 prompt（`details` 那条路才进 prompt），
-   * 所以不会污染发给模型的上下文，也不会被写进会话文件。
-   *
-   * 会话文件里不带它：恢复历史时 `state` 是从消息重建的，这些耗时显示不出来就显示不出来
-   * （显示 `Took` 一个假数字比不显示更糟）。
+   * 只进界面、不进 prompt，也不写进会话文件：恢复历史时拿不到就算了（显示一个假数字更糟）。
    */
   toolTimings: Readonly<Record<string, number>>;
   /** 本轮（从 user.message 起）已发起的 LLM 尝试次数；用来判「还有没有重试机会」。 */
   llmAttempts: number;
-  // ─── 上下文压缩 ───
   /**
    * 压缩是否正在进行中（摘要要打一次网络，可能好几秒）。
    *
@@ -598,7 +533,7 @@ export function createInitialState(options: InitialStateOptions): AgentState {
     executing: [],
     turns: 0,
     // 默认**不设上限**：一次提问就是一条 ReAct 循环，模型要查多少轮由它自己说了算。
-    // 曾经默认 25，表现为「模型正干着活突然停了」—— 但用户只发了一条消息，
+    // 默认不设上限：设成 25 那类小值时表现为「模型正干着活突然停了」而用户只发了一条消息，
     // 是 25 次 LLM 调用把这个大需求砍断了。命令行的 --max-turns 仍可显式设一个兜底值。
     maxTurns: options.maxTurns ?? Number.POSITIVE_INFINITY,
     turnIndex: 0,

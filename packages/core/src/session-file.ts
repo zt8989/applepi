@@ -1,32 +1,13 @@
 /**
  * 会话文件：`<时间戳>_<id>.jsonl`，首行 header，其后每行一条 entry。
  *
- * ## 格式照抄 pi
+ * 格式照抄 pi（header + `<SessionEntryBase>` 派生的各类 entry），好处是目录结构与 header 定义
+ * 都与 pi 一致 —— 将来要互通不必改，也不必自己发明一份格式。文件名与 id 同一规则（ISO 串把
+ * `:` `.` 换成 `-`，id 是 UUIDv7）：目录一眼看出先后，id 不靠文件名也能从 header 读出来。
+ * 改名之前的旧文件（`<id>.jsonl`）仍然读得到（见 config-home 的 `findFileById`）。
  *
- * header（`SessionHeader`，见 pi-coding-agent 的 session-manager.d.ts）：
- *
- *     {"type":"session","version":1,"id":"…","timestamp":"…","cwd":"…"}
- *
- * entry（`SessionEntryBase` + 各自的字段）：
- *
- *     {"type":"message","id":"…","parentId":null,"timestamp":"…","message":{…}}
- *
- * 为什么照抄：本项目**不要求** pi 能读我们的会话（那是另一件事），但抄一份格式有两个
- * 实利 —— 目录结构与 pi 一致（将来若要互通不用改），以及这份 header 定义是经过实战
- * 的，不用自己发明。文件名与 id 也与 pi 一致（见下面）。
- *
- * ## 文件名：`<时间戳>_<id>.jsonl`
- *
- * 与 pi 同一条规则（时间戳是 ISO 串把 `:` `.` 换成 `-`，id 是 UUIDv7）。好处：目录一眼
- * 能看出先后，而 id 不靠文件名也能读出来（header 里有）。改名之前的旧文件
- * （`<id>.jsonl`）仍然读得到 —— 解析路径扫目录时两种形状都认（见 config-home 的
- * `findFileById`）。
- *
- * ## 轨迹不写在这里
- *
- * 轨迹（一次尝试一节点）在 `traces/<时间戳>_<id>.jsonl`，与本文件分开。理由：轨迹是
- * **每次对话**的产物、落盘频繁；会话文件是给人读的历史。混在一起的话「读一个会话」要
- * 先跳过一堆与它无关的记录。
+ * 轨迹（一次尝试一节点）不写在这里，在 `traces/<时间戳>_<id>.jsonl`：轨迹落盘频繁，混在
+ * 一起的话「读一个会话」得先跳过一堆无关记录。
  */
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -35,20 +16,14 @@ import { ensureDir, findFileById, sessionDirFor, sessionFileName } from './confi
 import type { Message, SystemMessage } from '@earendil-works/pi-ai';
 
 /**
- * 会话文件版本。
+ * 会话文件版本 —— **与 pi 当前那版对齐（`CURRENT_SESSION_VERSION = 3`）**，因为我们产出的
+ * 必须是 pi 能直接读的文件。pi 的 v1→v3 迁移只是补 `id`/`parentId` 树与 role 改名，那些
+ * 字段我们写的时候本来就有，所以 v3 不是「要迁移」，是「本来就是这个形状」。
  *
- * **与 pi 当前那版对齐（`CURRENT_SESSION_VERSION = 3`）**，因为我们要产出的是一份
- * pi 能直接读的会话文件（见下面的「v3 形状」）。pi 那边 v1→v3 的迁移只是补
- * `id`/`parentId` 树、把 `hookMessage` role 改成 `custom` —— 那些字段我们写的时候
- * 本来就有，所以 v3 不是「要迁移」，是「本来就是这个形状」。
- *
- * v3 相对我们早先写的 v1，多出来的两样（本文件 + session-recorder 一起产出）：
- *
- *   - 会话开头的 **`model_change`**（`provider` / `modelId`）—— pi 用它恢复「这一段
- *     用的哪个模型」；我们早先只在**中途换模型**时写，开头那个没写。
- *   - 开头的**一条 `system` 消息**（`sections` = 整份 system prompt 的分段 +
- *     `toolsAdded` = 装载时那批工具的完整声明）—— 就是 pi 的「system prompt + tools」。
- *     pi 靠它 `_restoreToolsFromTranscript()` 把工具表装回来。
+ * v3 的两样开头脑子（本文件 + session-recorder 一起产出）：**`model_change`**（pi 用它恢复
+ * 「这一段用哪个模型」）与**一条 `system` 消息**（`sections` = 整份 prompt 的分段 +
+ * `toolsAdded` = 装载时那批工具的完整声明），pi 靠它 `_restoreToolsFromTranscript()` 把工具
+ * 表装回来。
  */
 export const SESSION_VERSION = 3;
 
@@ -125,7 +100,6 @@ export function createSessionHeader(options: {
   };
 }
 
-// ─── 写 ───
 
 export class SessionWriter {
   private readonly file: string;
@@ -219,7 +193,6 @@ export class SessionWriter {
   }
 }
 
-// ─── 读 ───
 
 /**
  * 读文件里**最后一条** entry（续写时接上 `id` / `parentId` 链用）。
@@ -306,18 +279,9 @@ export function readSession(file: string): Session | null {
 }
 
 /**
- * 这条 message 是不是 pi v3 的**开头 system 消息**（system prompt + tools）。
- *
- * 两条判据，够用且不误伤：
- *
- * - head 一定带 `toolsAdded`（装载时那批工具的完整声明）—— 中途那条
- *   `prompt.segment.added`（MCP 的 `mcp_servers` 段 patch）没有它；
- * - 万一工具一个都没有（没有 `toolsAdded`），head 也**没有 `source` 字段**，而段 patch
- *   都带着 `source`（`before_agent_start`）。于是「第一条 system 消息且不是段 patch」
- *   就是 head。
- *
- * 只看**第一条** message：head 永远在最前（`model_change` / `thinking_level_change`
- * 不是 message 条目，不影响）。
+ * 这条 message 是不是 pi v3 的**开头 system 消息**（system prompt + tools）。两条判据：
+ * head 一定带 `toolsAdded`（中途那条段 patch 没有它）；万一工具一个都没有，head 也**没有
+ * `source` 字段**，而段 patch 都带着它。只看**第一条** message：head 永远在最前。
  */
 function isLeadingHead(message: Message): boolean {
   const sys = message as SystemMessage;
@@ -417,14 +381,11 @@ export function readSessionThinking(file: string): SessionThinkingInfo | undefin
 /**
  * 只读 JSONL 的开头若干字节，逐行解析。
  *
- * ## 为什么需要它
+ * 一条 toolResult 能有几百 KB（一次 grep 的全部命中），而列表界面要的只是首条用户消息 ——
+ * 它在文件的前几行。为显示标题把 18MB 全 parse 一遍就是「打开 /resume 等一分钟」。
  *
- * 会话文件里一条 toolResult 能有几百 KB（一次 `ls -la` 的输出、一次 grep 的全部命中），
- * 而**列表界面要的只是首条用户消息** —— 它在文件的前几行。为了显示 124 个会话的标题
- * 而把 18MB 全 parse 一遍（那是早先 `sessionTitle()` 干的事），就是「打开 /resume 等一分钟」。
- *
- * `stopAfter` 是真正的省法：拿到想要的 entry 就不再往下读。标题那条路上第一条 user 消息
- * 一命中就停，于是实际读量与**第一个问题有多长**成正比，与这个会话聊了多久无关。
+ * `stopAfter` 是真正的省法：拿到想要的 entry 就不再往下读，于是读量与「第一个问题有多长」
+ * 成正比，与这个会话聊了多久无关。
  *
  * @param bytes     最多读多少字节（至少读到一整行，不截半行）
  * @param stopAfter 返回 true 就停：不再解析后面的行，也不再继续读盘
@@ -479,32 +440,14 @@ export function readJsonlHead(
 }
 
 /**
- * 只读 JSONL 的**最后**若干字节，倒着扫行（第一条命中的就是最新的那条）。
+ * 只读 JSONL 的**最后**若干字节，倒着扫行。
  *
- * ## 为什么需要「从尾巴读」
+ * 列表里那栏「最近一次活动」的 `timestamp` 在每一行里，而最后一次活动几乎总在**文件末尾**
+ * （会话文件只追加）—— 从尾巴读就不必把整个会话读一遍。
  *
- * 列表里有一栏是「这条会话最近一次活动是什么时候」。消息的 `timestamp` 在**每一行**里，
- * 而最后一次活动几乎总在**文件末尾**（一个会话文件是只追加的）。于是从文件头扫到尾
- * 是唯一能拿准的办法 —— 那等于把整个会话读一遍，18MB 的目录就是 18MB。
- *
- * 但 `session_info`（用户给会话起的名字）可能写在**任何**位置：给一个三个月前的会话
- * 改名，那条 entry 追加在文件末尾，而后面可能又跟了几百条消息。所以名字**只能**全扫。
- *
- * ## 两种读法，按「值在哪儿」选
- *
- * | 要什么 | 怎么拿 |
- * | --- | --- |
- * | `session_info`（名字 / 分叉来源 `parentSession`） | 从头扫（`readJsonlHead` 那边已有），**命中就停** |
- * | 最后活动时间（`modified`） | 从尾巴读这一段（这里） |
- *
- * ## 为什么「取最大 timestamp」而不是「最后一行的时间戳」
- *
- * 文件里留着**空壳会话**（header 之后一条消息都没有，见 `SessionWriter.start`），
- * 而中途失败的那一轮可能留下「工具结果写完了、assistant 消息没写」的情况 ——
- * 这时文件**末尾**那行的 timestamp 不代表最后一次真正说过话。
- *
- * 取最大值的代价只是「多读一点字节」（已经在读那一段了），收益是那一个数**准** ——
- * 它决定列表的排序与「3 分钟前 / 2 小时前」这种显示。
+ * 取**最大** timestamp 而不是最后一行的：文件里可能留着空壳会话（header 之后没有消息），
+ * 中途失败的那一轮也可能「工具结果写完了、assistant 消息没写」，那时末尾那行不代表最后一次
+ * 真正说过话。代价只是多读已经在读的这段字节，收益是排序与「3 分钟前」那个数**准**。
  *
  * @param bytes 最多读文件末尾多少字节
  */
@@ -565,41 +508,19 @@ export interface SessionInfoEntryLike extends SessionEntry {
 }
 
 /**
- * 给会话起名：往那个会话文件**追加**一条 `session_info`。
+ * 给会话起名：往那个会话文件**追加**一条 `session_info`（调用方：`/name` 与历史面板的重命名）。
  *
- * 两个调用方：`/name`（`tui/app.ts`）与历史会话面板的重命名（`session-picker.ts`）。
- * 写在**格式模块**里而不是其中任何一个，是因为这是「会话文件长什么样」的一部分 ——
- * 面板只是碰巧也需要它。
+ * 与 pi 同一个 entry type，所以两边都能读到这个名字（都是「倒着找最后一条 `session_info`」）。
  *
- * 与 pi 同一个 entry type，所以**两边都能读到**这个名字（pi 的 `getSessionName()` 走的就是
- * 「倒着找最后一条 `session_info`」，我们的 `config-home.readSessionName()` 同一套语义）。
+ * **append 而不是重写**：entry 用 `parentId` 串成一条链，重写要重排那条链，而改名不该动它。
  *
- * ## 为什么是 append 而不是重写文件
+ * **随机 id 而不是接着 writer 的 `seq` 数**：本函数是带外调用，与正在记录的 `SessionWriter`
+ * 各按「链尾 id 往后数」会算出同一个 id，链上就出现两个同 id 节点。副作用是这条
+ * `session_info` 与下一条消息在 `parentId` 上成了兄弟 —— 可接受（pi 的会话树本来就有分叉，
+ * 它外部 append 时也是这个形状）。
  *
- * entry 用 `parentId` 串成一条链（pi 用它做 session tree）。重写要重排那条链，
- * 而「给会话起个名字」不该动它 —— append 是**唯一**安全的形状。
- *
- * ## 为什么用随机 id 而不是接着正在跑的那个 writer 数
- *
- * 本函数是**带外**调用：正在记录的 `SessionWriter`（`session-recorder.ts`）手里有自己的
- * `seq`，两边各自按「最后一条 entry 的 id 往后数」就会**算出同一个 id** —— 下一个 `e12`
- * 既是这条 `session_info` 又是下一条消息，链上出现两个同 id 节点。随机 id 让两者互不相干。
- *
- * 副作用是：这条 `session_info` 与「下一条消息」在 `parentId` 上成了**兄弟**（都挂在当时的
- * 链尾上），而不是一条直线。这是可接受的 —— pi 的会话树本来就有分叉，它的
- * `appendSessionInfo()` 在外部 append 时也是这个形状；而且改名不该动链上的任何已有节点
- * （见上面的「为什么是 append 而不是重写文件」）。
- *
- * ## 名字里的换行会被压成空格
- *
- * 一条 `session_info` = 一行 JSON，而换行会把它劈成两半（第二半 `JSON.parse` 失败被跳过，
- * 于是这个名字**看起来没生效**）。与 pi 的 `appendSessionInfo()` 同一处理。
- *
- * ## 空名字 = 清掉名字
- *
- * pi 的语义是「最后一条 `session_info` 说了算，空串 = 显式清名」。`/name` 那边已经把
- * 空串拦掉了（没给参数 = 显示当前名字），这里再兜一层（与 pi 的 `appendSessionInfo` +
- * 面板 `confirmRename` 同一厚度）。
+ * 名字里的换行压成空格：一条 `session_info` = 一行 JSON，换行会把它劈成两半，于是这个名字
+ * 看起来没生效。**空名字 = 清掉名字**（pi 的语义：最后一条说了算，空串 = 显式清名）。
  */
 export function appendSessionName(file: string, name: string): void {
   const sanitized = name.replace(/[\r\n]+/g, ' ').trim();
