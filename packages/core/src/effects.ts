@@ -1,14 +1,9 @@
 /**
  * Effect 表 —— 一切皆 Action 的另一半。
  *
- * reducer 是纯表：action → (state, effect)。effect 由谁来做，是**接线**的事：
- *
- *   - `createPiAiEffectTable`：effect 直接调 pi-ai（createModels/deepseekProvider +
- *     streamSimple），工具也由本仓库的 Cmd 执行，由 redux-loop 驱动 —— 环自己转。
- *
- * 这张表对 CLI 和 Web 是同一张。reducer 里没有 if (kind === 'agent')，
- * 只有「这个 action 类型的 effect 是谁」。想换执行者，注入另一张同形状的表就行 ——
- * reducer 一行都不用改。
+ * reducer 是纯表：action → (state, effect)。effect 由谁做是**接线**的事：
+ * `createPiAiEffectTable` 直接调 pi-ai，工具也由本仓库的 Cmd 执行、由 redux-loop 驱动。
+ * 想换执行者，注入另一张同形状的表就行 —— reducer 一行都不用改。
  */
 import { Cmd, type CmdType } from 'redux-loop';
 import type {
@@ -98,30 +93,18 @@ export interface PiAiEffectsOptions {
   /**
    * 按 state 里的 `model.provider` / `model.modelId` 取**当时的**模型。
    *
-   * ## 为什么需要它
+   * 没有它的话 effect 表捕获的是**建表那一刻**的 `model`：`/model` 换了之后底栏与轨迹都对，
+   * 而**实际请求仍发给旧模型** —— 所有可见证据都说换了。
    *
-   * 没有它时 effect 表捕获的是**建表那一刻**的 `model`（闭包变量），于是 `/model`
-   * 换了模型之后底栏变了、轨迹树里也记了新模型，**实际请求仍发给旧模型** ——
-   * 症状是「换了没用」，而所有可见证据都说换了。
-   *
-   * 给了它之后模型是**每次请求现取**的：`model.changed` 一 dispatch，
-   * 下一个回合就用新的。`getModel` 返回 `undefined`（模型在盘上找不到了，配置坏过）时
-   * 退回闭包里那个 —— 那样至少还打得出请求，而抛 `undefined` 会让整条环崩在一个
-   * 「本该打网络」的位置上。
+   * `getModel` 返回 `undefined`（模型在盘上找不到了）时退回闭包里那个：至少还打得出请求。
    */
   resolveModel?: ((state: AgentState) => Model<any> | undefined) | undefined;
   /**
-   * 各档思考级别的 token 预算（`settings.json` 的 `thinkingBudgets`）。
+   * 各档思考级别的 token 预算（`settings.json` 的 `thinkingBudgets`），**建表时给一次**。
    *
-   * ## 为什么是「建表时给一次」而不是每请求现读
-   *
-   * 与 pi 同一步：它的 Agent 在构造时收下这个字段（`core/sdk.js:275`，之后每请求原样带上，
-   * `pi-agent-core` 的 `agent.js:313`）。所以「聊到一半手改 settings.json」在两边都不生效，
-   * 要重启 —— 这也是把 `thinkingBudgets` 放在这里（而不是每请求读盘）的理由：
-   * 行为与 pi 一致，而且每请求读一次盘没有任何好处。
-   *
-   * 与 `resolveModel` 的「每请求现取」不矛盾：模型会通过 `/model` 在**会话内**被改
-   * （有界面入口），预算没有。
+   * 与 pi 同一步（它的 Agent 构造时收下、之后每请求原样带上），所以「聊到一半手改
+   * settings.json」两边都不生效，要重启。与 `resolveModel` 的「每请求现取」不矛盾：模型会在
+   * 会话内通过 `/model` 被改，预算没有入口。
    */
   thinkingBudgets?: ThinkingBudgets | undefined;
   /**
@@ -164,17 +147,13 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
   /**
    * 最近一次 `compact.request` 带的理由。
    *
-   * 为什么存在 effect 表的闭包里而不是 state 里：
-   * `failActionCreator` 只拿到异常、拿不到 action，所以「为什么压」必须在
-   * dispatch 那一刻就存到某个**不可被界面改写**的地方。放 state 里等于留了一个
-   * 「界面能改掉判定依据」的口子，而理由要显示给用户、可不能被人随手改掉。
+   * 存在闭包里而不是 state：`failActionCreator` 只拿到异常、拿不到 action，所以「为什么压」
+   * 必须在 dispatch 那一刻存到某个界面改不了的地方 —— 放 state 里等于留一个「界面能改掉判定
+   * 依据」的口子。也不是状态：压缩一结束就没意义，写进 state 只会让 `conversation.reset` /
+   * `restored` 多一件要记得带上的事。
    *
-   * 为什么用 `let` 而不是 state：它不是状态 —— 压缩一结束就没意义了，
-   * 而把它写进 state 会让 `conversation.reset` / `restored` 多一件要记得带上的事。
-   *
-   * **声明必须在 return 之前**：`markCompactReason` 是箭头函数（在 return 的对象里），
-   * 闭包引用的是下面这个 `let`；若声明在 return 之后，`markCompactReason` 被调用时
-   * 它还在 TDZ 里（ReferenceError）。
+   * **声明必须在 return 之前**：`markCompactReason` 闭包引用这个 `let`，声明在 return 之后的话
+   * 它被调用时还在 TDZ 里。
    */
   let lastRequestedReason: CompactReason = 'manual';
 
@@ -246,25 +225,15 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
           final = event.error;
         }
       }
+      // **超时闸的判定必须在看 `final` 之前**。真实 provider 在 signal abort 时会补一份
+      // `stopReason:'aborted'` 的部分消息、以 error 事件交回来，于是 `final` 有值 ——
+      // 「先看 `!final` 再问 timedOut」的写法永远走不到，被我们自己掐断的消息会被当成模型正常
+      // 说完，一路走到 `llm.succeeded`（症状：一个 120s 的 step 记成 ok、树上一条空的 llm.result、
+      // 错误一个字都没留下，也不会重试）。
       //
-      // **超时闸的判定必须在看 `final` 之前**。
-      //
-      // 先前的写法是「先看 `!final`，再在里面问 timedOut」—— 那只有在流被 abort 之后
-      // 「安静收尾、什么都不给」时才成立。**真实 provider 不这样**：signal 一 abort，
-      // 它就补一份 `stopReason:'aborted'` 的部分消息，以 `error` 事件交回来
-      // （见 pi-ai `api/openai-completions.js`：catch 里 `output.stopReason = signal.aborted
-      // ? 'aborted' : 'error'`，然后 push 一个 error 事件）。于是 `final` 有值，
-      // 「是不是超时了」这一问永远走不到，那份**被我们自己掐断**的消息就被当成
-      // 模型正常说完，一路走到 `llm.succeeded`。
-      //
-      // 症状（2026-10-13 的会话 01a1330b，两次）：一个整整 120s 的 step 记成 `ok`、
-      // 树上一条**空的** llm.result、`step.end`/`turn.end` 写成「用户中断」，
-      // `error` 是 null —— 错误一个字都没留下，重试也不会发生（超时本来是可重试的）。
-      //
-      // 判据用消息自己的 `stopReason`，不用「收到的是 done 还是 error」：
-      // 前者对任何 provider 都成立，后者是 pi-ai 当前的实现细节。
-      // 唯一让超时**不**生效的情形是「真的收到了一次正常完成」—— 计时器与流收尾
-      // 赛跑到同一瞬间时，一份完整答案比一个可重试的超时错误更有价值。
+      // 判据用消息自己的 `stopReason` 而不是「收到的是 done 还是 error」：前者对任何 provider
+      // 都成立。唯一让超时**不**生效的情形是真的收到了正常完成 —— 一份完整答案比一个可重试的
+      // 超时错误更有价值。
       const interrupted = final === undefined || final.stopReason === 'aborted';
       if (timedOut && interrupted) {
         throw new LlmTimeoutError(state.llmTimeoutMs);
@@ -407,24 +376,16 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
     };
   }
 
-  /**
-   * 工具「跑完了但其实失败了」——按内容判定，不是按抛异常。
-   *
-   * ## 为什么必须判内容
-   *
-   * pi 的 `bash` 工具执行 `exit 1` 时**不抛异常**：它把
-   * 「Command exited with code 1」当正常结果返回。所以只 catch 异常的话，
-   * 每一个失败的工具都会走进「成功」分支，isError 永远是 false。
-   *
-   * 后果不是小问题：轨迹上把失败画成 ✓（分叉不画出来）、界面不标红、
-   * 而模型拿到的 toolResult 里 isError=false —— 它会以为命令跑成功了。
-   *
-   * ## 判据
-   *
-   * pi 把退出码写进正文，形如 `Command exited with code <非 0>`。
-   * 只认这一种形状：靠猜「输出里有没有 error 字样」会误伤（命令成功但日志里
-   * 恰好有 "error"），宁可漏判也不能把成功判成失败。
-   */
+/**
+ * 工具「跑完了但其实失败了」—— 按内容判定，不是按抛异常。
+ *
+ * 必须判内容：pi 的 `bash` 执行 `exit 1` 时**不抛异常**，它把「Command exited with code 1」
+ * 当正常结果返回 —— 只 catch 异常的话每个失败的工具都走「成功」分支，isError 永远 false。
+ * 后果是轨迹把失败画成 ✓、界面不标红、模型以为命令跑成功了。
+ *
+ * 只认 `Command exited with code <非 0>` 这一种形状：靠「输出里有没有 error 字样」会误伤，
+ * 宁可漏判也不能把成功判成失败。
+ */
   function isFailure(content: ToolResultMessage['content']): boolean {
     const text = Array.isArray(content)
       ? content.map((c) => (c.type === 'text' ? c.text : '')).join('\n')

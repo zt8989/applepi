@@ -1,48 +1,16 @@
 /**
- * 配置目录：读 ~/.pi/agent/ 下的 provider / 凭证 / 默认值。
+ * 配置目录：读 `~/.pi/agent/` 下的 provider / 凭证 / 默认值。
  *
- * ## 主路径：直接用 pi-coding-agent 的 ModelRuntime
+ * 主路径直接用 pi-coding-agent 的 `ModelRuntime`（读 models.json + auth.json + 装配 provider
+ * 的官方实现），换来 44 个内置 provider、1500+ 模型目录、schema 校验、凭证优先级与协议适配，
+ * 这些手写维护不来。代价是 `import` 整个包要 ~2.6s，对交互式 CLI 可以接受。
  *
- * pi-coding-agent 从主入口导出了 `ModelRuntime`，它就是「读 models.json + auth.json +
- * 装配 provider」这整套东西的官方实现。所以这里**不再自己读、自己装配**，直接：
+ * 手写路径（`createModelsWithPiConfig`）留着有两个用途：**测试**（离线、不碰真实家目录）
+ * 与**降级**（`ModelRuntime` 构造失败时至少还能用自定义 provider）。
  *
- * ```ts
- * const runtime = await ModelRuntime.create();
- * runtime.getModel('workbuddy', 'cn:space-bunny');
- * await runtime.getAuth(model);        // models.json > auth.json > <ID>_API_KEY
- * runtime.streamSimple(model, ctx);   // 连 api 名 → streamSimple 的映射也是它做的
- * ```
- *
- * 换来的东西比自己写多得多，而且不会过期：
- * - **44 个内置 provider、1543 个模型目录**（anthropic / openai / deepseek / … 全带
- *   正确的 baseUrl、协议、价目表），我们手写时只有 3 个；
- * - models.json 的 **TypeBox schema 校验**（形状不对会报哪个 provider 的哪个字段）；
- * - 凭证优先级、OAuth、`getAuth()` 的 `source`；
- * - 内置 provider 的协议适配（responses / anthropic-messages / openai-completions …）。
- *
- * 代价：`import` 整个包要 ~2.6s（它把 TUI 与终端组件也拉进来了），比手写的 ~0.2s 慢。
- * 对一个交互式 CLI 来说可以接受 —— 换来的是配置正确性不用我们自己维护。
- *
- * ## 手写路径还在（`createModelsWithPiConfig`）
- *
- * 两个用途，不是「没删干净的旧代码」：
- * 1. **测试**：离线测试要一个不碰网络、不依赖真实家目录的 Models，`ModelRuntime.create()`
- *    会读真实的 `~/.pi/agent`（测试里虽然隔离了家目录，但那样就没有 provider 了）。
- * 2. **降级**：万一 `ModelRuntime` 构造失败（配置坏了、版本不兼容），退回手写路径，
- *    至少还能用 models.json 里自定义的 provider，而不是整个起不来。
- *
- * ## models.json 的两种形状
- *
- * pi 新版要求 `models` 是**数组**，旧版（本项目早期写的）是**对象 map**：
- *
- * ```json
- * "models": [ { "id": "…", "contextWindow": 1000000 } ]      ← 现在
- * "models": { "some-id": { "id": "…", "contextWindow": 1000000 } }  ← 旧
- * ```
- *
- * `ModelRuntime` 只认数组。所以手写路径与 `normalizeModels()` 负责归一（数组原样、
- * 对象 map 展平，map 的 key 当 id 兵底），并在读时顺手把盘上那份改成数组 ——
- * 否则 pi 自己读同一个文件时整个文件作废。
+ * models.json 的 `models` 有两种形状：pi 新版要求**数组**，旧版（与手写配置）是**对象 map**
+ * （`{"some-id": {...}}`）。`ModelRuntime` 只认数组，所以手写路径与 `normalizeModels()` 负责
+ * 归一，并在读时顺手把盘上那份改成数组 —— 否则 pi 读同一个文件时整个文件作废。
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { authPath, configHome, modelsPath, settingsPath, writeJson } from './config-home';
@@ -54,24 +22,9 @@ import { streamSimple as anthropicStreamSimple } from '@earendil-works/pi-ai/api
 import { streamSimple as openaiResponsesStreamSimple } from '@earendil-works/pi-ai/api/openai-responses';
 
 /**
- * 配置家目录。默认与 pi 同址（`~/.pi/agent`），环境变量只认 pi 官方的
- * `PI_CODING_AGENT_DIR`。见 `config-home.ts`。
- *
- * ## 现在直接用 pi 的 `getAgentDir()`
- *
- * 之前这里是手抄的 `join(homedir(), '.pi', 'agent')`（因为 pi-coding-agent 的
- * `exports` 封了内部路径，只能从主入口拿，而主入口拿不到 `getAgentDir`）。
- * 有了 pnpm patch 打开 `./dist/*` 之后，直接引官方的：
- *
- * ```ts
- * import { getAgentDir } from '@earendil-works/pi-coding-agent/dist/config.js';
- * ```
- *
- * 两边必须指向同一个目录，否则 models.json / auth.json / sessions/ 会分家。
- * 抄一份的风险是 pi 改了实现（tilde 展开、换目录名）而我们静默地指向别处 ——
- * 症状是「改了一边另一边读不到」，很难查。
- *
- * 本项目**不再**额外认自己的环境变量：只有一个变量时不可能分家。
+ * 配置家目录 —— 直接调 pi 的 `getAgentDir()`（`~/.pi/agent`），环境变量只认它的
+ * `PI_CODING_AGENT_DIR`。抄一份 `join(homedir(), '.pi', 'agent')` 的风险是 pi 改了实现
+ * 而我们静默指向别处，症状是「改了一边另一边读不到」。见 `config-home.ts`。
  */
 export function piAgentDir(): string {
   return configHome();
@@ -124,15 +77,10 @@ export interface PiModelsFile {
 }
 
 /**
- * 归一成数组。**两种形状都收**：
+ * 归一成数组。**两种形状都收**：数组（pi 新版）与对象 map（旧版 / 手写）。
  *
- *   数组（pi 新版）：`[{ "id": "…" }, …]`
- *   对象 map（旧版）：`{ "<modelId>": { "id": "…" }, … }`
- *
- * 为什么要收旧形状：pi 自己已经只认数组，所以搞错的后果是**整个 models.json 作废**
- * （`ModelConfig.load()` 报 schema 错误，一个 provider 都不装）。而本项目历史上写的
- * 配置、以及别人手写的配置都可能是 map。读的时候宽松一点，少一个「整个文件不可用」
- * 的坑；map 的 key 本来就等于 `id`，所以以 key 兜底、值里的 `id` 优先。
+ * 收旧形状的理由：pi 只认数组，搞错的后果是**整个 models.json 作废**（schema 报错、
+ * 一个 provider 都不装）。map 的 key 本来就等于 `id`，所以以 key 兜底、值里的 `id` 优先。
  */
 export function normalizeModels(
   models: PiProviderConfig['models'],
@@ -167,12 +115,10 @@ export function loadPiModels(): PiModelsFile | null {
 /**
  * 读 models.json 并把它**归一 + 落盘**。
  *
- * 为什么要写回盘：旧的 `models: { map }` 形状 pi 不认，而 pi 读同一个文件
- * （配置家目录已改成与 pi 同址）—— 我们的文件用旧形状就会让 pi 整个加载失败。
- * 与其赌用户手写的是哪种，不如读的时候顺手改成 pi 现在的形状，一次性了事。
+ * 要写回盘：旧的 `models: { map }` 形状 pi 不认，而配置家目录与 pi 同址 —— 我们的文件用旧
+ * 形状就会让 pi 整个加载失败。读的时候顺手改成 pi 现在的形状，一次性了事。
  *
- * 幂等：已是数组就什么都不做。写回失败也不抛 —— 内存里的配置已经能用（我们读的是
- * `normalizeModels()` 的结果），落盘只是为了下次和 pi 都能用。
+ * 幂等（已是数组就什么都不做）；写回失败也不抛 —— 内存里的配置已经能用。
  */
 export function loadPiModelsNormalized(): PiModelsFile | null {
   const file = loadPiModels();
@@ -206,21 +152,11 @@ export function loadPiModelsNormalized(): PiModelsFile | null {
 /**
  * 用 pi 自己的 `ModelConfig` 校验 models.json。
  *
- * ## 为什么要这一步
+ * 归一（`normalizeModels()`）只管「旧的对象 map」这一种形状，pi 的 schema 还有别的约束
+ * （`id` 非空、`api` 是字符串…）。形状再出问题的话 pi 读同一个文件会**整个文件作废**
+ * （一个 provider 都不装），症状是「怎么一个 provider 都没有」，很难往配置格式上想。
  *
- * 归一（`normalizeModels()`）只处理「旧的对象 map」这一种历史形状，而 pi 的 schema
- * 还有别的约束（`id` 非空、`api` 是字符串、……）。形状再出问题的话，pi 读同一个文件时
- * 会**整个文件作废**（一个 provider 都不装），症状是「怎么一个 provider 都没有」——
- * 很难往配置格式上想。
- *
- * `ModelConfig.load()` 用的就是 pi 那份 TypeBox schema，报错精确到 provider 的字段：
- *
- *     Invalid models.json schema:
- *       - providers.workbuddy.models: must be array
- *
- * 所以这里**先让官方校验器看一眼**，把话说清楚，再决定要不要继续用这份配置。
- * 主路径（`createPiModelRuntime()`）本来就会校验并抛错；这里是给降级路径用的 ——
- * 它要的是「尽量能用」，所以只警告不抛。
+ * 主路径本来就会校验并抛错；这里是给降级路径用的 —— 它要「尽量能用」，所以只警告不抛。
  *
  * @returns 校验错误文本；`undefined` = 通过（或文件不存在）。
  */
@@ -262,18 +198,14 @@ export interface PiSettings {
    */
   theme?: string;
   /**
-   * 默认开启哪些内置工具（与 pi 用**同一个键、同一个配置文件**）。
+   * 默认开启哪些内置工具（与 pi 用**同一个键、同一个配置文件**）。语义照抄 pi 的
+   * `resolveDefaultTools()`（见 `tools.ts` 的 `resolveToolSelection`）：
+   * - 不给 → `["read","bash","edit","write"]`；
+   * - 出现不带前缀的名字 → 整份清单**替换**默认那份；
+   * - 只有 `+name` / `-name` → 在默认那份上按顺序增删（`…,"+grep"` = 加上 grep）。
    *
-   * 语义逐条照抄 pi 的 `resolveDefaultTools()`（见 `tools.ts` 的
-   * `resolveToolSelection`）：
-   *   - 不给 → `["read","bash","edit","write"]`（pi 的 `DEFAULT_TOOL_NAMES`）
-   *   - 出现不带前缀的名字 → 整份清单**替换**默认那份
-   *   - 只有 `+name` / `-name` → 在默认那份上按顺序增删
-   *
-   * 例：`["read","bash","edit","write","+grep"]` = 加上 grep（find/ls 仍关）。
-   *
-   * 官方读的是**多层** settings（项目 / 全局 / 内置）；本项目只认这一个文件。
-   * 规则本身一致，所以最终选出来的清单与 pi 相同 —— 只是没有项目级覆盖层。
+   * 官方读**多层** settings（项目 / 全局 / 内置），本项目只认这一个文件：规则一致，
+   * 最终清单与 pi 相同，只是没有项目级覆盖层。
    */
   defaultTools?: string[];
 }
@@ -370,23 +302,13 @@ export function buildProvider(
 }
 
 /**
- * 把 models.json 里的**全部** provider 装进一个 `Models`。
+ * 把 models.json 里的**全部** provider 装进一个 `Models`（含传入的 `extra` 内置 provider）。
  *
- * 返回的 Models 里既有自定义 provider（workbuddy 等），也已经有传入的
- * `extra` 内置 provider。
+ * 这是**降级 / 测试**路径，不是主路径（主路径是 `createPiModelRuntime()`）：离线测试要一个
+ * 不碰网络、不依赖真实家目录的 Models；`ModelRuntime.create()` 失败时也得能用自定义 provider。
  *
- * ## 这是降级/测试路径，不是主路径
- *
- * 主路径是 `createPiModelRuntime()`（直接用 pi-coding-agent 的 `ModelRuntime`）。
- * 这个手写版本保留在两个地方：
- *   - **测试**：离线测试要一个不碰网络、不依赖真实家目录的 Models；
- *   - **降级**：`ModelRuntime.create()` 失败时至少还能用 models.json 里的自定义
- *     provider，而不是整个起不来。
- *
- * 所以它**故意不注册内置 provider 目录** —— 那正是 `ModelRuntime` 的价值所在，
- * 手写一遍既慢又会过期。调用方要内置 provider 就自己传 `extra`。
- *
- * 异步：里面会 `await validateModelsFile()`（pi 的 `ModelConfig.load()` 是 Promise）。
+ * 所以它**故意不注册内置 provider 目录** —— 那正是 `ModelRuntime` 的价值，手写一遍既慢又会
+ * 过期。要内置 provider 就自己传 `extra`。
  */
 export async function createModelsWithPiConfig(extra: (() => Provider<any>)[] = []): Promise<Models> {
   const models = createModels();

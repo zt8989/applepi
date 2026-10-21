@@ -1,17 +1,12 @@
 /**
  * 终端界面 —— pi-tui（差分渲染的 TUI 库）驱动，环仍然只由本项目的 Redux Loop 跑。
  *
- * 这个文件不含任何环的逻辑：它只是订阅 store，把状态画出来。
- * 界面是**整页切换**的两块（中间那块按 `page` 换内容）：
+ * 这个文件不含环的逻辑：只订阅 store、把状态画出来。界面是**整页切换**的两块（中间那块按 `page`
+ * 换内容）：对话页（用户说了什么、LLM 答了什么、工具做了什么）与轨迹页（`Ctrl+R` 切换，键位可改；
+ * 像 `git log --graph` 一样的一次尝试一节点，失败/超时也是节点）。
  *
- *   - 对话页：用户说了什么、LLM 答了什么、工具做了什么（按消息流渲染）
- *   - 轨迹页（默认 Ctrl+R 切换，键位可改）：**像 git log --graph 一样的一次尝试一节点的树**
- *     失败/超时也在上面，是一层能展开的节点，不是飘在下面的一行红字。
- *
- * 顶行是**页签 + 轨迹统计合一行**（`tabLine`），底栏两行是 cwd / 用量 + 模型。
- *
- * pi-tui 的好处是差分渲染：流式 token 一个个进来时只重画变化的那几行，
- * 不会整屏闪烁 —— 这对一个一直在吐 delta 的 agent 界面很关键。
+ * 顶行是页签 + 轨迹统计合一行，底栏是 cwd / 用量 + 模型。pi-tui 的差分渲染是关键：流式 token
+ * 一个个进来时只重画变化的行，不会整屏闪烁。
  */
 // pi-tui 1.x：`TUI` 是共享**接口**，实例化要选具体渲染器。
 // TuiAltScreen  = 真正的全屏：占满视口，终端不留回滚缓冲，界面自己管滚动。
@@ -245,54 +240,28 @@ function nodeColor(node: TraceNode): (t: string) => string {
 /**
  * 轨迹面板：**一个节点一个块**的增量渲染。
  *
- * ## 为什么不用一块 `Text` 画整棵树
+ * 不能用一块 `Text` 画整棵树：每帧重算整棵树（实测单次 4~6ms，而一个长工具输出能刷几百帧），
+ * 而且 `Text` 的高度就是内容高度 —— 被布局裁掉的部分**永远回不来**，面板既不滚动也没有分页，
+ * 节点一多就「后面看不到、滚也滚不动」。
  *
- * 早先 `tracePanel` 是 `new Text('', 0, 0)`，每帧 `setText(renderColoredTree(整个树))`。
- * 两个后果，第二个是用户直接抱怨的那个：
+ * 改成与对话区同构：每个节点一个 `Text`（下标与 `tree.order` 对应），只在那一个节点的内容真变了
+ * 才 `setText`；外层包 `ScrollView` + `follow: 'end'`；节点变少（`/new`、恢复别的会话）就把多余
+ * 的块丢掉。
  *
- * 1. **每帧重算整棵树**。流式 token 每来一个就触发一次 `refresh()`，于是 200 个节点
- *    的树每秒重算几十次（实测单次 4~6ms，而一个长工具输出能刷几百帧）。
- * 2. **节点多了看不见后面的**。`Text` 高度就是内容高度，被布局裁掉的部分**永远回不来** ——
- *    面板既不滚动也没有分页，于是「一开始只能看到最前面的，后面就看不到，滚也滚不动」。
- *
- * 这里改成与对话区**同构**的形状（`TranscriptChunks` 就是这个套路）：
- *
- * - 每个节点一个 `Text`，下标与 `tree.order` 一一对应；
- * - 只在**那个节点的**内容真变了才 `setText`（追加式：新节点只算自己那几个）；
- * - 外层包 `ScrollView`，`follow: 'end'` —— 新节点往下追加，视口自动贴底；
- * - 节点变少（`/new`、恢复别的会话）就把多余的块丢掉，否则旧节点还画在屏幕上。
- *
- * ## 为什么不能用 pi 官方的 `CollapsibleRender`
- *
- * 轨迹是**时间线**，不是可折叠的树：关掉一个节点不该让它的子节点消失（那是 pi 渲染
- * `entry_appended` 那类内容的形状）。这里要的只是「按块增量 + 可滚动」。
+ * 不用 pi 的 `CollapsibleRender`：轨迹是**时间线**，关掉一个节点不该让它的子节点消失。
  */
 
 /**
  * 把「**只有空格、没有任何转义序列**」的行折成空串。
  *
- * ## 为什么需要这一步：空隙会被拖选刷亮
+ * 对话区每个块都是 pi-tui 的 `Text`，而 `Text.render()` 会把每一行补空格到全宽 —— 官方组件里那些
+ * 本来返回空串的「空隙」行（`Spacer(1)`、Markdown 空段）经它一过就成了整行空格。代价在选区上：
+ * `TuiAltScreen` 按「行 + 列」算选中，宽度 > 0 的行会**整行**刷成反显，于是拖选跨过卡片间隙时
+ * 会扫过一条整行高的亮条。复制出来的文本两边一样（pi-tui 逐行 `trimEnd()`），所以只对齐「看得见
+ * 的那部分」。
  *
- * 对话区（与轨迹页）每个块都是一个 pi-tui 的 `Text`，而 `Text.render()` 会把**每一行都补空格
- * 到全宽**（`lineWithMargins + " ".repeat(paddingNeeded)`）。官方组件里那些「空隙」行
- * （`AssistantMessageComponent` 开头的 `Spacer(1)`、Markdown 的空段）本来返回的是**空串**
- * （零宽），经 `Text` 一过就变成整行空格。
- *
- * 代价在选区上：`TuiAltScreen` 的选中按「行 + 列」算，宽度 > 0 的行会**整行**刷成反显
- * —— 于是拖选跨过两张卡片之间的间隙时，屏幕上会扫过一条整行高的亮条，看着就像
- * 「空白也被选中了」。pi 不把整条消息套进 `Text`（它把组件直接塞 `Container`），那些行
- * 还是零宽的，高亮会跳过去（只剩卡片自己的底色 padding 被刷亮，那是卡片的一部分）。
- *
- * **复制出来的文本两边一样**：pi-tui 逐行 `stripTerminalSequences(...).trimEnd()` 再
- * `join('\n')`，空串行照样是一个空行。所以这里只对齐「看得见的那部分」，不动复制内容。
- *
- * 判据是「剥掉转义序列后没有可见字符、且**不带样式**」：
- *
- * - 带底色的 padding 行（`\x1b[48;2;…m` 加一串空格）**不能动** —— 它本来就是卡片的一部分，
- *   在 pi 里也占全宽、也会被刷亮；
- * - 只有 **OSC 133 区域标记**加空格的行（`AssistantMessageComponent` 把 `\x1b]133;A\x07`
- *   拼在第 0 行上，而第 0 行恰恰是它那个 `Spacer(1)`）**只剪尾部的空格**，标记留着 ——
- *   那是 `scrollToPrompt`（上一个 / 下一个提问）拼的锚点，剪掉就跳不动了。
+ * 判据：剥掉转义序列后没有可见字符**且不带样式**。带底色的 padding 行不能动（那是卡片的一部分）；
+ * 只有 **OSC 133 区域标记**加空格的行**只剪尾部空格**、标记留着 —— 那是 `scrollToPrompt` 的锚点。
  */
 const SGR_SEQUENCE = /\u001b\[[0-9;]*m/;
 /**
@@ -567,46 +536,23 @@ export function renderColoredTree(tree: TraceTree, maxWidth: number): string {
 }
 
 /**
- * 顶行：页签 + 轨迹统计（**兼两职**，刻意压成一行）。
- *
- * ## 形状
+ * 顶行：页签 + 轨迹统计（**兼两职**，刻意压成一行）：
  *
  * ```
  * 对话 │ 轨迹 3轮2步  工具5  重试1  错误1 (Ctrl+R)
  * ```
  *
- * - 「对话 / 轨迹」当前页加粗高亮，旁边写切换键（否则得另找地方说「按哪个键能切」）。
- *   那个键名来自 `app.trace.toggle`（可用 `~/.pi/agent/keybindings.json` 改），
- *   所以改名之后这一行跟着变 —— 手写 `'Ctrl+R'` 迟早会开始骗人。
- * - 统计是**精简后的**：回合与步数合成 `x轮x步`（两个都是「事件次数」的口径，
- *   连读不歧义 —— 「3 轮 2 步」= 三次用户输入、两次 LLM 往返），工具/重试/错误
- *   非 0 才出现。
- * - 统计**始终显示**（不管在对话页还是轨迹页）：这轮跑到哪了是「读对话」时就想要的信息，
- *   不该逼用户切页才看得到。
+ * 页签旁边的切换键来自 `app.trace.toggle`（可改），所以改名后这一行跟着变 —— 手写 `'Ctrl+R'`
+ * 迟早会开始骗人。统计里回合与步数合成 `x轮x步`（都是「事件次数」的口径），工具/重试/错误非 0
+ * 才出现，且**始终显示**（跑到哪了是读对话时就想要的信息）。
  *
- * ## 为什么不再有独立顶栏
+ * 不再有独立顶栏：原来顶栏与页签各占一行、都在讲「我在哪页 / 这轮跑到哪了」，而界面真正缺的是
+ * 对话高度。节点数也删了（`trace.order.length`，开一轮就 +5，跳得快又不 actionable），花费 `$`
+ * 一并删掉（底栏 statsLine 已有同口径的会话累计）。
  *
- * 原来顶栏独占一行（轨迹统计），紧跟着下面还有一行页签 —— 两行都在讲同一件事
- * （「我在哪页 / 这轮跑到哪了」），纵向各白占一行，而界面真正缺的是对话的高度。
- * 合成一行后：那行要么讲页签要么讲统计，不讲别的。
- *
- * 节点数也删了：它是 `trace.order.length`，**开一轮就 +5**（user / turn.start /
- * step.start / llm.attempt / …），跳得又快又不 actionable —— 要看节点数切到轨迹页。
- * 花费 `$` 一并删掉：底栏 statsLine 里已有一个**同口径**的会话累计 `$`，两个 `$`
- * 摆在两行里只会让人怀疑「这俩为什么不一样」。
- *
- * ## 为什么回合/步数要分开报过、现在又合起来了
- *
- * 早先报的是 `节点 N · 回合 N · 步 N · 工具 N · 重试 N · 错误 N`，六个数挤一行像日志。
- * `回合 3 · 步 8` 与 `3轮8步` 说的是同一件事，写法不同而已；真正需要区分的是
- * 「工具调用数」（模型自己发起的动作，与前两者不同口径），那个仍然单独报。
- *
- * ## 为什么 padToWidth 用 visibleWidth 而不是 stripAnsi().length
- *
- * pi-tui 是**增量**重绘：只重画变化的行。这一行的长度随统计变化（`3轮2步` → `3轮3步`），
- * 不补齐的话旧内容的尾巴不会被擦掉，下一帧会叠着出现 —— 看起来像「重复刷屏」。
- * 补齐长度让这一行恒定，增量重绘就不留残影。而汉字是双宽、`stripAnsi().length`
- * 会把「一个汉字」当一个字符，所以按可见列宽算（padToWidth 的注释）。
+ * `padToWidth` 用 `visibleWidth` 而不是 `stripAnsi().length`：pi-tui 是**增量**重绘，这一行长度随
+ * 统计变化，不补齐的话旧内容的尾巴不会被擦掉、下一帧叠着出现（看着像重复刷屏）；而汉字是双宽，
+ * 按字符数算会少补。
  */
 export function tabLine(state: AgentState, page: 'chat' | 'trace'): string {
   const stats = traceStats(state.trace);
@@ -663,35 +609,17 @@ export function modelLine(state: AgentState): string {
 }
 
 /**
- * 底栏左下行：token 用量 + 上下文占用。
+ * 底栏左下行：token 用量 + 上下文占用。形状照抄 pi：`↑6.8k ↓49 R143 CH2.1% 0.7%/1.0M (auto)`。
  *
- * 形状照抄 pi：`↑6.8k ↓49 R143 CH2.1% 0.7%/1.0M (auto)`
+ * 格式化与累加都直接用 pi 的实现（`formatTokens` / `addUsageToTotals` / `formatCwdForFooter`）——
+ * 两边数字对不上会让人以为算错了。两种口径**不要混**：**累计**（`↑`/`↓`/`R`/`W`/`$`）从
+ * `state.messages` 把所有 assistant 消息的 usage 加起来；**最近一次**（上下文占用）只看最后一条
+ * 有效消息的 usage，累加出来的会是天文数字。
  *
- * ## 数字格式与算法都用 pi 的
- *
- * `formatTokens` / `addUsageToTotals` / `formatCwdForFooter` 都是从
- * `pi-coding-agent/dist/...` 直接 import 的。两边显示的数字对不上会让人以为算错了，
- * 宁可完全一致也不要各写一套。
- *
- * ## 两种口径，不要混
- *
- * - **累计**（`↑`/`↓`/`R`/`W`/`$`）：本次会话一共花了多少。从 `state.messages` 里把
- *   所有 assistant 消息的 usage 累加（每帧 O(消息数)，换来与 pi 一致的口径）。
- * - **最近一次**（上下文占用 `29.2%/1.0M`）：这一次请求占了窗口多少。**只看最后一条
- *   有效消息的 usage**，不累加 —— 累加出来的数字是天文数字（见函数体的注释）。
- *
- * 两者混用就是「把整段历史重复数了 N 次」。
- *
- * ## `(auto)` 是自动压缩的指示灯
- *
- * pi 的 `footer.js` 在占用段后面跟 ` (auto)`（`autoCompactEnabled ? " (auto)" : ""`，
- * `?/1.0M` 那一支也带）。这 6 个字符说的是「快满了会自动压，不用自己动手」——
- * 没有它，用户只能靠记忆判断这一格的数字该不该紧张。
- *
- * 判定用**真的开关**（`options.autoCompactEnabled()` → 内核的 `AutoCompact`），
- * 不是本文件的局部变量：`/settings` 里翻一下就变，`refresh()` 下一帧就跟上。
- * `null`（这个装配不支持压缩）**不画** —— 与 `/settings` 面板里那一行不显示同一条口径：
- * 不知道的事不替它打保票。
+ * `(auto)` 是自动压缩的指示灯（pi 的 `footer.js` 同样在占用段后面跟这 6 个字符）：它说的是「快满了
+ * 会自动压，不用自己动手」。判定用**真的开关**（`options.autoCompactEnabled()` → 内核的
+ * `AutoCompact`），`/settings` 里翻一下就变、`refresh()` 下一帧跟上；`null`（这个装配不支持压缩）
+ * **不画** —— 不知道的事不替它打保票。
  */
 /** 底箱第二行算出来的结果。 */
 export interface StatsLine {
@@ -709,92 +637,36 @@ export interface StatsLine {
 }
 
 /**
- * 排队中的用户输入面板。空队列时返回空串（面板自己不占高度）。
+ * 排队中的用户输入面板。空队列时返回空串（面板自己不占高度）。形状与 pi 的
+ * `updatePendingMessagesDisplay()` 一致。
  *
- * 与 pi 的 `updatePendingMessagesDisplay()` 同一形状与同一口径：
- *
- * ```
- * Steering: 顺便看下版本
- * Follow-up: 待会儿再说
- * ⏎ <key> to edit all queued messages
- * ```
- *
- * ## 为什么 steer 与 followUp 要用**不同的标记
- *
- * 两者投递给模型的时机不同，用户对它们的预期也不同：steer 是「打断现在这条线」，
- * followUp 是「等它说完」。若都显示成同一行「已排队」，用户就无法判断自己的话
- * 到底什么时候会被看见——而这正是使用这两个键的全部意义。
+ * steer 与 followUp 用**不同的标记**：两者投递给模型的时机不同、用户预期也不同（steer 打断现在
+ * 这条线，followUp 等它说完）。都显示成同一行的话，用户无法判断自己的话什么时候会被看见。
  */
-/**
- * 键位这件事，本项目**不再自己造**：翻页用 pi 的 `tui.altScreen.pageUp/pageDown`
- * （`PgUp`/`PgDn`），`Alt+↑` 与 `Ctrl+P` 归还 pi 的 `app.message.dequeue` /
- * `app.model.cycleForward`。
- *
- * ## 早先这里有什么，以及为什么删
- *
- * 早先这块是两张**字节序列**表（`SCROLL_UP_SEQUENCES` / `SCROLL_DOWN_SEQUENCES`），
- * 把 `Alt+↑↓`、`Ctrl+P/N` 匹配成「翻半页」，挂在全局 input listener 上。三个问题：
- *
- * 1. **抢了 pi 的键**：`Alt+↑` 在 pi 里是「把排队消息还回输入框」
- *    （`app.message.dequeue`），`Ctrl+P` 是「换下一个模型」（`app.model.cycleForward`）。
- *    两条都被翻页抢走 —— 两边共用的 `keybindings.json` 里就再也表达不出
- *    「我要 pi 那个动作」（而那正是 `keybindings.ts` 存在的理由）。
- * 2. **把裸 `\x1b[A` 当成了 `Alt+↑`**：那其实就是普通 ↑。不支持 Kitty 键盘协议的
- *    终端（Orca 的内嵌终端、Terminal.app、tmux 老配置）发过来的正是这一串，
- *    于是所有 ↑↓ 都被吃成翻页 —— 编辑器里改不了光标，扩展挂在输入区槽位里的
- *    对话框（`ask_user_question`）收不到方向键（症状：只有 Tab 能用）。
- * 3. **没必要**：pi-tui 的 `TuiAltScreen` 本来就有一整套（`tui.altScreen.pageUp` /
- *    `pageDown` = `PgUp`/`PgDn`、`halfPageUp/Down`、`lineUp/Down`、
- *    `previousPrompt/nextPrompt`、搜索、滚轮），而且它滚的是 **primary** ScrollView ——
- *    本项目切页时 `primary` 跟着当前页走（见 `applyLayout`），正好就是「只滚当前页」。
- *    这些键还能被 `keybindings.json` 改、`/hotkeys` 里也列得出来。
- *
- * 半页现在**默认没有键**（与 pi 一致）：想用就在 `keybindings.json` 里给
- * `tui.altScreen.halfPageUp` / `tui.altScreen.halfPageDown` 绑一个。
- */
+// 键位**不自己造**：翻页用 pi 的 `tui.altScreen.pageUp/pageDown`（`PgUp`/`PgDn`），
+// `Alt+↑` 与 `Ctrl+P` 归还 pi 的 `app.message.dequeue` / `app.model.cycleForward`。
+//
+// 不能自己维护字节序列表：`Alt+↑` / `Ctrl+P` 在 pi 里有语义，抢走之后两边共用的 `keybindings.json`
+// 再也表达不出「我要 pi 那个动作」；而裸 `\x1b[A` 其实就是普通 ↑（不支持 Kitty 协议的终端发的
+// 正是这一串），于是所有 ↑↓ 都被吃成翻页，编辑器里改不了光标、扩展的对话框收不到方向键。
+// pi-tui 的 `TuiAltScreen` 本来就有整套翻页（还能改键、`/hotkeys` 里列得出来），它滚的是当前页的
+// primary ScrollView，正好。半页默认没有键（与 pi 一致），想用就在 `keybindings.json` 里绑。
 const ESC = String.fromCharCode(27);
 
 /**
- * 这条按键要不要**忽略**。
+ * 这条按键要不要**忽略**（mac 上「快捷键触发两次」的根因）。
  *
- * ## 为什么需要它（mac 上「快捷键触发两次」的根因）
+ * pi-tui 请求 Kitty 键盘协议时带了 flag 2（报告事件类型），于是**一次按键产生两个序列**：press
+ * （`:1u`）与 release（`:3u`）。而 release 序列**也能匹配 `matchesKey()`**（parseKey 读的是
+ * `<code>;<mod>`，第三段不参与匹配）—— 于是轨迹页切两次再切回来、`Ctrl+O` 展开两次，看着「完全
+ * 没反应」。
  *
- * pi-tui 的 Kitty 键盘协议请求里带了 flag 2（`terminal.js` 的 `1|2|4`），
- * flag 2 的语义是「报告事件类型」—— 于是**一次按键产生两个序列**：一个 press
- * （`:1u`）和一个 release（`:3u`）。macOS 上的 iTerm2 / Ghostty / kitty /
- * WezTerm 都支持这套协议，所以按一下切页键（默认 `Ctrl+R`）收到两条。
+ * pi-tui 自己有这层过滤，但只对**聚焦组件**生效；本项目的全局开关与滚轮都挂在 input listener 上，
+ * 官方那层管不到（扩展的 `ctx.ui.onTerminalInput()` 更是直接透传到 `addInputListener`）。
  *
- * 而 release 序列**也能匹配 `matchesKey()`**（`keys.js` 的 parseKey 读的是
- * `<code>;<mod>`，事件类型那第三段不参与匹配）。于是轨迹页被切换两次 ——
- * 切到轨迹页再切回对话页，按键看起来「完全没反应」。`Ctrl+O` 展开两次、
- * `Ctrl+Q` 换两次模式也是同样的症状。
- *
- * pi-tui 自己**有**这层过滤，但只对**聚焦组件**生效：
- *
- * ```js
- * // tui.js —— inputListeners 在前，过滤在后，且只查 focusedComponent
- * for (const listener of this.inputListeners) { … }        // ← 我们的快捷键在这里
- * …
- * if (isKeyRelease(data) && !this.focusedComponent.wantsKeyRelease) return;
- * ```
- *
- * 本项目的几个全局开关（轨迹页 / 展开工具 / 队列模式 / 中断 / 模型面板）与滚轮全部挂在
- * **input listener** 上（不是聚焦组件），
- * 所以官方那层过滤管不到它们。扩展的 `ctx.ui.onTerminalInput()` 更是直接透传到
- * `tui.addInputListener()`，同一个坑。
- *
- * ## 为什么不「关掉 flag 2」
- *
- * 那要在 `terminal.js` 里改（且它给的是 press/repeat/release 三态，repeat 是
- * 长按的正确语义）。而我们在**自己这层**过滤掉 release 已经够了：release 本来
- * 就不该有任何动作，重复也是因为没人过滤它。
- *
- * ## 与官方的口径一致
- *
- * 用的是同一个 `isKeyRelease()`（pi-tui 从 `index` 导出），所以两层判断不会漂移。
- * 粘贴内容（`\x1b[200~…\x1b[201~`）在 `isKeyRelease()` 里被显式排除 ——
- * 而我们的滚轮判断是**前缀**匹配（`data.startsWith(ESC + '[A')`），粘贴里只要
- * 开头撞上就会误判成翻页，所以粘贴必须在更早的地方就放行。
+ * 不关掉 flag 2：那要改 `terminal.js`，而且要的 repeat 态正是长按的语义。在**自己这层**过滤掉
+ * release 就够。用的是同一个 `isKeyRelease()`（pi-tui 导出），两层判断不会漂移。粘贴内容在它里面
+ * 被显式排除 —— 而滚轮判断是**前缀**匹配，粘贴里撞上开头就会被误判成翻页，所以粘贴必须更早放行。
  */
 export function shouldIgnoreKey(data: string): boolean {
   // 粘贴 / 输入框里的普通文本：不可能是快捷键，一律放行。
@@ -1062,38 +934,19 @@ export interface ElaSlashCommand {
 }
 
 /**
- * 斜杠命令表——**唯一的真相**。
+ * 斜杠命令表 —— **唯一的真相**（补全、webui 的 `/` 下拉、`runCommand` 都念这一份）。
  *
- * 补全（`setAutocompleteProvider`）、webui 的 `/` 下拉、以及 `runCommand` 都念这一份。
+ * 名字、**英文原文描述**、`argumentHint` 都抄 pi 的 `core/slash-commands.js`，顺序也按 pi 排：
+ * 两个界面里看到同一句话，缺的那些一眼能看出是**没做**而不是被挪了位置。
  *
- * ## 命名与文案直接跟 pi 对齐
+ * pi 有、这里**不列**的（不是忘，是不做）：`tree` / `fork` / `clone`（本项目的轨迹树是只读的
+ * 执行历史，没有「在消息树上换分支」）、`export` / `import`（会话文件本身就是 JSONL，`cp` 就是那个
+ * 动作）、`share`（没有账号体系）、`bug`（上报给 pi 的开发者 —— 会寄错人）、`changelog`、
+ * `trust`（本项目没有「项目级、需信任才加载」的资源）、`login` / `logout`（鉴权在 pi 那边配）、
+ * `reload`（装载发生在内核装配那一刻，没有热重载入口）。
  *
- * 名字、**英文原文描述**、`argumentHint` 都抄 pi 的 `core/slash-commands.js`：用户在两个
- * 界面里看到的是同一句话，不会出现「pi 里叫 resume、这里叫 sessions」这种要翻译一遍的差。
- * 有条无条按 pi 的顺序排，缺的那些一眼能看出是**没做**，而不是被谁挪了位置。
- *
- * ## pi 有、这里**不列**的（不是忘，是不做）
- *
- * | pi 的命令 | 为什么不列 |
- * | --- | --- |
- * | `tree` / `fork` / `clone` | 会话树导航（跳到历史某个点开分叉）。本项目的轨迹树（`Ctrl+T`）是**只读**的执行历史，没有「在消息树上换分支」这层能力 —— 列出来只能报「未实现」 |
- * | `export` / `import` | 导出 HTML 需要 pi 那套导出器；会话文件本身就是 JSONL，`cp` 就是那个动作。恢复走 `/resume`（或 `ela --session <id>`） |
- * | `share` | 分享到 Radius artifact / GitHub gist：没有账号体系 |
- * | `bug` | 上报 bug 给「pi 的开发者」—— 我们不是 pi，那封信会寄错人 |
- * | `changelog` | 本项目没有 changelog 文件可读 |
- * | `trust` | 项目信任决策。本项目没有「项目级、需信任才会加载」的资源这一层 |
- * | `login` / `logout` | 供应商鉴权在 pi 那边配（`~/.pi/agent/auth.json`、环境变量、`--api-key`），这里不另起一套 |
- * | `reload` | 热重载 keybindings / 扩展 / skills / prompt。本项目的装载发生在内核装配那一刻，没有热重载入口（要换就重开） |
- *
- * ## 本项目有、pi **没有**的
- *
- * 只剩 `/skills` 一条：pi 在开场横幅里报 skill 清单，而 `disable-model-invocation`、
- * 重装 prompt 这些都能让「磁盘上有、模型不知道」—— 会话中途能查一次是必要的诊断，
- * 所以留住（它不是会话类命令，浏览器里也能跑）。
- *
- * 曾经还有三条，已按「只留 pi 那套」删掉：`/sessions`（并入 `/resume`）、`/clean` 与
- * `/wipe`（删历史在 `/resume` 面板里，`ctrl+d`）、`/help`（pi 没有它，靠补全是那个入口 ——
- * 打 `/` 就能看到全表）。
+ * 本项目有、pi **没有**的只剩 `/skills`：`disable-model-invocation` 与重装 prompt 都能让「磁盘上
+ * 有、模型不知道」，会话中途能查一次是必要的诊断。
  */
 export const SLASH_COMMANDS: ElaSlashCommand[] = [
   { name: 'settings', description: 'Open settings menu', web: true },
@@ -1592,12 +1445,19 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 同一件事（「我在哪页 / 这轮跑到哪了」），纵向白占一行，而对话区最缺高度。
    */
   const tabs = new Text('', 0, 0);
-  /**
-   * 对话区：**按消息分块**的增量渲染（每条消息一个组件，内容没变就不重算）。
-   *
-   * 以前这里是 `new Text(renderTranscript(...))` 那个整段重算的形状，每帧 ~1.2 秒，
-   * 而流式 token 每个都触发一次刷新 —— 详见 TranscriptChunks 的注释。
-   */
+/**
+ * 对话区：**按消息分块**的增量渲染。
+ *
+ * 不能整段一个 `Text`：每次状态变化都重渲整段 + 重新折行，而流式 token 每来一个就触发一次
+ * `refresh()` —— 实测约 1.2 秒一帧（官方 `MIN_RENDER_INTERVAL_MS` 只有 16ms），而且是**同步**的，
+ * 直接占住事件循环连输入都收不到，会话越长越卡。改成每条消息一个组件（pi 的 `interactive-mode.js`
+ * 就是这么做的，流式那条原地 `updateContent`），没变的块不重算：实测 1208 条消息的会话从
+ * 291.9ms/帧降到 0.30ms/帧。
+ *
+ * 缓存键是「宽度 + 折叠 + 思考可见性」而不是只有消息本身：同一个 `message` 在终端宽度变了、
+ * Ctrl+O 切了 `expanded`、Ctrl+T 切了 `hideThinking` 之后渲染结果不同。
+ * 用 `WeakMap` 而不是 `Map`：`/new` 清空会话后旧消息能被回收。
+ */
   const transcript = new TranscriptChunks();
   /**
    * 轨迹区：**按节点分块**的增量渲染 + 可滚动。
@@ -3841,48 +3701,17 @@ let rendererRendering = false;
 /**
  * `runTui` 装上自己的重绘入口；管道/一次性模式不调，于是保持 no-op。
  *
- * ## 为什么这里必须推迟到微任务 + 重入护栏
+ * 必须推迟到微任务并加重入护栏：官方 `ToolExecutionComponent` 在**我们的渲染过程中**就调
+ * `ui.requestRender()`，同步接上 `refresh` 就是「refresh → … → renderTool → requestRender →
+ * refresh」的无限递归（`RangeError: Maximum call stack size exceeded`）。
  *
- * 官方 `ToolExecutionComponent` 在**我们自己的渲染过程中**就会调 `ui.requestRender()`：
- * `markExecutionStarted()` 与 `setArgsComplete()` 的实现就是 `updateDisplay();
- * ui.requestRender();`，而 `renderTool` 每渲染一个工具块都要走这两步。
+ * 推迟就够：`context.invalidate()` 才是官方的重画入口，它已经清了组件自己的 `render()` 缓存 ——
+ * 官方要的是「下一帧被重画」，状态变化本身由 `store.subscribe` → `refresh` 覆盖。
  *
- * 同步接上 `refresh` 就是无限递归：
- *
- *     refresh → transcript.update → blockLines → renderMessage → renderTool
- *            → component.markExecutionStarted → ui.requestRender → refresh → …
- *
- * 症状是 `RangeError: Maximum call stack size exceeded`，栈帧正好是上面这条链。
- * `TOOL_UI.requestRender` 早先是空实现，链是断的，所以这条路径一直没暴露过。
- *
- * ## 为什么推迟就够
- *
- * `context.invalidate()` 才是官方的重画入口（`getRenderContext` 里绑的），而它已经
- * 顺手清了组件自己的 `render()` 缓存 —— 官方要的是「下一帧被重画」，不是「此刻同步
- * 重画」。状态变化本身由 `store.subscribe` → `refresh` 覆盖，不依赖这条路。
- * 所以改成微任务后行为不变，只是不再递归。
- *
- * 两道闸缺一不可，而且**都必须在入口处判**：
- *
- *   - `queued`：合并一帧内的多次请求（官方组件一帧能发好几次）。
- *   - `rendering`：渲染途中发来的请求**直接丢掉**。
- *
- * ## 为什么 `rendering` 一定要在入口判
- *
- * 这一点很反直觉，值得钉住：只把请求推迟到微任务、而 `rendering` 只在微任务里判，
- * 得到的是**自激循环而不是爆栈**——
- *
- *     微任务: rendering=false → 进 fn → fn 里渲染 → 发请求 → 排队 → fn 返回
- *     → rendering=false → 下一个微任务又进 fn → …
- *
- * 每轮都排一个新微任务，而微任务队列会一直有新任务，V8 根本没有机会走
- * “栈太深”，于是栈一直是浅的、堆一直涨 —— 症状是跑几分钟后
- * `FATAL ERROR: heap out of memory`，而不是 `Maximum call stack size exceeded`。
- * （本仓库第一版修复就是这么翻车的：测试直接 OOM。）
- *
- * 入口处先看 `rendering` 就断了环：渲染途中来的请求一律丢弃。
- * 丢弃是安全的 —— 此刻这一次 `fn` 正在把组件的新内容带上（官方组件的
- * `context.invalidate()` 已经清了它自己的 `render()` 缓存），再画一帧只是白做一倍工作。
+ * 两道闸缺一不可，且**都必须在入口判**：`queued` 合并一帧内的多次请求；`rendering` 把渲染途中
+ * 发来的请求直接丢掉。若 `rendering` 只在微任务里判，得到的是**自激循环而不是爆栈** —— 每轮排一个
+ * 新微任务，栈一直浅、堆一直涨，症状是跑几分钟后 `FATAL ERROR: heap out of memory`。
+ * 丢弃是安全的：此刻这次 `fn` 正在把新内容带上，再画一帧只是白做一倍工作。
  */
 export function setRendererRenderRequest(fn: () => void): void {
   requestRenderFromRenderer = () => {
@@ -4343,37 +4172,20 @@ function toolCallIdsOf(message: { content: unknown[] }): string[] {
 /**
  * 把整段对话渲染成文本块（`from` 恒为 0：滚动交给 ScrollView）。
  *
- * ## 不加「你 ›」「助手 ›」这类前缀
+ * **不加「你 ›」「助手 ›」这类前缀**：pi 靠**底色与字体形状**区分角色（用户整块蓝底、助手默认
+ * 前景色、思考灰斜体）。加前缀会把蓝底变成「`你 ›` + 白字」，而模型说的话与提示挤在同一行里、
+ * 斜体失效 —— 底色比前缀准。
  *
- * 这是与 pi 最早的一处形状分歧：我们在每条消息前面加了一个带颜色的角色名，
- * pi 没有任何前缀 —— 角色靠**底色与字体形状**区分：
- *
- *   - 用户：整块蓝底（`userMessageBg`）铺满整行
- *   - 助手：默认前景色、无底色
- *   - 思考：灰色**斜体**（`thinkingText`）
- *
- * 加前缀的代价不只是「多了两个字」：用户那块蓝底（截图中一整条深蓝带）会变成
- * 「`你 ›` + 白字」，而模型说的话（白字无底）与提示（灰斜体）挤在同一行里，
- * 斜体失效。一句话能认出是模型说的还是你自己说的，底色比前缀准。
- *
- * ## 直接用 pi 的组件，而不是照着截图重画
- *
- * `UserMessageComponent` / `AssistantMessageComponent` / `ToolExecutionComponent`
- * 加上 `createAllToolRenderers()` 是 pi 官方那套渲染器（靠 pnpm patch 打开的子路径）。
- * 用它们而不是手写，是因为里面有一堆「眼睛看不出来但错了很难受」的细节：
- * bash 折叠**保留尾部** 5 行（头部是命令，尾部才是报错）而 read/write 保留头部 10 行；
- * write 的块里是**文件内容**而不是工具输出；edit 渲染的是**彩色 diff**；
- * 每个工具块用 `Box` 把底色补到整行（手写时宽度差一列底色就断一截）。
- * 这些各自都不难，但**一起对**才和截图一致。
+ * 直接用 pi 的组件（`UserMessageComponent` / `AssistantMessageComponent` /
+ * `ToolExecutionComponent` + `createAllToolRenderers()`）而不是照着截图重画：里面有一堆眼睛看不出
+ * 但错了很难受的细节（bash 折叠保留**尾部** 5 行而 read/write 保留头部 10 行、write 的块里是文件
+ * 内容、edit 渲染彩色 diff、每个工具块用 `Box` 把底色补到整行）。各自都不难，**一起对**才一致。
  */
 /**
  * 渲染**一条**消息。
  *
- * ## 为什么要单独抽出来
- *
- * 对话区是**增量**渲染的（见 `TranscriptChunks`）：每条消息各自成为一个组件，
- * 内容没变就不重算。整段渲染只有在一次性模式（管道输出）和测试里才需要，
- * 那是同一套循环拼起来的。
+ * 单独抽出来是因为对话区是**增量**渲染的：每条消息各自成为一个组件，内容没变就不重算。
+ * 整段渲染只有一次性模式（管道输出）与测试才需要，那是同一套循环拼起来的。
  */
 export function renderMessage(
   state: AgentState,

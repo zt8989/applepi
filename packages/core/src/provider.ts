@@ -52,11 +52,8 @@ export interface AgentRuntime {
 }
 
 /**
- * 内置 provider 工厂（pi-ai 自带）。**只用于降级路径**。
- *
- * 主路径不用它们 —— `ModelRuntime` 自带 44 个内置 provider、1500+ 个模型目录
- * （anthropic / openai / deepseek / … 全带正确的 baseUrl、协议、价目表），
- * 比这里手列三个强得多，也不容易过期。
+ * 内置 provider 工厂（pi-ai 自带）。**只用于降级路径** —— 主路径的 `ModelRuntime`
+ * 自带 44 个内置 provider、1500+ 个模型目录，比这里手列几个强，也不容易过期。
  */
 const PROVIDER_FACTORIES: Record<string, () => Provider<any>> = {
   deepseek: deepseekProvider as () => Provider<any>,
@@ -65,25 +62,14 @@ const PROVIDER_FACTORIES: Record<string, () => Provider<any>> = {
 };
 
 /**
- * **不写死任何 provider 名**的兜底默认。
+ * **不写死任何 provider 名**的兜底默认：写死一个名字等于把「我这台机器碰巧这么配」当成
+ * 配置格式的一部分，于是换机器 / 新装 / 别人拷了 settings.json 的场景都在启动第一步就
+ * 报「未知 provider」。按「用户真的有什么」逐级往下退：
  *
- * 早先这里是 `{ provider: 'workbuddy', model: 'cn:space-bunny' }` —— 那是**当时这台
- * 机器**的配置，不是协议里的一条规定。于是一切「家目录里没有 workbuddy」的场景
- * （新装、换机器、别人拷了 settings.json 而没拷 models.json、测试的隔离家目录）
- * 都在启动第一步就炸：
+ * 1. `models.json` 里**第一个** provider 的第一个模型 —— 用户自己写的，一定存在；
+ * 2. 内置 `anthropic` 且**不给 model** —— 内置目录一定在，具体模型交给 `createRuntime()`。
  *
- *     未知 provider：workbuddy。可用：amazon-bedrock, ant-ling, …
- *
- * 写死一个 provider 名等于把「我这台机器碰巧这么配」当成了配置格式的一部分。
- *
- * 现在按「用户真的有什么」逐级往下退：
- *
- *   1. `models.json` 里**第一个** provider 的第一个模型 —— 用户自己写的，一定存在；
- *   2. 一个内置 provider（`anthropic`）且**不给 model** —— 内置目录一定在，
- *      具体模型交给 `createRuntime()` 取第一个。
- *
- * 第 2 步失败（凭证没配）时错的是「缺 ANTHROPIC_API_KEY」，而不是「workbuddy 是谁」。
- * 那是能照着修的错。
+ * 第 2 步失败时错的是「缺 ANTHROPIC_API_KEY」，那是能照着修的错。
  */
 export function fallbackProviderSpec(): ProviderSpec {
   for (const [providerId, config] of Object.entries(loadPiModels()?.providers ?? {})) {
@@ -132,16 +118,12 @@ export function providerNames(runtime?: PiModelRuntime): string[] {
 /**
  * 建运行时：注册 provider，按 spec 解析出 Model。
  *
- * ## 主路径：`ModelRuntime`
+ * 主路径走 `ModelRuntime`：它自己读 models.json / auth.json、校验 schema、拼好凭证优先级，
+ * 并自带 44 个内置 provider 的完整目录 —— 这些手写维护不来。
  *
- * 它自己读 models.json / auth.json、校验 schema、拼好凭证优先级，并自带 44 个内置
- * provider 的完整目录 —— 这些全是手写维护不来的。
- *
- * ## 降级：手写装配
- *
- * `ModelRuntime.create()` 失败时（配置坏到连它都起不来、版本不兼容等）退回
- * `createModelsWithPiConfig()`：至少还能用 models.json 里的自定义 provider，
- * 而不是整个起不来。降级信息写 stderr。
+ * `ModelRuntime.create()` 失败时（配置坏到连它都起不来、版本不兼容）退回手写装配
+ * （`createModelsWithPiConfig()`），至少还能用 models.json 里的自定义 provider。
+ * 降级信息写 stderr。
  */
 export async function createRuntime(spec: ProviderSpec): Promise<AgentRuntime> {
   let models: Models;
@@ -196,13 +178,11 @@ const KEYLESS_PROVIDERS = new Set(['faux']);
 
 /**
  * 取该 provider 的 API key。**三处来源，不读任何 `.env`**：
+ * 1. shell 环境变量 `<ID>_API_KEY`（`--api-key` 也走这条路）；
+ * 2. `~/.pi/agent/auth.json`（与 pi 同址，两边共用一份凭证）；
+ * 3. models.json 条目内的 `apiKey`。
  *
- * 1. shell 环境变量 `<ID>_API_KEY`（`--api-key` 也是走这条路，见 tui.ts）
- * 2. `~/.pi/agent/auth.json`（与 pi 同址，两边共用一份凭证）
- * 3. models.json 条目内的 `apiKey`（在 `buildProvider` 那条路上，已 self-contained）
- *
- * 顺序与 pi 的凭证优先级一致。刻意**没有** `.env` 这一档：从调用目录读 `.env`
- * 会把「A 项目的 key」发给「B 项目」，比读不到更难查。
+ * 刻意**没有** `.env` 这一档：从调用目录读 `.env` 会把「A 项目的 key」发给「B 项目」。
  */
 export function resolveApiKey(provider: string): string | undefined {
   // 非字母数字的 provider id 要归一下（`my-gateway` → `MY_GATEWAY_API_KEY`），
@@ -221,7 +201,6 @@ export function resolveApiKey(provider: string): string | undefined {
   );
 }
 
-// ─── 离线演示 provider（pi-ai 自带的 faux） ───
 
 export interface FauxRuntime {
   runtime: AgentRuntime;

@@ -1,30 +1,20 @@
 /**
  * 侧边栏自己的状态：**哪些会话被归档了**。
  *
- * ## 为什么是一份额外的文件，而不是写进会话 `.jsonl`
+ * 归档是**人的一个决定**，不是这次对话发生过的事，所以单存一份文件
+ * （`<家目录>/ela-webui-sidebar-state.json`，键是会话 id、值是归档时刻 ms），
+ * 不写进会话 `.jsonl`（pi / 终端那边会看到不认识的 entry），也不塞 `settings.json`（那是配置）。
  *
- * 「归档」是**人的一个决定**（这一条我不想在列表里看见），不是这次对话发生过的事。
- * 写进会话文件的话，pi / 终端那边会看到一条它们不认识的 entry，而且删会话时那份
- * 标记会跟着没——它本来就该跟着没。同理也不能塞进 `settings.json`：那是配置。
+ * 存时刻而不是布尔：归档视图要按「什么时候归档的」排。没有这个键 = 没归档，
+ * 于是「恢复」就是删掉这个键——没有第三种状态。
  *
- * 所以这里照 Pi Web 的做法（`pi-web-session-state.json`）：一份独立的状态文件，
- * 存在 `<家目录>/ela-webui-sidebar-state.json`，键是会话 id、值是归档时刻（ms）。
- *
- * ## 为什么存时刻而不是布尔
- *
- * 归档视图要按「什么时候归档的」排（Pi Web 的归档那一列显示的就是它），而
- * `true` 排不了。没有这个键 = 没归档，于是「恢复」就是删掉这个键——没有第三种状态。
- *
- * ## 文件坏了怎么办
- *
- * 当空读（并 `console.warn` 一次）：列表少几条归档标记，比整个侧边栏拉不出来强。
- * 写入是「临时文件 + rename」，半份 JSON 不会落在这条路径上。
+ * 文件坏了当空读（并 `console.warn` 一次）：列表少几条归档标记，比整个侧边栏拉不出来强。
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { configHome } from './config-home';
 
-/** 状态文件的版本。读到的版本不是它就当空（与线的协议同一口径：半懂不懂不如重来）。 */
+/** 状态文件版本。读到的不是它就当空（半懂不懂不如重来）。 */
 export const SIDEBAR_STATE_VERSION = 1;
 
 export interface SidebarState {
@@ -36,8 +26,8 @@ export interface SidebarState {
 /**
  * 合法的会话 id：与 pi 写的一致（UUIDv7 那种），也放过测试里造的 `sess-alpha`。
  *
- * 校验的理由不是洁癖：这份文件的键会变成界面上的 data-* 与请求体，`__proto__`
- * 这类键赋值会改掉对象的原型。
+ * 校验的理由不是洁癖：这些键会变成界面上的 data-* 与请求体，`__proto__` 这类键
+ * 赋值会改掉对象的原型。
  */
 const SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 
@@ -45,7 +35,6 @@ function isSessionId(value: string): boolean {
   return SESSION_ID_PATTERN.test(value) && value !== '__proto__';
 }
 
-/** `<家目录>/ela-webui-sidebar-state.json`。 */
 export function sidebarStatePath(): string {
   return path.join(configHome(), 'ela-webui-sidebar-state.json');
 }
@@ -118,7 +107,6 @@ export function setArchivedSessions(
   return state;
 }
 
-/** 忘掉这一批会话的归档标记（会话文件被删掉时跟着清）。 */
 export function forgetArchivedSessions(
   ids: readonly string[],
   file: string = sidebarStatePath(),

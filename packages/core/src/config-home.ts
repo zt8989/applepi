@@ -1,27 +1,11 @@
 /**
- * 配置家目录 —— 本项目**唯一**的全局状态位置。
+ * 配置家目录 —— 本项目**唯一**的全局状态位置，默认与 pi 共用 `~/.pi/agent`。
  *
- * 位置：默认就是 pi 的 `~/.pi/agent`（见 `configHome()`）。
+ * 与 pi 同址的理由：`models.json` / `auth.json` / `settings.json` / `sessions/` 都是
+ * 「配置一份就够」的东西，分两个目录的收益只是一个命名上的所有权标记，代价是每次改配置
+ * 都得同步两次。环境变量也只认 pi 的官方名 `PI_CODING_AGENT_DIR`。
  *
- * ## 为什么与 pi 同址（而不是自己的 ~/.redux-agent）
- *
- * 之前用 `~/.redux-agent/`，现在**默认与 pi 共用** —— 两边读写同一份 `models.json` /
- * `auth.json` / `settings.json` / `sessions/`。理由是这两个都是配置**一份**就够的东西：
- * provider 目录改一次两边都得知道，key 改一次两边都得用，pi 是官方工具、我们只是另一个
- * 前端。分两个目录的代价是每次改配置都得同步两次，收益仅仅是一个命名上的所有权标记。
- *
- * 环境变量只认 pi 的官方名 `PI_CODING_AGENT_DIR`（`getAgentDir()` 自己认它）。
- *
- * ## 为什么不自己再认一个
- *
- * 之前本项目额外认了 `REDUX_AGENT_DIR`（优先级更高，给测试隔离用）。现在删掉：
- * 两个变量指向同一件事，却只有 pi 那个会被 pi 自己认 —— 于是会出现「我们以为在家目录 A，
- * pi 在家目录 B」，配置分家。**只有一个环境变量**时不可能分家。测试改用
- * `PI_CODING_AGENT_DIR`（同一个机制、不同名字），隔离效果一样。
- *
- * 两个都没设时跟 pi 一样：`~/.pi/agent`。
- *
- * ## 结构（与 pi 一致）
+ * 结构（与 pi 一致）：
  *
  *     ~/.pi/agent/
  *       models.json            provider / 模型目录
@@ -31,23 +15,13 @@
  *         --<cwd 编码>--/       按工作目录分（编码规则与 pi 相同）
  *           <时间戳>_<id>.jsonl 会话：首行 header，其后每行一条 entry
  *
- * `traces/` 是我们**多出来的**一个目录（pi 没有）：轨迹树（一次尝试一节点）+ 装载段
- * （prompt / model）。它不能混进 sessions/ —— 轨迹是每次对话的产物、落盘频繁，
- * 会话文件是给人看的历史，混在一起「读一个会话」得先跳过一堆与它无关的记录。
+ * `traces/` 是本项目**多出来的**一个目录（pi 没有）：轨迹树 + 装载段。它不能混进 sessions/
+ * —— 轨迹落盘频繁，混在一起「读一个会话」得先跳过一堆无关记录。
  *
- * ## 会话怎么与 pi 互通
- *
- * 目录名（`--<cwd>--` 编码）、**文件名**（`<ISO 时间戳>_<id>.jsonl`）与 header 形状与 pi 一致，
- * 所以 pi 的 `/resume` 能看到我们的会话，我们的 `/resume` 也能看到 pi 的。
- * session id 也是同一个形状（UUIDv7）—— 于是把我们的 id 粘给 pi 的 `--session <id>`
- * 能直接恢复。**header 的 `version` 写的是当前 pi 的 `3`**：v3 多出来的两样（开头的
- * `model_change` 与 head system 消息）我们自己就写（见 session-file.ts / session-recorder.ts），
- * 不再让 pi 现场升级。老文件若是 v1，pi 仍会自动升（补 `id`/`parentId` 树、把 `hookMessage`
- * 改成 `custom`）；那些字段我们写的时候本来就有，所以升完不会丢东西。
- *
- * 早先我们的文件名是 `<id>.jsonl`（且 id 形如 `s<base36>`）。改成与 pi 一致后，
- * 按 id 找文件需要扫目录比对 `_<id>.jsonl` 后缀（见 `findFileById()`）；老的 `<id>.jsonl`
- * 仍然认，作为最后一条回退。
+ * 会话互通：目录名、文件名、header 形状、session id 形状（UUIDv7）都与 pi 一致，所以两边
+ * 的 `/resume` 互相看得见，也能把 id 粘给对方的 `--session <id>`。header 的 `version` 写
+ * 当前 pi 的 `3`，v3 多出来的两样（开头的 `model_change` 与 head system 消息）我们自己写；
+ * 老的 v1 文件 pi 仍会自动升，那些字段我们本来就有，升完不会丢东西。
  */
 import {
   closeSync,
@@ -84,26 +58,20 @@ export const PI_CONFIG_DIR: string = PI_DIR_NAME;
 export const CONFIG_DIR_NAME = '.redux-agent';
 
 /**
- * 配置家目录 —— **就是 pi 的 `getAgentDir()`**（`~/.pi/agent`）。
+ * 配置家目录 —— **就是 pi 的 `getAgentDir()`**（`~/.pi/agent`），只认 pi 那一个环境变量
+ * （`PI_CODING_AGENT_DIR`）。本项目不再额外认自己的变量：两个变量指向同一件事、却只有一个
+ * 被 pi 认，配置就会分家。
  *
- * 本项目只认 pi 那一个环境变量（`PI_CODING_AGENT_DIR`），与 pi 完全同步。
- * 早先这里是 `~/.redux-agent`，再早还额外认了 `REDUX_AGENT_DIR` 且优先级更高 ——
- * 都删了，理由见文件头：「两个变量指向同一件事，却只有一个被 pi 认」。
- *
- * 为什么不手写 `join(homedir(), '.pi', 'agent')`：那是抄 pi 的实现，而 pi 改了
- * （比如支持 tilde 展开、换目录名）我们就会静默地指向另一个地方 —— 症状是
- * “改了一边另一边读不到”，很难查。直接用官方函数，两者不可能分家。
+ * 不手写 `join(homedir(), '.pi', 'agent')`：那是抄 pi 的实现，pi 改了（换目录名、支持 tilde）
+ * 我们就会静默指向另一个地方，症状是「改了一边另一边读不到」。
  */
 export function configHome(): string {
   return getAgentDir();
 }
 
 /**
- * `<家目录>/models.json`。
- *
- * pi 那边有 `getModelsPath()`，我们仍然自己拼 —— 目录名与文件名要与它一致，
- * 但路径从 `configHome()` 推，这样万一将来 pi 加了别的优先级，我们的读与写
- * 仍然落在同一处（而不是一个用官方、一个用自己）。
+ * `<家目录>/models.json`。路径从 `configHome()` 推（而不是抄 pi 的 `getModelsPath()`），
+ * 于是读与写永远落在同一处。
  */
 export function modelsPath(): string {
   return path.join(configHome(), 'models.json');
@@ -140,15 +108,10 @@ export function writeJson(file: string, value: unknown): void {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
-// ─── sessions 路径（编码规则与 pi 相同） ───
 
 /**
- * 工作目录 → 目录名。
- *
- * 规则来自 pi-coding-agent 的 `migrations.js`：`--<cwd 把 / \ : 换成 ->--`。
- * 照抄是为了两边目录长得一样（虽然目前不互通）。
- *
- *     C:\Users\me\proj  →  --C-Users-me-proj--
+ * 工作目录 → 目录名：`--<cwd 把 / \ : 换成 ->--`（规则照抄 pi 的 `migrations.js`，
+ * 为了两边目录长得一样）：`C:\Users\me\proj` → `--C-Users-me-proj--`。
  */
 export function encodeCwd(cwd: string): string {
   return `--${cwd.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`;
@@ -166,26 +129,10 @@ export function tracePathFor(sessionId: string): string {
   return path.join(tracesDir(), `${sessionId}.jsonl`);
 }
 
-// ─── 文件名：`<时间戳>_<id>.jsonl`（与 pi 一致） ───
-//
-// ## 为什么文件名里要有时间戳
-//
-// 照抄 pi（`session-manager.js`：`timestamp.replace(/[:.]/g, "-")` + `_` + id）。
-// 好处是目录一眼能看出先后（`ls` 按名字排就是时间序），而且**同一毫秒里两次开新会话**
-// 也不会因为文件名一样而互相覆盖 —— id 已经是 uuid 不会撞，时间戳只是给人看的。
-//
-// ## 为什么 id 仍然单独存在（不把 id 塞进时间戳）
-//
-// 两者是不同的东西：时间戳是**创建时刻**，id 是**身份**。会话被恢复/续写时身份不变，
-// 时间戳也不该变（文件名只在创建时定一次）。所以文件一旦建好就不再改名。
-
 /**
- * 生成文件名里的时间戳部分（与 pi 同一规则）。
- *
- * `2026-10-12T05:44:28.468Z` → `2026-10-12T05-44-28-468Z`
- *
- * 把 `:` 与 `.` 换成 `-`：Windows 文件名不允许冒号，而点号会与扩展名混淆。
- * 两种字符一起换、换成同一个字符 —— 这是 pi 的写法（不是我们发明的）。
+ * 生成文件名里的时间戳部分（与 pi 同一规则）：`2026-10-12T05:44:28.468Z` →
+ * `2026-10-12T05-44-28-468Z`。`:` 与 `.` 都要换：Windows 文件名不允许冒号，点号会与
+ * 扩展名混淆。
  */
 export function fileTimestamp(iso: string): string {
   return iso.replace(/[:.]/g, '-');
@@ -211,18 +158,9 @@ export function sessionIdFromFileName(fileName: string): string {
 /**
  * 在目录里按下 id 找文件：`<任意时间戳>_<id>.jsonl` 或旧的 `<id>.jsonl`。
  *
- * ## 为什么要扫目录而不是拼路径
- *
- * 文件名带创建时刻的时间戳，而一个 id 之后被恢复/续写时我们**不知道**当初那个时刻 ——
- * 只有扫目录、比对 `_<id>.jsonl` 后缀才找得到。目录里文件数与会话数同量级
- * （几十上百），一次 `readdir` 远比「把时间戳也存进 header 再读出来」简单。
- *
- * ## 旧文件仍然认
- *
- * 改名之前建的会话文件名就是 `<id>.jsonl`（无时间戳前缀）。它们还在盘上、还要能读
- * （恢复历史、删会话）。所以精确匹配 `<id>.jsonl` 也放行，作为最后一条回退。
- *
- * 找不到时返回 null（调用方决定是「没有这个文件」还是拼一个默认路径）。
+ * 必须扫目录而不是拼路径：文件名带创建时刻，而恢复/续写时我们不知道当初那个时刻 ——
+ * 只有比 `_<id>.jsonl` 后缀才找得到。旧的 `<id>.jsonl`（改名之前建的）仍然认，作为最后
+ * 一条回退。找不到返回 null（调用方决定是「没有这个文件」还是拼一个默认路径）。
  */
 export function findFileById(dir: string, id: string): string | null {
   if (id === '') return null;
@@ -254,16 +192,9 @@ export function findSessionFile(sessionId: string, cwd: string): string {
 /**
  * **只知道 id** 时找会话文件：扫 `sessions/` 下每个 `--<cwd>--` 目录。
  *
- * ## 为什么需要它
- *
- * 「按 cwd + id」在一种情况下不够用：`resume` 一个别的项目里的会话时，内核的 cwd 还是
- * 启动那个（见 `conversation.reset` 的注释：恢复不换工作目录），于是按 cwd 拼出来的路径
- * 指向一个空目录 —— 文件其实在它**原本**那个项目的目录里。症状是「完整历史」写着
- * 「还没落盘」，可文件明明在（`GET /api/history?sessionId=<id>` 要的也正是这条能力：
- * 有个 id 就该能打开那一段，不必先知道它当初在哪儿）。
- *
- * 代价是「每个目录一次 `existsSync` + 命中不了才 readdir」：目录个数是个位数到几十，
- * 而调用点是「人点开一页」那种频率，不是列表那种每帧都要跑的路径。
+ * 「按 cwd + id」不够用：resume 一个别的项目里的会话时，内核的 cwd 还是启动那个，于是按
+ * cwd 拼出来的路径指向空目录，而文件在它原本那个项目里（症状：「完整历史」写着「还没落盘」，
+ * 可文件明明在）。代价是每个目录一次 `existsSync`，而调用点是「人点开一页」的频率。
  */
 export function findSessionFileById(sessionId: string): string | null {
   if (sessionId === '') return null;
@@ -293,24 +224,14 @@ export function findTraceFile(sessionId: string): string {
 }
 
 /**
- * 退出时提示的「怎么恢复这次会话」命令。
+ * 退出时提示的「怎么恢复这次会话」命令：`ela --session <id>` —— 本项目自己的入口。
+ * 两边会话文件完全互通（目录名、文件名、header、id 全一致），粘给 `pi` 也能恢复，
+ * 只是那不是我们要提示的默认路径。
  *
- * 打的是 `ela --session <id>` —— **本项目自己的入口**。
+ * 只有「**真的落过盘**」才打印（那条命令要能真的跑起来）：非 TTY（管道/重定向）时没人看；
+ * 没接过话时那个 id 还没文件，打印出来是误导。
  *
- * ## 为什么是 `ela` 而不是 `pi`
- *
- * 用户看到这行提示时正在用 `ela`，把它粘回去自然是回到 `ela`。两边会话文件完全互通
- * （目录名、文件名、header、id 全一致），所以粘给 `pi --session <id>` 同样能恢复 ——
- * 但那是用户的另一个选择，不是我们要提示的默认路径。
- *
- * ## 什么时候不打印
- *
- * 只有「**真的落过盘**」才打印（那条命令要能真的跑起来）：
- *   - 非 TTY（管道/重定向）：那些转义序列没人看，与 pi 同一判断；
- *   - 没接过话（空会话不建文件，见 `SessionWriter.start`）：那个 id 还没文件，
- *     `ela --session <id>` 会找不到，打印出来是误导。
- *
- * @returns 要打印的那一行（含前缀缩进由调用方决定），或者 null（不该打印）。
+ * @returns 要打印的那一行，或者 null（不该打印）。
  */
 export function resumeCommand(sessionId: string | undefined, cwd: string): string | null {
   if (!sessionId) return null;
@@ -319,7 +240,6 @@ export function resumeCommand(sessionId: string | undefined, cwd: string): strin
   return `ela --session ${sessionId}`;
 }
 
-// ─── 列会话 ───
 
 /** 一个会话的摘要（列表里显示用；细节要读文件）。 */
 export interface SessionSummary {
@@ -338,21 +258,16 @@ export interface SessionSummary {
   /**
    * **第一条 user 消息**（压成一行，见 `firstMessageText`）。没有就 undefined。
    *
-   * 列表里的标题就是「名字 → 这一句 → id」那一串（见 `web/api.ts` 的 `sessionListTitle`）。
-   * 把它放在这里，是因为**只能在这一遍读里拿**：pi v3 的 head（system prompt 分段 +
-   * 工具表）本身就 ~64KB，而用户的第一句话紧跟在它后面 —— 另一处再按 64KB 去扫正好
-   * 扫不到，症状是列表里那一行显示成一串 uuid（真发生过）。
+   * 只能在这一遍读里拿：pi v3 的 head 本身就有 ~64KB，用户的第一句话紧跟在它后面 ——
+   * 另一处再按 64KB 去扫正好扫不到（症状：列表里那一行显示成一串 uuid）。
    */
   firstMessage?: string | undefined;
   /** 分叉来源（header 的 `parentSession`）。本项目还没接 fork，所以通常 undefined。 */
   parentSession?: string | undefined;
-  /**
-   * **最后一次说话**的时间（ms）。
-   *
-   * 与 `mtimeMs` 的差别不是「精确一点」而是**另一个东西**：文件 mtime 会被任何写入改动
-   * （连改名都算），而这条是「最后一次 user/assistant 消息」。排序与「2 小时前」用它。
-   * 读不到就退回 `mtimeMs`。
-   */
+/**
+ * **最后一次说话**的时间（ms）。与 `mtimeMs` 不是一回事：文件 mtime 会被任何写入改动，
+ * 而这条是「最后一次 user/assistant 消息」。排序与「2 小时前」用它，读不到退回 `mtimeMs`。
+ */
   lastActivityMs: number;
 }
 
@@ -369,17 +284,10 @@ function firstLineOf(chunk: string): string {
 }
 
 /**
- * 数**消息**条数（跳过 header）—— 列表里显示「几条」指的是对话多长，不是文件几行。
+ * 数**消息**条数（跳过 header）—— 列表里那个「几条」指对话多长，不是文件几行。
  *
- * ## 为什么不整文件读进来再 `split('\n')`
- *
- * 早先那样做，而列表阶段每个会话要读**两次**（一次取 header、一次数条数）：
- * 一个 18MB 的 sessions/ 目录就是 36MB 的读 + 36 万次字符串比较，而这一段在弹窗弹出前
- * 是**同步**的 —— 用户看到的就是「打开 /resume 要等一分钟」。
- *
- * 现在只读开头 64KB 取 header（见 `readHead`），条数则**分块流式数换行**：
- * 不把全文读进内存，也不建一个几十万元素的 `split` 结果数组。而条数是**精确**的 ——
- * 列表副标题里那个数字用户看得见，不能拿「估个大概」换速度。
+ * 分块流式数换行：不把全文读进内存，也不建一个几十万元素的 `split` 数组（那正是
+ * 「打开 /resume 要等一分钟」的来源）。条数必须**精确**，列表副标题里用户看得见。
  */
 function countLines(file: string): number {
   let fd: number | undefined;
@@ -437,26 +345,16 @@ function readHead(file: string, bytes = 65536): string {
 /**
  * 列出所有会话，按**最后说话**的时间倒序。
  *
- * 遍历 sessions/ 下的每个 `--<cwd>--` 目录（目录名本身就编码了 cwd，先用它，
- * 读得到 header 就用 header 里的 —— header 更权威）。
+ * 遍历 sessions/ 下每个 `--<cwd>--` 目录（目录名已编码 cwd，读得到 header 就用 header 的）。
+ * 为了「打开列表不读全文」：
+ * | 字段 | 怎么拿 |
+ * | --- | --- |
+ * | header（cwd / id / 时间） | 只读开头 64KB（`readHead`） |
+ * | 条数 | 分块流式数换行（`countLines`），精确且不建大数组 |
+ * | 名字 / 分叉来源 | 从头扫 512KB、**不提前停**（`readJsonlHead`，见 `readSessionMeta`） |
+ * | 最后说话时间 | 只读**末尾** 256KB（`readJsonlTail`） |
  *
- * ## 代价：18MB 的目录要扫两遍，但都只扫**字节**
- *
- * | 字段 | 怎么拿 | 为什么 |
- * | --- | --- | --- |
- * | header（cwd / id / 时间） | 只读开头 64KB（`readHead`） | header 是首行，永远在这截里 |
- * | 条数 | 分块流式数换行（`countLines`） | 精确；不把全文读进内存 |
- * | 名字 / 分叉来源 | 从头扫 512KB，**不提前停**（`readJsonlHead`，见 `readSessionMeta`） | `session_info` 可以追加在**任何**位置 —— 给三个月前的会话改名，那条 entry 就在文件末尾 |
- * | 最后说话时间 | 只读**末尾** 256KB（`readJsonlTail`） | 消息 timestamp 在每行里，但最后那次几乎总在末尾 |
- *
- * 早先这里是「每个会话都 `readSession` 整份再 parse 一遍」：124 个会话、18MB 的目录，
- * 光列列表就要 524ms。现在整条弹窗路径 128ms（见 docs/architecture/sessions.md）。
- *
- * ## 为什么**不**扫全文
- *
- * 「全文」只在**搜索**里才需要（找当时聊过的那句话）。而列表本身不需要 —— 显示标题用
- * 第一条 user 消息（也在文件前几行），显示时间用末尾。所以这里坚持「为显示不读全文」。
- * 搜索那侧仍只搜**头部**（见 `session-picker.ts` 的说明），两边的取舍写在同一处。
+ * 全文只在**搜索**里才需要，列表不需要 —— 标题用前几行的第一条 user 消息，时间用末尾。
  */
 export function listSessions(filter?: { cwd?: string }): SessionSummary[] {
   const root = sessionsDir();
@@ -529,10 +427,9 @@ export function listSessions(filter?: { cwd?: string }): SessionSummary[] {
         mtimeMs,
         createdAt,
         entries: countLines(full),
-        // header 里那个分叉来源要带上：`readSessionMeta` **读不到它**（它走
-        // `readJsonlHead`，而那里把 `session` 那一行单独拿出去当 header 了，不进 `content`）
-        // —— 早先这里漏了，于是 `parentSession` 永远是 undefined，而字段文档写着
-        // 「header 的 `parentSession`」。子会话（子代理那些）靠它从列表里排掉。
+        // header 里的分叉来源要单独带上：`readSessionMeta` **读不到它**（它走 `readJsonlHead`，
+        // 而那里把 `session` 那一行当 header 拿走了，不进 `content`）。子会话（子代理那些）靠它
+        // 从列表里排掉。
         ...(parentSession !== undefined ? { parentSession } : {}),
         ...(readSessionMeta(full) ?? {}),
         lastActivityMs: readJsonlTail(full, TAIL_BYTES).lastActivityMs || mtimeMs,
@@ -549,23 +446,10 @@ export function listSessions(filter?: { cwd?: string }): SessionSummary[] {
 /**
  * 把 `session_info`（名字）与分叉来源读出来。两个都没取到就返回 undefined。
  *
- * ## 为什么**不能** `stopAfter` 命中就停
- *
- * 直觉上「命中 `session_info` 就停」像是对的那个省法（`sessionTitleFromHead` 就是那么做的）。
- * 它是错的：pi 的语义是**最后一条** `session_info` 说了算，而改名是**反复**发生的 ——
- * 给同一个会话改两次名，就有两条。于是「命中就停」读到的是**第一次**的名字，
- * 而用户在 pi 那边看到的是第二次那个。症状是「刚改完名，按 ctrl+n 只看到旧名字」，
- * 而且只在该会话被改过名时出现 —— 极难归因。
- *
- * 更根本的是：一条 entry 可能追加在**文件末尾**（给一个三个月前的会话改名），
- * 所以这里的 512KB 截断本来就不是「读全部」—— 它只是「前 512KB 里的最后一条
- * `session_info`」。对一个**很长**的会话，被改名的那条落在窗口外，仍会读不到。
- *
- * ## 那能不能精确地做
- *
- * 能，但代价是扫全文（名字可能在任意一行），而 docs/architecture/sessions.md 已经为
- * 「不扫全文」付出过代价。所以这里明确选「扫前 512KB」，并把这条限制写在上面。
- * 对**当前**正在聊的会话改名（正是面板的主要用途），那条 entry 就在前几 KB 里，一定命中。
+ * **不能**命中就停：pi 的语义是**最后一条** `session_info` 说了算，而改名会反复发生 ——
+ * 「命中就停」读到的是第一次那个名字（症状：刚改完名，按 ctrl+n 只看到旧名字）。
+ * 改名也可能追加在文件末尾，所以这里限「前 512KB 里的最后一条」：对**正在聊**的会话改名
+ * （面板的主要用途）一定命中，对很长的老会话可能读不到。
  */
 function readSessionMeta(
   file: string,
@@ -613,9 +497,8 @@ function readSessionMeta(
 /**
  * 会话里的**第一条 user 消息**，压成一行（控制字符与连续空白都折成单个空格）。
  *
- * 折成一行是刻意的：它会被塞进侧边栏那一行（`text-overflow: ellipsis`），
- * 一个换行会把那一行的排版拆坏。纯附件（只有图片、没有文字）的那条跳过 ——
- * 拿一个空标题不如用后面那句。
+ * 折成一行是刻意的：它会被塞进侧边栏那一行，一个换行会把排版拆坏。纯附件（只有图片）
+ * 的那条跳过 —— 拿一个空标题不如用后面那句。
  */
 function firstUserMessageText(entries: readonly SessionEntry[]): string | undefined {
   for (const entry of entries) {
@@ -650,12 +533,8 @@ function oneLine(text: string): string {
 /**
  * 一个会话当前的显示名（`session_info`）。没起过名（或文件不存在）就 undefined。
  *
- * 与列表里 `SessionSummary.name` **同一份数据、同一套语义**（最后一条非空
- * `session_info` 说了算，见 `readSessionMeta`）；这里只是给「只知道文件路径」的调用方
- * （`/name` 与 `/session` 那两个命令）一个直接入口 —— 它们不该为了一个字段去 list 整个目录。
- *
- * **只扫前 512KB**（理由见 `readSessionMeta` 那段）。对 `/name` 的常见用法（给**正在聊**
- * 的这个会话起名）一定命中，因为那条 entry 就追加在刚才聊的那几行后面。
+ * 与列表里 `SessionSummary.name` 同一份数据、同一套语义；这里只是给「只知道文件路径」的
+ * 调用方（`/name`、`/session`）一个直接入口。**只扫前 512KB**（理由见 `readSessionMeta`）。
  */
 export function readSessionName(file: string | undefined): string | undefined {
   if (file === undefined || !existsSync(file)) return undefined;
@@ -666,26 +545,16 @@ export function ensureDir(dir: string): void {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 }
 
-// ─── 清理 ───
 
 /**
  * 清掉一批会话：会话文件 + 对应的轨迹文件。
  *
- * ## 为什么两个都要删
+ * 两个都要删：一个会话在盘上落两处（`sessions/` 与 `traces/`），只删前者的话 `traces/`
+ * 会一直攒着几万个小文件，而那才是真正占空间的一份。
  *
- * 一个会话在盘上落两处：`sessions/<cwd 编码>/<时间戳>_<id>.jsonl`（对话历史）与
- * `traces/<时间戳>_<id>.jsonl`（执行轨迹）。只删前者的话，`/api/sessions` 列表干净了，但
- * `traces/` 会一直攒着几万个小文件 —— 而且那才是真正占空间的一份。
- *
- * ## 为什么不做「物理删除」之外的软标记
- *
- * 用户点「清理」就是要磁盘真的少下来。留个 .trash 再定期扫是另一套机制，
- * 不如直接删：调用方（Web 的确认弹窗）已经问过用户了。
- *
- * ## 删不掉的怎么办
- *
- * Windows 上文件可能被索引器/编辑器短暂占着。这里**吞掉错误并计数**，
- * 不让一个顽固文件把整批清理炸掉 —— 用户看到「清了 12 个（1 个没删掉）」比看到报错有用。
+ * 不做 `.trash` 之类的软标记：用户点「清理」就是要磁盘真的少下来。
+ * 删不掉的（Windows 上被索引器/编辑器占着）**吞掉错误并计数**，不让一个顽固文件把整批
+ * 清理炸掉 —— 「清了 12 个（1 个没删掉）」比报错有用。
  */
 export interface CleanResult {
   /** 成功删掉的文件数（会话 + 轨迹都算）。 */
@@ -733,16 +602,10 @@ export function cleanSessions(ids: readonly string[]): CleanResult {
 /**
  * 清掉**不在** `keep` 里的全部会话。
  *
- * 用途是「一键把测试留下的垃圾扫掉」：测试会话的 cwd 全是临时目录，
- * 界面上根本没法一个个点。keep 放行当前正在用的那个 id —— 它正在被记录器写着，
- * 删了会让接下来的消息写进一个已被删掉的文件（Linux 上还会拿到一个「看不见的」句柄）。
- *
- * ## 现在**没有命令入口**了（有意）
- *
- * 它以前是 `/clean` 与 `/wipe`。命令表改成与 pi 对齐之后那两条删了 —— pi 的删历史在
- * `/resume` 面板里（`ctrl+d`，一次一条）。函数留着是因为它是**库**的能力：
- * `clean-sessions.test.ts` 钉的「删会话要连带删轨迹」那条不变量因为它才跑得起来，
- * 而哪天要开一个 CLI 的清理入口（或面板里的「删掉全部测试会话」）时不必重写。
+ * 用途是「一键扫掉测试留下的垃圾」：测试会话的 cwd 全是临时目录，界面上没法一个个点。
+ * `keep` 放行当前正在用的那个 id —— 它正被记录器写着，删了会让接下来的消息写进一个已被
+ * 删掉的文件。现在没有命令入口（pi 的删历史在 `/resume` 面板里），函数留着是给测试与
+ * 将来的 CLI 清理入口用。
  */
 export function cleanSessionsExcept(keep: readonly string[]): CleanResult {
   const keepSet = new Set(keep);

@@ -1,26 +1,12 @@
 /**
  * 会话记录器 —— 把对话写成 `sessions/<cwd>/<时间戳>_<id>.jsonl`，供「恢复历史」用。
  *
- * ## 与轨迹的分工
+ * 与轨迹是**并行的两份记录**，不是一份的两种视图：轨迹一次尝试一节点（排查「为什么慢/错了」，
+ * 能重建轨迹树），会话是消息流（「上次聊到哪了」，能零 token 重建 messages）。分开是因为
+ * 轨迹落盘频繁，混在一起的话「读一个会话」得先跳过一堆无关的 attempt 记录。
  *
- * | | 轨迹（traces/） | 会话（sessions/） |
- * | --- | --- | --- |
- * | 记什么 | 一次尝试一节点（含失败/超时） | 消息流（user / assistant / toolResult） |
- * | 给谁看 | 排查「为什么慢/错了」 | 「上次聊到哪了」 |
- * | 恢复 | 重建轨迹树 | 重建 messages，零 token |
- *
- * 两者是**并行的两份记录**，不是一份的两种视图：轨迹里有节点但没有完整消息正文
- * （错误节点的 detail 是错误信息），会话里有消息但没有 attempt 的时间线。
- *
- * ## 为什么不放到一起
- *
- * 轨迹是每次对话的产物、落盘频繁；会话是给人读的历史。混在一个文件里的话，
- * 「读一个会话」得先跳过一堆与它无关的 attempt 记录。
- *
- * ## 写入时机
- *
- * 订阅 store —— 和轨迹落盘器一样的形状。**每条消息只在第一次出现时写一次**
- * （用已写条数做游标），否则流式更新会把同一条 message 写几十遍。
+ * 写入时机：订阅 store。**每条消息只在第一次出现时写一次**（用已写条数做游标），
+ * 否则流式更新会把同一条 message 写几十遍。
  */
 import { createSessionHeader, SessionWriter } from './session-file';
 import { buildPromptHead, declaredToolSchemas } from './prompt-head';
@@ -36,19 +22,13 @@ export interface SessionRecorderOptions {
   /**
    * 恢复会话时：这个文件里**已经有** `thinking_level_change` 条目吗。
    *
-   * 没给（新会话）或给 `false`（老会话没记过这一档）→ 写第一条消息时**回填一条**，
-   * 与 pi 的 `sdk.js:279-283` 是同一件事（「Restore missing settings metadata for older
-   * sessions」那段）。不给的话，恢复一个老会话之后它永远不知道自己用哪一档，
-   * 而「不知道」在 pi 那里会被当成「新会话」 —— 于是 per-model 覆盖被跳过（见
-   * `thinking-level.ts` 里 `resolveStartupThinkingLevel` 第 3 步）。
+   * 没给（新会话）或给 `false`（老会话没记过这一档）→ 写第一条消息时**回填一条**，否则
+   * 恢复出来的会话不知道自己用哪一档，而「不知道」在 pi 那里等于「新会话」—— per-model
+   * 覆盖会被跳过（见 `thinking-level.ts`）。
    *
-   * ## 与 pi 的一处**时间差**（刻意）
-   *
-   * pi 在会话建立那一刻就把这行写下去（它的会话文件本来就一直存在）；本项目是
-   * 「空会话不落盘」，所以回填推迟到**真的要写文件时**（第一条消息 / 档位真的变了）。
-   * 后果只有一个：恢复一个老会话又直接退出，盘上不会多这一行 —— 而下次恢复仍然按
-   * 默认解析拿到同一档，行为上看不出差别。换来的是那条硬挣来的不变式：
-   * **恢复不写盘**（见 `packages/core/test/restore-perf.test.ts`「会话文件一个字节都不该变」）。
+   * 与 pi 的一处**时间差**（刻意）：pi 在会话建立那一刻就写这行，本项目「空会话不落盘」，
+   * 所以回填推迟到**真要写文件时**。代价只是「恢复老会话又直接退出」时盘上少这一行，
+   * 换来的是那条不变式：**恢复不写盘**（见 `restore-perf.test.ts`）。
    */
   hasThinkingEntry?: boolean | undefined;
 }
@@ -63,9 +43,8 @@ export interface SessionRecorder {
 /**
  * pi v3 会话开头那条 **system 消息**：system prompt（`sections`）+ 工具（`toolsAdded`）。
  *
- * 形状与发给 provider 的 head 一模一样（`buildPromptHead`，见 `prompt-head.ts`）——
- * pi 恢复会话时正是靠它 `_restoreToolsFromTranscript()` 把工具表装回来，并回放出
- * system prompt 的各段。用**装载时**那批工具（`headTools`，不可变历史），不是「当前」那份。
+ * 形状与发给 provider 的 head 一模一样，pi 恢复会话时正是靠它把工具表与各段 prompt 装回来。
+ * 用**装载时**那批工具（`headTools`，不可变历史），不是「当前」那份。
  */
 function sessionHead(state: AgentState): SystemMessage {
   const head = buildPromptHead({
@@ -79,7 +58,7 @@ function sessionHead(state: AgentState): SystemMessage {
 /**
  * 挂一个会话记录器到 store 上。
  *
- * 恢复已有会话时传 `resumeFrom`：那之后的旧消息已经在文件里，游标要接着算，
+ * 恢复已有会话时传 `resumeFrom`（文件里已有几条消息）：游标要接着算，
  * 否则会把恢复出来的消息**再写一遍**。
  */
 export function createSessionRecorder(
@@ -96,23 +75,18 @@ export function createSessionRecorder(
 
   let written = options.resumeFrom ?? 0;
   /**
-   * 是不是**新会话**（不是恢复已有文件）。
-   *
-   * 只有新会话才产出开头的两样 v3 内容：`model_change` 与 head system 消息。
-   * 恢复时那两样要么已经在文件里（pi/我们写的 v3），要么压根没有（v1 老文件）——
-   * 无论哪种都不该在**文件末尾**补一条（head 必须是最前面那条，append 补不到那儿）。
+   * 是不是**新会话**（不是恢复已有文件）。只有新会话才产出开头的 `model_change` 与 head
+   * system 消息：恢复时那两样要么已在文件里，要么本来就没有 —— 无论哪种都不该补在**文件
+   * 末尾**（head 必须是最前面那条，append 补不到那儿）。
    */
   const isNewSession = options.resumeFrom === undefined;
 
   /**
    * 上一次**已经写进文件**的模型（用来判断「换没换」）。
    *
-   * **建表时就记成「当前那个」**（而不是 `null`）：`model_change` 的语义是
-   * 「**换**成了什么」。新会话开头那条初始 `model_change` 由 `pendingInitialModel`
-   * 单独负责（pi 也在开头写一条）；这里只管「后来了又换过」。
-   *
-   * 不去重会怎样：订阅器**每帧**都跑，一次 `/model` 能写出几百条 —— 而会话文件
-   * 恰好是「打开 `/resume` 面板要扫」的那些文件之一。
+   * 建表时就记成「当前那个」而不是 `null`：`model_change` 的语义是「**换**成了什么」，
+   * 新会话开头那条由 `pendingInitialModel` 单独负责。不去重的话订阅器**每帧**都跑，
+   * 一次 `/model` 能写出几百条 —— 而这个文件正是 `/resume` 面板要扫的。
    */
   const modelKeyOf = (s: AgentState): string => `${s.model.provider}\0${s.model.modelId}`;
   let lastModelKey = modelKeyOf(store.getState());
@@ -122,10 +96,8 @@ export function createSessionRecorder(
   /**
    * 这个会话**开始时**用哪一档，以及「这条记录还没写进文件」。
    *
-   * pi 在会话建立那一刻就把「这个会话用哪一档」写进文件（`core/sdk.js:279-290`），
-   * 而本项目**空会话不建文件**（见 `SessionWriter.start`：header 推迟到第一条消息）。
-   * 所以这里记着它、推迟到真的要写文件时再落 —— 文件内容与 pi 同形
-   * （header → `model_change` → `thinking_level_change` → head → 消息），
+   * pi 在会话建立那一刻就写进文件，而本项目**空会话不建文件**，所以推迟到真要写文件时再落
+   * —— 文件内容与 pi 同形（header → `model_change` → `thinking_level_change` → head → 消息），
    * 而「进来看一眼就退出」仍然不留垃圾文件。
    */
   let lastThinkingLevel = store.getState().model.thinkingLevel;
@@ -170,12 +142,9 @@ export function createSessionRecorder(
       writer.appendThinkingChange(thinkingLevel);
       lastThinkingLevel = thinkingLevel;
     }
-    // 模型换了要记一条（与 pi 同一个 entry type，pi 恢复时也认）。
-    //
-    // 为什么**在**这里而不在 `onModelChange` 回调里：那个回调字段早先是声明了但
-    // 没人调的（没有调用方传它），于是「换模型」这个事实**从来没进过会话文件** ——
-    // 恢复历史时看到的是一串消息，却不知道中间哪一段用的哪个模型。有一条能真跑的
-    // 路之后，回调字段就多余了，删掉比留一个永远不触发的钩子诚实。
+    // 模型换了要记一条（与 pi 同一个 entry type）。为什么在**这里**而不在
+    // 某个回调里：换模型有多个入口（`/model` 面板、换 provider、恢复会话），只有「盯着 state
+    // 里那一刻的 model」才不会漏一个 —— 漏掉的那条就是「恢复时不知道中间用了什么模型」。
     if (modelKey !== lastModelKey) {
       writer.appendModelChange(state.model.provider, state.model.modelId);
       lastModelKey = modelKey;

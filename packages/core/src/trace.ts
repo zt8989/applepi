@@ -1,31 +1,16 @@
 /**
  * 轨迹树（trace tree）—— 像 git log 一样的一次尝试一节点的结构。
  *
- * 想法直接照搬 git：agent 的执行历史不是一条线，而是**一棵树**。
- *   - 每个 commit 有一个 parent；这里每个节点有 parentId。
- *   - commit 有分支（--graph 里的 `|`、`/`、`\`）；这里重试就是分支。
- *   - HEAD 指向当前所在的那条线；这里 tipId 是「最后一条成功闭合的节点」。
+ * 想法照搬 git：执行历史不是一条线而是一棵树（节点有 parentId，重试就是分支，`tipId` 是
+ * 「最后一条成功闭合的节点」）。
  *
- * 关键设计（也是这个需求里最容易做错的地方）：
+ * 最关键的一点：**attempt 节点的 parent 取的是「发起时」的 tip，而不是它自己产生的失败结果。**
+ * 所以「第 1 次超时 → 记一个 error 节点（不推进 tip）→ 重试」的两次尝试是**兄弟**，树上长成
+ * 分叉。若错误节点推进了 tip，第二次尝试就会挂在错误节点底下 —— 那等于说「错误的子节点才是
+ * 正确的历史」，不是 git 的语义。
  *
- *   **attempt（尝试）节点的 parent 取的是「发起时」的 tip，而不是它自己产生的失败结果。**
- *
- *   所以：LLM 第 1 次调用超时 → 记一个 status='error' 的 `llm.attempt` 节点（不推进 tip），
- *   重试第 2 次 → 它的 parent 仍然是「超时前那个节点」。于是重试和失败是**兄弟**，
- *   树上长成 git 那样的分叉：
- *
- *        · user                 ← tip（超时前）
- *        ├─ ✗ llm.attempt       ← 父 id 指向上面那个节点
- *        │   └─ llm.error: LLM 调用超时（30s）
- *        └─ ✓ llm.attempt       ← 父 id 同样指向上面那个节点（不是指向上一条失败）
- *            └─ llm.result: 42
- *
- *   如果错误节点推进了 tip，第二次尝试就会被挂到错误节点底下，变成
- *   「错误的子节点才是正确的历史」——那就不是 git 的语义了。
- *
- * 本文件是纯函数：没有 IO、没有 Date.now()、没有随机数。同一个 Action 序列
- * 必然产出同一棵树（id 由 reducer 单调自增，不含时间戳），因此树可以在
- * reducer 里算，也可以在测试里断言，还能在 TUI 侧从 JSONL 回放重建。
+ * 本文件是纯函数：没有 IO、没有 `Date.now()`、没有随机数。同一个 action 序列必然产出同一棵树，
+ * 所以树能在 reducer 里算、能在测试里断言、也能从 JSONL 回放重建。
  */
 import { uuidv7 } from '@earendil-works/pi-ai';
 import type { Message } from '@earendil-works/pi-ai';
@@ -98,18 +83,12 @@ export type TraceNodeKind =
   /** 换成了哪个模型 / 哪个档位（model.changed / thinking.changed）。 */
   | 'model.changed'
   /**
-   * 一个 **pi agent 生命周期事件**（`agent_start` / `tool_execution_*` / `message_end` …）。
+   * 一个 **pi agent 生命周期事件**。它既不是对话（不推进 tip），也不是上下文/压缩/失败 ——
+   * 它是「内核把什么告诉了扩展/宿主」的**注释**。单独一种 kind 是必要的：`traceStats` 按 kind
+   * 数回合/步/工具/错误，这种一个都不该计进去。
    *
-   * ## 为什么单独一种 kind
-   *
-   * 它既不是对话（不推进 tip），也不是上下文（不改 prompt）、不是压缩、不是失败 ——
-   * 它是「内核把什么告诉了扩展/宿主」的**注释**。单独一种是必要的：`traceStats` 按 kind
-   * 数回合/步/工具/错误，`extension.event` 一个都不该计进去。
-   *
-   * ## 不推进 tip
-   *
-   * 它是旁注：`tool.call` / `tool.result` / `llm.result` 才是「发生过的事」的推进点。
-   * 让它推进 tip 的话，后面真正的事件会挂到注释底下，树就串成一条以事件为轴的链。
+   * 不推进 tip：`tool.call` / `tool.result` / `llm.result` 才是「发生过的事」的推进点；让它
+   * 推进的话，后面真正的事件会挂到注释底下，树就串成一条以事件为轴的链。
    */
   | 'extension.event'
 
@@ -139,20 +118,12 @@ export interface TraceNode {
   /**
    * 这条节点对应的 **pi 消息**（user / assistant / toolResult / 中途追加的 system 段）。
    *
-   * ## 为什么消息挂在节点上
+   * 消息挂在节点上：时间线**从轨迹树派生**，要派生无损，节点就得自己带着那份消息 —— 否则还得
+   * 回头读 `state.messages`，而那是**发给模型**的那份（会被压缩替换、恢复重灌），两边迟早对不上。
+   * 于是 `state.messages` 只服务 LLM 请求，界面一个字节都不读它。
    *
-   * 时间线（界面看到的对话流）**从轨迹树派生**，而轨迹树是唯一真相。要让派生结果无损，
-   * 节点就得自己带着那份消息 —— 否则「派生」还得回头去读 `state.messages`，而那是
-   * **发给模型**的那份（会被压缩替换、会被恢复重灌），两边的顺序与内容迟早对不上。
-   *
-   * 于是 `state.messages` 只服务 LLM 请求，界面这边一个字节都不读它。
-   *
-   * 只有「会产生一条消息」的节点才有它：`user` / `llm.result` / `tool.result` /
-   * 工具失败的那个 `error` / `prompt.segment`。容器、`model.init`、`stop`、
-   * LLM 失败的 `error` 都没有。
-   *
-   * **可选**：旧轨迹文件里没有它（那时消息单独落在 `op:'message'` 行）——
-   * 派生时会退回「读 state.messages」，行为与改动前一致。
+   * 只有「会产生一条消息」的节点才有它。**可选**：旧轨迹文件里消息单独落在 `op:'message'` 行，
+   * 派生时退回 `fallbackMessages`。
    */
   readonly message?: Message | undefined;
   readonly createdAt: number;
@@ -174,22 +145,11 @@ export interface TraceTree {
 }
 
 /**
- * 生成会话 id：**UUIDv7**，与 pi 完全同一形状。
+ * 生成会话 id：**UUIDv7**，与 pi 完全同一形状（直接用 pi-ai 导出的 `uuidv7()`）。
  *
- * ## 为什么不用以前的 `s<base36 时间戳>`
- *
- * 以前的 id 是 `s` + `Date.now().toString(36)`（如 `smv4jubkv`）。它有两个毛病：
- *
- *   1. **同一毫秒内两次开新会话会撞 id** —— 于是两次会话指向同一个文件名，后一次把
- *      前一次的历史续写进同一个文件。真实发生过。
- *   2. 与 pi 的 id 形状不同，于是 pi 的 `--session <id>` / `/resume` 那套互动（把我们的
- *      id 粘给 pi）不成立 —— 而我们要的正是「会话两边互通」。
- *
- * UUIDv7 是**时间有序**的 UUID（前 48 位是毫秒时间戳）：既不会撞，又像 pi 一样可按
- * 创建顺序排。直接用 pi-ai 导出的 `uuidv7()` —— 自己实现一份只会与 pi 慢慢分家。
- *
- * 顺带：id 里不再有「时间」这个可读信息，时间在**文件名**里（见 config-home 的
- * `sessionFileName()`），这也是 pi 的做法。
+ * 不用 `s<base36 时间戳>`：那种 id 在同一毫秒内两次开新会话会撞，于是两次会话续写同一个文件；
+ * 而且与 pi 的 id 形状不同，把我们的 id 粘给 pi 的 `--session` 就不成立。UUIDv7 是时间有序的，
+ * 既不会撞又能按创建顺序排。id 里不再有可读时间，时间在**文件名**里。
  */
 export function newSessionId(): string {
   return uuidv7();
@@ -302,7 +262,6 @@ export function patchNode(
   };
 }
 
-// ─── 查询 ───
 
 export function getNode(tree: TraceTree, id: string): TraceNode | undefined {
   return tree.nodes[id];
@@ -376,30 +335,12 @@ export function traceStats(tree: TraceTree): TraceStats {
     if (node.kind === 'error') errors += 1;
     if (node.endedAt !== null) durationMs += node.endedAt - node.createdAt;
   }
-  // 「重试」= 同一个父节点下有**多个 step 容器**（说明前一个没成，走了分支）。
-  //
-  // 只数 step.start，**不能把 tool.call 算进来**：模型一轮里并行发两个工具时，
-  // 这两个 tool.call 是同一个 llm.result 下的兄弟节点，按「多兄弟即重试」的判据会被记成一次重试。
-  // 之前把工具也算上，于是每轮并行调用都虚增一个「重试」（实测一轮 2 个 bash 就 +1）。
-  //
-  // ## 为什么一次遍历就把「重试数」算完
-  //
-  // 「它是同父下的第 2 个及以后的 step，且那组里有失败的」—— 两个条件都能在
-  // **一遍**扫描里就得到：
-  //
-  //   - 「同父下已经见过几个 step.start」用一个计数器（按 parentId 分桶）就够；
-  //   - 「那组里有失败」用一个标记（按 parentId 分桶）就够。
-  //
-  // 于是**不需要** `childrenOf()`（那个函数每次重扫 `tree.order`），也不需要
-  // 事后 `filter` + `indexOf`（那在「同一父下很多 step」时是 O(k²) —— 而这正是
-  // 重试链的形状，实测 800 个同父 step 要 6.4ms）。两边都不要之后是严格 O(N)。
-  //
-  // 判据的**口径**一个字没变（与渲染层 `isForkGroup` 同口径）：一个回合里正常地
-  // 模型→工具→模型→工具，那些 step 共享同一父但**都没失败**，所以不算重试；
-  // 只有「同父下后面那个 step，且这一组里出过错」才 +1。
-  //
-  // 计数器与失败标记都按 `parentId` 分桶。只在真有 step.start 时才用 —— 没有 step 的树
-  // （开场、只说过话还没跑模型）连 Map 都不建。
+// 「重试」= 同一个父节点下有**多个 step 容器**。只数 step.start，**不能把 tool.call 算进来**：
+// 模型一轮里并行发两个工具时它们是同一个 llm.result 下的兄弟，按「多兄弟即重试」会虚增重试。
+//
+// 一遍扫描就够：「同父下已见过几个 step.start」与「那组里有没有失败」各按 parentId 分桶计数，
+// 于是不需要 `childrenOf()`（每次重扫 `tree.order`），也不需要事后 `filter` + `indexOf`
+// （同父下很多 step 时是 O(k²)，而那正是重试链的形状）。判据口径与渲染层 `isForkGroup` 一致。
   let retries = 0;
   if (steps > 0) {
     /** parentId → 迄今见过的 step.start 个数。 */
@@ -465,14 +406,8 @@ const SCOPE_OPEN_KINDS: ReadonlySet<TraceNodeKind> = new Set<TraceNodeKind>([
 ]);
 
 /**
- * 容器的**闭合点**（`turn.start` → `turn.end`，`step.start` → `step.end`）。
- *
- * 它们画在自己**容器那一列**（缩进不 +1），符号是 `└─` —— 于是括号是闭合的：
- * ```
- * │  ○  n3 step.start: 第 1 步
- * │  │  ○  n4 llm.result: 我来查
- * │  └─ n5 step.end: 第 1 步结束
- * ```
+ * 容器的**闭合点**（`turn.start` → `turn.end`，`step.start` → `step.end`）：画在自己**容器那一
+ * 列**（缩进不 +1），符号 `└─`，于是括号是闭合的。
  */
 const SCOPE_CLOSE_KINDS: ReadonlySet<TraceNodeKind> = new Set<TraceNodeKind>([
   'turn.end',
@@ -484,16 +419,14 @@ const RAIL = '│  ';
 /**
  * 节点圆点 —— **所有节点都用它**（包括当前 tip）。
  *
- * 早先 tip 单独画 `◎`（两个圈的那种），于是树上同时出现两种圆点字形；现在统一成
- * 一种圈，tip 改由**加粗**区分（`renderColoredTree()` / `TraceChunks.lineOf()` 里给的）。
- * 这里（纯文本层）不再需要 tipId —— 加粗是颜色/属性，不属于字形。
+ * tip 也用同一个圆点，靠**加粗**区分（`renderColoredTree()` / `TraceChunks.lineOf()` 给的）——
+ * 两种字形读起来像画错了。这里（纯文本层）不需要 tipId：加粗是属性，不属于字形。
  */
 const DOT = '○  ';
 /**
  * 容器的闭合点（`turn.end` / `step.end`）。
  *
- * 拐角与圆点同宽，所以闭合点**同时**是 tip 时也不需要另造一个 `└◎` —— 加粗同样落在
- * 这一行上（早先那个 `CORNER_TIP` 就是为了不在拐角处丢 tip；改用加粗之后它没必要了）。
+ * 拐角与圆点同宽，所以闭合点**同时**是 tip 时也不需要另造一个 `└◎`：加粗落在这一行上。
  */
 const CORNER = '└─ ';
 
@@ -511,85 +444,39 @@ function metaSuffix(node: TraceNode): string {
 }
 
 /**
- * 把整棵树算成一行一行（含每行的轨道前缀）。
- *
- * ## 形状从哪来：lazygit 的 `--graph`
- *
- * 每个节点一个圆点（`○`，**tip 也是它**），左边是它所在各层容器的竖线：
+ * 把整棵树算成一行一行（含每行的轨道前缀）。形状仿 lazygit 的 `--graph`：每个节点一个圆点，
+ * 左边是它所在各层容器的竖线。
  *
  * ```
  * ○  n1 user: 查两个
  * ○  n2 turn.start: 回合 1
  * │  ○  n3 step.start: 第 1 步
  * │  │  ○  n4 llm.result: 并行 [调用 bash] [调用 bash]
- * │  │  ○  n5 tool.call: bash {"command":"echo one"}
- * │  │  ○  n6 error: Command exited with code 1
  * │  └─ n7 step.end: 第 1 步结束（2 个工具调用）
  * └─ n8 turn.end: 回合 1 结束：模型说完了
  * ```
  *
- * 容器的闭合点画 `└─`。
+ * **tip 不在这层表达**：加粗由 `renderColoredTree()` / `TraceChunks.lineOf()` 按 `tree.tipId`
+ * 做。这里刻意不给 tip 造第二个字形（纯文本路径没有 tip 标记）。
  *
- * ## tip 不在这层表达
+ * **缩进只由容器给**（`turn.start` 与 `step.start` 无条件给子孙加一级，别的节点不加）。
+ * 不按父子关系缩进：轨迹树的链是一条直线，按父子缩进会让第 10 轮跑到第 10 层、长出一条永远
+ * 往右的阶梯；按容器缩进时 `turn.end` / `step.end` 画在自己那一列，缩进用完即还。
+ * `llm.result` → `tool.call` → `tool.result` 也不再分级：它们是步里面的内容，标签就在旁边。
  *
- * 「我现在在哪」由**加粗**给（`renderColoredTree()` / `TraceChunks.lineOf()` 按
- * `tree.tipId` 判）。这里刻意不给 tip 造第二个字形：早先 tip 是 `◎`（圈里套圈），
- * 于是同一棵树上有两种圆点，而字形差异又很轻微 —— 读起来像画错了。统一成一种圈、
- * 用加粗区分之后，树上只剩一种符号，tip 反而更跳。
- *
- * 代价是**纯文本路径没有 tip 标记**（这里不产出 ANSI）：`renderTree()` 打出来的树
- * 每个节点都是 `○`。一次性模式的树走 `renderColoredTree()`，加粗是在的。
- *
- * ## 缩进只由容器给：轮一层、步一层
- *
- * 老版本是「整棵树拉平，只有出错才画树枝」。那个画法在正常对话里**看不到结构**
- * —— 轮、步、事件全部左对齐，只能靠标签自己认；而它省下的宽度其实不多。
- * 现在改成：**`turn.start` 与 `step.start` 无条件给子孙加一级缩进**，别的节点不加。
- *
- * ### 为什么不是「每个父节点都缩进自己的孩子」
- *
- * 因为轨迹树的链是一条**直线**：`… → step.end → 下一个 step → turn.end →
- * 下一轮的 user → 下一个 turn.start …`（推进 tip 的节点挂出下一个节点，见本文件顶部）。
- * 按父子关系缩进就成了「历史是深树」：第 10 轮的内容会在第 10 层，屏幕上长出一条
- * 永远往右走的阶梯。按**容器**缩进则天然把括号收回来 —— `turn.end` / `step.end`
- * 画在自己容器那一列（符号 `└─`），所以第一轮的缩进用完即还，第二轮与第一轮对齐。
- * 「发了一句话 = 出去一层，说完 = 回来一层」，这正是要一眼看到的东西。
- *
- * ### 为什么工具与 LLM 那层不再分级
- *
- * `llm.result` → `tool.call` → `tool.result` 也是父子关系，但它们是**步里面的内容**，
- * 都画在第 3 列。理由：那是同一件事的两半（调用与结果），分开缩进只让每一行多占几格，
- * 而工具名与参数就在标签里 —— 要认清「哪个结果属于哪个调用」，看相邻两行的标签更快。
- *
- * ## 实现：按**发生顺序**走一遍，维护一个作用域栈
- *
- * 缩进 = 「这一行开着哪些容器」。容器在树上虽然有父子关系，但**关闭的时机**是事件性的
- * （`turn.end` / `step.end` 落下来的那一刻），所以不能只看树：得按 `tree.order`
- * （= 落盘顺序 = 发生顺序）扫，遇到 `turn.start` / `step.start` 压栈，
- * 遇到闭合点把它弹掉。每行 O(1) 次出入栈，整棵树 O(N)。
- *
- * 老版本是递归 `childIndentOf` / `prefixOf` 沿父链算缩进（带记忆，均摊 O(1)）——
- * 那时缩进只取决于「祖先里有几个分叉组」，沿父链走是对的；现在要看「这一刻它关了没」，
- * 必须按发生顺序扫。
- *
- * ### 四条收口规则（都有真实场景，不是防御性代码）
+ * 实现：按 `tree.order`（= 发生顺序）扫一遍维护一个作用域栈 —— 容器的**关闭时机**是事件性的，
+ * 只看树不够。每行 O(1)，整棵树 O(N)。四条收口规则：
  *
  * | 遇到 | 做什么 | 为什么 |
  * | --- | --- | --- |
- * | `turn.end` / `step.end` | 关掉 `parentId` 那个作用域（连它里面还开着的） | 闭合点自己画在容器那一列 |
- * | `turn.start` | 清空（回合不嵌套；里面还开着的 step 一起收） | 上一个回合没等到 `turn.end` 时也要收 |
- * | `step.start` | 先关掉已经开着的 step | 重试/下一步开新容器时，旧的那一格不该还挂着 |
+ * | `turn.end` / `step.end` | 关掉 `parentId` 那个作用域（连里面还开着的） | 闭合点画在容器那一列 |
+ * | `turn.start` | 清空（回合不嵌套） | 上一个回合没等到 `turn.end` 时也要收 |
+ * | `step.start` | 先关掉已经开着的 step | 旧的那一格不该还挂着 |
  * | `user`（`meta.queued !== 'steer'`） | **清空**整个栈 | 「用户又发了一句话」= 新回合从根层开始 |
  *
- * 前两条按理说够用（树上有 `turn.end`），但**「回合结束了而 `turn.end` 还没落下来」
- * 是真实存在的中间态**：`turn.end` 是环转 idle 之后另发的一条 Cmd（见 reducer 的
- * `turn.end` 迁移），用户看到答案后立刻接着说下一句，就会挤在它前面。那时新一句话
- * 的 parent 取 tip，落点在上一个回合**里面** —— 只认树的话，第二轮会被缩进到
- * 上一轮的括号里。所以第 4 条按「这是新的一句话」而不是按父节点收口。
- *
- * `meta.queued === 'steer'` 是唯一的例外：插话**属于**当前回合（它在当前 step 的工具
- * 跑完后插进来），所以它来了不收 —— 这一条也正是 `queue.delivered` 那里给 user 节点
- * 打 `queued` 标记的用处。
+ * 最后一条必要：「回合结束了而 `turn.end` 还没落下来」是真实存在的中间态（`turn.end` 是环转
+ * idle 之后另发的 Cmd）。那时新一句话的 parent 取 tip、落点在上一个回合**里面**，只认树的话
+ * 第二轮会被缩进进上一轮的括号。`meta.queued === 'steer'` 是唯一例外：插话**属于**当前回合。
  */
 export function traceRows(tree: TraceTree, options: TreeRenderOptions = {}): TraceRow[] {
   const maxWidth = options.maxWidth ?? 100;
@@ -650,18 +537,10 @@ export function traceRows(tree: TraceTree, options: TreeRenderOptions = {}): Tra
 }
 
 /**
- * 把树渲染成多行字符串。
+ * 把树渲染成多行字符串（画法见 `traceRows()`，这里只负责拼成文本）。
  *
- * 画法（lazygit 式轨道、轮/步缩进）见 `traceRows()`；这里只负责把它拼成一段文本。
- *
- * ## 为什么没有 `HEAD → <tipId>` 那一行
- *
- * 以前最后会补一行 tip 指向谁。现在 tip **就是树上那一行**（加粗；闭合点同时是 tip
- * 时那一行也加粗），再写一行说的是同一件事。少一行，也不再有「树里那行到底是节点还是尾巴」
- * 这个歧义（按行数校验的测试曾经得记得给它加一）。
- *
- * 这里打出来的是**纯文本**（没有 ANSI），所以看不出哪一行是 tip —— 看得出的那条路是
- * `renderColoredTree()`（一次性模式与轨迹页都走它）。
+ * 没有 `HEAD → <tipId>` 那一行：tip 就是树上那一行（加粗），再写一行说的是同一件事。这里打的
+ * 是纯文本、看不出 tip —— 看得见的那条路是 `renderColoredTree()`。
  */
 export function renderTree(tree: TraceTree, options: TreeRenderOptions = {}): string {
   const rows = traceRows(tree, options);
@@ -677,7 +556,6 @@ export function formatDuration(ms: number): string {
   return `${minutes}m${seconds.toString().padStart(2, '0')}s`;
 }
 
-// ─── 序列化 / 回放 ───
 
 /**
  * 落盘 / 传输用的节点形状。刻意用扁平数组（而不是嵌套 children）：

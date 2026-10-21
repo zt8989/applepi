@@ -34,22 +34,14 @@ export interface AgentStoreHandle {
 /**
  * 自动上下文压缩：盯住「一个回合结束」，判定超了没有，超了就发 `compact.request`。
  *
- * ## 为什么是 store 订阅器而不是接线里的一个 action
+ * 压缩**必须**在环彻底停下来时发起（`phase === 'idle'`）：压缩要整份换掉 messages，
+ * 而 LLM 还在流 / 工具还在跑时换，那条流回来就找不到自己的 toolCall 了。
  *
- * 压缩**必须**在环彻底停下来的时候发起（`phase === 'idle'`）—— 压缩要整份换掉 messages，
- * 而在 LLM 还在流 / 工具还在跑时换，那条流回来就找不到自己的 toolCall 了。
+ * 而 redux-loop 里没有「环停下来」这个 action（`llm.done` 之后环只是没有更多 Cmd 了），
+ * 所以这里订阅 `phase` 从非 idle 变成 idle —— 环怎么停的都看得到，不漏路径。
  *
- * 而「环停下来的那一刻」在 redux-loop 里没有一个对应的 action：`llm.done`（无工具时）
- * 之后环**不是**由某条 action 闭合的，只是没有更多 Cmd 了。写一个「回合结束」action
- * 会要求所有收尾路径都记得 dispatch 它 —— 而漏掉一次的后果是压缩永远不触发。
- *
- * 订阅器盯 `phase` 从非 idle 变成 idle，**不漏路径**：环怎么停的它都看得到。
- *
- * ## 为什么不在 reducer 里判
- *
- * reducer 是纯函数，不能读时间也不能发起副作用。「要不要压」这个判定要读
- * `state.messages` 的最后一条 usage —— 那是 state，做得到。但「压」这件事要花钱打网络，
- * 必须是 Cmd。所以：判定留在 reducer/Cmd 之外（这里），执行留在 effect 里。
+ * 判定也必须在 reducer 之外：reducer 是纯函数，不能读时间、不能发起副作用；而「压」要花钱
+ * 打网络，必须是 Cmd。
  */
 export interface AutoCompact {
   dispose(): void;
@@ -62,8 +54,8 @@ export interface AutoCompact {
 /**
  * 盯住「环刚停下来」那一刻判要不要压。
  *
- * @param supported 表里有没有 `runCompact` —— 没有就是不支持压缩（Web 侧自带表时可能是这样），
- *                  那时**连开关都不该给**（一个什么都压不了的开关就是谎），所以返回 `null`。
+ * @param supported 表里有没有 `runCompact`；没有就是不支持压缩，那时**连开关都不该给**
+ *                  （一个什么都压不了的开关就是谎），所以返回 `null`。
  * @param enabled   初始开关（`settings.json` 的 `compaction.enabled`，pi 的默认是 `true`）。
  */
 export function createAutoCompact(options: {
@@ -73,23 +65,16 @@ export function createAutoCompact(options: {
 }): AutoCompact | null {
   if (!options.supported) return null;
   const { store } = options;
-  //
-  // 可变（而不再是构造时定死）：`/settings` 面板里的 Auto-compact 那一行能当场开关它。
-  // 开关只影响**自动**压缩 —— `compact.request` 是手动路径，不该被一个「关掉自动」的
-  // 开关拦住（那正是「关掉自动压缩」而不是「禁用压缩」）。
-  //
+  // 可变（不是构造时定死）：`/settings` 面板能当场开关它。开关只影响**自动**压缩 ——
+  // `compact.request` 是手动路径，不该被「关掉自动」拦住。
   let enabled = options.enabled ?? true;
 
   /**
    * 上一次看到的状态是不是「在跑」。
    *
-   * 订阅器是在 reducer **之后**跑的，所以它只能看到「已经停下来」的状态 ——
-   * 看不到刚刚停下的那一刻。要判断「刚刚停下的那一刻」就得**记住上一次**：
-   * 上一次还在跑、这一次 idle ⇒ 环刚闭合，这就是唯一需要判定的时机。
-   *
-   * 为什么不能每次 idle 都判：那会在压缩刚完成（也会变 idle）时又判一次，
-   * 而压缩刚做完上下文已经小了 —— 虽然 `shouldCompact` 大概会返回 false，
-   * 但多一次没必要的判定就是多一个「为什么压了两次」的可能性。
+   * 订阅器在 reducer **之后**跑，只看得见「已经停下来」的状态，看不到刚停下的那一刻 ——
+   * 所以得**记住上一次**：上一次还在跑、这一次 idle ⇒ 环刚闭合，那是唯一要判定的时机。
+   * 每次 idle 都判的话，压缩刚完成（也会变 idle）时会又判一次。
    */
   let wasRunning = false;
   /** 已经压过的那一轮（用 messages 长度当粗粒度标记）：压完不再对同一批历史重复压。 */
@@ -191,14 +176,8 @@ export function createAgentStore(options: CreateAgentStoreOptions): AgentStore {
 /**
  * 建 store 并把自动压缩的订阅器一起装好。
  *
- * ## 为什么自动压缩装在这里，而不是 `createPersistentStore`
- *
- * 因为它与「要不要落盘」**无关** —— 压缩是功能，落盘是持久化。
- * 早先只在 `createPersistentStore` 里装，于是直接用 `createAgentStore` 的调用方
- * （测试、以及任何只要内存 store 的人）**永远收不到自动压缩**，而症状是
- * 「长会话一直撞窗口」且没有任何地方提到过压缩 —— 极难归因。
- *
- * 落盘那条路仍然走 `createPersistentStore`，它多做一件事（挂轨迹落盘器）。
+ * 自动压缩装在这里而不是只在 `createPersistentStore` 里：它跟「要不要落盘」无关，
+ * 直接用 `createAgentStore` 的调用方（测试、只要内存 store 的人）也该有自动压缩。
  */
 export function createAgentStoreWith(options: CreateAgentStoreOptions): AgentStoreHandle {
   const { runtime, systemPrompt, maxTurns, streamFn, effects, reducerEffects, sessionId } = options;
@@ -261,12 +240,8 @@ export function createAgentStoreWith(options: CreateAgentStoreOptions): AgentSto
 }
 
 /**
- * 装一个会**把轨迹落盘**的 store。
- *
- * `createAgentStore` 保持只返回 store（测试里要的就是 store 本身），
- * 需要持久化时用这个，它额外挂一个订阅器把新节点追加写进 sink。
- *
- * 错误节点同样会被写进去 —— 落盘器对成功与失败一视同仁。
+ * 装一个会**把轨迹落盘**的 store：比 `createAgentStoreWith` 多做一件事 —— 挂一个订阅器把
+ * 新节点追加写进 sink。错误节点同样会写进去（落盘器对成功与失败一视同仁）。
  */
 export function createPersistentStore(options: CreateAgentStoreOptions): AgentStoreHandle {
   const handle = createAgentStoreWith(options);

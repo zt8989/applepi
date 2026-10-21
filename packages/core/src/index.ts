@@ -44,7 +44,6 @@ export { getTool, getTools } from './tools';
 export type { AgentTool, AgentToolResult } from './agent-tool';
 export { abortRun, isRunning } from './run-control';
 
-// ─── 轨迹树（trace tree） ───
 export {
   appendNode,
   childrenOf,
@@ -103,7 +102,6 @@ export {
 } from './store';
 export { classifyLlmError, isRetryable, DEFAULT_LLM_TIMEOUT_MS } from './state';
 
-// ─── 上下文压缩（compact） ───
 export {
   compactionSettings,
   compactReasonText,
@@ -148,7 +146,6 @@ export {
   type StartHerdrReportingOptions,
 } from './herdr';
 
-// ─── 装载与 middleware ───
 export type { ModelCapabilities, PromptToolDefinition } from './actions';
 export type { ModelState, PromptState } from './state';
 export { createKernel, defaultSystemPrompt, type Kernel, type KernelOptions } from './kernel';
@@ -161,7 +158,6 @@ export {
 } from './middleware';
 export type { InitRecord, ReplayedInit, ReplayedSession } from './trace-store';
 
-// ─── System prompt（拼装交给 pi 的 buildSystemPrompt） ───
 export {
   buildPromptOptions,
   buildSystemPromptText,

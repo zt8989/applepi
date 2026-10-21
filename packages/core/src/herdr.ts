@@ -1,89 +1,29 @@
 /**
  * herdr 集成 —— 让 herdr 的 sidebar / `agent list` 认出这个 pane 里跑的是 pi。
  *
- * ## 为什么必须**自己上报**，而不是往进程环境里塞 `HERDR_AGENT`
+ * 必须**自己上报**：herdr 靠前台进程身份认 agent，而 ela 的进程是 `node …/bin/ela.mjs`；
+ * 提示变量 `HERDR_AGENT` 只在 Linux / macOS 生效（Windows 那份二进制根本不读它）。
  *
- * herdr 认 pane 里的 agent，靠的是**前台进程身份**（进程名 / argv）。ela 的进程是
- * `node …/bin/ela.mjs` —— herdr 既不认识 `ela`，也看不出这是 pi 家族。
- *
- * herdr 为此给过一个提示变量 `HERDR_AGENT=<agent>`（包装进程用），但那个**只在
- * Linux / macOS 生效**：官方文档 *Agents → VMs and sandbox wrappers* 一节明写
- * “On Linux and macOS, a host-visible wrapper can hide the real agent process…”，
- * 而 Windows 那份 `herdr.exe` 里连 `HERDR_AGENT` 这个字符串都不存在（那段逻辑是
- * `cfg(unix)` 的）。于是 `bin/ela.mjs` 里那次「带 `HERDR_AGENT` 再 exec 一遍自己」
- * 在 Windows 上纯属白干 —— 变量确实进了进程环境（`ps` / 子进程都看得见），herdr 却
- * 从来不读它，pane 依旧没有身份。
- *
- * 跨平台的正确路子是 herdr 文档里的 *Add Herdr support to your agent*：agent 自己
- * 上报。herdr 也给 pi 装了一份官方集成（`herdr:pi`，写在 pi 的扩展目录里），而 ela
- * 的扩展宿主扫的正是那个目录 —— 它在本项目里也会跑（ela 同样会发 `session_start`），
- * 跟这里抢同一个 pane。下一节「为什么要挡掉…」讲的就是这件事。
- *
- * ## 报什么、报给谁
- *
- * | 项 | 值 |
- * | --- | --- |
- * | 传输 | `HERDR_SOCKET_PATH` 上的 socket（一行一个 JSON 请求） |
- * | 方法 | `pane.report_agent`（状态 + 会话引用 + resume 命令）、`pane.release_agent` |
- * | agent | `pi`（可被 `ELA_HERDR_AGENT` 覆盖，见 `herdrAgentName`） |
- * | source | `ela`（herdr 自己那套用 `herdr:` 前缀，第三方不许撞） |
- *
- * 会话引用报**本项目自己那份**：`sessions/<cwd>/<时间戳>_<id>.jsonl`（与 pi 同形状，
- * 见 config-home.ts），resume 命令是 `ela --session <id>` —— 于是 herdr 服务器重启后
+ * 报什么：`HERDR_SOCKET_PATH` 上的 socket（一行一个 JSON），方法 `pane.report_agent` /
+ * `pane.release_agent`，agent 名 `pi`（可被 `ELA_HERDR_AGENT` 覆盖），source `ela`。
+ * 会话引用报本项目自己那份，resume 命令是 `ela --session <id>` —— herdr 服务器重启后
  * 拉起来的是 ela 自己，而不是一个没有 ela 状态的 pi 进程。
  *
- * ## 为什么不 spawn `HERDR_BIN_PATH` 那套 CLI
+ * 不走 `HERDR_BIN_PATH` 那套 CLI：每次状态变化起一个几十 MB 的进程（状态是每轮好几次），
+ * 而 socket 正是 herdr 自己的 pi 扩展走的那条路。
  *
- * 官方推荐 CLI（“the portable choice, including on Windows”），但每次状态变化起一个
- * 27MB 的 herdr 进程、还带一个控制台 —— 而状态变化是**每轮对话好几次**。
- * socket 是 herdr 自己的 pi 扩展走的那条路（同一份 `pane.report_agent` 协议），
- * 实测在 Windows 上可用（Windows 的 socket 是**命名管道**，见 `herdrSocketEndpoint`）。
+ * resume 要**两步**：herdr 要求 reporter 先持有 pane 才能附命令，否则整条被拒
+ * （`resume_not_accepted`）。所以第一次只报状态，收下之后再补一条带 resume 的；补的那条
+ * 被拒就安静地降级成只报状态。
  *
- * ## resume 要**两步**：先持有 pane，再附命令
+ * 要挡掉 herdr 自带的 pi 扩展（`herdr:pi`，装在 pi 扩展目录里，ela 的宿主也会扫到它）：
+ * 官方的 source 一旦持有 pane，自定义 source 就再也拿不到它，`resume_argv` 永远被拒。
+ * 所以 `extension-host.ts` 在 ela 自己上报时跳过那一份（按 `HERDR_INTEGRATION_ID` 标记认）。
  *
- * herdr 对 `resume_argv` 有一条额外规矩（*Socket API → Agent state reporting*）：
+ * 报不上不算错：变量不全 / 连不上 / herdr 回错误一律吞掉，第一次失败通过 `onError` 说一声。
  *
- * > A custom agent must hold the pane through `pane.report_agent` before it can attach
- * > a command; otherwise the request fails with `resume_not_accepted`.
- *
- * 也就是说「第一次上报就带 resume」只有在那个 pane **还没有主**的时候才恰好能过；
- * 一旦 pane 已经被别的上报者占着，herdr 会**整条拒掉**（连状态一起不生效）并回
- * `resume_argv requires the reporter to hold the pane; report its state with pane.report_agent first`。
- * 所以这里分两步：第一次只报状态（顺带把 pane 拿下来），收下之后再把 resume 补一条。
- * 补的那条被拒（`resume_not_accepted`）就**安静地**降级成只报状态 —— pane 里已经有
- * 别人在报 resume 了，那不是错误（见下一节）。
- *
- * ## 为什么要挡掉 herdr 自己那份 pi 扩展
- *
- * herdr 的官方 pi 集成（`~/.pi/agent/extensions/herdr-agent-state.ts`，source
- * `herdr:pi`）是**装在 pi 扩展目录**里的，而 ela 的扩展宿主扫的就是那个目录 —— 于是
- * 它在 ela 里也会跑，也往同一个 pane 报（`session_start` 那一刻就报，比这里的
- * `startHerdrReporting` 还早）。
- *
- * 实证（herdr 0.9.3）：官方的 `herdr:` source 一旦持有 pane，**自定义 source 就再也
- * 拿不到它** —— 状态上报回 `ok`，但 `pane.get` 里的 agent 与 session 仍旧是
- * `herdr:pi`，`resume_argv` 永远 `resume_not_accepted`。后果是服务器重启后 herdr 用
- * 它内置的 `pi --session <id>` 把 pane 拉起来（一个没有 ela 状态的 pi），而不是
- * `ela --session <id>` —— 这正是 ela 要自己上报的原因。
- *
- * 所以 ela 自己报的时候，`extension-host.ts` 会把那份**herdr 托管的** pi 扩展跳过
- * （按文件头的 `HERDR_INTEGRATION_ID=pi` 标记认，只跳这一个）。`ELA_HERDR_AGENT=off`
- * 时这里不上报，那份扩展就照常装（mac / linux 上仍由 herdr 官方集成管这个 pane）。
- *
- * ## 失败面：报不上不算错
- *
- * herdr 不在（变量不全）、socket 连不上、herdr 回一个错误 —— 一律**吞掉不抛**，
- * 对话该怎么跑还怎么跑；第一次失败会通过 `onError` 说一声（只说一次，免得刷屏）。
- * 这与 herdr 文档给集成作者的要求一致（“Send reports in the background or with a
- * short timeout, and ignore failures.”）。
- *
- * ## 退出时不靠 release 兜底
- *
- * 正常收工（`ela -p` 走完、TUI 的 finally）会发一条 `pane.release_agent`；而
- * Ctrl+D / Ctrl+C 那条路径上是 `process.exit()` —— 异步 socket 写不出去，发也白发。
- * 那不要紧：herdr 自己会发现「上报那个进程没了」并把 pane 清掉（实测 3 秒内，
- * 也是官方集成唯一的退出方式 —— 它压根不发 release）。所以 `dispose()` 只管停掉
- * 订阅，别指望它让 pane 立刻变干净。
+ * 退出不靠 release 兜底：Ctrl+D / Ctrl+C 走 `process.exit()`，异步 socket 写不出去；
+ * herdr 自己会发现上报进程没了并清掉 pane，所以 `dispose()` 只管停订阅。
  */
 import { createConnection } from 'node:net';
 import type { AgentState } from './state';
@@ -158,11 +98,8 @@ export function herdrSelfReportingActive(env: NodeJS.ProcessEnv = process.env): 
 }
 
 /**
- * socket 的**平台形式**。
- *
- * Windows 上 `HERDR_SOCKET_PATH` 是个**路径形状的命名管道名**（`…\AppData\Roaming\herdr\herdr.sock`）：
- * 直接 connect 那个路径会 `ENOTSOCK`（实测），必须先加 `\\.\pipe\` 前缀；Unix 上它就是
- * unix socket 的路径，原样用。herdr 自己的集成脚本也是这么做分支的。
+ * socket 的**平台形式**：Windows 上 `HERDR_SOCKET_PATH` 是路径形状的命名管道名，
+ * 必须先加 `\\.\pipe\` 前缀（直接 connect 会 `ENOTSOCK`）；Unix 上原样用。
  */
 export function herdrSocketEndpoint(
   socketPath: string,
@@ -248,14 +185,13 @@ export interface HerdrReport {
 }
 
 /**
- * store 的一帧 → 该给 herdr 报什么（纯函数，好测）。
+ * store 的一帧 → 该给 herdr 报什么（纯函数）。
  *
- * 三档的判据：
- * - `executing` 里有 `ask_user_question` → `blocked`（模型在等用户答题，见那个常量的注释）；
- * - 其余看 `phase`：`idle` → `idle`（等你说话）；`thinking` / `calling-tools` → `working`。
+ * - `executing` 里有 `ask_user_question` → `blocked`（模型在等用户答题）；
+ * - 其余看 `phase`：`idle` → `idle`，`thinking` / `calling-tools` → `working`。
  *
- * 问卷的判据**先于** phase：问卷挂起时 phase 是 `calling-tools`，只看 phase 会把它报成
- * `working` —— 而 sidebar 上「在跑」与「等你」是两件完全不同的事（后者要弹通知）。
+ * 问卷判据必须**先于** phase：问卷挂起时 phase 是 `calling-tools`，只看 phase 会报成
+ * `working` —— 而 sidebar 上「在跑」与「等你」是两件不同的事（后者要弹通知）。
  */
 export function herdrReportFor(state: AgentState, session?: HerdrSessionRef | undefined): HerdrReport {
   const waiting = state.executing.some((tool) => tool.call.name === ASK_USER_QUESTION);
@@ -318,25 +254,16 @@ export interface HerdrReporterOptions {
 /**
  * 造一个上报器。
  *
- * ## 为什么是「单条在途 + 只留最后一份」
+ * 「单条在途 + 只留最后一份」是 herdr 的要求：状态是**当前值**而不是事件流，排队把历史
+ * 一条条发过去，herdr 上的状态会晚好几拍才追上。所以新请求顶掉还没发出去的那份。
  *
- * 这是 herdr 给集成作者的要求（“Send only the latest state. If several changes queue up
- * while a report is in flight, drop the older ones.”）：状态是**当前值**而不是事件流，
- * 排队把历史一条条发过去，herdr 上的状态会晚好几拍才追上。所以新请求直接顶掉还没发出去
- * 的那份，而在途那条发完再看队列里有没有最新的一份。
+ * seq 从 `Date.now() * 1000` 起：herdr 只接受比上次大的 seq，而「上次」是它记住的**上一个
+ * ela 进程**（同一 pane、同一 source），从时间戳起步才不会与它撞车。
  *
- * ## 为什么 seq 从 `Date.now() * 1000` 起
- *
- * herdr 只接受**比上次大**的 seq，而「上次」是它记住的上一个 ela 进程（同一 pane、
- * 同一 source）。从时间戳起步就不可能与上一个进程撞车（与 herdr 官方 pi 扩展同一做法）。
- *
- * ## 两步上报的状态机
- *
- * `holdsPane` 是唯一一个「herdr 那边的状态」：第一条 report 被收下之后才为真。
- * 在那之前 resume_argv 一律不带（带了可能整条被拒）；变真之后补发最新一份带 resume 的。
- * `resumeUsable` 是被拒之后的降级开关：`resume_not_accepted` 说明 pane 归别人，
- * 安静地不再尝试（状态照报）；`invalid_resume_argv` 说明我们自己的命令形状错了，
- * 报一次错（免得一直带着一个永远被拒的字段）然后再降级。
+ * 两步上报的状态机：`holdsPane` 是唯一一个「herdr 那边的状态」，第一条 report 被收下之后
+ * 才为真 —— 在那之前 resume_argv 一律不带，变真之后补发最新一份带 resume 的。
+ * `resumeUsable` 是被拒之后的降级开关：`resume_not_accepted` 说明 pane 归别人，安静地不再
+ * 尝试（状态照报）；`invalid_resume_argv` 说明我们自己的命令形状错了，报一次错再降级。
  */
 export function createHerdrReporter(options: HerdrReporterOptions): HerdrReporter {
   const source = options.source ?? HERDR_SOURCE;
@@ -517,11 +444,9 @@ export interface StartHerdrReportingOptions {
 /**
  * 订阅 store，把状态变化按需推给 herdr；返回**拆台函数**（拆订阅 + release）。
  *
- * 不在 herdr 里、或 `ELA_HERDR_AGENT` 关掉时返回一个空壳 —— 零开销、零副作用，
- * 与本项目在别处「不在那个环境里就什么都不做」的口径一致。
+ * 不在 herdr 里、或 `ELA_HERDR_AGENT` 关掉时返回一个空壳 —— 零开销、零副作用。
  *
- * 调用方：`packages/tui/src/main.ts`（**只有交互式**那一条路 —— 一次性模式没有 PTY
- * 给 herdr 显示，与 herdr 官方集成 `ctx.mode === 'tui'` 的门同一个理由）。
+ * 调用方只有 `tui/src/main.ts` 的**交互式**那条路：一次性模式没有 PTY 给 herdr 显示。
  */
 export function startHerdrReporting(options: StartHerdrReportingOptions): () => void {
   const pane = herdrPane(options.env);
