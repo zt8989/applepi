@@ -209,6 +209,23 @@ const ICON_RESTORE =
   '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h18v4H3z" /><path d="M5 9v11h14V9" /><path d="M12 18v-5" /><path d="m9.6 15.4 2.4-2.4 2.4 2.4" /></svg>';
 
 /**
+ * 底栏那三个入口的图标 —— 照 Pi Web 的 `SettingsSectionIcon`（`components/SettingsPanel.tsx`，
+ * `section: models / skills / general`），只是放大到 14px 与底栏那行文字对齐。
+ *
+ * 为什么照它而不是自己画：同一套产品里“模型”“技能”“设置”的图形已经有一套现成的；
+ * 两边各画一版，用户第一眼就会觉得是两套 UI。三条都是 24 格、`currentColor` 描边，
+ * 所以 hover / 禁用只需改外层颜色。
+ */
+const ICON_SETTINGS_SECTION = {
+  model:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" /><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 15h3M1 9h3M1 15h3" /></svg>',
+  skills:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2-10 5 10 5 10-5-10-5Z" /><path d="m2 12 10 5 10-5M2 17l10 5 10-5" /></svg>',
+  settings:
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7h-9M14 17H5" /><circle cx="7" cy="7" r="3" /><circle cx="17" cy="17" r="3" /></svg>',
+} as const;
+
+/**
  * 真删东西之前的二次确认（模态框复用 `/skills` 那一套外观，见 `modal.ts`）。
  *
  * 为什么不是 `window.confirm`：那个弹框不属于页面、在深色主题里是一块白，而且
@@ -259,9 +276,9 @@ export function installSidebar(host: HTMLElement, hooks: SidebarHooks): Sidebar 
       </button>
     </div>
     <div class="ela-sidebar-foot">
-      <button type="button" class="ela-sidebar-key" data-key="model" title="模型">模型</button>
-      <button type="button" class="ela-sidebar-key" data-key="skills" title="技能">技能</button>
-      <button type="button" class="ela-sidebar-key" data-key="settings" title="设置">设置</button>
+      <button type="button" class="ela-sidebar-key" data-key="model" title="模型" aria-label="模型">${ICON_SETTINGS_SECTION.model}<span>模型</span></button>
+      <button type="button" class="ela-sidebar-key" data-key="skills" title="技能" aria-label="技能">${ICON_SETTINGS_SECTION.skills}<span>技能</span></button>
+      <button type="button" class="ela-sidebar-key" data-key="settings" title="设置" aria-label="设置">${ICON_SETTINGS_SECTION.settings}<span>设置</span></button>
     </div>
   `;
 

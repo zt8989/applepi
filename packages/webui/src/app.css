@@ -540,7 +540,14 @@ body {
 
 .ela-sidebar-key {
   flex: 1;
-  padding: 0.35rem 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 图标与文字之间留一点距离：图标是 14px 描边，贴字会看着“黏在一起”。 */
+  gap: 0.3rem;
+  /* 侧边栏拉到最窄时三格会挤：宁可让文字换行也不好让图标被压？不 —— 图标不缩，文字截断。 */
+  min-width: 0;
+  padding: 0.35rem 0.2rem;
   border: 0;
   border-radius: 0.3rem;
   background: none;
@@ -550,9 +557,26 @@ body {
   transition: background 0.12s, color 0.12s;
 }
 
+/* 图标不参与缩放（32px 左右的按钮里，被压扁的图标比没有更难看）。 */
+.ela-sidebar-key svg {
+  flex: none;
+  opacity: 0.85;
+}
+
+.ela-sidebar-key span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .ela-sidebar-key:hover {
   background: var(--secondary, #f4f4f5);
   color: var(--foreground, #111);
+}
+
+.ela-sidebar-key:hover svg {
+  opacity: 1;
 }
 
 /*
