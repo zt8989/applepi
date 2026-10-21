@@ -162,9 +162,8 @@ const TITLE_MAX_LENGTH = 60;
  * 头部 512KB 读进来找 `session_info`（名字），顺手把第一条 user 消息也带出来了
  * （`SessionSummary.firstMessage`）。
  *
- * 早先这里自己按 64KB 扫一遍找第一句话 —— 那是个错假设：pi v3 的 head（system prompt
- * 分段 + 工具表）本身就 ~64KB，用户的第一句话紧跟其后，于是**新会话全都扫不到**，
- * 侧边栏那一行显示成一串 uuid（老会话的 head 小，才碰巧有标题）。
+ * 不能只扫开头 64KB 找第一句话：pi v3 的 head（system prompt 分段 + 工具表）本身就 ~64KB，用户的第一
+ * 句话紧跟其后 —— 那样新会话全都扫不到，侧边栏那一行显示成一串 uuid。
  */
 function sessionListTitle(summary: SessionSummary): string {
   if (summary.name !== undefined && summary.name !== '') return summary.name;
