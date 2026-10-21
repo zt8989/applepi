@@ -1,25 +1,14 @@
 /**
  * 浏览器侧的 `Agent` 替身。
  *
- * ## 为什么需要它
+ * pi-web-ui 的 `ChatPanel` / `AgentInterface` 只认一个 `pi-agent-core` 形状的 `Agent`（读
+ * `state`、`subscribe`、`prompt`、`abort`），而本项目的环跑在服务端 —— 浏览器不该再有一份 agent，更
+ * 不该拿得到模型密钥。所以这里是一个**形状一样、实现是网线**的替身：
  *
- * pi-web-ui 的 `ChatPanel` / `AgentInterface` 只认一个 `pi-agent-core` 形状的 `Agent`：
- * 读 `agent.state`（messages / model / thinkingLevel / isStreaming / pendingToolCalls）、
- * `agent.subscribe(...)`、`await agent.prompt(...)`、`agent.abort()`。
+ *   state ← 服务端推来的快照；prompt / abort / model / thinkingLevel 的 setter → 转发给服务端。
  *
- * 而本项目的环**跑在服务端**（tui 进程里的 Redux Loop）。浏览器不该再有一份 agent、
- * 也不该拿得到模型密钥。所以这里给一个**形状一样、实现是网线**的替身：
- *
- *   state   ← 服务端推来的快照
- *   prompt  → `{type:'prompt'}` 发出去
- *   abort   → `{type:'abort'}`
- *   model / thinkingLevel 的 setter（pi-web-ui 的选择器会直接写它）→ 转发给服务端
- *
- * ## 事件为什么只转不造
- *
- * `AgentInterface` 订阅的 `message_start/turn_start/message_update/message_end/agent_end`
- * 全部由服务端发来（见 `@ela/core/web-protocol`）。浏览器侧**不猜**环进行到哪一步 ——
- * 猜出来的状态与服务端错过一次就再也对不上。
+ * 事件**只转不造**：`message_start` / `turn_start` / `message_update` / `message_end` / `agent_end`
+ * 全由服务端发来。浏览器侧不猜环进行到哪一步 —— 猜出来的状态与服务端错过一次就再也对不上。
  */
 
 import type { WebAgentState, WebClientMessage, WebServerMessage } from '@ela/core/web-protocol';

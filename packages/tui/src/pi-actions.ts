@@ -1,21 +1,12 @@
 /**
- * 「完全复用 pi 的键位」里那几条**纯逻辑**的动作助手。
+ * 「完全复用 pi 的键位」里那几条**纯逻辑**的动作助手（循环模型 / 循环思考级别）。
  *
- * ## 为什么单独一个文件
- *
- * 这一批动作（循环模型 / 循环思考级别）在 pi 里是 `AgentSession` 的方法，语义不难，
- * 但**边界条件**不少：作用域里只有一个模型时不该动、当前模型不在作用域里时从哪开始、
- * 方向为负时怎么取模、级别只认模型支持的那几档。这些全是纯函数 —— 抽出来就能在测试里
- * 逐个钉住，而不必把整个 TUI 起来。
- *
+ * 单独一个文件是为了能测：语义不难但**边界**不少（作用域里只有一个模型时不该动、当前模型不在作用域里
+ * 时从哪开始、负方向怎么取模、级别只认模型支持的那几档），抽成纯函数就能逐个钉住而不必起整个 TUI。
  * `app.ts` 那边只剩「调它，然后把结果发给内核 / 写进 settings」的接线。
  *
- * ## 与 pi 的对应关系
- *
- * - `nextCycleIndex` ↔ pi `agent-session.js` 的 `_cycleScopedModel` / `_cycleAvailableModel`
- *   （同一个取模、同一个「当前不在列表里就从 0 开始」）。
- * - `nextThinkingLevel` ↔ pi 的 `cycleThinkingLevel()`（同一个「只认支持的档位、
- *   到顶回卷」，连「当前档位不在列表里时从头一个开始」那个怪处也一样）。
+ * 与 pi 的对应：`nextCycleIndex` ↔ `_cycleScopedModel` / `_cycleAvailableModel`，`nextThinkingLevel` ↔
+ * `cycleThinkingLevel()`（连「当前档位不在列表里时从头一个开始」那个怪处也一样）。
  */
 import type { Model } from '@earendil-works/pi-ai';
 import { getSupportedThinkingLevels } from '@earendil-works/pi-ai';

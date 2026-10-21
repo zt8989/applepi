@@ -1,54 +1,24 @@
 /**
  * 本项目自己的键位表 —— 在 pi 那份之上加几个动作，装进 pi-tui 的全局 keybindings。
  *
- * ## 为什么要「在 pi 那份之上」
+ * pi-tui 的 `getKeybindings()` 只有 `tui.*`，而 `app.*` 那一堆是 **pi 应用层**定义的。本项目的界面
+ * 是另一套应用层，所以这里做「pi 的全套 + 我们自己的几个」：`{ ...pi 的 KEYBINDINGS,
+ * ...PROJECT_KEYBINDINGS }`。三个好处都不是理论上的：
  *
- * pi-tui 的 `getKeybindings()` 默认只有 `TUI_KEYBINDINGS`（`tui.editor.*` / `tui.input.*`
- * / `tui.select.*` / `tui.altScreen.*`），而 `app.*` 那一堆是 **pi 应用层**定义的
- * （`pi-coding-agent/dist/core/keybindings.js` 的 `KEYBINDINGS`）。两者加起来才是完整
- * 的一份键位表。
+ * 1. **复用 pi 的动作 id**（`ctrl+o` = `app.tools.expand`，`ctrl+l` = `app.model.select`）：用户写在
+ *    `~/.pi/agent/keybindings.json` 里的覆盖两边同时生效；自己编一个 `ela.tools.expand` 就会分家。
+ * 2. **提示文字不再手抄键名**：面板底部那句与顶行的 `(Ctrl+R)` 都由 `keyDisplayText()` 从同一个解析
+ *    结果渲染，改键后提示跟着变（手写的提示只有改了键的那个人自己能发现它在骗人）。
+ * 3. **一个进程里只有一份**：以前各面板各自 `setKeybindings(...)`，那些不含我们的动作 —— 症状是
+ *    「打开过一次面板之后，轨迹那块提示变成空串」。
  *
- * 本项目的界面是**另一套应用层**：它有自己的开关（轨迹页、中断），所以
- * 这里的做法是「pi 的全套 + 我们自己的几个」：
+ * `ctrl+t` 与 pi 含义一致（`app.thinking.toggle`，展开/收起 thinking 块）—— 同一份
+ * `keybindings.json` 里同一个键不能有两个含义，所以轨迹页用本项目自己的 `app.trace.toggle`
+ * （默认 `ctrl+r`）。
  *
- *     defs = { ...pi 的 KEYBINDINGS, ...PROJECT_KEYBINDINGS }
- *
- * 好处有三个，都不是理论上的：
- *
- *   1. **复用 pi 的动作 id**。`ctrl+o` 展开工具输出 = pi 的 `app.tools.expand`，
- *      `ctrl+l` 打开模型面板 = pi 的 `app.model.select` —— 用同一个 id 意味着用户写在
- *      `~/.pi/agent/keybindings.json` 里的覆盖**两边同时生效**（pi 那边改了键，
- *      我们这边跟着改，反之亦然）。自己编一个 `ela.tools.expand` 就会分家。
- *   2. **提示文字不再手抄键名**。面板底部那句「Enter to select · Ctrl+S …」与顶行的
- *      `(Ctrl+R)` 都由 `keyDisplayText()` 从**同一个**解析结果渲染 —— 用户改了键，
- *      提示跟着变。手写 `'(Ctrl+T)'` 的话，一改键位提示就开始骗人，而且只有改了键的
- *      那个人自己能发现。
- *   3. **一个进程里只有一份**。之前 `model-picker.ts` / `session-picker.ts` 各自
- *      `setKeybindings(KeybindingsManager.create())`，而那两份**不含**我们的动作 ——
- *      于是「打开过一次面板之后，轨迹那块提示变成空串」。现在只在这里创建。
- *
- * ## 与 pi 的 `ctrl+t`：本项目**现在也用**它（含义一致）
- *
- * pi 的 `ctrl+t` 是 `app.thinking.toggle`（展开/收起 thinking 块）。本项目早先把
- * 轨迹页切换也放在 `ctrl+t`，那正好撞在 pi 的键上：同一台机器上 pi 与 ela 用的是
- * **同一份** `~/.pi/agent/keybindings.json`，而 `ctrl+t` 在两边的含义不同 ——
- * 写覆盖的人没法表达「我想要哪个」。
- *
- * 所以轨迹页改用本项目自己的 `app.trace.toggle`（默认 `ctrl+r`）。
- *
- * `ctrl+t` 本身现在**补上了**：本项目也实现了「展开/收起思考块」，语义与 pi 完全相同，
- * 于是共用那份 `keybindings.json` 不再有歧义 —— 用户在 pi 那边把 `ctrl+t` 改成别的
- * 键，这边跟着变（反之亦然）。
- *
- * ## 用户覆盖
- *
- * 读 `~/.pi/agent/keybindings.json`（与 pi 同一个文件、同一套格式：
- * `{ "app.trace.toggle": "alt+r" }`，值也可以是数组给多个键）。用 pi 的
- * `migrateKeybindingsConfig()` 做旧名字迁移（`expandTools` → `app.tools.expand` 那套），
- * 所以两边认的是同一批历史写法。
- *
- * 读不到（文件不存在 / 坏 JSON / 没权限）就用全套默认值，**不抛** —— 键位是可选配置，
- * 不该让界面起不来。
+ * 用户覆盖读 `~/.pi/agent/keybindings.json`（与 pi 同一个文件、同一套格式，值也可以是数组），
+ * 旧名字走 pi 的 `migrateKeybindingsConfig()` 迁移。读不到就用全套默认值、**不抛** —— 键位是可选
+ * 配置，不该让界面起不来。
  */
 import {
   getKeybindings,

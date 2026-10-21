@@ -1,42 +1,9 @@
 /**
  * TUI 的「思考级别」弹窗 —— `/thinking` 打开（或 `/thinking <级别>` 直接切）。
  *
- * ## 为什么直接用 pi 官方的 `ThinkingSelectorComponent`
- *
- * 与 `/model`（见 `model-picker.ts`）**同一个理由**：这个面板的交互面窄，但每一条都要与
- * pi 对齐才有意义 —— 当前那一档打勾、`Ctrl+S` 存默认、`· default` 标记、模糊搜索、
- * 底部那行按键提示、每一档的说明文案（`Deep reasoning (~16k tokens)` 那种）：
- *
- * ```text
- *   ────────────────────────────────────────────────
- *   Thinking Level
- *
- *   Shift+Tab cycles thinking levels in-session
- *
- *   > 搜索…
- *   ✓ high        Deep reasoning (~16k tokens) · default
- *     low         Light reasoning (~2k tokens)
- *     max         Maximum reasoning
- *
- *   Enter to select · Ctrl+S to set as default · Escape to cancel
- *   ────────────────────────────────────────────────
- * ```
- *
- * 复刻它要抄一份档位说明表 + 模糊搜索 + 打勾/默认标记，而那张说明表在 pi 那边会漂移。
- *
- * ## `Ctrl+S` 落的是哪一档
- *
- * pi 的 `selectThinkingLevel(level, persist)` → `session.setThinkingLevel(level, {persist})`
- * → `settingsManager.setDefaultThinkingLevel(level)`：写的是**用户请求的那一档**（不 clamp）。
- * 本项目同一处：`onSelectAsDefault` 交给调用方去写 `defaultThinkingLevel`（见
- * `thinking-level.ts` 的 `writeDefaultThinkingLevel`）。
- *
- * ## 与 `/model` 面板的两处不同
- *
- * 1. **`Shift+Tab` 不落盘**（pi 的 `cycleThinkingLevel()` 没带 `persist`），只有这个
- *    面板里的 `Ctrl+S` 才存默认 —— 所以这里没有「循环」的接线。
- * 2. 换档位**不需要内核出手**：`thinking.changed` 只改 state 里的一个字段（不像换模型要
- *    重装能力与窗口），所以调用方直接 dispatch。
+ * 直接用 pi 官方的 `ThinkingSelectorComponent`（与 `/model` 同一个理由）：面板交互面窄，但每一条都要
+ * 与 pi 对齐才有意义 —— 当前档打勾、`Ctrl+S` 存默认、`· default` 标记、模糊搜索、底部按键提示、每一档
+ * 的说明文案。手写就是与上游漂移。
  */
 import { ThinkingSelectorComponent } from '@earendil-works/pi-coding-agent';
 import type { ViewportTUI } from '@earendil-works/pi-tui';

@@ -1,15 +1,12 @@
 /**
  * webui 的入口：把 pi-web-ui 的 `ChatPanel` 挂到一个**远程** agent 上。
  *
- * 这里只有三件事：
+ * 只做三件事：给 pi-web-ui 铺好 `AppStorage`（IndexedDB 后端 —— 它内部「这个 provider 有没有 key」
+ * 的检查会读它，不铺就抛，虽然密钥其实在服务端）；造一个 `RemoteAgent` 当 `session`；连上 tui 的
+ * `/ws`，把状态与事件交给 `ChatPanel` 渲染。
  *
- *   1. 给 pi-web-ui 铺好它需要的 `AppStorage`（IndexedDB 后端）—— 它内部的
- *      「这个 provider 有没有 key」检查会去读它，不铺就会抛（虽然密钥其实在服务端）；
- *   2. 造一个 `RemoteAgent`（见 remote-agent.ts）当 `session`；
- *   3. 连上 tui 的 `/ws`，把状态与事件交给 `ChatPanel` 渲染。
- *
- * 界面外壳（顶栏 / 提示行）刻意很小：真正的聊天界面是 pi-web-ui 的组件。顶栏右侧那三个
- * 入口（完整历史 / 系统 / 工具）在 `context-panels.ts`。
+ * 界面外壳（顶栏 / 提示行）刻意很小 —— 真正的聊天界面是 pi-web-ui 的组件，顶栏右侧那三个入口在
+ * `context-panels.ts`。
  */
 
 import {

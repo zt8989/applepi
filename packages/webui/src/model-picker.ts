@@ -1,34 +1,13 @@
 /**
  * 模型选择器（浏览器侧）—— composer 右下角那个模型按钮的**下拉菜单**。
  *
- * ## 为什么不用 pi-web-ui 自带的 `ModelSelector`
+ * 不用 pi-web-ui 自带的 `ModelSelector`：它列的是**它打包进去那一代 pi-ai 的内置目录**（1500+ 条，
+ * 含大量本机没配的 provider），而内核能真发出去的只有 `getAvailableSnapshot()` 那些（与 TUI 的
+ * `/model` 同一份）。列表不一致时用户会挑一个本机没有的模型，症状是发出去报错、原因只在服务端日志里。
+ * `AgentInterface` 留了口子：设了 `onModelSelect` 就不弹它自己的 selector。
  *
- * 因为它列的是**它打包进去那一代 pi-ai 的内置目录**（1500+ 条，含大量本机根本没配的
- * provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapshot()` 那些
- * —— 与 TUI 的 `/model` 面板同一份。两边列表不一致时，用户在浏览器里挑一个本机没有的
- * 模型，症状是发出去报错，且只能在服务端日志里看到原因。
- *
- * `AgentInterface` 留了口子：设了 `onModelSelect` 就**不弹**它自己的 selector
- * （见 pi-web-ui `components/AgentInterface.js` 的 `onModelSelect` 分支）。
- *
- * ## 形状：贴着按钮开的下拉，不是整屏模态框
- *
- * 与 pi-web 的 `ModelSelector` 同一个交互：点 composer 上那个模型按钮，菜单在按钮
- * **正上方**弹出来（下面空间不够时才往下），宽度固定、右侧对齐；点外面 / `Esc` 关掉。
- * 列表按 provider 分组，当前模型打勾并自动滚到它；目录有 500+ 条，所以顶部常驻搜索框。
- *
- * ## 对齐 TUI 的哪些行为
- *
- * | TUI（`ModelSelectorComponent`） | 这里 |
- * | --- | --- |
- * | 列表 = 已配置 provider 的可用模型 | 同一份（服务端 `/api/models`） |
- * | 有作用域时默认 `Scope: scoped` | 有作用域时默认「只看已启用」 |
- * | `tab` 切 all / scoped | `Tab` 同一个意思 |
- * | 当前模型打勾 | 同（并自动滚到它） |
- * | 搜索按 id / 名字 | 同（外加 provider） |
- *
- * 刻意**没有**做的：`Ctrl+S` 存默认、后台刷新目录、`default` 前缀直达。它们是
- * pi 那套 settings/catalog 的入口，本项目没接（说明写在 `docs/architecture/webui.md`）。
+ * 形状与 Pi Web 一致：贴着按钮开的下拉（下面空间不够才往下），宽度固定、右侧对齐，点外面 / `Esc` 关掉；
+ * 列表按 provider 分组、当前模型打勾并自动滚到它；目录 500+ 条，所以顶部常驻搜索框。
  */
 
 import type { WebModelRef } from '@ela/core/web-protocol';
