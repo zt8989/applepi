@@ -1,27 +1,13 @@
 /**
  * 附件：浏览器 → 服务端的**发送投影**，以及服务端消息 → 界面的**展示投影**。
  *
- * ## 两条方向为什么不对称
+ * 两个方向不对称，因为环在服务端、只有两样东西真的过线：**图片**必须带 `content`（base64，它就是
+ * `ImageContent.data`），**文档**只带 `extractedText`（原文件 base64 传一遍再写进会话文件就是几十 MB
+ * 的垃圾）。
  *
- * pi-web-ui 的 `Attachment`（`utils/attachment-utils.ts`）是为「agent 在浏览器里跑」
- * 设计的：`content` 是整份文件的 base64，`extractedText` 是文档抽出来的正文。我们的
- * 环在服务端，只有两样东西真的过线：
- *
- * - **图片**：模型要看图，`content`（base64）必须带上 —— 它就是 `ImageContent.data`；
- * - **文档**：模型只看正文，所以只带 `extractedText`。原文件 base64 传一遍再写进
- *   会话文件，就是几十 MB 的垃圾（见 `@ela/core/web-protocol` 的 `WebAttachment`）。
- *
- * 展示方向反过来：服务端的历史里只有 pi 的 `content` 块（`image` + 带
- * `[Document: 名字]` 头的 `text`）。这里把它们还原成 pi-web-ui 认的
- * `user-with-attachments` 消息 —— 于是 `UserMessage` 会画出缩略图 / 文件格子，
- * 点开是它的 `AttachmentOverlay`，不用我们另写一套渲染器。
- *
- * ## 为什么文件名藏在文本块里
- *
- * `ImageContent` 只有 `data` / `mimeType`，没有文件名；而文件名要跨会话、跨标签页
- * 活下来（历史恢复之后还得显示对）。所以桥在图片前插一条 `[Image: 名字]` 文本块，
- * 这里消费掉它。用户自己打的 `[Image: …]` 只有**下一块真的是图片**时才会被当成
- * 标签（见 `IMAGE_LABEL` 的处理），正常文字不会被吃掉。
+ * 展示方向反过来：历史里只有 pi 的 `content` 块，这里还原成 pi-web-ui 认的
+ * `user-with-attachments` 消息 —— 于是 `UserMessage` 会画缩略图 / 文件格子，点开是它自己的
+ * `AttachmentOverlay`，不用另写一套渲染器。
  */
 
 import type { WebAttachment } from '@ela/core/web-protocol';

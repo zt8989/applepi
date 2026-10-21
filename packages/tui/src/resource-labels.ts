@@ -1,27 +1,12 @@
 /**
- * 开场「已装载资源」那几节的**显示形状** —— 与 pi 同形，但拆出来是为了能单测。
+ * 开场「已装载资源」那几节的**显示形状** —— 与 pi 同形，拆出来是为了能单测。
  *
- * ## 为什么要照抄 pi 的口径
+ * 照抄 pi 的口径：开场报的是**资源是什么**（一条路径一个文件、一条一个扩展入口），不是「它带来了几个
+ * 工具」。报成工具名的后果比不好看严重 —— 用户照着那一行去 `settings.json` 的 `packages` 里找，找不到，
+ * 于是以为扩展没装上。
  *
- * pi 的开场报的是**资源是什么**（`[Context]` 一条路径一个文件、`[Extensions]` 一条一个扩展
- * 入口），不是「它带来了几个工具」。早先这里报的是扩展注册的工具名，于是界面上写着
- * `[扩展] ask_user_question` —— 那是一个**工具**的名字，被当成扩展的名字报了出去。
- *
- * 症状比「不好看」严重：用户照着那一行去 `settings.json` 的 `packages` 里找
- * `ask_user_question`，找不到，于是以为扩展没装上；而它其实装得好好的。
- *
- * 三条规则照抄 `interactive-mode.js` 的 `getCompactExtensionLabels()`：
- *
- * 1. **npm/git 来源用 `包:入口` 形状**（`pi-web-access:dist`）—— 那是用户唯一认得的名字；
- * 2. 非包来源取路径**末尾最短的唯一后缀**（`orca-agent-status.ts` 而不是
- * `C:\Users\me\.pi\agent\orca\orca-agent-status.ts`）；
- * 3. 末尾的 `index.ts` / `index.js` 去掉（那是包的入口，不是它的名字）。
- *
- * ## 唯一性那一段为什么要遍历所有扩展
- *
- * 两个扩展可能都叫 `index.ts`（一个在 `a/` 一个在 `b/`）。只取最后一段就撞名了，
- * 而清单是用来**认哪一个是哪一个**的 —— 撞名的清单等于没有。所以逐段加长到唯一为止
- * （`a/index.ts` → `a/index.ts`？不，是 `a/index.ts` 与 `b/index.ts` 都唯一为止）。
+ * 三条规则照抄 `getCompactExtensionLabels()`：npm/git 来源用 `包:入口`（`pi-web-access:dist`）；非包
+ * 来源取路径**末尾最短的唯一后缀**；末尾的 `index.ts` / `index.js` 去掉（那是入口不是名字）。
  */
 import path from 'node:path';
 

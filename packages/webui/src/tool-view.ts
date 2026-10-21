@@ -1,29 +1,17 @@
 /**
  * 工具调用的**折叠行**视图 —— 全部工具共用一套：默认只一行摘要，点开才看内容。
  *
- * ## 为什么是这个形状
+ * pi-web-ui 自带的 `ToolMessage` 把结果常展开铺在卡片里（甚至把参数与结果各打一段 JSON），一轮十几次
+ * 工具调用就把对话冲走了。这里照 Pi Web 重画：默认折叠成「工具名 + 参数预览 + 耗时 + 状态 + 箭头」，
+ * 展开后也扁平精简（`edit` 左右分栏 diff、`bash` 命令 + 输出、其它工具输入/输出文本），成功与失败只差
+ * 一点色相。
  *
- * pi-web-ui 自带的 `ToolMessage` 把工具结果**常展开**铺在卡片里（`DefaultRenderer`
- * 甚至把参数与结果各打一段 JSON）：一轮里十几次工具调用会把对话冲走。这里照
- * **Pi Web**（github.com/agegr/pi-web）的做法重画：
+ * 耗时不在浏览器里算：工具在服务端跑，拿「开始/结束」相减得到的是传输延迟，恢复历史时连起点都没有
+ * —— 用内核的 `state.toolTimings`。
  *
- *   - 默认**折叠**成一行：工具名 + 参数预览 + **耗时** + 状态 + 箭头；
- *   - 展开后也**扁平精简**：`edit` 是左右分栏 diff（`split-diff.ts`）、`bash` 是
- *     命令 + 输出、其它工具是输入 JSON + 输出文本；
- *   - 成功 / 失败的边框与底色只差一点色相（绿 / 红），不抢对话的视线。
- *
- * 耗时（`1.2s`）不在浏览器里算：工具在服务端跑，浏览器只看到「开始 / 结束」两条
- * 消息，相减得到的是传输延迟；恢复历史时更是连起点都没有。所以用内核的
- * `state.toolTimings`（见 `setToolTimings()` 的注释）。
- *
- * ## 为什么要替换 `tool-message` 的 render
- *
- * pi-web-ui 的 `renderTool()` 对**没注册**的工具回退到它自己的 `DefaultRenderer`，
- * 而它没有「兜底 renderer」这个钩子。要给**所有**工具（含扩展 / MCP 那些我们事先
- * 不知道名字的）换皮，只能把 `tool-message` 的 `render` 换掉。
- *
- * 副作用在 `installToolMessageView()` 里做，由 `main.ts` 在界面起来前调用
- * （那时 pi-web-ui 已经加载、`tool-message` 已经注册）。
+ * 要替换 `tool-message` 的 `render` 是因为 pi-web-ui 对**没注册**的工具回退到它自己的
+ * `DefaultRenderer`，而没有「兜底 renderer」钩子 —— 要给所有工具（含扩展 / MCP 那些我们事先不知道名字
+ * 的）换皮，只能换掉它。
  */
 
 import { LitElement, html, nothing, type TemplateResult } from 'lit';

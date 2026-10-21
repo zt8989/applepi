@@ -1,21 +1,12 @@
 /**
  * 问卷（多题 tab）在浏览器里的呈现 —— 终端那一份的**镜像**。
  *
- * ## 分工
+ * 终端那份由扩展自己的组件画（`ask_user_question` 是内置扩展），这里画浏览器这一份：两边同时开着同一
+ * 份问卷，谁先答完都算数（握手段 `externalQuestionnaire`，见 `@ela/core/questionnaire`）。
  *
- * 终端那份由扩展自己的组件画（`ask_user_question` 是本项目的内置扩展，见
- * `patches/`），这里画的是**浏览器这一份**：两边同时开着同一份问卷，谁先答完都算数
- * （扩展补丁里的握手段 `externalQuestionnaire`，见 `@ela/core/questionnaire` 的文件头）。
- *
- * ## 它不是状态的所有者
- *
- * 答案属于服务端（`@ela/core/questionnaire` 的 `QuestionnaireSession`）。这里做两件事：
- * 把快照画出来、把点击/按键变成**意图**发回去（`activate` / `pick` / `toggle` / `custom` /
- * `commit` / `note` / `globalNote` / `submit` / `cancel`）。
- *
- * **本地只有两样东西**：光标停在哪个选项上，以及**还没提交的备注草稿**
- * （备注在提交时一次性发过去 —— 每敲一个字发一条 WebSocket 太啰嗦；草稿丢了也只是
- * 少一句备注，不影响答案）。
+ * 它不是状态的所有者：答案属于服务端的 `QuestionnaireSession`，这里只把快照画出来、把点击/按键变成
+ * **意图**发回去。本地只有两样东西：光标停在哪个选项上，以及**还没提交的备注草稿**（备注在提交时一次
+ * 性发过去 —— 每敲一个字发一条 WebSocket 太啰嗦；草稿丢了也只少一句备注，不影响答案）。
  */
 import type { QuestionnaireIntent, QuestionnaireSnapshot } from '@ela/core/questionnaire';
 

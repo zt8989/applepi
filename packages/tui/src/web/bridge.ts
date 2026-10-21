@@ -1,29 +1,15 @@
 /**
  * 内核 → 浏览器的桥。
  *
- * ## 它在哪一层
+ * `main.ts` 起内核，TUI 订阅同一个 store 画终端界面；本文件是**第二个订阅者** —— 把内核的
+ * `AgentState` 映射成 `web-protocol` 里那份「pi-web-ui 认的形状」，交给 `server.ts` 广播给浏览器。
  *
- * `main.ts` 起内核（`createKernel()`），TUI 订阅同一个 store 画终端界面；本文件是
- * **第二个订阅者** —— 它把内核的 `AgentState` 映射成 [web-protocol](@ela/core/web-protocol)
- * 里那份「pi-web-ui 认的形状」，交给 [server](server.ts) 广播给浏览器。
+ * 桥**不持有环**：消息进来是 `store.dispatch`，中止是 `abortRun()`，换模型/开新会话是内核的回调。
  *
- * 桥**不持有环**：消息进来是 `store.dispatch`，中止是 `abortRun()`，换模型/开新会话是
- * 内核的回调。与 TUI 完全同源 —— 「环只有一份」这条铁律在 web 这一侧同样成立。
- *
- * ## 为什么发「整份状态 + 少量事件」
- *
- * pi-web-ui 的 `AgentInterface` 有两个落点：
- *
- *   - `session.state.messages` 是**稳定列表**（每条消息渲染一次）；
- *   - `session.subscribe` 的 `message_update` 喂**流式容器**（当前这条还没落进列表的）。
- *
- * 内核的 `streamingText` / `thinkingText` 是流式期的中间态（不进 `messages`），而
- * pi-web-ui 恰好要一个「部分助手消息」——所以每次变化都发整份状态（简单、不会漂移），
- * 再补一条 `message_update` 让流式容器跟上。
- *
- * **发整份，但不逐 token 发** —— 流式期一个 token 一次 dispatch，那是几百 MB/s 的
- * `JSON.stringify` 垃圾（真把进程撞到 OOM 过）。合帧的细节与实测数字见 `FRAME_INTERVAL_MS`。
- * 事件与状态**同一帧一起发**，顺序是**先状态后事件**（`message_update` 要读 `state.isStreaming`）。
+ * 发「整份状态 + 少量事件」：pi-web-ui 的 `session.state.messages` 是稳定列表（每条渲染一次），
+ * `message_update` 喂流式容器（当前这条还没落进列表的），而内核的 `streamingText` / `thinkingText`
+ * 正是那种中间态。**发整份但不逐 token 发** —— 合帧细节见 `FRAME_INTERVAL_MS`。
+ * 事件与状态同一帧一起发，**先状态后事件**（`message_update` 要读 `state.isStreaming`）。
  */
 
 import type { AgentStore } from '@ela/core/store';
@@ -278,43 +264,28 @@ function lastAssistant(messages: readonly WebStreamItem[]): AssistantMessage | u
 /**
  * 状态帧的最小间隔（ms）。
  *
- * ## 为什么必须合帧
+ * 必须合帧：桥挂在 `store.subscribe` 上，而流式 token 每一个都是一次 dispatch，`snapshot()` 下游的
+ * `JSON.stringify` 是 **O(整段会话)** 的 —— 一份 4.6MB 的会话 stringify 一次 13ms，流式期每帧要发
+ * `state` + `message_update` 两份，一个 token 就是 ~26ms CPU 加 ~9MB 垃圾。token 密集时堆一路冲到
+ * 2GB 以上，以 `FATAL ERROR: heap out of memory` 收场（真发生过），顺带把 TUI 主线程也拖住。
  *
- * 桥挂在 `store.subscribe` 上，而**流式 token 每一个都是一次 dispatch** —— 每帧都推是
- * 「一个 token 一帧」。`snapshot()` 本身不贵，贵的是它下游的 `JSON.stringify`：那是
- * **O(整段会话)** 的。实测一份 4.6MB 的会话，stringify 一次 13ms、产出 4.6MB 字符串，
- * 而流式期每帧要发 `state` + `message_update` 两份 —— 一个 token 就是 ~26ms CPU 加
- * ~9MB 垃圾。token 密集时（几十个/秒）等于每秒几百 MB 的垃圾，GC 追不上：堆会一路
- * 冲到 2GB 以上，最后以 `FATAL ERROR: heap out of memory` 收场（真发生过两次，
- * 崩溃报告里 `heapUsed` 2.6GB、上限 4.35GB）。顺带把 TUI 也拖住 —— 主线程在
- * stringify 里，按键与重画都得排队，症状就是「思考时界面直接卡死」。
+ * 合帧之后整份状态与 token 速率解耦，但**不丢边界** —— 判据是「结构变没变」（`structureChanged`），
+ * `FRAME_INTERVAL_MS` 只是「多久重看一眼」：
+ * - 结构变了（开跑 / 收工 / 换模型 / 工具起止 / 消息落地）→ **立刻**发整份状态；
+ * - 只是流式文本在长 → 只发 `message_update`，窗口到期重看一次，最多 `STATE_MAX_IDLE_MS` 用整份状态兜底；
+ * - 真的什么都没变 → 一个字节都不发。
  *
- * 合帧之后，整份状态与 token 速率解耦 —— **但不丢边界**。真正的判据是「结构变没变」
- * （见 `structureChanged`），`FRAME_INTERVAL_MS` 只是「多久重看一眼」：
- *
- *   - 结构变了（开跑 / 收工 / 换模型 / 工具起止 / 消息落地）→ **立刻**发一帧整份状态；
- *   - 只是流式文本在长 → 整份状态**不发**，只发一条 `message_update`（见
- *     `sendStreamingDelta`）；窗口到期重看一次，并最多 `STATE_MAX_IDLE_MS` 用
- *     一帧整份状态兜底；
- *   - 真的什么都没变 → 一个字节都不发（落盘器回的 `trace.persisted` 就是这种）。
- *
- * 于是「`isStreaming` 变了」「助手消息落地了」这类边界一格都不会丢，而一段 2MB 的
- * 会话跑 200 个 token，整份状态从 400 帧降到 2 帧（实测 883MB → 6.9MB）。
+ * 实测：一段 2MB 的会话跑 200 个 token，整份状态从 400 帧降到 2 帧（883MB → 6.9MB）。
  */
 const FRAME_INTERVAL_MS = 100;
 
 /**
  * 整份状态帧的兜底间隔（ms）。
  *
- * 该不该发整份状态，判据是「结构变没变」（见 `structureChanged`）—— 而**判据是人写的**，
- * 漏一项的后果是浏览器一直显示旧值，而且**不会自己好**。所以再压一条：只要还在变，
- * 最多 `STATE_MAX_IDLE_MS` 必发一帧整份状态。代价是 1 帧/秒（4MB 的会话 = 4MB/s，
- * 相对改之前每 token 两份的几百 MB/s 可以忽略），换来「不可能漂移超过一秒」。
+ * 「该不该发整份状态」的判据是人写的，漏一项浏览器就会一直显示旧值、而且不会自己好。所以再压一条：
+ * 只要还在变，最多 `STATE_MAX_IDLE_MS` 必发一帧（代价 1 帧/秒，换来「不可能漂移超过一秒」）。
  *
- * ## 为什么流式文本不算「结构」
- *
- * 因为 `message_update`（见 `sendStreamingDelta`）已经把它单独发了。判据里再带上它，
- * 等于每 token 都「结构变了」—— 又回到改之前的老样子。
+ * 流式文本**不算**结构：`message_update` 已经单独发了它，判据里再带上它等于每 token 都「结构变了」。
  */
 const STATE_MAX_IDLE_MS = 1000;
 
@@ -733,19 +704,10 @@ export class WebBridge {
   }
 
   /**
-   * store 变了：**先分道，再决定要不要真发**。
-   *
-   * 三件事，按代价从小到大：
-   *
-   *   1. 空转（没有浏览者）就一个字节都不算 —— 这才是最常见的情形（终端里跑 ela、
-   *      没开 web 界面），而 `snapshot()` + `JSON.stringify` 都是 O(整段会话) 的；
-   *   2. **流式增量**（只带「正在长的那一条」，几十 KB）立刻发；
-   *   3. **整份状态**只在「结构变了」或「距上一帧超过 `STATE_MAX_IDLE_MS`」时发
-   *      （见 `stateFrameDue`）。流式期两者都稳定，于是整份状态从「每 token 两份」
-   *      降到「一秒一帧」。
-   *
-   * 同步发是故意的：原来的形状就是「store 一变就广播」；现在只是**大负载那一半**
-   * 变成了按需 + 合帧，小负载那一半还是一条不漏。
+   * store 变了：**先分道，再决定要不要真发**。三件事，按代价从小到大：
+   * 1. 空转（没有浏览者）就一个字节都不算 —— `snapshot()` + `stringify` 都是 O(整段会话) 的；
+   * 2. **流式增量**（只带正在长的那一条，几十 KB）立刻发；
+   * 3. **整份状态**只在「结构变了」或距上一帧超过 `STATE_MAX_IDLE_MS` 时发。
    */
   private onStoreChange(): void {
     if (this.listeners.size === 0) return;

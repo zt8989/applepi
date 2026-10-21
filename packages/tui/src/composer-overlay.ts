@@ -1,46 +1,9 @@
 /**
- * 「覆盖 composer」这一形状的覆盖层参数 —— `/model`、`/scoped-models`、`/resume`
- * 三个面板共用。
+ * 「覆盖 composer」这一形状的覆盖层参数 —— `/model`、`/scoped-models`、`/resume` 三个面板共用。
  *
- * ## 为什么不是居中的浮窗
- *
- * pi 里这些面板**根本不是浮窗**：`interactive-mode.js` 的 `showSelector()` 把
- * `editorContainer`（承载 composer 的那一格）的**内容整个换掉** —— `clear()` 之后
- * `addChild(selector)`，关掉时再 `addChild(editor)` 换回来。
- *
- * ```js
- * // pi: interactive-mode.js 的 showSelector()
- * this.editorContainer.clear();
- * this.editorContainer.addChild(created.component);
- * this.ui.setFocus(created.focus);
- * // 关掉时：
- * this.editorContainer.clear();
- * this.editorContainer.addChild(this.editor);
- * ```
- *
- * 于是面板**天然**是 composer 的宽度（`editorContainer` 占满一行），而它的底边**就是**
- * composer 的底边（同一个槽位、同一个位置）。用户按下 Ctrl+L / /resume 时看到的是
- * 「输入框那块变成了列表」，不是「屏幕中央弹出一个框」。
- *
- * 本项目里 composer 是底部 `VStack` 里的一格（见 `app.ts` 的 `applyLayout`），
- * 没有 pi 那套 `editorContainer` 可以换内容。所以这里用 overlay **复刻同一个矩形**：
- *
- * | pi 的槽位性质 | 这里的写法 |
- * | --- | --- |
- * | 宽度 = composer 宽度 = 整行 | `width: '100%'` |
- * | 底边 = composer 底边 | `anchor: 'bottom-center'` + `margin.bottom` = composer 距屏幕底的行数 |
- * | 向上生长（盖住对话区，不截断顶部） | 不给 `maxHeight`（默认不截；面板自己定高） |
- *
- * ## `margin.bottom` 为什么必须跟着底栏走，而不是写死 2
- *
- * 「composer 底边距屏幕底几行」= 它下面那几格的高度之和。当前布局里 composer 下面是
- * **底栏**（`footer`，两行：cwd / 用量 + 模型），所以是 2。但这个数是 `app.ts` 的
- * **布局事实**，不是这里能拍脑袋写死的常量 —— 底栏哪天变成三行（或者底下再加一格，
- * 比如常驻的队列面板），面板就会跟着错位，且症状是「面板底边悬在输入框上面两行」，
- * 很难归因。
- *
- * 所以这个数由本模块的 {@link FOOTER_ROWS} 统一给出，`app.ts` 布局里 footer 的 `basis`
- * 与这里的 `margin.bottom` **读同一个来源**。改一处，两处同时动。
+ * pi 里这些面板**根本不是浮窗**：`showSelector()` 把 `editorContainer`（承载 composer 的那一格）的
+ * 内容整个换掉，于是面板天然是 composer 的宽度、底边就是 composer 的底边。本项目没有那套容器，
+ * 所以用 overlay **复刻同一个矩形**，让用户看到的仍是「输入框那块变成了列表」。
  */
 
 /** 底栏占几行。**必须与 `app.ts` 里 footer 的 `basis` 相等** —— 见文件头。 */

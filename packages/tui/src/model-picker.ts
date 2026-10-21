@@ -1,56 +1,26 @@
 /**
  * TUI 的「换模型」弹窗 —— `/model`（或 `app.model.select`）打开。
  *
- * ## 为什么直接用 pi 官方的 `ModelSelectorComponent`
- *
- * 与 `/resume`（见 `session-picker.ts`）**同一个理由**：这个面板的交互面很宽，而每一条都要与
- * pi 对齐才有意义（用户已经习惯了 `Ctrl+S` 存默认、`default` 前缀搜默认模型、
- * 「当前模型置顶 + 打勾」）：
- *
- * ```text
- *   ────────────────────────────────────────────────
- *   Only showing models from configured providers. Use /login to add providers.
- *   > 搜索…
- *   → ✓ cn:space-bunny [workbuddy] · default
- *       cn:deepseek-v4.1-flash [workbuddy]
- *       cn:glm-5.3-flash [workbuddy]
- *
- *     Model Name: cn:space-bunny
- *
- *     Model catalogs refreshed.
- *   Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel
- *   ────────────────────────────────────────────────
- * ```
- *
- * 手写这套要复刻 `model-selector.js` + `model-catalog-refresh.js`（后台刷目录、15s 超时、
- * 错误分级文案、模糊搜索 + `default` 特例、当前模型置顶排序、`Model Name:` 那行、滚动指示
- * `(3/12)`）约 200 行，而且**必然与上游漂移**。所以这里是**适配层**，不是重写。
+ * 直接用 pi 官方的 `ModelSelectorComponent`（与 `/resume` 同一个理由）：这个面板的交互面很宽，而每
+ * 一条都要与 pi 对齐才有意义（`Ctrl+S` 存默认、`default` 前缀搜默认模型、当前模型置顶 + 打勾）。
+ * 手写要复刻 `model-selector.js` + `model-catalog-refresh.js`（后台刷目录、15s 超时、错误分级文案、
+ * 模糊搜索、`Model Name:` 那行、滚动指示）约 200 行，而且必然与上游漂移。所以这里是**适配层**。
  *
  * | 官方要什么 | 我们给 |
  * | --- | --- |
- * | `ModelRuntime` | `runtime.runtime`（主路径）或 `fallbackModelRuntime()`（降级，见文件头） |
- * | `currentModel` | 当前 `state.model`（底栏那一栏就是它） |
- * | `scopedModels` | 内核当前的作用域列表（`/scoped-models` 改的那份） |
- * | `defaultModel` | `settings.json` 的 `defaultProvider` / `defaultModel` |
+ * | `ModelRuntime` | `runtime.runtime`（主路径）或 `fallbackModelRuntime()`（降级） |
+ * | `currentModel` / `scopedModels` / `defaultModel` | `state.model` / 内核作用域列表 / settings |
  * | `onSelectAsDefault` | `SettingsManager.setDefaultModelAndProvider()` |
- * | `keybindings` | `installProjectKeybindings()` 并装到 pi-tui 全局（与 `/resume` 同一句理由） |
+ * | `keybindings` | `installProjectKeybindings()` 装到 pi-tui 全局 |
  *
- * ## 但**换模型要真的换**（与 `/resume` 那一处最大的不同）
+ * **换模型要真的换**（与 `/resume` 最大的不同）：状态只能由 action 改，所以换模型是
+ * `kernel.setModel()` —— dispatch 一条 `model.changed`（带全能力 / 窗口），而 effect 表读的模型是从
+ * state 里取的。
  *
- * 选完之后不能只 `showStatus()` —— 那是 pi 的 `InteractiveMode` 能这么干的原因：它有
- * `session.setModel()`。本项目的状态**只能由 action 改**（reducer 纯函数那条不变式），所以
- * 换模型是 `kernel.setModel()`：它 dispatch 一条 `model.changed`（带全能力 / 窗口），而 **effect 表
- * 读的模型是从 state 里取的**（见 `effects.ts` 里 `modelOf(state)`）。
- *
- * ## 降级路径：手写一个最小门面，而不是让面板不可用
- *
- * `ModelRuntime.create()` 失败时 `provider.ts` 退回手写装配（`runtime.runtime` 是
- * `undefined`）。官方组件的构造签名要一个 `ModelRuntime`，硬传 `undefined` 会在
- * `getAvailableSnapshot()` 那一行就崩 —— 症状是「按 `/model` 什么都不发生」。
- *
- * 所以给一个**只实现组件用到的那几个方法**的门面：模型列表来自 `models.getModels()`
- * （手写装配也有，那是 pi-ai 的 `Models` 接口），`refresh()` 报「不可用」而不是假装成功。
- * 面板能列、能搜、能选 —— 只是列出来的是 models.json 里的那几个，而不是 1500+ 内置目录。
+ * 降级路径给一个**只实现组件用到的那几个方法**的门面（`ModelRuntime.create()` 失败时 `runtime.runtime`
+ * 是 undefined，硬传进去会在 `getAvailableSnapshot()` 那一行就崩，症状是「按 `/model` 什么都不发生」）：
+ * 模型列表来自 `models.getModels()`，`refresh()` 报「不可用」而不是假装成功 —— 面板能列、能搜、能选，
+ * 只是列的是 models.json 里那几个。
  */
 import { ModelSelectorComponent } from '@earendil-works/pi-coding-agent';
 // `ScopedModelsSelectorComponent` **不在**主入口的导出里（只有 `ModelSelectorComponent` 有），

@@ -1,50 +1,25 @@
 /**
  * TUI 的「恢复历史」弹窗 —— `/resume` 打开。
  *
- * ## 为什么直接用 pi 官方的 `SessionSelectorComponent`
- *
- * 这个面板的**交互面**很宽，而每一条都要与 pi 对齐才有意义（用户已经习惯了 `tab` 换作用域、
- * `ctrl+s` 换排序、`re:` 正则搜索）：
- *
- * ```text
- *   Resume Session (Current Folder)        ⊙ Current Folder │ ○ All  Name: All  Sort: Threaded
- *   > 搜索…                                tab scope · re:<pattern> regex · "phrase" exact
- *     读 package.json 的前 3 行            ctrl+s sort · ctrl+n named · ctrl+d delete …
- *   › 现在几点？用 bash 查一下日期          6 8m
- *     (1/112)
- * ```
- *
- * 手写这套要复刻 `session-selector.js` + `session-selector-search.js`（树形前缀、
- * 分数排序、`re:`/引号查询解析、异步加载 + `Loading 7/112` 进度、删除确认态、
- * 重命名子面板…）约 350 行，而且**必然与上游漂移**。对话区那几个渲染器已经这么用了
- * （见 `app.ts`），这里同一口径。
- *
- * 所以这里是**适配层**，不是重写：
+ * 直接用 pi 官方的 `SessionSelectorComponent`：这个面板的**交互面**很宽，而每一条都要与 pi 对齐才有
+ * 意义（`tab` 换作用域、`ctrl+s` 换排序、`re:` 正则搜索）。手写要复刻 `session-selector.js` +
+ * `session-selector-search.js`（树形前缀、分数排序、查询解析、异步加载进度、删除确认态、重命名子面板）
+ * 约 350 行，而且必然与上游漂移。所以这里是**适配层**，不是重写。
  *
  * | 官方要什么 | 我们给 |
  * | --- | --- |
- * | `currentSessionsLoader` / `allSessionsLoader`：`(onProgress, signal) => Promise<SessionInfo[]>` | `listSessions({cwd})` / `listSessions()` 适配成 `SessionInfo` |
- * | `renameSession(path, name)` | 往那个会话文件追加一条 `session_info`（与 pi 同一个 entry type） |
- * | 删除 | 官方自己删会话文件（先 `trash` 再 `unlink`）；**轨迹文件它不管**，我们从外部补 |
- * | `keybindings` | `installProjectKeybindings()`，并装到 pi-tui 全局 |
- * | `currentSessionFilePath` | 当前会话文件 —— 官方用它把「正在用的这条」染成 accent 色**并拒绝删它** |
+ * | `currentSessionsLoader` / `allSessionsLoader` | `listSessions({cwd})` / `listSessions()` |
+ * | `renameSession(path, name)` | 往会话文件追加一条 `session_info`（与 pi 同一个 entry type） |
+ * | 删除 | 官方自己删会话文件；**轨迹文件它不管**，我们从外部补 |
+ * | `keybindings` | `installProjectKeybindings()`，装到 pi-tui 全局 |
+ * | `currentSessionFilePath` | 官方用它把「正在用的这条」染成 accent 色**并拒绝删它** |
  *
- * ## 搜索**不**扫全文（有意与 pi 不同）
+ * 搜索**不**扫全文（有意与 pi 不同）：官方把整个会话文件读出来拼 `allMessagesText`，而我们给空字符串
+ * —— 能搜 id、名字、cwd、标题。124 个会话 / 18MB 的现实是「为了搜索全量 parse」= 打开面板等一分钟；
+ * 要找回某句话，`rg` 搜 `~/.pi/agent/sessions` 更快更准。
  *
- * 官方 `SessionInfo.allMessagesText` 是把整个会话文件读出来拼的，`fuzzyMatch` 拿它当
- * 检索面 —— 所以「搜历史里聊过的那句话」在 pi 里能命中。
- *
- * 我们给**空字符串**：能搜 id、名字、cwd、标题（第一条 user 消息）。理由是
- * docs/architecture/sessions.md 里那条已经付出过代价的结论 —— 124 个会话 / 18MB，
- * 为了搜索而全量 parse 就是「打开面板要等一分钟」。要找回某句话，用 `rg` 搜
- * `~/.pi/agent/sessions` 比在一个 40 字符的模糊搜索框里捞更快更准。
- *
- * ## 弹窗开着时 `onInput` 必须让路（见 `app.ts` 那里的注释）
- *
- * pi-tui 的 `inputListeners` 在**聚焦组件之前**跑（`tui.js` 的 `handleInput`），而
- * `app.ts` 的 `onInput` 无条件处理轨迹页切换 / 展开工具 / 队列模式 / 中断这四个键。
- * 致命的那条是中断（默认 `ctrl+c`）：空闲时它 `process.exit(0)`，在弹窗里按一下
- * 「取消」整个界面就没了。
+ * 弹窗开着时 `onInput` 必须让路（见 `app.ts`）：`inputListeners` 在聚焦组件之前跑，而中断键在空闲时
+ * `process.exit(0)` —— 在弹窗里按一下「取消」整个界面就没了。
  */
 import { existsSync, rmSync } from 'node:fs';
 import {
@@ -166,25 +141,15 @@ export function openSessionPicker(options: SessionPickerOptions): () => void {
   const { tui } = options;
   const cwd = options.cwd || process.cwd();
 
-  // 装键位表到 pi-tui 全局。
+  // 装键位表到 pi-tui 全局：`SessionList` / `Input` 判键走 pi-tui 的 `getKeybindings()`，它默认只含
+  // `tui.*`，不装的话 `kb.matches(data, 'app.session.rename')` 恒为 false、`ctrl+r` **静默失效**
+  // （连那行提示也一起消失 —— 它用同一份 keybindings 渲染）。
   //
-  // **为什么必须做**：`SessionList` / `Input` 判键走的是 pi-tui 的 `getKeybindings()`，
-  // 它默认只含 `TUI_KEYBINDINGS`。而 `app.session.*`（toggleSort / rename / delete…）
-  // 是 **pi 应用层**定义的 —— 不装的话 `kb.matches(data, 'app.session.rename')` 恒为
-  // false，于是 `ctrl+r` **静默失效**（连那行提示都会一起消失 —— 它也是用同一个
-  // keybindings 渲染的，于是症状是「面板里没写有 rename」而不是「按了没反应」）。
+  // 用 `installProjectKeybindings()` 而不是 pi 的 `KeybindingsManager.create()`：后者不含
+  // `app.trace.toggle` 那一组，装上去顶行那块 `(Ctrl+R)` 会变成 `()`。
   //
-  // 用 `installProjectKeybindings()`（= pi 的全套 + 本项目自己的动作）而不是 pi 的
-  // `KeybindingsManager.create()`：两者都读同一份 `~/.pi/agent/keybindings.json`，
-  // 但后者**不含** `app.trace.toggle` 那一组 —— 装上去之后顶行那块 `(Ctrl+R)`
-  // 会变成 `()`（查不到这个动作），而这是开着面板时才出现的症状。
-  //
-  // 与 pi 一样**不做** `ctrl+r` 在面板内（重命名）与面板外（轨迹页）的冲突检查：
-  // 面板打开时本项目那四个全局键整个让路（`onInput` 开头的 `hasOverlay()` 早返回），
-  // 两者不会同时生效。
-  //
-  // 返回值继续往下传：官方组件的构造参数要它（`SessionSelectorComponent` 的
-  // `keybindings`），它内部的 `Input` / `SessionList` 用同一份判键。
+  // 不做 `ctrl+r` 面板内（重命名）与面板外（轨迹页）的冲突检查：面板打开时那四个全局键整个让路，
+  // 两者不会同时生效。返回值继续往下传给官方组件的构造参数。
   const keybindings = installProjectKeybindings();
 
   /** 当前 scope 下已加载的摘要（`onPick` 按**文件路径**回查用）。 */

@@ -1,26 +1,16 @@
 /**
- * 初始化 pi 的主题。
+ * 初始化 pi 的主题（单独一个文件见下）。
  *
- * ## 为什么要单独一个文件
+ * 所有颜色都来自 pi 的 `theme`（挂在 globalThis 上的 Proxy）：手写 `paint('48;2;37;65;49', …)` 只
+ * 会得到「看起来差不多」的颜色，而且**亮色终端上会直接变成黑底黑字**。
  *
- * 界面上所有颜色都来自 pi 的 `theme`（一个挂在 globalThis 上的 Proxy）—— 用户蓝底、思考灰斜体、
- * 工具块的绿/红底色全由它给出。手写 `paint('48;2;37;65;49', …)` 只会得到「看起来差不多」
- * 的颜色，而且**亮色终端上会直接变成黑底黑字**。
+ * 两个坑：`theme` 没初始化时读任何属性都抛 `Theme not initialized`；而光 `initTheme()`（不带名字）
+ * 拿到的是 **system 主题** —— 终端还没上报颜色时它渲染成灰度（实测 `toolSuccessBg` 与 `userMessageBg`
+ * 都是 `rgb(0,0,0)`，于是「工具块有底色」**静默失效**）。
  *
- * 更要命的是两个坑：
- *
- * 1. `theme` 在没初始化时**读任何属性都抛异常**：
- *    `throw new Error("Theme not initialized. Call initTheme() first.")`
- * 2. 光 `initTheme()`（不带名字）拿到的是 **system 主题** —— 它在终端还没上报颜色时
- *    渲染成灰度。我实测过：`initTheme()` 后 `toolSuccessBg` 是 `rgb(0,0,0)`，
- *    `userMessageBg` 也是 `rgb(0,0,0)`，于是「工具块有底色」这件事**静默失效**。
- *    截图里那个深绿 `rgb(37,65,49)` 只有走 `dark` / `light` 内置主题才拿得到。
- *
- * 所以这里做两件事：
- *   1. 读 `settings.json` 的 `theme` 字段（与 pi 同一个配置文件、同一个键）。
- *   2. 用 `resolveThemeSetting()` 按**终端深浅色**解析掉；没配就按 `getTerminalTheme()`
- *      的检测结果在 dark/light 之间选。跟随终端是必须的：写死 dark 会让浅色终端的用户
- *      看到一堆看不清的深色块。
+ * 所以这里读 `settings.json` 的 `theme` 字段（与 pi 同一个文件、同一个键），用 `resolveThemeSetting()`
+ * 按**终端深浅色**解析；没配就按 `getTerminalTheme()` 的检测在 dark/light 之间选 —— 写死 dark 会让
+ * 浅色终端出现黑底块。
  */
 import {
   getTerminalTheme,

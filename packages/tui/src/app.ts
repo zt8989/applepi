@@ -104,9 +104,18 @@ import { getMarkdownTheme, getEditorTheme, type Theme } from '@earendil-works/pi
 // 两边对不上会让人以为算错了。
 // 见 docs/architecture/provider.md「为什么要 pnpm patch」。
 import { formatCwdForFooter, formatTokens } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js';
-// composer 直接用官方那个会把工作状态画进**上框线**的编辑器（与 pi 同形）。
-// 为什么不是自己给 pi-tui 的 `Editor` 加个 setter：那段边框排版（状态 + 滚动指示
-// `↑ N more` 抢位置、窄终端退化成只画转圈）是 pi 踩过的，复刻必然漂移。
+  // 官方那个把工作状态画进**上框线**的编辑器（`embedWorkingStatus: true`），与 pi 同一个类。
+  //
+  // 配色直接用 pi 的 `getEditorTheme()`：手写一份会让横线颜色分家（pi 用
+  // `theme.getThinkingBorderColor(level)`，而 `dim` 是文本属性不是颜色 token），补全列表的选中色也会
+  // 分家（`accent` vs `cyan`）。它内部读 pi 主题，**必须**在 `setupTheme()` 之后调。
+  //
+  // 形状交给 typecheck，写错时**不要**用 `as unknown as EditorTheme` 压住：那个 cast 会让
+  // `this.theme.selectedText is not a function` 在渲染时才爆，而补全列表渲染失败只表现为「打 `/`
+  // 什么都没弹」，极难归因。
+  //
+  // keybindings 也要传：`CustomEditor` 的构造签名要它，且必须与面板 / `keyLabel()` 用**同一份**，
+  // 不然用户改过的键在这里不生效。
 import { CustomEditor } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/custom-editor.js';
 import {
   WorkingStatusIndicator,
@@ -677,22 +686,13 @@ export function shouldIgnoreKey(data: string): boolean {
 /**
  * 全局输入监听器要不要**整个让路**（不消费，交给聚焦组件）。
  *
- * 两种「有人占着键盘」的形态：
+ * 两种「有人占着键盘」的形态：**overlay 栈非空**（`/model`、`/resume` 那些面板，以及扩展的
+ * `custom({ overlay: true })`）；**输入区槽位被扩展组件占着**（扩展的非 overlay `custom()`，
+ * `mountEditorSlot` 那一格，`ctx.ui.select/confirm/input` 也在那儿）。后者**不在 overlay 栈上**，
+ * 只判 `hasOverlay()` 会漏掉 —— 症状是 `ask_user_question` 的对话框只有 Tab 能用、↑/↓ 在滚对话区，
+ * 以及对话框开着的同时按 `Ctrl+R` / `Ctrl+O` / `Shift+Tab` 背后的主界面会跟着变。
  *
- * 1. **overlay 栈非空** —— 本项目的 `/model`、`/resume` 那些面板，以及扩展的
- *    `custom({ overlay: true })`；
- * 2. **输入区槽位被扩展组件占着** —— 扩展的非 overlay `custom()`（默认就是这条路，
- *    `ask_user_question` 也走它）与 `ctx.ui.select/confirm/input` 都挂在这一格
- *    （见 `mountEditorSlot`）。这些组件自己 `handleInput`，而且它们**不在 overlay 栈上**，
- *    只判 `hasOverlay()` 会漏掉它们。
- *
- * 漏掉第 2 种的症状（Orca 里报上来的那条）：`ask_user_question` 的对话框只有 Tab
- * 能用，↑/↓ 在滚对话区 —— 当时翻页是本项目自己拦的（字节层面的来龙去脉见
- * `const ESC` 上方那段注释），而本监听器比聚焦组件先跑。
- * 同一条缝里还漏过其他全局开关：对话框开着的**同时**按 `Ctrl+R` / `Ctrl+O` /
- * `Shift+Tab`，背后的主界面真的会跟着变。
- *
- * 与 `hasOverlay()` 那条口径一致：让路 = `return undefined`，**不**消费。
+ * 让路 = `return undefined`，**不**消费。
  */
 export function shouldYieldInput(
   tui: { hasOverlay(): boolean },
@@ -771,27 +771,16 @@ export function statsLine(state: AgentState, autoCompact: boolean | null = null)
   }
   if (totals.cost > 0) parts.push(`$${totals.cost.toFixed(3)}`);
 
-  // 上下文占用 = **最后一次** LLM 调用占掉多少窗口。**不能拿累加值**。
+  // 上下文占用 = **最后一次** LLM 调用占掉多少窗口，**不能拿累加值**。
   //
-  // ## 为什么不能累加（这里原先就错着）
+  // `totals` 是整个会话累计的（`↑`/`↓`/`R`/`$` 要的是那个口径），而窗口不是：每一轮的
+  // `input + cacheRead` 都把当轮完整 prompt 重新数了一遍，而 prompt 里含前面所有轮次的内容 ——
+  // 累加等于「整段历史被重复数了 N 次」（实测 583 条助手消息、1.0M 窗口：9536% vs 正确 29.2%）。
   //
-  // `totals` 是**整个会话累计**的 —— `↑`/`↓`/`R`/`$` 那一排要的就是这个口径
-  // （“本次会话一共花了多少”）。但上下文窗口**不是**：它是**这一次请求**能装多少。
-  // 每一轮的 `input + cacheRead` 都把当轮完整的 prompt 重新数了一遍，而 prompt 里
-  // 包含**前面所有轮次的内容** —— 累加起来等于「整段历史被重复数了 N 次」。
+  // 口径与 pi 一致：取**最后一条有效**助手消息的 `usage.totalTokens`（即上一次请求的总 token）。
   //
-  // 实测（583 次助手消息的真实会话，窗口 1.0M）：累加口径 **9536%**，
-  // 正确口径 **29.2%**。所以底栏会出现「9536%/1.0M」这种一眼就知道坏了的数字。
-  //
-  // ## 口径与 pi 官方一致
-  //
-  // `agent-session.js` 的 `getContextUsage()`：取**最后一条有效**助手消息的
-  // `usage.totalTokens`（`compaction.js` 的 `calculateContextTokens`：
-  // `totalTokens || input+output+cacheRead+cacheWrite`），即“上一次请求的总 token”。
-  //
-  // 这里**不自己上色**，而是把告警信息一起返回（`warning`）：整行底箱会被包进 dim，
-  // 而 dim 里再嵌一个 `\x1b[0m` 结尾的颜色段会把 dim 提前关掉（见 dimLine 的注释）。
-  // 自动压缩开着才画 `(auto)`；关着 / 不知道（null）都不画。
+  // 这里**不自己上色**而是把告警信息一起返回：整行底箱会被包进 dim，而 dim 里再嵌一个 `\x1b[0m`
+  // 结尾的颜色段会把 dim 提前关掉（见 dimLine）。
   const autoSuffix = autoCompact === true ? ' (auto)' : '';
   const contextWindow = state.model.contextWindow;
   if (contextWindow > 0) {
@@ -866,23 +855,16 @@ export function twoColumn(left: string, right: string, width: number): string {
 /**
  * 底栏**第一行**：cwd 在左，扩展的状态段贴在右（`ctx.ui.setStatus`）。
  *
- * ## 为什么状态段在这儿，而不是像 pi 那样另起一行
+ * 状态段放这儿而不像 pi 那样另起一行：本项目底栏是**固定两行**的（`FOOTER_ROWS` 同时被
+ * `composer-overlay.ts` 拿去做面板行预算，两边必须相等），多一行会挤掉一格对话区，而第一行右半边
+ * 本来就空着。
  *
- * pi 的底栏行数随状态段变化（`footer.js` 里 `lines.push(statusLine)`）；本项目的
- * 底栏是**固定两行**的（`FOOTER_ROWS` 同时被 `composer-overlay.ts` 拿去做面板行预算，
- * 两边必须相等）—— 多一行会把对话区挤掉一格。而第一行右半边本来就空着。
+ * **dim 只包左段**：状态段是扩展自己上的色，整体包 dim 的话它收尾的 `\x1b[0m` 会把 dim 提前关掉，
+ * 右段之后到行尾会突然变亮。
  *
- * ## dim 只包左段
+ * 两个分支都要把行补齐到全宽：pi-tui 是增量重绘，行变短时旧字的尾巴不会被擦掉。
  *
- * 状态段是扩展**自己上的色**（`pi-background-tasks` 是 `lightBlue(label)`，收尾 `\x1b[0m`）。
- * 整体包一层 dim 的话，那个 `\x1b[0m` 会把 dim 提前关掉 —— 于是右段之后到行尾的内容
- * 会突然变亮（见 `dimLine` 的注释，同一个道理）。
- *
- * ## 两个分支都要把行补齐到全宽
- *
- * pi-tui 是增量重绘：行变短时旧字的尾巴不会被擦掉，下一帧就叠着出现。
- *
- * @param cwdText   左边那段（`cwdLine()` 的结果，不带颜色）
+ * @param cwdText   左边那段（不带颜色）
  * @param statusText 右边那段（已排序、已单行化，**可能带颜色**；空串 = 没有状态段）
  */
 export function extensionFooterRow(cwdText: string, statusText: string, width: number): string {
@@ -979,25 +961,16 @@ export const SLASH_COMMANDS: ElaSlashCommand[] = [
 ];
 
 /**
- * 回车时一条 `/xxx` 该走哪条路 —— 与 pi 的分工一致。
+ * 回车时一条 `/xxx` 该走哪条路 —— 与 pi 的分工一致：**skill**（`/skill:name` 展开成 `<skill>` 块）
+ * → **真命令**（内置与扩展命令）→ **prompt 模板**（展开成正文）→ 剩下的**原样当用户输入发送**。
  *
- * 顺序：
+ * 与 pi 的唯一差别是第 1/2 步的先后（pi 把扩展命令放最前）：`skill:` 是保留前缀，只有「扩展恰好
+ * 叫 `skill:xxx`」这种病态命名才分得出来。
  *
- * 1. **skill**（`/skill:name` 展开成 `<skill>` 块）；
- * 2. **真命令**（内置 `SLASH_COMMANDS` 与扩展命令，由调用方传 `isCommand` 判断）；
- * 3. **prompt 模板**（`/名字` 展开成正文）；
- * 4. 剩下的**原样当用户输入发送**。
+ * 未命中是 `message` 而不是错误：`/etc/hosts`、`/文件名` 这类输入很自然，**不能报错也不能吞掉**
+ * —— pi 对认不出的 `/xxx` 就是原样发给模型。这一层只负责分类。
  *
- * 与 pi 的唯一细微差别是第 1/2 步的先后：pi 把扩展命令放在最前面，这里保留原有的
- * 「`/skill:` 先认」次序。因为 `skill:` 是保留前缀，只有「扩展恰好叫 `skill:xxx`」
- * 这种病态命名才分得出来；普通输入上两条顺序结果相同。
- *
- * ## 为什么未命中是 `message` 而不是错误
- *
- * `/etc/hosts`、`/文件名` 这类输入在输入框里很自然，**不能报错也不能吞掉** ——
- * pi 对认不出的 `/xxx` 就是原样发给模型。这一层只负责分类，不负责报错。
- *
- * 写成导出的纯函数是为了能测：`onSubmit` 是闭在 `runTui()` 里的，单测够不到。
+ * 导出成纯函数是为了能测：`onSubmit` 闭在 `runTui()` 里，单测够不到。
  */
 export type SlashInputRoute =
   | { kind: 'skill'; text: string }
@@ -1111,17 +1084,14 @@ export interface TuiOptions {
    */
   newSession?: (() => { id: string }) | undefined;
   /**
-   * 恢复一个历史会话（换 id → 之后的消息追加进**那个**文件 + 记录器游标接着算）。
+   * 恢复一个历史会话：把它的消息灌回 state（零 token）。
    *
-   * ## 为什么必须由内核出手
+   * 优先走内核那条（`options.restoreSession`）：它换会话 id + 对齐记录器游标，不会把恢复出来的历史
+   * 再写一遍盘。没接就退化成一条 `conversation.restored`，但**不换 id**、没有游标概念 —— 恢复出来的
+   * 消息会被当前记录器当成新消息写盘，要说出来，不然用户以为是历史坏了。
    *
-   * 界面自己 dispatch 是**做不到**的：`session.restored` 只是往 `messages` 里追加，而会话
-   * 记录器是 store 的订阅器，它看到「多了一条新消息」就写盘 —— 于是整段历史被当成新产生的
-   * 消息，全量抄进**当前**会话的文件（真发生过：390 行会话原样复制成另一个 390 行的文件）。
-   * 要挡住它必须做两件只有内核知道的事：把 `sessionId` 换掉、并用 `resumeFrom` 告诉记录器
-   * 「前面那 N 条已经在文件里了」。内核的 `restoreSession(file)` 已经把两件事一起做了。
-   *
-   * 不传就退化成界面版的灌消息（状态对，但会复制一份，且之后的消息写错文件）。
+   * 必须**一条** action：每次 dispatch 都重渲染整段对话，逐条灌是 O(N²)（390 条实测 62 秒）。
+   * 轨迹不跟着恢复（它是那一轮的产物，历史轨迹在 `traces/<id>.jsonl`）。
    */
   restoreSession?: ((file: string) => Promise<{ id: string; restored: number }>) | undefined;
   /**
@@ -1155,26 +1125,14 @@ export interface TuiOptions {
 }
 
 /**
- * 当前 git 分支，读不到就返回 undefined（不在仓库里 / 没装 git 都会这样）。
+ * 当前 git 分支，读不到就返回 undefined（不在仓库里 / 没装 git）。
  *
- * 为什么每次 refresh 都重读而不在启动时算一次：分支会变（用户切了分支、或我们自己在
- * 会话里执行了 git 命令）。每帧读一次 `.git/HEAD` 便宜到可以忽略，而缓存了就意味着
- * “底栏在说谎”。
+ * 每次 refresh 都重读而不在启动时算一次：分支会变（用户切了分支、或我们在会话里跑了 git 命令），
+ * 缓存了就意味着「底栏在说谎」；读一次 `.git/HEAD` 便宜到可以忽略。
  *
- * ## `.git` 有两种形状
- *
- * - **目录** —— 普通 checkout，HEAD 就在 `<cwd>/.git/HEAD`。
- * - **文件** —— linked worktree 与 submodule。里面是一行 `gitdir: <真正的 git 目录>`：
- *
- *     gitdir: C:/repo/.git/worktrees/rpiv-compat
- *
- *   HEAD 在**那个**目录里。直接把 `.git` 当目录读会抛 ENOTDIR，于是 catch 掉、
- *   返回 undefined —— 症状是底栏只剩路径、括号里的分支名**静默消失**。
- *   （实测：在 worktree 里跑 `pnpm test` 会因此挂掉两条底栏断言，而它们看起来像
- *   “界面坏了”，与真因隔了三层。）
- *
- * 读文件时必须剥掉换行再拼路径，否则拼出来的是 `...\rpiv-compat\rHEAD`。
- * git 的 `gitdir:` 指针用正斜杠（Windows 上也是），`path.resolve` 能接。
+ * `.git` 有两种形状：**目录**（HEAD 在 `<cwd>/.git/HEAD`）与**文件**（linked worktree 与 submodule，
+ * 内容是 `gitdir: <真正的 git 目录>`，HEAD 在那个目录里）。把 `.git` 当目录读会抛 ENOTDIR，症状是
+ * 括号里的分支名静默消失。读文件时必须剥掉换行再拼路径。`gitdir:` 用正斜杠，`path.resolve` 能接。
  */
 export function gitBranch(cwd: string): string | undefined {
   const gitPath = path.join(cwd, '.git');
@@ -1254,30 +1212,16 @@ export function scopeFrom(
 }
 
 /**
- * 视口往上翻之后那条「回到最新」的提示 —— pi 的 `scrollToEndIndicator` 画的内容。
+ * 视口往上翻之后那条「回到最新」的提示（pi 的 `scrollToEndIndicator`）。
  *
- * ## 为什么需要它
+ * 对话区的 ScrollView 是 `follow: 'end'`，但用户往上翻之后 `follow` 让位、视口停在历史里，这时新
+ * 消息还在下面长而屏幕上没有任何东西说「下面还有」—— 症状不是报错，而是「等流式输出时以为卡住了」。
  *
- * 对话区（以及轨迹页）的 ScrollView 是 `follow: 'end'`：新内容往下追加、视口自动贴底。
- * 但用户往上翻之后 `follow` 让位，**视口就停在历史里了** —— 这时新消息还在下面继续
- * 长出来，屏幕上却没有任何东西说「下面还有」。pi 的做法是在视口最后一行居中压一条
- * 可点的提示条（点它回到底部的鼠标处理在 pi-tui 里，这里只管文案）。
+ * 文案与 pi 逐字同形（`↓ Jump to latest message · Ctrl+End`），键名**走键位表**
+ * （`keyLabel('tui.altScreen.bottom')`）：用户改了键位，这条提示跟着变。
  *
- * 没有它时的症状不是「报错」，而是「等流式输出时以为卡住了」—— 而 `Ctrl+End` 这个键
- * 本身也就只有这条提示会告诉用户。
- *
- * ## 文案与 pi 逐字同形
- *
- * `↓ Jump to latest message · Ctrl+End` —— 与 pi `createInteractiveTui()` 里那一句
- * 完全相同。改成本项目自己的中文只会让同一个动作在两个应用里说得不一样
- * （命令反馈卡的取舍相同，见 [surfaces](../../docs/architecture/surfaces.md)）。
- *
- * 键名**走键位表**（`keyLabel('tui.altScreen.bottom')`）而不是手写 `Ctrl+End`：用户在
- * `~/.pi/agent/keybindings.json` 里把它改成别的键之后，这条提示跟着变 —— pi 走的是同一套
- * （`keyDisplayText('tui.altScreen.bottom')`）。
- *
- * 首尾各留一个空格、配色用主题的 `selectedBg` + `text`：这条是被 `compositeTuiLine`
- * **压进**视口最后一行已有内容的，不留空格会与那一行原来的字连成一片（pi 也一样）。
+ * 首尾各留一个空格、配色用 `selectedBg` + `text`：它是被 `compositeTuiLine` **压进**视口最后一行
+ * 已有内容的，不留空格会与那一行原来的字连成一片。
  */
 export function jumpToLatestHint(theme: Theme): string {
   // `keyLabel` 解析不出键时返回空串（动作 id 写错=编程错误，见 keybindings.ts）—— 那时
@@ -1360,25 +1304,14 @@ export async function runTui(options: TuiOptions): Promise<number> {
     return sessionName;
   };
   /**
-   * 退出前打印一行「怎么恢复这次会话」。
+   * 退出前打印一行「怎么恢复这次会话」。形状与 pi 一样（`To resume this session: <命令>`），命令是
+   * 本项目的 `ela --session <id>`；判断与文案都在 config-home 的 `resumeCommand()`。
    *
-   * 形状与 pi 的退出提示一样（`To resume this session: <命令>`，前缀暗色），
-   * 只是命令是本项目的 `ela --session <id>`。
-   * 判断与文案都在 config-home 的 `resumeCommand()`（那儿才有「真落过盘没」的事实）。
+   * **必须在 `tui.stop()` 之后调**：界面跑在备用屏（`\x1b[?1049h`）上，`tui.stop()` 才回到主屏，
+   * 而备用屏那整块内容退出时被终端丢掉 —— 在那之前写的行会跟着一起没（症状正是「退出时不显示
+   * resume 提示」）。所以调用方**只能**是 `tui.stop(); printResumeOnExit();`。
    *
-   * ## 必须在 `tui.stop()` **之后**调
-   *
-   * 界面跑在**备用屏**（`\x1b[?1049h`）上，`tui.stop()` 才发 `\x1b[?1049l` 回到主屏。
-   * 备用屏那一整块内容在退出时被终端**丢掉**，所以在这之前 `process.stdout.write`
-   * 的那行会跟着一起没 —— 字节确实发出去了，用户却一个字也看不到，只看到
-   * `tui.stop()` 之后重画上来的那一帧界面。症状正是「退出时不显示 resume 提示」。
-   *
-   * pi 的顺序就是这个（`shutdown()`：先 `this.stop()`，再 `formatResumeCommand` 后写）：
-   * 先离开备用屏，行才落在主屏上、停在那儿。所以调用方**只能**是
-   * `tui.stop(); printResumeOnExit();` 这个次序 —— 别再把它挪到 `tui.stop()` 前面。
-   *
-   * 用 `process.stdout.write` 而不是界面里的 notify：这一刻界面已经停了，
-   * 往终端写一行才是用户看得到的地方 —— 也是 pi 的做法。
+   * 用 `process.stdout.write` 而不是界面里的 notify：这一刻界面已经停了。
    */
   const printResumeOnExit = (): void => {
     const command = resumeCommand(sessionId?.(), cwd);
@@ -1445,19 +1378,6 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 同一件事（「我在哪页 / 这轮跑到哪了」），纵向白占一行，而对话区最缺高度。
    */
   const tabs = new Text('', 0, 0);
-/**
- * 对话区：**按消息分块**的增量渲染。
- *
- * 不能整段一个 `Text`：每次状态变化都重渲整段 + 重新折行，而流式 token 每来一个就触发一次
- * `refresh()` —— 实测约 1.2 秒一帧（官方 `MIN_RENDER_INTERVAL_MS` 只有 16ms），而且是**同步**的，
- * 直接占住事件循环连输入都收不到，会话越长越卡。改成每条消息一个组件（pi 的 `interactive-mode.js`
- * 就是这么做的，流式那条原地 `updateContent`），没变的块不重算：实测 1208 条消息的会话从
- * 291.9ms/帧降到 0.30ms/帧。
- *
- * 缓存键是「宽度 + 折叠 + 思考可见性」而不是只有消息本身：同一个 `message` 在终端宽度变了、
- * Ctrl+O 切了 `expanded`、Ctrl+T 切了 `hideThinking` 之后渲染结果不同。
- * 用 `WeakMap` 而不是 `Map`：`/new` 清空会话后旧消息能被回收。
- */
   const transcript = new TranscriptChunks();
   /**
    * 轨迹区：**按节点分块**的增量渲染 + 可滚动。
@@ -1526,30 +1446,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
   /**
    * 会话区与输入区之间的那一行空隙 —— pi 的 `Spacer(1)`。
    *
-   * ## 为什么它不是 composer 自带的
+   * pi 里这行空隙在**编辑器上面那个 widget 容器**里，没有 widget 时容器里就只有一个 `Spacer(1)`，
+   * 于是「输入框上面永远空一行」由容器保证。本项目的扩展 widget 直接摊在 `bottom` 这个 VStack 里，
+   * 没有那个容器，所以这里显式补回来（队列卡非空时它自己还有前导空行，于是「卡与对话区一行、
+   * 卡与输入框一行」，与 pi 逐行一样）。
    *
-   * pi 里这行空隙**不在编辑器身上**，而在它上面那个 widget 容器里：
-   * `renderWidgetContainer(widgetContainerAbove, widgets, spacerWhenEmpty=true, leadingSpacer=true)`
-   * —— 没有 widget 时那个容器里**就只有一个 `Spacer(1)`**，有 widget 时 Spacer 排在它们前面。
-   * 于是「输入框上面永远空一行」是**容器**保证的，跟输入框里放了什么无关。
-   *
-   * ## 本项目为什么丢过
-   *
-   * 本项目的扩展 widget 不是装在一个容器里，而是直接摊在 `bottom` 这个 VStack 里
-   * （见 `applyLayout`），于是那个「容器自带的 Spacer」没有对应的东西。
-   * 早先这行空隙是**借**来的：队列卡 `renderQueuePanel` 的第一行总是一个空行，
-   * 空队列时那行也还在（布局里给的是 `minSize: 1`）。队列卡改成「空队列零行」
-   * （`minSize: 0`，为了不常年留一条看着像坏了的空行）之后，那行借来的空隙就一起没了 ——
-   * 症状是**会话流最后一行贴着 composer 的上框线**。
-   *
-   * 所以这里把它显式补回来：与 pi 同形 —— 队列卡非空时卡自己还有前导空行，
-   * 于是「卡与对话区一行、卡与输入框一行」，与 pi 逐行一样（那边是 pendingMessages
-   * 自己的 `Spacer(1)` + widget 容器的 `Spacer(1)`）。
-   *
-   * ## 为什么钉死成一行
-   *
-   * `basis: 1, grow: 0, minSize: 1` —— 缺口就是**恰好一行**：不给 grow（不然窗口高时
-   * 会把空隙撑开）、不给它被 shrink 掉的机会（不然窗口矮时输入框又贴上去，等于没修）。
+   * `basis: 1, grow: 0, minSize: 1`：缺口恰好一行 —— 给 grow 会在高窗口时撑开，能被 shrink 就
+   * 会在矮窗口时让输入框又贴上去。
    */
   const dockGap = new Spacer(1);
 
@@ -1571,29 +1474,18 @@ export async function runTui(options: TuiOptions): Promise<number> {
    */
   let currentScope: ModelScope = scopeFrom(readScopedModels(cwd), options.runtime);
 
-  // 官方那个会把工作状态画进**上框线**的编辑器（`embedWorkingStatus: true`）——
-  // 与 pi 同一个类、同一个形状。
+  // 官方那个把工作状态画进**上框线**的编辑器（`embedWorkingStatus: true`），与 pi 同一个类。
   //
-  // ## 配色直接用 pi 那份（`getEditorTheme()`），不再手写
+  // 配色直接用 pi 的 `getEditorTheme()`：手写一份会让横线颜色分家（pi 用
+  // `theme.getThinkingBorderColor(level)`，而 `dim` 是文本属性不是颜色 token），补全列表的选中色也会
+  // 分家（`accent` vs `cyan`）。它内部读 pi 主题，**必须**在 `setupTheme()` 之后调。
   //
-  // 手写一份会有两个问题：
+  // 形状交给 typecheck，写错时**不要**用 `as unknown as EditorTheme` 压住：那个 cast 会让
+  // `this.theme.selectedText is not a function` 在渲染时才爆，而补全列表渲染失败只表现为「打 `/`
+  // 什么都没弹」。
   //
-  // 1. **横线颜色会分家**。pi 的 composer 横线是 `theme.getThinkingBorderColor(level)`
-  //    （默认级别 'off' → 主题 token `thinkingOff`），而不是凭感觉的 `dim`（那是**文本
-  //    属性** `\x1b[2m`，不是颜色 token）。手写那份在浅色终端上与 pi 不一致。
-  // 2. **补全列表的选中文也会分家**：pi 用 `accent`，手写的用 `cyan`。
-  //
-  // 它内部读的是 pi 主题，所以**必须**在 `setupTheme()` 之后调 —— 不能在模块顶层求值。
-  // 形状（`borderColor` 是函数、`selectList` 是一整块 `SelectListTheme`）交给 typecheck；
-  // 写错时不要用 `as unknown as EditorTheme` 压住 —— 那个 cast 会让
-  // `this.theme.selectedText is not a function` 在**渲染时**才爆，而补全列表渲染失败
-  // 在界面上只表现为「打 `/` 什么都没弹」，极难归因。
-  //
-  // ## 为什么 keybindings 也要传
-  //
-  // `CustomEditor` 的构造签名要它（它内部会认 `app.interrupt` / `app.exit` 等）。
-  // 传上面那份（= pi 全套 + 本项目自己的动作），与面板 / `keyLabel()` 用的是**同一份**
-  // —— 不然用户改过的键在这里不生效。
+  // keybindings 也要传（`CustomEditor` 的签名要它），且必须与面板 / `keyLabel()` 用**同一份**，
+  // 不然用户改过的键在这里不生效。
   const editor = new CustomEditor(tui, getEditorTheme(), keybindings, {
     // 把「思考中 / 压缩中 / 重试中」画在**上框线**里（而不是单独占一行）。
     // 这正是 pi 的行为：状态与 composer 共用一个边框，不多吃一行。
@@ -1727,25 +1619,16 @@ export async function runTui(options: TuiOptions): Promise<number> {
       .join(' ');
 
   /**
-   * 扩展的**输入区槽位**（pi 的 `editorContainer` 语义）：非空时，composer 那一格
-   * 显示的是它，而不是 `editor`。
+   * 扩展的**输入区槽位**（pi 的 `editorContainer` 语义）：非空时 composer 那一格显示它而不显示
+   * `editor`。
    *
-   * ## 为什么不复用 overlay
+   * 不复用 overlay：本项目自己的面板是用 overlay **复刻** composer 矩形的，而扩展的 inline
+   * `custom()` 要的不只是矩形 —— 它按 `tui.terminal.rows` 自己算行预算、自己决定折叠、把对话区留在
+   * 上面，那只能由布局**真的把那一格换掉**才能得到。
    *
-   * 本项目自己的那几个面板（`/model`、`/resume`）是用 overlay **复刻** composer
-   * 的矩形（见 `composer-overlay.ts`）—— 那是「我们没有 pi 的 `editorContainer`」
-   * 时代的写法。而扩展的 inline `custom()` 要的**不只是**一块矩形：它自己按
-   * `tui.terminal.rows` 算行预算、自己决定折叠，把对话区留在上面 —— 那只能由布局
-   * **真的把那一格换掉**才能得到（overlay 是盖上去的，高度也由 overlay 参数定）。
-   *
-   * ## 只存一个（与 pi 同）
-   *
-   * pi 的 `editorContainer` 只有一格：第二个 inline `custom()` 会 `clear()` 掉第一个。
-   * 界面这边同样「新的赢」，但顺手把旧的 `dispose()` 掉 —— pi 不 dispose，于是旧组件
-   * 里的定时器/监听器会一直活着。
-   *
-   * 并发不会真的发生：`ask_user_question` 自己是拿模块级变量守着的
-   * （`presentation.ts` 的 `claimInlineSlot()`，抢不到就降级成 overlay）。
+   * 只存一个（与 pi 同）：第二个 inline `custom()` 会顶掉第一个，但顺手把旧的 `dispose()` 掉（pi 不
+   * dispose，旧组件里的定时器/监听器会一直活着）。并发不会真的发生：`ask_user_question` 自己用
+   * `claimInlineSlot()` 守着，抢不到就降级成 overlay。
    */
   let editorSlotComponent: (Component & { dispose?: () => void }) | undefined;
   /**
@@ -1965,26 +1848,17 @@ export async function runTui(options: TuiOptions): Promise<number> {
     /**
      * **有弹窗 / 输入区被扩展占着时，本监听器整个让路。**
      *
-     * pi-tui 的 `inputListeners` 在**聚焦组件之前**跑（`tui.js` 的 `handleInput`）：
-     * 没被 `consume` 的按键继续往聚焦组件走，而弹窗聚焦的正是它自己。所以这里
-     * `return undefined`（不消费）就是「我不处理，交给弹窗」。
+     * pi-tui 的 `inputListeners` 在**聚焦组件之前**跑，没被 `consume` 的按键继续往聚焦组件走 ——
+     * 所以 `return undefined` 就是「我不处理，交给弹窗」。
      *
-     * ## 为什么必须要
+     * 必须要：这个监听器无条件处理几个全局开关，其中中断键（默认 `ctrl+c`）在空闲时
+     * `process.exit(0)`，而在弹窗里 `Ctrl+C` 的语义是**取消面板** —— 「打开 /resume 然后想退出」
+     * 会直接杀掉整个界面（没有堆栈、没有日志，用户只觉得「崩了」）。其余几个（切轨迹页 / 展开工具 /
+     * 换队列模式）会让弹窗开着的**同时**背后的主界面也变，看着像面板没盖住背景。
      *
-     * 这个监听器无条件处理那几个全局开关，其中一个是致命的：中断键（默认 `ctrl+c`）
-     * 在空闲时 `process.exit(0)`。弹窗里 `Ctrl+C` 的语义是**取消面板**，于是
-     * 「打开 /resume 然后想退出」会直接杀掉整个界面 —— 而且没有堆栈、没有日志，
-     * 用户只会觉得「崩了」。
-     * 另外几个（切轨迹页 / 展开工具 / 换队列模式）会让弹窗
-     * 开着的**同时**背后的主界面也变了，看着像面板没盖住背景。
-     *
-     * ## 两种「有人占着键盘」都要判
-     *
-     * 本项目的面板在 overlay 栈上（`hasOverlay()` 一判就有），但**扩展的对话框不一定**：
-     * `ctx.ui.custom()` 默认走**输入区槽位**（`mountEditorSlot`）而不上 overlay 栈，
-     * `ctx.ui.select/confirm/input` 也在同一格。只判 `hasOverlay()` 漏掉的正是这一批
-     * （`ask_user_question` 就是这一批里最常用的一个 —— 症状见 `shouldYieldInput()`）。
-     * 判据写成了一个纯函数，就是为了这两种形态各自有测试能钉住。
+     * 两种形态都要判：本项目的面板在 overlay 栈上（`hasOverlay()`），而 `ctx.ui.custom()` 默认走
+     * **输入区槽位**、`ctx.ui.select/confirm/input` 也在同一格 —— 只判 `hasOverlay()` 漏掉的正是
+     * 这一批（`ask_user_question` 最常用，症状见 `shouldYieldInput()`）。
      */
     if (shouldYieldInput(tui, editorSlotComponent !== undefined)) return undefined;
     /**
@@ -3102,28 +2976,19 @@ export async function runTui(options: TuiOptions): Promise<number> {
 
   const send = (text: string): void => {
     // 工作状态（上框线那个「思考中…」）不在这里手动开 —— `refresh()` 从 state 现推。
-    // `user.message` 会把 `phase` 拉到 `thinking`，下面那行 `dispatch` 之后紧接着的
-    // `refresh()` 就把状态画上了。
     //
-    // `before_agent_start` 在**发出去之前**调（与 pi 同序）：扩展看到的是「用户刚说了
-    // 什么、即将开跑」这个时刻。
+    // `before_agent_start` 在**发出去之前**调（与 pi 同序）：扩展看到的是「用户刚说了什么、即将开跑」
+    // 这个时刻。
     //
-    // **必须 await**：扩展现在可以改 prompt 段（写回 `systemPromptOptions.sections`，
-    // 我们把它 diff 成一条 `prompt.segment.added`）—— 那条补丁消息得在
-    // `user.message` **之前**就位，否则本轮的请求已经把 `state.messages` 读走了。
-    // 改回 `void` 的话症状很轻：首轮拿不到扩展的段，而看不出哪里错。
+    // **必须 await**：扩展可以改 prompt 段（写回 `systemPromptOptions.sections`，我们把它 diff 成一条
+    // `prompt.segment.added`），那条补丁得在 `user.message` **之前**就位，否则本轮请求已经把
+    // `state.messages` 读走了。改回 `void` 的症状很轻：首轮拿不到扩展的段，看不出哪里错。
     //
-    // 期间用一个门钉住重复发送：原来靠「`dispatch` 同步把 `phase` 变成 thinking」防连按，
-    // 现在 `await` 会把这个窗口打开。
+    // 期间用 `sending` 门钉住重复发送：`await` 打开了「连按两下」的窗口。
     //
-    // ## 还要等**扩展装载完成**（`deferExtensions`，见 `TuiOptions.ready`）
-    //
-    // 装载完成前 state 里的工具集与 system prompt 还是「没有扩展」的形状，先发出去的
-    // 那条会把一份**缺工具集**的 head 写进会话与轨迹 —— head 是不可改的历史
-    // （见 `prompt-head.ts`），后面补不回来。
-    //
-    // 是「等」而不是「拒」：用户的输入一句都不丢，只是晚一两秒出去（并说一声为什么）。
-    // 这个 await 与那个 `sending` 门是同一件事的两半：门挡住连按，这里挡住「还没装完」。
+    // 还要等**扩展装载完成**（`deferExtensions`）：装载前 state 里的工具集与 prompt 还是「没有扩展」
+    // 的形状，先发出去的那条会把一份**缺工具集**的 head 写进会话与轨迹，而 head 是不可改的历史。
+    // 是「等」而不是「拒」—— 用户的输入一句都不丢，只是晚一两秒出去（并说一声为什么）。
     if (sending) return;
     sending = true;
     if (!extensionsReady) {
@@ -3611,24 +3476,15 @@ function usableWidth(width: number): number {
 /**
  * 工具渲染器表。**按官方工具名索引**。
  *
- * ## 为什么用 `create*ToolDefinition()` 而不是 `createAllToolRenderers()`
+ * 用 `create*ToolDefinition()` 而不是 `createAllToolRenderers()`：后者返回的表里 `edit` 的
+ * `renderShell` 是 `undefined`，而定义上是 `"self"`。漏掉的后果很隐蔽 —— `edit` 块底色被套两层
+ * （`48;2;37;65;49` 出现两次，浅色/高对比主题下边界会错位），而且 `edit` 会走错代码路径
+ * （`selfRenderContainer` vs `contentBox`），将来官方改形状时我们跟错还不报错。
  *
- * 后者返回的表里 `edit` 的 `renderShell` 是 `undefined`，而工具**定义**上是 `"self"`。
- * `ToolExecutionComponent` 靠这个字段决定外壳：非 `"self"` 时它用自己的 `Box` 给整块
- * 铺底色，而 `edit` 的渲染器**自己**已经铺了一层（`getEditHeaderBg`）。
+ * 标题就是英文工具名（官方 `label` 本来就是 `edit`/`read`）：另起一套中文 label 是**二次翻译**，
+ * 多一层维护还让界面与 pi 对不上。
  *
- * 漏掉的后果很隐蔽：edit 块**底色被套了两层**（`48;2;37;65;49` 出现两次），
- * 在大多数终端上看不出来，但在浅色/高对比主题下边界会错位；而 `renderShell` 错了
- * 还会让 `edit` 走错代码路径（`selfRenderContainer` vs `contentBox`），将来官方改形状时
- * 我们跟错还不报错。
- *
- * 顺带一说：为什么标题是英文工具名 —— 官方 `label` 字段本身就是 `"edit"`/`"read"`
- * （见 `createEditToolDefinition` 的 `label: "edit"`），pi 界面显示的就是它。
- * 我们另起了一套中文 label（`读文件`/`执行命令`），那是**二次翻译**：既多一层维护，
- * 也让界面与 pi 对不上。现在直接显示工具名。
- *
- * 表里没有的工具（扩展工具，如 `ask_user_question`）交给 `toolDefinitionFor()` 兜底 ——
- * 那里解释了「为什么不能传 `undefined`」（那会让 Ctrl+O 那个折叠开关失效）。
+ * 表里没有的工具（扩展工具）交给 `toolDefinitionFor()` 兜底。
  */
 const TOOL_RENDERERS: Record<string, unknown> = Object.fromEntries(
   [
@@ -3642,29 +3498,13 @@ const TOOL_RENDERERS: Record<string, unknown> = Object.fromEntries(
 /**
  * 一个工具的**渲染定义** —— 表里有就用它，没有就给一个只有 `label` 的兜底。
  *
- * ## 为什么不能对扩展工具传 `undefined`
+ * **不能**对扩展工具传 `undefined`：`ToolExecutionComponent` 会走它自己的
+ * `formatToolExecution()`（工具名 + 参数 + **整段**输出），那条路**完全不看 `expanded`** ——
+ * 于是 Ctrl+O 折叠了，扩展工具的块还是全铺开。pi 那边扩展工具有定义（只是不带 `renderCall` /
+ * `renderResult`），组件于是走 fallback，而 fallback 认 `expanded`。
  *
- * `ToolExecutionComponent` 拿 `undefined` 时走的是它自己那条 `formatToolExecution()`：
- * 工具名 + `JSON.stringify(args, null, 2)` + **整段**输出（见 `tool-execution.js`）。
- * 而那条路**完全不看 `expanded`** —— 于是 Ctrl+O 折叠了，扩展工具的块还是把参数与结果
- * 全铺开，内置工具却跟着折叠。症状就是「折叠开关对 `ask_user_question` 不生效」。
- *
- * pi 那边扩展工具**是有定义的**：`session.getToolDefinition(name)` 返回注册时那份
- * `{ label, description, parameters }`（扩展不提供 `renderCall` / `renderResult`），
- * 于是组件走 `createCallFallback()` / `createResultFallback()` —— 那两个都认 `expanded`：
- *
- * - 折叠：参数挤在标题那一行（`key=value`，超 100 字截断）；结果只留前 10 行，
- *   多的接一行 `... (N more lines, Ctrl+O to expand)`；
- * - 展开：每个参数一行 `key: value`（字符串原样、续行缩进）；结果给全文。
- *
- * 本项目只维护内置那四个的渲染器表，扩展工具不在里面 —— 所以这里给它们一个
- * **没有 `renderCall` / `renderResult` 的定义**，复刻 pi 的同一条路。
- *
- * ## 为什么是「有定义」而不是「有渲染器」
- *
- * 分岔点是 `hasRendererDefinition()`（`toolDefinition !== undefined`），不是渲染器是否存在。
- * 所以 `{ label: name }` 就够 —— `label` 本身在那个分支里不被读（fallback 用工具名），
- * 写上是为了让这个对象是诚实的（它确实是个工具定义，只是不带渲染器）。
+ * 分岔点是有没有**定义**（`hasRendererDefinition()`）而不是有没有渲染器，所以 `{ label: name }`
+ * 就够；写上 `label` 是为了让这个对象诚实（它确实是个工具定义）。
  */
 function toolDefinitionFor(name: string): unknown {
   return TOOL_RENDERERS[name] ?? { label: name };
@@ -3922,25 +3762,12 @@ function toolCallArgs(state: AgentState, toolCallId: string): Record<string, unk
 /**
  * 用户消息**上面**那一行空隙（非首条时才有）。
  *
- * ## 为什么必须自己插
+ * 必须自己插：`UserMessageComponent` 的 `paddingY=1` 产生的那两行是**带蓝底**的，蓝块往上多出一行
+ * 同色边，看起来就是「工具调用之间都有间隔，用户的蓝块却直接贴上来」（助手块/工具块的空行无底色，
+ * 所以那边本来就是真空隙）。
  *
- * `UserMessageComponent` 的 `paddingY=1` 确实会产生两行空白，但它们是**带蓝底**的
- * （pi-tui 的 `Markdown.render` 里 `emptyLines` 走 `applyBackgroundToLine`）——
- * 蓝块往上多出一行同色边，而上面那行本身是满宽的，于是蓝块与上一条内容之间
- * 看不到任何空隙。实测就是「工具调用之间都有间隔，用户的蓝块却直接贴上来」。
- *
- * 助手块 / 工具块的空行是**无底色**的，所以那些地方本来就是真空隙 —— 不一致就在这里。
- *
- * ## 与 pi 一致
- *
- * `interactive-mode.js` 的 `addMessageToChat`：
- *
- *     case "user":
- *         if (this.chatContainer.children.length > 0) this.chatContainer.addChild(new Spacer(1));
- *         this.chatContainer.addChild(new UserMessageComponent(...));
- *
- * 即非首条才插。我们没有 `children.length` 可看，用「已经有内容画上去了」（`at > 0`）
- * 等价 —— 首条消息前面不需要空隙。
+ * 与 pi 的 `addMessageToChat` 一致：`case "user"` 时 `children.length > 0` 才插 `Spacer(1)`。
+ * 这里用「已经有内容画上去了」（`at > 0`）等价。
  *
  * @param at 这条消息之前已经画了多少行（用来判断是不是首条）
  */
@@ -3951,23 +3778,12 @@ function userSpacer(message: { role: string }, at: number): string[] {
 /**
  * 渲染**正在跑**的工具（`toolResult` 消息还没有，但工具已经开跑了）。
  *
- * ## 为什么这里有东西可画
+ * 一个长命令在跑的时候 `state.messages` 里还没有 `toolResult`，但 `state.executing` 有那条调用、
+ * `state.toolProgress` 有边跑边送出来的输出。只看 `messages` 的话工具一开跑就什么都不显示 ——
+ * 几十秒的空白与「卡死了」在屏幕上没有区别。
  *
- * 一个长命令（`npm install`、带 sleep 的脚本、编译）在跑的时候：
- *   - `state.messages` 里**还没有** `toolResult`（那要等它跑完）；
- *   - `state.executing` 里有那条调用，`state.toolProgress` 里有官方工具边跑边送出来的输出。
- *
- * 早先只看 `messages`，于是工具一开跑就**什么都不显示** —— 用户看到光标在那儿闪，
- * 而工具块要等命令结束才突然出现。几十秒的空白与「卡死了」在屏幕上没有区别。
- *
- * ## `isPartial: true` 让官方渲染器接管「进行中」的样子
- *
- * 不自己画半成品：pi 的 bash 渲染器拿到 `isPartial` 就会
- *   - 把底色换成 `toolPendingBg`（而不是成功/失败色）；
- *   - 把底部那行从 `Took` 换成 `Elapsed`，并起一个 1s 定时器让秒数跳；
- *   - 接受**不完整**的输出（末尾不会被当成「截断」）。
- *
- * 这些细节手写要对齐一堆，所以直接用它的（见 `renderTool` 的同类注释）。
+ * `isPartial: true` 让官方渲染器接管「进行中」的样子：底色换成 `toolPendingBg`、底部那行从
+ * `Took` 换成 `Elapsed` 并起定时器跳秒、接受**不完整**的输出。这些细节手写要对齐一堆。
  *
  * @returns 行；工具没在跑（还没有任何输出）时返回空数组。
  */
@@ -4006,30 +3822,15 @@ function renderRunningTool(
 /**
  * 正在跑的工具的**长生命周期**组件，按 toolCallId 缓存。
  *
- * ## 为什么必须有它（而不是每帧 new 一个）
+ * 必须有它：官方 bash 渲染器在 `renderResult` 看到 `isPartial` 时会 `setInterval(…, 1000)` 让
+ * `Elapsed` 每秒重画，而它只在**同一个组件**收到非 partial 的 `updateResult` 时才 clear —— 每帧 new
+ * 一个的话那些 interval 永久留着，事件循环永远不空。反过来每帧 `stopRendererTimers()` 能避开泄漏，
+ * 但 `Elapsed` 再也不跳（跑几十秒仍显示 `0.0s`）。
  *
- * 官方 bash 渲染器在 `renderResult` 里看到 `isPartial` 时会
- * `setInterval(() => context.invalidate(), 1000)`，让 `Elapsed` 那一行每秒重画一次。
- * 而它只在**同一个组件**收到非 partial 的 `updateResult` 时才 clearInterval ——
- * 中间没有「收尾」的话，每个 interval 都永久留着，事件循环永远不空。
+ * 泄漏收口：组件只在工具**真的在跑**时留在表里，`pruneLiveTools` 每帧按 `executing` 清掉已结束的
+ * （同时停掉它的计时器），所以生命周期 = 工具执行时长。
  *
- * 每帧 new 一个 + 每帧 `stopRendererTimers()` 能避开泄漏，代价是 `Elapsed` 再也不跳
- * （计时器刚起就被我们自己清了）：命令跑几十秒而中间没输出时，那行永远显示 `0.0s`。
- * 组件跨帧活着，官方自己的定时器就能正常跑完整个生命周期 —— 与 pi 一致。
- *
- * ## 泄漏怎么收口
- *
- * 组件只在工具**真的在跑**时留在表里；`pruneLiveTools` 每帧按 state 里的
- * `executing` 清掉已结束的，所以时长生命周期 = 工具执行时长，不是会话时长。
- * 计时器在清掉时也被 `stopRendererTimers` 停掉（官方组件自己的
- * `invalidate` 链路已经不适用了，所以由我们代劳）。
- *
- * ## 会不会拖累增量渲染
- *
- * 不会。带运行中工具的那个消息块**本来就不进缓存**（`TranscriptChunks.blockLines`
- * 的 `isLive` 分支每帧重算），而且一轮里在跑的工具都挂在同一条 assistant 消息上，
- * 这样的块至多一个。所以让组件活着不增加任何缓存失效 —— 保护长会话的那套
- * 增量优化（O(N²) → O(N)）只作用于历史块，与这块无关。
+ * 不拖累增量渲染：带运行中工具的那个块**本来就不进缓存**，且一轮里至多一个这样的块。
  */
 const liveTools = new Map<string, ToolExecutionComponent>();
 /** 建组件时的终端宽度 —— 变了要重建（官方组件按建时宽度折行）。 */
@@ -4395,27 +4196,16 @@ function joinStreamPart(lines: string[], part: string[], width: number, isLast: 
 /**
  * 流式文字的**增量排版**。
  *
- * ## 病根
+ * 病根：官方组件的形状是「给一段文字，让 markdown 从头排一遍」，而流式是**追加** —— 每个 token 都
+ * 把整段回答重新 lex 一次（profile 里 lexer 那个 LaTeX 扩展正则就占了 19% self time）、行也全部重
+ * 折一遍。实测每 token：10K 字 2.4ms、60K 字 24.9ms，累起来是 O(n²)，主线程被吃满。
  *
- * 官方组件的形状是「给一段文字，让 markdown 从头排一遍」。而流式是**追加**：
- * 每个 token 都把整段回答重新 lex 一次（profile 里 lexer 里那个 LaTeX 扩展正则一个人
- * 就占了 19% self time）、行也全部重折一遍。实测每 token：回答 10K 字 2.4ms、
- * 30K 字 7.8ms、60K 字 24.9ms —— 累起来是 O(n²)，主线程就此被吃满
- * （"卡住"），每帧再造一遍整段字符串（内存尖峰）。
+ * 做法：按**段边界**把长回答切成「定稿的段落」与「正在长的尾巴」—— 定稿的只排一次并连行一起缓存
+ * （`settled` / `lines`），每帧只重排尾巴（尾巴在下一个空行到来前一直很短），拼接用
+ * `joinStreamPart`（等价性由「段边界处分开渲染 = 整段渲染」保证）。于是每 token 的成本从 O(整段) 变成
+ * O(当前段)，只剩「模型不写空行」那种情形退化，由 `STREAM_MAX_RENDER_MS` 的预算兜着。
  *
- * ## 做法
- *
- * 按**段边界**把已经很长的回答切成「定稿的段落」与「正在长的尾巴」：
- *
- *   - 定稿的段落只排一次，排完就连行一起缓存（`settled` / `lines`）；
- *   - 每帧只重排尾巴 —— 尾巴在下一个空行到来前一直很短；
- *   - 拼接用 `joinStreamPart`，等价性由那条「段边界处分开渲染 = 整段渲染」保证。
- *
- * 于是每 token 的成本从 O(整段回答) 变成 O(当前这一段)；只剩「模型不写空行」
- * 那一种情形仍会退化成 O(尾巴)，那由 `STREAM_MAX_RENDER_MS` 那道时间预算兜着。
- *
- * 导出是为了测（与 `TranscriptChunks` / `renderTranscript` 同一个理由：纯函数，
- * 能直接把「增量结果 == 整段一次渲染」逐行比出来）。
+ * 导出是为了测：能把「增量结果 == 整段一次渲染」逐行比出来。
  */
 export class StreamingLines {
   /** 缓存键（宽度 / 折叠 / 展开）—— 变了就全部重排。 */
@@ -4482,36 +4272,15 @@ export class StreamingLines {
 /**
  * 对话区：**按消息分块**的增量渲染。
  *
- * ## 为什么不是「整段一个 Text」
+ * 不能整段一个 `Text`：每次状态变化都重渲整段 + 重新折行，而流式 token 每来一个就触发一次
+ * `refresh()` —— 实测约 1.2 秒一帧（官方 `MIN_RENDER_INTERVAL_MS` 只有 16ms），而且是**同步**的，
+ * 直接占住事件循环连输入都收不到。改成每条消息一个组件（pi 的 `interactive-mode.js` 就是这么做的，
+ * 流式那条原地 `updateContent`），没变的块不重算：实测 1208 条消息的会话从 291.9ms/帧降到
+ * 0.30ms/帧。
  *
- * 原来的做法是 `transcript.setText(renderTranscript(...))`：每次状态变化都把**整段**
- * 对话重新渲染成一个字符串，再让 `Text.render()` 折行。而流式 token 每来一个就触发一次
- * `store.subscribe` → `refresh()`，于是每帧都要：
- *
- *   1. `renderTranscript`：重建 N 个官方组件（Markdown 解析、diff、底色）—— 实测 887ms
- *   2. `Text.render`：重新折行 14890 行 / 1.9MB 文本 —— 实测 313ms
- *
- * 合计约 **1.2 秒一帧**，而 pi-tui 的 `MIN_RENDER_INTERVAL_MS` 只有 16ms。渲染永远追不上
- * 流式速度，症状就是「界面卡住、token 刷不出来」。而且这是**同步**的：它直接占住事件
- * 循环，连输入都收不到 —— 越长的会话越卡。
- *
- * ## 照抄 pi 官方的结构
- *
- * pi 的 `interactive-mode.js` 就是每个消息一个组件（`chatContainer.addChild(...)`），
- * 流式那一条原地 `updateContent`。`Text` 组件自己缓存 `render()` 的结果，只在
- * `setText()` 时失效 —— 所以「没变的块不重算」这件事官方组件已经帮我们做好了，
- * 缺的只是别把 1208 条消息塞进**同一个** `Text` 里。
- *
- * 实测（1208 条消息的真实会话）：整段 291.9ms/帧 → 分块 **0.30ms/帧**（≈160×）。
- *
- * ## 缓存键为什么是「宽度 + 折叠 + 思考可见性」而不是只有消息本身
- *
- * 同一个 `message` 对象在几种情况下渲染结果不同：终端宽度变了（要重新折行），
- * Ctrl+O 切了 `expanded`（工具块展开/折叠），Ctrl+T 切了思考块可见性
- * （`hideThinking`）。这些都进了键，所以切换后不会读到过期的行。
- *
- * 用 `WeakMap` 而不是 `Map`：键是消息对象，会话被 `/new` 清空后旧消息就能被回收 ——
- * 用 `Map` 的话整段历史会一直被钉在内存里。
+ * 缓存键是「宽度 + 折叠 + 思考可见性」而不是只有消息本身：同一份 `message` 在终端宽度变了、Ctrl+O
+ * 切了 `expanded`、Ctrl+T 切了 `hideThinking` 之后渲染结果不同。用 `WeakMap` 而不是 `Map`：
+ * `/new` 清空会话后旧消息能被回收。
  */
 export class TranscriptChunks {
   /** 每条消息一个 `Text`，下标与 `state.messages` 一一对应。 */
@@ -4946,22 +4715,12 @@ export class TranscriptChunks {
 /**
  * composer **上框线**上该显示的工作状态（`undefined` = 空闲，什么都不画）。
  *
- * ## 为什么在这里现推，而不是维护一个 `lastMessage` 变量
+ * 在这里现推而不是维护 `lastMessage`：三个状态（思考中 / 压缩中 / 重试）**交错**（重试在一轮之内、
+ * 压缩在一轮之外，那段时间 `phase` 还是 idle），手工收尾漏一处就是「圈一直转」或「文案洇在那儿」。
+ * 现推幂等 —— 同一份 state 永远推出同一个结果。
  *
- * 三个状态（思考中 / 压缩中 / 重试）各自有进入与退出条件，而且**交错**：重试发生在
- * 一轮之内、压缩发生在一轮之外（那段时间 `phase` 还是 idle）。早先是用一串 if/else
- * 加一个 `lastLoaderMessage` 变量手工收尾，漏一处的症状是「圈一直转」或「文案洇在那儿」。
- * 现推就没有这笔账 —— 同一份 state 永远推出同一个结果，幂等。
- *
- * ## 优先级
- *
- * 重试 > 压缩 > 生成。重试看着像「还在跑」，但它带的是「第 N/M 次」那个更有信息的
- * 文案，而且它确实是当前最该知道的一件事。
- *
- * ## 为什么重试那句从 `renderTail` 搬到这里
- *
- * pi 把工作状态放在上框线上，而「重试中」就是一个工作状态。放两处（尾巴一行 +
- * 上框线一行）会同一件事报两遍。所以 `renderTail` 里那条删了，只剩上框线这份。
+ * 优先级：重试 > 压缩 > 生成（重试那句带「第 N/M 次」，是当前最该知道的一件事）。所以「重试中」
+ * 只在这里报，`renderTail` 里那条删了 —— 放两处会同一件事报两遍。
  */
 export function workingStatusText(state: AgentState): string | undefined {
   if (state.retrying) {

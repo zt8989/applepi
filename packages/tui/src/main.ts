@@ -384,27 +384,17 @@ async function main(): Promise<void> {
   // 做不了异步收尾，但 stdio 传输自己的 `exit` 钩子会把还活着的服务器进程组杀掉。
   process.once('exit', () => void kernel.dispose());
 
-  // `--session <id>` 不只是「用这个 id 建一个新的」—— 如果那个 id 已经有会话文件，
-  // 就**真的把它恢复**（读消息 + 轨迹树，零 token）。
+  // `--session <id>` 不只是「用这个 id 建一个新的」—— 那个 id 已经有会话文件时**真的恢复**它
+  // （读消息 + 轨迹树，零 token）。
   //
-  // ## 为什么要有这一段
+  // 必须做：退出时打的那行就是 `ela --session <id>`，交回本项目时不真恢复，那行提示就是谎话
+  // （界面起来了、只是空空如也）。用 `findSessionFile` 而不是拼路径 —— 文件名带时间戳，只有扫目录
+  // 才找得到（它同时认旧名）。
   //
-  // 退出时我们打的那行是 `ela --session <id>`（见 config-home 的
-  // `resumeCommand()`）。既然提示的是「用这个 id 恢复」，那把它交回本项目自己时
-  // 就得真恢复 —— 否则那行提示就是谎话，而用户看不出区别（界面起来了、只是空空如也）。
-  //
-  // 用 `findSessionFile` 而不是拼路径：文件名带时间戳（与 pi 一致），只有扫目录才找得到；
-  // 它同时认旧名（`<id>.jsonl`）。
-  //
-  // ## 找不到时为什么必须出声
-  //
-  // `findSessionFile` 只在**当前目录**对应的会话目录里找（`sessions/<cwd 编码>/`）。
-  // 而 `ela --session <id>` 完全可能是**在别的目录**里跑的（那个会话其实是别的项目
-  // 的）—— 此时静默降级的结果是：id 还是那个 id，但对话是空的，看上去就像「恢复了
-  // 一个新会话」，而没有任何地方提到过原因（真发生过，排查了半天）。
-  //
-  // 所以这里把事实说清楚：文件不在这里 → 告诉用户它可能在哪个目录的会话里，
-  // 以及本次会当成新会话（用同一个 id）接着写。
+  // 找不到时必须出声：`findSessionFile` 只在**当前目录**对应的会话目录里找，而 `ela --session <id>`
+  // 完全可能在别的目录里跑（那个会话属于别的项目）。静默降级的后果是「id 还是那个 id，但对话是空
+  // 的，看上去像恢复了个新会话」，没有任何地方提到原因。所以要说清楚文件不在这里、以及本次会当成
+  // 新会话（用同一个 id）接着写。
   if (args.sessionId !== undefined) {
     const file = findSessionFile(args.sessionId, args.cwd);
     if (existsSync(file)) {
@@ -462,11 +452,9 @@ async function main(): Promise<void> {
         resolveModel,
         // 这里**不再**有 `onPresenceChange`（原来拿它切扩展宿主模式到 `'rpc'`）。
         //
-        // 早先那一步是为了让 `ask_user_question` 走 `ctx.ui.select/input` 的逐题回退，
-        // 好让浏览器也答得上。现在问卷是本项目的**内置扩展**（带 patch，见 `patches/`）：
-        // 终端那一份由扩展自己画、浏览器那一份走 `ctx.ui.externalQuestionnaire` 交给我们，
-        // 两边同时开着、谁先答都算数 —— 不需要把宿主装成非终端宿主（那反而会把扩展
-        // 自己那份 TUI 问卷整个关掉）。
+        // 不切「非终端宿主模式」：问卷是本项目的**内置扩展**（带 patch），终端那一份由扩展自己画、
+        // 浏览器那一份走 `ctx.ui.externalQuestionnaire` 交给我们，两边同时开着、谁先答都算数 ——
+        // 把宿主装成非终端反而会把扩展自己那份 TUI 问卷整个关掉。
         // 底栏那一行（与终端**逐字同形**）：`↑362k ↓310k R121M CH99.9% 52%/1.0M (auto)`。
         // 浏览器那边 pi-web-ui 自带的 `formatUsage` 只到 `R`/`W` —— 所以由服务端
         // 算好整行发过去，而不是让它再算一份（口径一漂，两端对不上）。
@@ -648,17 +636,13 @@ async function main(): Promise<void> {
 
   // ── 显式退出（一次性模式）──
   //
-  // 光靠事件循环自己排空**不够**：MCP 的 stdio 服务器是子进程，而「连到一半就被丢下」
-  // 的那个（`npx -y rea-agents` 还在解析 / 下载时一次性模式已经跑完了）不会被优雅的
-  // `session_shutdown` 收掉 —— 那一刻它的 client 还没挂到 connection 上，`close()`
-  // 是空转，子进程的 stdio 就一直握着事件循环（实测卡到 600s 超时）。
+  // 光靠事件循环自己排空**不够**：MCP 的 stdio 服务器是子进程，而「连到一半就被丢下」的那个
+  // （`npx` 还在下载时一次性模式已经跑完）不会被 `session_shutdown` 收掉 —— 那一刻它的 client 还没
+  // 挂到 connection 上，`close()` 是空转，子进程的 stdio 一直握着事件循环（实测卡到 600s 超时）。
   //
-  // 官方 stdio 传输自己装了 `process.on('exit')` 钩子：进程退出时把还活着的服务器
-  // **进程组**一并杀掉。所以这里等 stdout 排空后显式退出，让那个钩子收尾 ——
-  // 这正是「在退出路径上显式收子进程」。
-  //
-  // 交互模式走不到这里（`runTui` 在 `await new Promise(() => {})` 上挂着，退出走
-  // `app.ts` 的 `process.exit(0)`，同样会触发那个钩子）。
+  // 官方 stdio 传输自己装了 `process.on('exit')` 钩子，退出时把还活着的服务器**进程组**一并杀掉 ——
+  // 所以这里等 stdout 排空后显式退出，让那个钩子收尾。交互模式走不到这里（退出走
+  // `app.ts` 的 `process.exit(0)`，同样触发那个钩子）。
   await flushStdout();
   process.exit(exitCode);
 }
@@ -694,33 +678,15 @@ function flushStdout(timeoutMs = 1000): Promise<void> {
 const pendingStatuses = new Map<string, string>();
 
 /**
- * 取出界面层的 UI 宿主（扩展的 `ctx.ui` 由它造）。
+ * 扩展的 UI 宿主。**一直都有**（内核装扩展时它已存在），只是里面的 `tui` 要等界面起来才填上。
  *
- * ## 拿不到就**抛**，不是给空实现
+ * 不填一个空实现，也不抛「界面还没起来」：
+ * 1. 扩展在**装载期**就碰 `ctx.ui.theme`（`bindCore` 在装配时调了 `setUIContext`），那时 `uiRef`
+ *    还是空的 —— 抛出去就是**整个界面起不来**（症状：首帧空白、顶栏底栏全没，真因只在一行日志里）；
+ * 2. 而「tui 未就绪」这个抛错本身是对的，只是不该在「只读个 theme」时触发。
  *
- * 交互模式下内核已经绑了 UI（`uiOptions` 给了），所以 `hasUI` 是 true —— 扩展会真的
- * 去开对话框。那时如果界面还没起来（理论上不该发生：`publishUi` 在 `tui.start()` 之后
- * 就调了，而用户在首帧之前敲不出字），给一个 `tui: undefined` 会让扩展崩在自己的
- * `requestRender()` 上 —— 那个堆栈与真因隔了三层。
- *
- * 所以这里明说「界面还没起来」。那是一个真 bug，不该被伪装成「没界面」。
- */
-/**
- * 扩展的 UI 宿主。**一直都有**（内核装扩展时它已经存在），只是里面的 `tui` 要等
- * 界面起来才填上。
- *
- * ## 为什么不填一个空实现
- *
- * 空实现看着无害，实际有两个后果：
- *
- * 1. 扩展在**装载期**就碰 `ctx.ui.theme`（`bindCore` 在内核装配时调了 `setUIContext`），
- *    那时 `uiRef.current` 还是空的 → `requireUi` 抛 → **整个界面起不来**
- *    （症状：首帧空白、顶栏底栏全没了，而真因在一条日志里）。
- * 2. 「tui 未就绪」这个抛错本身是**对的**（真有方法要一个还不存在的 TUI），
- *    但它不该在「只读个 theme」时被触发。
- *
- * 所以拆开：`theme` 现在就给真的（`setupTheme()` 的返回值，界面起来之前就有），
- * `tui` / `addInputListener` 那几个在界面起来之前调用会**明说「还没就绪」**。
+ * 所以拆开：`theme` 现在就给真的（`setupTheme()` 在界面起来之前就有），`tui` / `addInputListener`
+ * 那几个在界面起来之前调用会**明说还没就绪**。
  */
 function requireUi(ref: { current: HostUiOptions | undefined }): HostUiOptions {
   const ui = ref.current;

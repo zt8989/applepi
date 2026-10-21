@@ -1,31 +1,15 @@
 /**
- * `/hotkeys` —— 键位表。**形状照抄 pi 的那条同名命令**（`handleHotkeysCommand()`）：
- * 同样的分节（Navigation / Editing / Other / Extensions）、同样的 Markdown 表格、
- * 同样的上下边框与 `Keyboard Shortcuts` 标题。
+ * `/hotkeys` —— 键位表。**形状照抄 pi 的同名命令**：同样的分节（Navigation / Editing / Other /
+ * Extensions）、同样的 Markdown 表格与边框标题。
  *
- * ## 为什么要照抄形状，而不是自己排版
+ * 照抄是因为读者是**从 pi 过来的人**，换一种排版不会更好读、却会让人以为是另一套键位；而且表格的
+ * `Key` / `Action` 两列让「我该按哪个键」更好扫。
  *
- * 这条命令的读者是**从 pi 过来的人**：他们记的是「`/hotkeys` 打出来是什么样」。
- * 换一种排版（比如对齐的纯文本列表）并不会更好读，但会让人以为是另一套键位。
- * 表格还有个实际好处：键名那一列是 `Key`/`Action` 两列对齐的，眼睛扫「我该按哪个键」
- * 比在 `Ctrl+X 描述` 这种行里找更快。
+ * 与 pi 唯一的刻意差别：键名全部**实时解析**（`keyLabel()` → `getKeybindings()`），所以改过
+ * `keybindings.json` 之后显示的是新键；本项目的三个额外动作在同一份表里，同一套 `keyLabel()` 就够。
  *
- * ## 与 pi 唯一的、刻意的差别：键名全部**实时解析**
- *
- * pi 那份也是实时解析的（`keyDisplayText()` → `getKeybindings()`），所以用户改过
- * `~/.pi/agent/keybindings.json` 之后两边显示的都是新键。本项目额外多了三个自己的
- * 动作（`app.trace.toggle` 等），它们和 pi 的动作在同一份表里，因此**同一套**
- * `keyLabel()` 就够了。
- *
- * ## 表格里列什么
- *
- * **pi 那份能按的，这里都列**（`feat/pi-keybindings-parity` 之后本项目的动作与 pi 对齐了）——
- * 这批：interrupt / clear / exit / suspend / 循环思考级别 / 循环模型 / 模型面板 / 展开工具 /
- * 思考块 / 外部编辑器 / 复制 / followUp / dequeue / 粘贴图片。
- *
- * pi 有而本项目**确实没有**的（会话树、fork、login/logout、trust、name……）**不列** ——
- * 照抄过来会得到一份「按了没反应」的说明书，那比少列几行坏得多。
- * 分节名字与顺序保持与 pi 一致。
+ * 表格只列**真能按的**：pi 有而本项目确实没有的（会话树、fork、login/logout、trust、name…）不列 ——
+ * 照抄过来会得到一份「按了没反应」的说明书，比少列几行坏得多。
  */
 import {
   getMarkdownTheme,

@@ -1,34 +1,15 @@
 /**
  * TUI 的「设置」面板 —— `/settings`（与 pi 同名）。
  *
- * ## 为什么用 pi 的零件搭，而不是复用 pi 的 `SettingsSelectorComponent`
+ * 不复用 pi 的 `SettingsSelectorComponent`：它的 `SettingsConfig` 全字段必填，而有二十来行对应
+ * 本项目**没有的功能**（fullscreen、cache warming、transport、mermaid、project trust、tree filter…）。
+ * 硬填只有两种结果 —— 真把那些功能做一遍（另一个量级的工作），或写出一个「看着能改、改了没用」的
+ * 开关，而本项目最不愿留那种东西。
  *
- * pi 那个组件的 `SettingsConfig` / `SettingsCallbacks` 是**全字段必填**（38 行），
- * 而有二十来行对应本项目**没有的功能**：fullscreen / TUI mode、cache warming、transport、
- * HTTP idle timeout、mermaid、install telemetry、project trust、tree filter……
- * 硬填上它们只有两种结果：要么把那些功能真做一遍（那是另一个量级的工作），要么写出
- * 一个「看着能改、改了没用」的开关 —— 而这个项目里最不愿留的就是那种东西
- * （见 `model-picker.ts` 里「假成功比报错更糟」那几句）。
- *
- * 所以这里用 pi 的**同一批零件**自己拼一屏（`SettingsList` + `SteppedSubmenu` +
- * `getSettingsListTheme` + `DynamicBorder`），形状与 pi 逐行一致（列表、右值、描述行、
- * `Enter/Space to change · Esc to cancel` 那行提示），**行**只放本项目真的会照着做的：
- *
- * | 这一行 | 写哪儿 | 谁生效 |
- * | --- | --- | --- |
- * | Auto-compact | `settings.json` 的 `compaction.enabled` | 内核当场开关自动压缩（`store.ts` 的 `AutoCompact`） |
- * | Hide thinking | `hideThinkingBlock` | 与本项目 `Ctrl+T` 同一个键、同一条渲染路径 |
- * | Default thinking level per model | `modelThinkingLevels` | 换模型/启动时按它解析（`thinking-level.ts`），当前模型则当场生效 |
- *
- * ## 那一行「Default thinking level per model」是逐字照搬 pi 的
- *
- * 它是这一步存在的**主要理由**（在这之前 `modelThinkingLevels` 只能手改 settings.json）：
- * 两步选择（先选模型、再选档位），档位那一步只列**这个模型支持的**那几档，已经配过的模型
- * 多一行 `(clear override)`（回到全局默认）。连文案与排序都照抄 —— 两边同一个操作见到的话
- * 应该是同一个东西，而这种「多步列表」的自创变体只会让回来的人多学一套。
- *
- * 没有的那二十来行**不是遗漏而是结论**：它们各自对应一个本项目还没有的功能。想加时是
- * 先有那个功能、再把那一行接上来，而不是反过来。
+ * 所以用 pi 的**同一批零件**自己拼一屏（`SettingsList` + `SteppedSubmenu` + `getSettingsListTheme` +
+ * `DynamicBorder`），形状与 pi 逐行一致，而**行**只放本项目真的会照着做的：Auto-compact
+ * （`compaction.enabled` → 内核当场开关）、Hide thinking（与 `Ctrl+T` 同一个键）、Default thinking
+ * level per model（`modelThinkingLevels` → 换模型/启动时解析，当前模型当场生效）。
  */
 import { Container, SettingsList, type SettingItem } from '@earendil-works/pi-tui';
 import type { ViewportTUI } from '@earendil-works/pi-tui';
