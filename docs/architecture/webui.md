@@ -37,6 +37,8 @@ TUI 之外的第二块界面：**浏览器里的 pi-web-ui**，环仍然是终�
 | `src/context-panels.ts` | `@ela/webui` | 顶栏那三个入口：完整历史 / 系统 / 工具 |
 | `src/modal.ts` | `@ela/webui` | 通用模态框（列表 / 纯文本） |
 | `src/model-picker.ts` | `@ela/webui` | 模型选择器（**接管**了 pi-web-ui 自带那个，见下） |
+| `src/settings-panel.ts` | `@ela/webui` | 设置面板：常规 / 模型 / 技能三个分区（`/settings` `/scoped-models` `/skills` 共用） |
+| `src/settings-scope.ts` | `@ela/webui` | 设置 › 模型（可用模型 / 作用域）的纯逻辑：`enabledModels` 的读写投影 |
 | `src/stats.ts` | `@ela/webui` | composer 下面那一行：左端工作目录、右端统计（两段都由服务端算好） |
 | `src/sidebar.ts` | `@ela/webui` | 左侧边栏：历史会话（按 cwd 分组）+ 新建 / 搜索 + 底栏三个入口 |
 | `src/panel-resize.ts` | `@ela/webui` | 侧边栏宽度：拖中缝 / 键盘 / 双击复位，最小最大与记忆（口径同 Pi Web） |
@@ -142,8 +144,35 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 - `Ctrl+S` 存默认（写 `settings.json` 的 `defaultModel`）；
 - 后台刷新目录（`ModelRuntime.refresh()`，会打网络）—— 所以列表是**取的那一刻**的快照。
 
-作用域现在能改了：`/scoped-models` 命令给一个勾选列表（`module.ts` 的通用模态框），
-勾一下即写 `settings.json`（见下）。
+作用域现在能在设置里改：`/settings` 的「模型」分区就是 pi-web 设置 › 模型里的
+「可用模型」（按 provider 分组、显示 `8/12 已启用`，勾一下即写 `settings.json`）。
+`/scoped-models` 仍然能用 —— 它落在同一块面板的同一个分区。
+
+## 设置面板（常规 / 模型 / 技能）
+
+与 pi-web 的设置页同一个形状：顶部分区，一个分区一页。入口是 `/settings`（侧边栏底部的
+「设置」）、`/scoped-models`（落在「模型」）与 `/skills`（落在「技能」）。
+
+| 分区 | 内容 | 写哪儿 |
+| --- | --- | --- |
+| 常规 | 自动压缩 / 隐藏思考块 / 默认思考级别 | `compaction.enabled` / `hideThinkingBlock` / `defaultThinkingLevel` |
+| 模型 | **可用模型** —— composer 模型选择器的候选集 | `settings.json` 的 `enabledModels`（`null` = 全开） |
+| 技能 | 进了 prompt 的 skill 清单（只读，点开看描述与路径） | — |
+
+几条口径：
+
+- 模型分区按 provider 分组（顺序用服务端给的，不重排），provider 那一行是整组开关，
+  模型行缩进一档；当前模型标「当前」。
+- **勾一下即保存**（与 TUI 的 `/scoped-models` 同一个口径）。保存失败会**退回改前的
+  状态**并给一行提示 —— 界面不显示没写进 `settings.json` 的值。
+- **至少留一个模型**：服务端把空数组归成 `null`（= 全开），关掉最后一个会让作用域反而
+  全开，所以界面在点下去之前拦住。
+- 带思考级别后缀的条目（`provider/id:high`）与目录里对不上的旧条目都**原样写回** ——
+  我们看不懂的配置不替用户删；只有「全部开启」会清空作用域。
+- `Tab` / `Shift+Tab` 切分区（搜索框里也一样），↑↓ 选、`Enter` 切换、`Esc` 关闭。
+
+模型选择器（composer 上那个按钮，`model-picker.ts`）与这里的「可用模型」是两件事：
+前者换**当前会话**用哪个模型，后者决定**选择器里列哪些**候选。
 
 ## 前端那几个「不得不」的地方
 
@@ -202,8 +231,9 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 - 执行时不发给模型（`RemoteAgent.prompt` 里拦下，见 `onPrompt`）—— 与 TUI 的 `runCommand`
   同一个分工：命令是「跟界面说」的通道，消息才是「跟模型说」。**例外是未命中的 `/xxx`**：
   不报错、不拦，当普通消息发出去（与 pi、终端一致）。
-- `/model` 弹已有的模型选择器；`/thinking` `/settings` `/scoped-models` 弹通用模态框；
-  `/skills` 是纯文本弹窗；扩展命令走 `POST /api/command`。
+- `/model` 弹已有的模型选择器；`/thinking` 弹通用模态框；`/settings` `/scoped-models`
+  `/skills` 打开同一块设置面板的三个分区（常规 / 模型 / 技能）；扩展命令走
+  `POST /api/command`。
 - **`/help` 没有**（与 pi 一致：它的入口是补全 —— 打 `/` 就把整张表摆出来）。
 - `/skill:<名字> [问题]` **不是命令**（与 TUI 一致）：它要把 SKILL.md 展开成 `<skill>` 块
   发给模型，而文件在磁盘上 —— 所以浏览器**不拦**，当普通消息发出去，

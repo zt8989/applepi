@@ -51,23 +51,31 @@ const isCurrent = (model: WebModelRef, current: ModelPickerOptions['current']): 
 const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 
 /**
- * 作用域条目 → 可比较的 key 集合。
+ * 作用域条目 → 去掉思考级别后缀的模型 key。
  *
  * `settings.json` 的 `enabledModels` 存的是 `provider/id`，也可以带思考级别后缀
  * （`provider/id:high`）—— 而**模型 id 本身就可能带冒号**（`cn:deepseek-v4.1-flash`）。
  * 所以不能简单地按冒号切：只有**最后**一段是合法档位时它才是后缀（与 CLI 的
  * `-m provider/id:high` 同一个判据）。
+ *
+ * 没有合法后缀时原样返回 —— 设置面板要拿它去比对目录里的 `provider/id`。
  */
+export function scopePatternKey(pattern: string): string {
+  const slash = pattern.indexOf('/');
+  if (slash === -1) return pattern;
+  const colon = pattern.lastIndexOf(':');
+  if (colon > slash && THINKING_LEVELS.has(pattern.slice(colon + 1))) {
+    return pattern.slice(0, colon);
+  }
+  return pattern;
+}
+
+/** 作用域条目 → 可比较的 key 集合（原样与去掉后缀的两种都留着）。 */
 export function scopedKeys(patterns: readonly string[]): Set<string> {
   const keys = new Set<string>();
   for (const pattern of patterns) {
     keys.add(pattern);
-    const slash = pattern.indexOf('/');
-    if (slash === -1) continue;
-    const colon = pattern.lastIndexOf(':');
-    if (colon > slash && THINKING_LEVELS.has(pattern.slice(colon + 1))) {
-      keys.add(pattern.slice(0, colon));
-    }
+    keys.add(scopePatternKey(pattern));
   }
   return keys;
 }
