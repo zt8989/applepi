@@ -34,6 +34,14 @@
  *
  * 删除是真删文件（会话 + 轨迹），所以每个入口都先弹一次确认；当前会话与服务端正在跑
  * 的那一回合都会被服务端拒绝，这里再把话原样转出来。
+ *
+ * ## 宽度与窄屏
+ *
+ * 宽度不在这里算：拖中缝改宽是 `panel-resize.ts` 的事（手柄在 `main.ts` 的 shell 里，
+ * 因为它得长在侧边栏**外面**，否则 `overflow: hidden` 会把它裁掉）。这里只管
+ * 「开 / 关」，而且是**两份**状态：宽屏那份是用户的偏好（存本地），窄屏那份是这一次的
+ * 临时开关（不存 —— 手机上一收一开不该改掉桌面上的偏好）。窗口跨过 768px 时切到对应
+ * 的那一份，于是「手机上自动折叠、回到桌面自动还原」是同一个机制的两面。
  */
 
 import { elaApi } from './api';
@@ -45,6 +53,13 @@ import type { WebSessionRef } from '@ela/core/web-protocol';
 const OPEN_STORAGE_KEY = 'ela-webui:sidebar-open';
 /** 折起了哪几个 cwd 的组（存 cwd 本身）。 */
 const COLLAPSED_GROUPS_KEY = 'ela-webui:sidebar-collapsed-groups';
+/**
+ * 窄屏断点（与 `app.css` 那条 `@media (max-width: 768px)` 同一个数）。
+ *
+ * 那里侧边栏是**盖上来**的一层抽屉（不进 flex 布局），所以拖宽的中缝在那一侧被藏掉；
+ * 这里用它决定「现在读哪一份开 / 关状态」。
+ */
+const MOBILE_QUERY = '(max-width: 768px)';
 
 export interface SidebarHooks {
   /** 点了一条会话：交给 agent 发 `resumeSession`。 */
@@ -59,6 +74,13 @@ export interface SidebarHooks {
   openSkills(): void;
   /** 底栏「设置」：与 `/settings` 同一个弹窗。 */
   openSettings(): void;
+  /**
+   * 收起 / 展开变了（包括窗口变窄时的自动收起）。
+   *
+   * 顶栏那个按钮的 `aria-expanded` 得跟着改 —— 窗口自己折叠时它不会收到点击，
+   * 没有这条回调就会一直停在「展开」。
+   */
+  onToggle?(open: boolean): void;
 }
 
 export interface Sidebar {
@@ -122,8 +144,8 @@ function readStoredOpen(): boolean {
   } catch {
     // 隐私模式：当作没存过。
   }
-  // 没存过：宽屏默认开，窄屏默认收（盖上来的一层，开着就看不到对话）。
-  return window.innerWidth > 768;
+  // 没存过：宽屏默认开。窄屏那份偏好不读它（见 `installSidebar` 里的两份状态）。
+  return true;
 }
 
 function writeStoredOpen(open: boolean): void {
@@ -266,16 +288,41 @@ export function installSidebar(host: HTMLElement, hooks: SidebarHooks): Sidebar 
   let currentSessionId = '';
   let currentCwd = '';
   let busy = false;
-  let open = readStoredOpen();
+  /**
+   * 「开没开」是两份状态（见文件头）：
+   *
+   *   - `desktopOpen`：宽屏的偏好，存本地。
+   *   - `mobileOpen`：窄屏这一次的开关，不存。没主动开过就是收着的 —— 那层抽屉盖在
+   *     对话上，默认开着等于把主界面藏了。
+   *
+   * 读哪一份由当前视口决定（`isOpen()`），所以窗口跨过 768px 时不必搬状态：切过去
+   * 就是另一半的最后一个值。回到宽屏 = 恢复偏好，切到窄屏 = 自动折叠。
+   */
+  let desktopOpen = readStoredOpen();
+  let mobileOpen = false;
+  const mobileQuery = window.matchMedia(MOBILE_QUERY);
+  const isNarrow = (): boolean => mobileQuery.matches;
+  const isOpen = (): boolean => (isNarrow() ? mobileOpen : desktopOpen);
   const collapsedGroups = readCollapsedGroups();
 
   const applyOpen = (): void => {
+    const open = isOpen();
     host.classList.toggle('is-collapsed', !open);
     // 折叠后宽度由 CSS 归零（见 app.css）—— 这里只改一个类，让过渡动得起来。
     // `inert`：收起时里面那些按钮不能再 Tab 得到（宽度 0 但仍在 DOM 里）。
     host.toggleAttribute('inert', !open);
+    // 拖宽的中缝由 CSS 跟着这个类藏起来（收起时它没有可拖的边界）。
+    hooks.onToggle?.(open);
   };
   applyOpen();
+
+  /**
+   * 窗口跨过断点：重读一次「该看哪份状态」（不互相搬运）。
+   *
+   * 窄屏那边永远从「收着」开始：`mobileOpen` 只由用户这一次的点击改，且切回宽屏后
+   * 不再有意义（下一次再变窄又是一层盖在对话上的抽屉）。
+   */
+  mobileQuery.addEventListener('change', applyOpen);
 
   /** 现在能不能换会话（环在跑就不行）：行与「新建」共用同一条判据（话不一样）。 */
   const refuseWhileRunning = (what: '切换会话' | '新建会话'): boolean => {
@@ -586,10 +633,13 @@ export function installSidebar(host: HTMLElement, hooks: SidebarHooks): Sidebar 
       if (changed) render();
     },
     toggle() {
-      open = !open;
-      writeStoredOpen(open);
+      if (isNarrow()) mobileOpen = !mobileOpen;
+      else {
+        desktopOpen = !desktopOpen;
+        writeStoredOpen(desktopOpen);
+      }
       applyOpen();
     },
-    isOpen: () => open,
+    isOpen,
   };
 }

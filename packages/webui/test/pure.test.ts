@@ -9,6 +9,13 @@ import { toolParameterFields } from '../src/context-panels';
 import { formatToolDuration, resultImages } from '../src/tool-view';
 import { pathBase, relativeTime } from '../src/format';
 import { groupSessions, matchesQuery } from '../src/sidebar';
+import {
+  clampPanelWidth,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH,
+  sidebarMaxWidth,
+} from '../src/panel-resize';
+import { scrollDuration, shouldJump } from '../src/smooth-scroll';
 
 /**
  * webui 的那几个**纯函数**。
@@ -357,4 +364,64 @@ test('resultImages：图像块拼成 data URL，非图像块 / 空 data 一律�
   assert.equal(resultImages({ content: [{ type: 'image', data: 'X' }] })[0]?.src, 'data:image/png;base64,X');
   assert.deepEqual(resultImages(undefined), [], '还没结果时没有图');
   assert.deepEqual(resultImages({ content: [] }), []);
+});
+
+/**
+ * 侧边栏宽度的夹取（`panel-resize.ts`）。
+ *
+ * 这几个错了的症状都不明显：夹错下限是「怎么也拖不窄」，夹错上限是「一把拖到满屏」，
+ * 而脏值（`NaN`）漏过去会让 `flex-basis` 变成非法值 —— 侧边栏直接不见了，控制台里
+ * 一句报错都没有。所以这里专门盯边界与脏值。
+ */
+test('clampPanelWidth：夹进 [min, max]，并取整', () => {
+  assert.equal(clampPanelWidth(300, 180, 480), 300);
+  assert.equal(clampPanelWidth(100, 180, 480), 180, '比下限窄 → 下限');
+  assert.equal(clampPanelWidth(900, 180, 480), 480, '比上限宽 → 上限');
+  assert.equal(clampPanelWidth(311.6, 180, 480), 312, '取整（半像素宽会让中缝发虚）');
+});
+
+test('clampPanelWidth：NaN / Infinity 落回下限，而不是写进去', () => {
+  // `Math.min(NaN, 480)` 还是 NaN —— 漏过去就是 flex-basis: NaNpx，侧边栏消失。
+  assert.equal(clampPanelWidth(Number.NaN, 180, 480), 180);
+  assert.equal(clampPanelWidth(Number.POSITIVE_INFINITY, 180, 480), 480);
+  assert.equal(clampPanelWidth(Number.NEGATIVE_INFINITY, 180, 480), 180);
+});
+
+test('clampPanelWidth：上限比下限还小时下限优先（不会夹出一个负宽度）', () => {
+  assert.equal(clampPanelWidth(500, 200, 120), 200);
+});
+
+test('sidebarMaxWidth：宽屏取库上限，窄屏给主区留出最小宽度', () => {
+  assert.equal(sidebarMaxWidth(1600), SIDEBAR_MAX_WIDTH, '够宽时就是 480');
+  assert.equal(sidebarMaxWidth(1200), SIDEBAR_MAX_WIDTH);
+  // 800 - 360 = 440：比 480 小，所以按视口算。
+  assert.equal(sidebarMaxWidth(800), 440);
+  assert.equal(sidebarMaxWidth(700), 340);
+});
+
+test('sidebarMaxWidth：连最小宽度都放不下时也不返回负数', () => {
+  // 300 - 360 < 0。负值的 flex-basis 非法，浏览器当 0 —— 看起来像「拖没了」。
+  assert.equal(sidebarMaxWidth(300), SIDEBAR_MIN_WIDTH);
+  assert.equal(sidebarMaxWidth(0), SIDEBAR_MIN_WIDTH);
+});
+
+/**
+ * 平滑滚动动画的两个判据（`smooth-scroll.ts`）。
+ *
+ * 它们错了的症状都很「手感」而不报错：时长不封顶会拖成幻灯，`shouldJump` 判宽了
+ * 就看不到动画、判窄了切会话时会从顶部滚半天。
+ */
+test('scrollDuration：近处短、远处长，但有上限', () => {
+  assert.equal(scrollDuration(0), 0.14, '原地不动也要有个起点时长');
+  assert.ok(scrollDuration(400) > scrollDuration(100), '越远越久');
+  assert.equal(scrollDuration(100_000), 0.45, '再远也封在 0.45s');
+  assert.equal(scrollDuration(-800), scrollDuration(800), '向上跳与向下跳同一口径');
+});
+
+test('shouldJump：超过一屏半就直接定位，否则播动画', () => {
+  const viewport = 600;
+  assert.equal(shouldJump(100, viewport), false, '一屏内的增量该有动画');
+  assert.equal(shouldJump(900, viewport), false, '刚好 1.5 屏：仍然播');
+  assert.equal(shouldJump(1200, viewport), true, '超过 1.5 屏（打开 / 切换会话）直接跳');
+  assert.equal(shouldJump(-2000, viewport), true, '往回跳同样是大跳');
 });

@@ -34,6 +34,8 @@ import { installCommandPalette } from './command-palette';
 import { installContextPanels } from './context-panels';
 import { installStatsView } from './stats';
 import { installSidebar, type Sidebar } from './sidebar';
+import { makeSidebarResizable } from './panel-resize';
+import { installSmoothAutoScroll } from './smooth-scroll';
 import { elaApi } from './api';
 import { parseCommand, runCommand } from './commands';
 import './app.css';
@@ -102,6 +104,10 @@ function installStorage(): void {
  * 状态存在浏览器里（与 `sidebar.ts` 同一个 key）。会话 id **不显示**：它是内部身份，
  * 而人认的是标题（侧边栏那一列）。工作目录那一行（`~/proj (main)`）在 **composer 下面
  * 那一行的左端**，右端是统计 —— 与终端底栏同形状，见 `stats.ts`。
+ *
+ * 侧边栏与主区之间那个中缝（`#ela-sidebar-resize`）可以拖：宽度规矩与记忆在
+ * `panel-resize.ts`。它得是 `<aside>` 的**兄弟**而不是子节点 —— 侧边栏是
+ * `overflow: hidden` 的，装在里面的手柄会被它自己裁掉。
  */
 function buildShell(): void {
   const app = document.getElementById('app');
@@ -109,6 +115,16 @@ function buildShell(): void {
   app.innerHTML = `
     <div class="ela-layout">
       <aside id="ela-sidebar" class="ela-sidebar"></aside>
+      <div
+        id="ela-sidebar-resize"
+        class="ela-resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-controls="ela-sidebar"
+        aria-label="调整侧边栏宽度"
+        title="拖动调整侧边栏宽度 · 双击复位"
+        tabindex="0"
+      ></div>
       <div class="ela-main">
         <header class="ela-main-header">
           <button id="ela-sidebar-toggle" type="button" class="ela-top-btn ela-top-icon" title="收起 / 展开侧边栏" aria-label="收起 / 展开侧边栏" aria-expanded="true">☰</button>
@@ -333,6 +349,11 @@ async function main(): Promise<void> {
   installCommandPalette(() => elaApi.commands());
 
   // 侧边栏（钩子要用 agent，所以到这里才建）。
+  // 顶栏那个按钮先拿到（侧边栏 `onToggle` 会在安装当下就回一次，那时这个 const 得已就绪）。
+  const sidebarToggle = requireElement('ela-sidebar-toggle');
+  const syncToggle = (open: boolean): void =>
+    sidebarToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+
   sidebar = installSidebar(requireElement('ela-sidebar'), {
     onResume: (id, cwd) => agent.resumeSession(id, cwd),
     onNew: () => agent.startNewSession(),
@@ -340,15 +361,18 @@ async function main(): Promise<void> {
     // 底栏的「技能」「设置」跑的是与 `/skills` `/settings` 同一个命令（同一个弹窗）。
     openSkills: () => void runCommand('skills', '', commandContext),
     openSettings: () => void runCommand('settings', '', commandContext),
+    // 窗口自己折叠时按钮不会收到点击，靠这条回调把 `aria-expanded` 拉回来。
+    onToggle: syncToggle,
   });
-  const sidebarToggle = requireElement('ela-sidebar-toggle');
-  const syncToggle = (): void =>
-    sidebarToggle.setAttribute('aria-expanded', sidebar?.isOpen() === true ? 'true' : 'false');
-  syncToggle();
-  sidebarToggle.addEventListener('click', () => {
-    sidebar?.toggle();
-    syncToggle();
+  // 中缝拖宽（宽度规矩与记忆都在 panel-resize.ts）。先造它再装侧边栏也不算错 ——
+  // 两边只靠 CSS 变量与一个类沟通，跟先后无关。
+  makeSidebarResizable({
+    panel: requireElement('ela-sidebar'),
+    handle: requireElement('ela-sidebar-resize'),
+    storageKey: 'ela-webui:sidebar-width',
   });
+  // `toggle()` 内部会走 `onToggle`，这里不必再同步一次。
+  sidebarToggle.addEventListener('click', () => sidebar?.toggle());
 
   await chatPanel.setAgent(agent as never, {
     // 密钥在服务端。这里返回 true 只是让 pi-web-ui 的「没 key 就不发」那道闸放行。
@@ -361,6 +385,10 @@ async function main(): Promise<void> {
   const chat = document.getElementById('ela-chat');
   if (!chat) throw new Error('#ela-chat 不存在');
   chat.appendChild(chatPanel);
+
+  // 会话列表的自动滚动：接管 pi-web-ui 的「瞬间跳到底」，改成 Motion 驱动的平滑跟随
+  // （它自己的自动滚动被关掉，所以两套不会抢；见 `smooth-scroll.ts` 的文件头）。
+  installSmoothAutoScroll(chat);
 
   agent.connect(wsUrl());
 }
