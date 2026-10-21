@@ -161,7 +161,7 @@ export interface WebAgentState {
   toolTimings: Record<string, number>;
   /**
    * 底栏那一行统计（与 TUI 的 `statsLine()` **逐字同形**）：
-   * `↑362k ↓310k R121M CH99.9% 52%/1.0M`。
+   * `↑362k ↓310k R121M CH99.9% 52%/1.0M (auto)`（末尾 `(auto)` = 自动压缩开着）。
    *
    * 为什么由服务端算而不是浏览器自己算：`CH`（缓存命中率）与上下文占用两段的口径都是
    * 「最近一次有效调用」，且上下文窗口要从 `model.contextWindow` 取 —— 在 `statsLine()`

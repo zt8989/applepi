@@ -1102,6 +1102,48 @@ test('statsLine：一次有效调用都没有时显示 ? 而不是 0%（0% 是�
   assert.ok(!out.includes('0%'), `不该显示 0%：${out}`);
 });
 
+// ─── `(auto)`：自动压缩的指示灯（与 pi 的 footer 逐字同形）───
+//
+// pi 的 `footer.js`：`autoCompactEnabled ? " (auto)" : ""`，接在占用段后面。
+// 这一小段不是装饰：它告诉用户「快满了会自动压，不用自己动手」。
+
+test('statsLine：自动压缩开着时占用段末尾跟 (auto)', () => {
+  const state = {
+    messages: [assistantWithUsage({ input: 700_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 700_000 })],
+    model: { contextWindow: 1_000_000 },
+  } as unknown as AgentState;
+  const out = statsLine(state, true).text;
+  assert.ok(out.endsWith('70%/1.0M (auto)'), `应在末尾跟 (auto)，实际：${out}`);
+});
+
+test('statsLine：自动压缩关着 / 不支持（null）/ 没传时都不画 (auto)', () => {
+  const state = {
+    messages: [assistantWithUsage({ input: 700_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 700_000 })],
+    model: { contextWindow: 1_000_000 },
+  } as unknown as AgentState;
+  for (const flag of [false, null, undefined] as const) {
+    const out = flag === undefined ? statsLine(state).text : statsLine(state, flag).text;
+    assert.ok(!out.includes('auto'), `开关是 ${String(flag)} 时不该有 (auto)：${out}`);
+  }
+});
+
+test('statsLine：占用未知（?/1.0M）时 (auto) 也跟（pi 的两支都带）', () => {
+  const state = { messages: [], model: { contextWindow: 1_000_000 } } as unknown as AgentState;
+  assert.ok(statsLine(state, true).text.endsWith('?/1.0M (auto)'), statsLine(state, true).text);
+});
+
+test('statsLine：(auto) 不进告警段（变色的只是数字那半截）', () => {
+  // 告警段的 `find` 与 text 是前缀关系：若把 ` (auto)` 也塞进 find，
+  // 将来去掉开关时告警就静默失效了（找不到就 paint 不到）——这里把它钉住。
+  const state = {
+    messages: [assistantWithUsage({ input: 800_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 800_000 })],
+    model: { contextWindow: 1_000_000 },
+  } as unknown as AgentState;
+  const out = statsLine(state, true);
+  assert.equal(out.warnings[0]?.find, '80%/1.0M', `告警段不带 (auto)：${String(out.warnings[0]?.find)}`);
+  assert.ok(out.text.includes('80%/1.0M (auto)'), out.text);
+});
+
 // ─── dimLine：整行变淡，但告警段保持颜色 ───
 
 test('dimLine：整行都变淡（底栏是背景信息，不该跟对话抢注意力）', () => {
