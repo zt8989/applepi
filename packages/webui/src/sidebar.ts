@@ -68,11 +68,11 @@ export interface SidebarHooks {
   onNew(): void;
   /** 一行提示（与开场诊断同一处）。 */
   notice(text: string, tone?: 'info' | 'warn' | 'error'): void;
-  /** 底栏「模型」：打开模型选择器。 */
-  openModelPicker(): void;
-  /** 底栏「技能」：列一下进了 prompt 的 skill（与 `/skills` 同一个弹窗）。 */
+  /** 底栏「模型」：打开设置 › 模型（与 pi-web 同一个入口；换**当前会话**模型走 composer 上那个按钮）。 */
+  openModels(): void;
+  /** 底栏「技能」：打开设置 › 技能（与 `/skills` 同一块面板）。 */
   openSkills(): void;
-  /** 底栏「设置」：与 `/settings` 同一个弹窗。 */
+  /** 底栏「设置」：与 `/settings` 同一块面板。 */
   openSettings(): void;
   /**
    * 收起 / 展开变了（包括窗口变窄时的自动收起）。
@@ -613,7 +613,7 @@ export function installSidebar(host: HTMLElement, hooks: SidebarHooks): Sidebar 
     if (refuseWhileRunning('新建会话')) return;
     hooks.onNew();
   });
-  requireIn<HTMLButtonElement>('[data-key="model"]').addEventListener('click', () => hooks.openModelPicker());
+  requireIn<HTMLButtonElement>('[data-key="model"]').addEventListener('click', () => hooks.openModels());
   requireIn<HTMLButtonElement>('[data-key="skills"]').addEventListener('click', () => hooks.openSkills());
   requireIn<HTMLButtonElement>('[data-key="settings"]').addEventListener('click', () => hooks.openSettings());
 

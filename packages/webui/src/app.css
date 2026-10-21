@@ -628,7 +628,7 @@ body {
   user-select: text;
 }
 
-/* ── 模型选择器（`src/model-picker.ts` 造 DOM，纯样式在这一里） ── */
+/* ── 通用模态框（`src/modal.ts`）与 composer 模型下拉（`src/model-picker.ts`） ── */
 
 .ela-modal-backdrop {
   position: fixed;
@@ -732,6 +732,757 @@ body {
   padding: 1rem 0.75rem;
   color: var(--color-muted-foreground, #6b7280);
   font-size: 0.8125rem;
+}
+
+/* composer 的模型下拉：贴着按钮开（形状照 pi-web 的 ModelSelector），不是模态框。 */
+.ela-select-popover {
+  position: fixed;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border, #e5e5e5);
+  border-radius: 8px;
+  background: var(--background, #fff);
+  color: var(--foreground, #111);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.2);
+}
+
+.ela-select-search {
+  flex: none;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border, #e5e5e5);
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+}
+
+.ela-select-list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.ela-select-group {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 8px 12px 3px;
+  background: var(--background, #fff);
+  color: var(--muted-foreground, #6b7280);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.ela-select-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.ela-select-item.is-selected {
+  background: var(--secondary, #f4f4f5);
+}
+
+.ela-select-check {
+  width: 14px;
+  flex: none;
+  font-size: 11px;
+}
+
+.ela-select-names {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ela-select-name {
+  overflow: hidden;
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ela-select-name.is-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.ela-select-item.is-current .ela-select-name {
+  font-weight: 600;
+}
+
+.ela-select-id {
+  overflow: hidden;
+  color: var(--muted-foreground, #6b7280);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ela-select-empty {
+  padding: 16px 12px;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 12px;
+}
+
+.ela-select-foot {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border, #e5e5e5);
+  color: var(--muted-foreground, #6b7280);
+  font-size: 10px;
+  user-select: none;
+}
+
+.ela-select-scope {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.ela-select-scope input {
+  accent-color: var(--primary, #111);
+}
+
+.ela-select-hint {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* ── 设置面板（`src/settings-panel.ts`）：整页分区弹窗（形状照 pi-web） ── */
+
+.ela-settings-backdrop {
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  z-index: 60;
+}
+
+.ela-settings-surface {
+  display: flex;
+  flex-direction: column;
+  width: min(1080px, calc(100vw - 16px));
+  height: 84vh;
+  max-height: calc(100dvh - 16px);
+  overflow: hidden;
+  border: 1px solid var(--border, #e5e5e5);
+  border-radius: 8px;
+  background: var(--background, #fff);
+  color: var(--foreground, #111);
+  box-shadow: 0 16px 48px rgb(0 0 0 / 0.22);
+}
+
+.ela-settings-header {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  min-height: 50px;
+  padding: 0 52px 0 18px;
+  border-bottom: 1px solid var(--border, #e5e5e5);
+}
+
+.ela-settings-title {
+  flex-shrink: 0;
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ela-settings-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  height: 50px;
+  margin-left: 22px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.ela-settings-tab {
+  position: relative;
+  flex: 0 0 96px;
+  width: 96px;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ela-settings-tab::after {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: 24px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--primary, #111);
+  content: '';
+  opacity: 0;
+  transform: translateX(-50%) scaleX(0.5);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.ela-settings-tab:hover {
+  color: var(--foreground, #111);
+}
+
+.ela-settings-tab.is-active {
+  color: var(--foreground, #111);
+  font-weight: 600;
+}
+
+.ela-settings-tab.is-active::after {
+  opacity: 1;
+  transform: translateX(-50%) scaleX(1);
+}
+
+.ela-settings-close {
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ela-settings-close:hover {
+  background: var(--secondary, #f4f4f5);
+  color: var(--foreground, #111);
+}
+
+.ela-settings-main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ela-settings-state {
+  margin: auto;
+  padding: 24px;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 13px;
+  text-align: center;
+}
+
+.ela-settings-state.is-error {
+  color: var(--destructive, #dc2626);
+}
+
+/* 常规：整页滚动，内容留一条可读列（pi-web 的 General 同一个形状）。 */
+.ela-settings-page {
+  width: 100%;
+  height: 100%;
+  padding: 26px clamp(18px, 4vw, 40px) 40px;
+  overflow-y: auto;
+}
+
+.ela-settings-page > * {
+  max-width: 620px;
+}
+
+.ela-settings-section + .ela-settings-section {
+  margin-top: 30px;
+}
+
+.ela-settings-heading {
+  margin: 0 0 5px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.ela-settings-description {
+  margin: 0 0 12px;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.ela-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border, #e5e5e5);
+}
+
+.ela-settings-row-text {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ela-settings-row-label {
+  font-size: 13px;
+}
+
+.ela-settings-row-hint {
+  color: var(--muted-foreground, #6b7280);
+  font-size: 11px;
+}
+
+.ela-settings-value {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border, #e5e5e5);
+  border-radius: 5px;
+  background: var(--background, #fff);
+  color: var(--foreground, #111);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ela-settings-value:hover {
+  background: var(--secondary, #f4f4f5);
+}
+
+.ela-settings-switch {
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border, #e5e5e5);
+  border-radius: 999px;
+  background: var(--secondary, #f4f4f5);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.ela-settings-switch > span {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--muted-foreground, #6b7280);
+  transition: transform 0.15s, background 0.15s;
+}
+
+.ela-settings-switch[aria-checked='true'] {
+  border-color: var(--primary, #111);
+  background: var(--primary, #111);
+}
+
+.ela-settings-switch[aria-checked='true'] > span {
+  background: var(--background, #fff);
+  transform: translateX(14px);
+}
+
+.ela-settings-switch:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 模型 / 技能：左侧列表 + 右侧详情。 */
+.ela-settings-split {
+  display: flex;
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.ela-settings-side {
+  display: flex;
+  flex: 0 0 250px;
+  min-width: 0;
+  flex-direction: column;
+  border-right: 1px solid var(--border, #e5e5e5);
+  overflow: hidden;
+}
+
+.ela-settings-side-head {
+  flex: none;
+  padding: 14px 16px 8px;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.ela-settings-side-list {
+  flex: 1;
+  min-height: 0;
+  padding: 0 8px 8px;
+  overflow-y: auto;
+}
+
+.ela-settings-side-foot {
+  flex: none;
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--border, #e5e5e5);
+}
+
+.ela-settings-side-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--foreground, #111);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ela-settings-side-item:hover {
+  background: var(--secondary, #f4f4f5);
+}
+
+.ela-settings-side-item.is-active {
+  background: var(--secondary, #f4f4f5);
+  font-weight: 600;
+}
+
+.ela-settings-side-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ela-settings-side-count {
+  flex: none;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ela-settings-link {
+  padding: 4px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ela-settings-link:hover {
+  color: var(--foreground, #111);
+  text-decoration: underline;
+}
+
+.ela-settings-detail {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ela-settings-detail-head {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 12px;
+  border-bottom: 1px solid var(--border, #e5e5e5);
+}
+
+.ela-settings-detail-info {
+  min-width: 0;
+}
+
+.ela-settings-detail-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.ela-settings-detail-meta {
+  margin: 4px 0 0;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 11px;
+}
+
+.ela-settings-toolbar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border, #e5e5e5);
+}
+
+.ela-settings-tool {
+  flex: none;
+  padding: 4px 9px;
+  border: 1px solid var(--border, #e5e5e5);
+  border-radius: 5px;
+  background: var(--background, #fff);
+  color: var(--foreground, #111);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.ela-settings-tool:hover {
+  background: var(--secondary, #f4f4f5);
+}
+
+.ela-settings-tool:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ela-settings-search {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--border, #e5e5e5);
+  border-radius: 5px;
+  outline: none;
+  background: var(--background, #fff);
+  color: var(--foreground, #111);
+  font-size: 12px;
+}
+
+.ela-settings-search:focus {
+  border-color: var(--primary, #111);
+}
+
+.ela-settings-list {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 12px 16px;
+  overflow-y: auto;
+}
+
+.ela-settings-model-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.ela-settings-model-row:hover {
+  background: var(--secondary, #f4f4f5);
+}
+
+.ela-settings-model-row[hidden] {
+  display: none;
+}
+
+.ela-settings-box {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--primary, #111);
+  cursor: pointer;
+}
+
+.ela-settings-model-names {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ela-settings-model-name {
+  overflow: hidden;
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ela-settings-model-name.is-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.ela-settings-model-id {
+  overflow: hidden;
+  color: var(--muted-foreground, #6b7280);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ela-settings-tag {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--secondary, #f4f4f5);
+  color: var(--muted-foreground, #6b7280);
+  font-size: 10px;
+}
+
+/* 技能详情 */
+.ela-settings-fields {
+  flex: 1;
+  min-height: 0;
+  padding: 16px 20px 24px;
+  overflow-y: auto;
+}
+
+.ela-settings-field + .ela-settings-field {
+  margin-top: 14px;
+}
+
+.ela-settings-field-label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted-foreground, #6b7280);
+  font-size: 11px;
+}
+
+.ela-settings-field-value {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.ela-settings-field-value.is-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.ela-settings-note {
+  flex: none;
+  padding: 10px 20px;
+  border-top: 1px solid var(--border, #e5e5e5);
+  color: var(--muted-foreground, #6b7280);
+  font-size: 11px;
+}
+
+/* 写盘失败 / 「至少留一个模型」这类必须当场看到的反馈。 */
+.ela-settings-status {
+  flex: none;
+  padding: 8px 18px;
+  border-top: 1px solid var(--border, #e5e5e5);
+  background: var(--secondary, #f4f4f5);
+  color: var(--foreground, #111);
+  font-size: 12px;
+}
+
+.ela-settings-status.is-error {
+  color: var(--destructive, #dc2626);
+}
+
+@media (max-width: 760px) {
+  .ela-settings-surface {
+    width: calc(100vw - 8px);
+    height: calc(100dvh - 8px);
+  }
+
+  .ela-settings-header {
+    padding-right: 44px;
+  }
+
+  .ela-settings-tabs {
+    margin-left: 10px;
+  }
+
+  .ela-settings-tab {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 64px;
+    padding: 0 8px;
+  }
+
+  .ela-settings-side {
+    flex-basis: 34%;
+  }
+
+  .ela-settings-detail-head {
+    padding: 14px;
+  }
+
+  .ela-settings-toolbar {
+    flex-wrap: wrap;
+    padding: 10px 14px;
+  }
+
+  .ela-settings-search {
+    flex-basis: 100%;
+  }
+
+  .ela-settings-list {
+    padding: 6px 8px 12px;
+  }
+
+  .ela-settings-page {
+    padding: 20px 16px 32px;
+  }
+}
+
+@media (max-width: 560px) {
+  .ela-settings-split {
+    flex-direction: column;
+  }
+
+  .ela-settings-side {
+    flex: 0 0 auto;
+    max-height: 34%;
+    border-right: 0;
+    border-bottom: 1px solid var(--border, #e5e5e5);
+  }
+
+  .ela-settings-side-list {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .ela-settings-side-item {
+    flex: none;
+    width: auto;
+  }
 }
 
 /* ── 问卷（多题 tab，`src/questionnaire.ts`）── */
@@ -1060,7 +1811,6 @@ input.ela-q-box {
   font-size: 0.75rem;
 }
 
-.ela-modal-scope,
 .ela-modal-hint {
   display: flex;
   align-items: center;
@@ -1070,10 +1820,6 @@ input.ela-q-box {
   color: var(--color-muted-foreground, #6b7280);
   font-size: 0.7rem;
   user-select: none;
-}
-
-.ela-modal-scope {
-  cursor: pointer;
 }
 /* ── 顶栏那三个入口（`context-panels.ts`）：完整历史 / 系统 / 工具 ── */
 

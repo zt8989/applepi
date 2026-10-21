@@ -136,6 +136,8 @@ async function start(bridgeOptions: {
       { name: 'ext-thing', description: '扩展命令', source: 'extension' },
     ],
     runExtensionCommand: async () => {},
+    extensions: () => [],
+    extensionErrors: () => [],
   });
 
   // 造一份假的 dist：一个 index.html + 一个资源，外加一个不存在的路径（验 SPA 回退）。
@@ -429,6 +431,8 @@ test('web api：空目录给空列表；空作用域归一成 null（= 全开）
     setAutoCompactEnabled: () => {},
     commands: () => [],
     runExtensionCommand: async () => {},
+    extensions: () => [],
+    extensionErrors: () => [],
   });
   const info = api.models();
   assert.deepEqual(info.models, []);

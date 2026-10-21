@@ -1,6 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { scopedKeys } from '../src/model-picker';
+import { scopedKeys, scopePatternKey } from '../src/model-picker';
+import type { WebModelRef, WebModelsInfo } from '@ela/core/web-protocol';
+import {
+  buildScopeState,
+  cloneScopeState,
+  enabledCount,
+  groupByProvider,
+  modelRef,
+  providerKeys,
+  remainingEnabled,
+  scopePayload,
+  setAllEnabled,
+  setProviderEnabled,
+  toggleModel,
+} from '../src/settings-scope';
 import { extractText, stripAssistantUsage } from '../src/remote-agent';
 import { extractAttachments, withMessageAttachments, withUserAttachments } from '../src/attachments';
 import { parseEditDiff } from '../src/edit-diff';
@@ -43,6 +57,127 @@ test('scopedKeys：模型 id 自身带冒号时不被切开（`workbuddy/cn:deep
   assert.ok(keys.has('workbuddy/cn:deepseek-v4.1-flash'), '去掉级别后缀后要正好等于模型 id');
   // 切早了会得到 `workbuddy/cn` —— 那种 key 不该成为唯一结果（否则那个模型永远不在作用域里）。
   assert.ok(keys.has('workbuddy/cn:deepseek-v4.1-flash:high'), '原样也留着');
+});
+
+test('scopePatternKey：只认最后一段合法级别；模型 id 里的冒号原样留着', () => {
+  assert.equal(scopePatternKey('deepseek/v4'), 'deepseek/v4');
+  assert.equal(scopePatternKey('deepseek/v4:high'), 'deepseek/v4');
+  assert.equal(scopePatternKey('workbuddy/cn:deepseek-v4.1-flash'), 'workbuddy/cn:deepseek-v4.1-flash');
+  assert.equal(
+    scopePatternKey('workbuddy/cn:deepseek-v4.1-flash:high'),
+    'workbuddy/cn:deepseek-v4.1-flash',
+  );
+  // 没有 `/` 的条目当成普通 key（settings.json 里的手写脏值不能让它抛）。
+  assert.equal(scopePatternKey('not-a-ref:high'), 'not-a-ref:high');
+});
+
+// ─── 设置 › 模型（可用模型 / 作用域）的纯逻辑 ───
+
+const model = (provider: string, id: string): WebModelRef => ({
+  provider,
+  id,
+  name: id,
+  reasoning: false,
+});
+
+const modelsInfo = (
+  models: WebModelRef[],
+  scoped: string[] | null,
+  current: { provider: string; id: string } | null = null,
+): WebModelsInfo => ({ models, scoped, current });
+
+test('buildScopeState：`scoped: null` = 全开；显式作用域保留 `:high` 原条目', () => {
+  const all = buildScopeState(modelsInfo([model('deepseek', 'v4')], null));
+  assert.deepEqual([...all.enabled], ['deepseek/v4']);
+  assert.equal(all.patterns.size, 0);
+  assert.deepEqual(all.extras, []);
+
+  const scoped = buildScopeState(
+    modelsInfo(
+      [model('deepseek', 'v4'), model('workbuddy', 'cn:flash')],
+      ['deepseek/v4:high', 'workbuddy/cn:flash'],
+    ),
+  );
+  assert.deepEqual([...scoped.enabled].sort(), ['deepseek/v4', 'workbuddy/cn:flash']);
+  assert.equal(scoped.patterns.get('deepseek/v4'), 'deepseek/v4:high', '保存时要写回带后缀那条');
+  assert.equal(scoped.patterns.has('workbuddy/cn:flash'), true, '模型 id 里的冒号不当下标后缀');
+});
+
+test('buildScopeState：目录里对不上的作用域条目不丢，留在 extras', () => {
+  const state = buildScopeState(
+    modelsInfo([model('deepseek', 'v4')], ['deepseek/v4', 'removed/gone:high']),
+  );
+  assert.deepEqual([...state.enabled], ['deepseek/v4']);
+  assert.deepEqual(state.extras, ['removed/gone:high']);
+});
+
+test('scopePayload：全开写 null；否则写回原条目（含后缀与对不上的旧条目）', () => {
+  const all = buildScopeState(modelsInfo([model('deepseek', 'v4'), model('deepseek', 'pro')], null));
+  assert.equal(scopePayload(all), null, '全开 = 不设 enabledModels');
+
+  const one = buildScopeState(
+    modelsInfo([model('deepseek', 'v4'), model('deepseek', 'pro')], ['deepseek/v4:high']),
+  );
+  assert.deepEqual(scopePayload(one), ['deepseek/v4:high'], '留下的模型带上原来的档位');
+
+  const withExtra = buildScopeState(
+    modelsInfo([model('deepseek', 'v4')], ['deepseek/v4', 'removed/gone']),
+  );
+  assert.deepEqual(scopePayload(withExtra), ['removed/gone', 'deepseek/v4'], '看不懂的条目原样留着');
+
+  setAllEnabled(withExtra);
+  assert.deepEqual(withExtra.extras, [], '「全部开启」才清掉旧条目');
+  assert.equal(scopePayload(withExtra), null);
+});
+
+test('remainingEnabled：关到最后一个时返回 0（服务端会把空数组归成全开）', () => {
+  const state = buildScopeState(
+    modelsInfo([model('deepseek', 'v4'), model('deepseek', 'pro')], ['deepseek/v4']),
+  );
+  assert.equal(remainingEnabled(state, ['deepseek/v4']), 0, '不能把唯一开着的关掉');
+  assert.equal(remainingEnabled(state, ['deepseek/pro']), 1, '关一个本来就关着的，不影响');
+  assert.equal(providerKeys(state, 'deepseek').length, 2);
+});
+
+test('toggleModel / setProviderEnabled / enabledCount：状态与计数一致', () => {
+  const state = buildScopeState(modelsInfo([
+    model('a', 'one'),
+    model('a', 'two'),
+    model('b', 'three'),
+  ], null));
+  assert.deepEqual(enabledCount(state), { enabled: 3, total: 3 });
+
+  toggleModel(state, 'a/one', false);
+  assert.deepEqual(enabledCount(state), { enabled: 2, total: 3 });
+
+  setProviderEnabled(state, 'a', false);
+  assert.deepEqual(enabledCount(state), { enabled: 1, total: 3 });
+  assert.deepEqual([...state.enabled], ['b/three']);
+
+  setProviderEnabled(state, 'a', true);
+  assert.deepEqual(enabledCount(state), { enabled: 3, total: 3 });
+});
+
+test('cloneScopeState：保存失败要退回改前的样子（集合互不影响）', () => {
+  const state = buildScopeState(modelsInfo([model('a', 'one')], ['a/one:high', 'stale/x']));
+  const before = cloneScopeState(state);
+  toggleModel(state, 'a/one', false);
+  state.extras.push('stale/y');
+  state.patterns.clear();
+
+  assert.deepEqual([...before.enabled], ['a/one'], '快照没被改');
+  assert.deepEqual(before.extras, ['stale/x'], '快照是独立的数组');
+  assert.equal(before.patterns.get('a/one'), 'a/one:high');
+});
+
+test('groupByProvider：保持服务端给的顺序（models.json 里 provider 的顺序是用户写的）', () => {
+  const groups = groupByProvider([
+    model('b', 'one'),
+    model('a', 'two'),
+    model('b', 'three'),
+  ]);
+  assert.deepEqual(groups.map(([provider]) => provider), ['b', 'a']);
+  assert.deepEqual(groups[0]![1].map(modelRef), ['b/one', 'b/three']);
 });
 
 test('extractText：字符串 / `{content}` / `{content: 块}` 三种入参都抠得出文本', () => {

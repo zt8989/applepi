@@ -26,7 +26,7 @@ import {
 import { html } from 'lit';
 import { STREAM_NOTICE_ROLE } from '@ela/core/web-protocol';
 import { RemoteAgent, type UiQuestionnaire, type UiRequest } from './remote-agent';
-import { openModelPicker } from './model-picker';
+import { openModelPicker, composerModelButton } from './model-picker';
 import { openConfirmDialog, openInputDialog, openSelectDialog } from './dialogs';
 import { openQuestionnaireModal, type QuestionnaireModalHandle } from './questionnaire';
 import { installToolMessageView, setToolTimings } from './tool-view';
@@ -199,6 +199,7 @@ async function main(): Promise<void> {
    * 不再随 `hello` 来 —— 那些是「非会话数据」，改成接口后由前端按需取（也更新鲜：
    * TUI 里刚改过作用域，这里再开就是新的）。
    */
+  let chatPanelRef: ChatPanel | null = null;
   async function openModelPickerFromApi(): Promise<void> {
     try {
       const info = await elaApi.models();
@@ -206,6 +207,10 @@ async function main(): Promise<void> {
         models: info.models,
         current: info.current,
         scopedModelIds: info.scoped,
+        anchor:
+          chatPanelRef === null
+            ? null
+            : composerModelButton(chatPanelRef, info.current?.id ?? null),
         onSelect: (model) => {
           // 走接口换（服务端才是真相）——它会推一份新状态回来。
           void elaApi.setModel(`${model.provider}/${model.id}`).then((result) => {
@@ -219,6 +224,7 @@ async function main(): Promise<void> {
   }
 
   const chatPanel = new ChatPanel();
+  chatPanelRef = chatPanel;
   /** 现在开着的扩展对话框（id → 只拆 DOM 的 close）。 */
   const openDialogs = new Map<string, () => void>();
   /** 开着的问卷（id → 那份弹窗的句柄）。同一份问卷会收到很多帧，所以得留着。 */
@@ -358,7 +364,9 @@ async function main(): Promise<void> {
     onResume: (id, cwd) => agent.resumeSession(id, cwd),
     onNew: () => agent.startNewSession(),
     ...commandContext,
-    // 底栏的「技能」「设置」跑的是与 `/skills` `/settings` 同一个命令（同一个弹窗）。
+    // 底栏的「模型」「技能」「设置」都打开同一块整页设置面板的三个分区（与 pi-web 一致）。
+    // 换**当前会话**模型走 composer 上那个按钮；底栏这一格管的是「哪些模型可选」。
+    openModels: () => void runCommand('scoped-models', '', commandContext),
     openSkills: () => void runCommand('skills', '', commandContext),
     openSettings: () => void runCommand('settings', '', commandContext),
     // 窗口自己折叠时按钮不会收到点击，靠这条回调把 `aria-expanded` 拉回来。
