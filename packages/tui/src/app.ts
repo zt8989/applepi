@@ -665,7 +665,7 @@ export function modelLine(state: AgentState): string {
 /**
  * 底栏左下行：token 用量 + 上下文占用。
  *
- * 形状照抄 pi：`↑6.8k ↓49 R143 CH2.1% 0.7%/1.0M`
+ * 形状照抄 pi：`↑6.8k ↓49 R143 CH2.1% 0.7%/1.0M (auto)`
  *
  * ## 数字格式与算法都用 pi 的
  *
@@ -681,6 +681,17 @@ export function modelLine(state: AgentState): string {
  *   有效消息的 usage**，不累加 —— 累加出来的数字是天文数字（见函数体的注释）。
  *
  * 两者混用就是「把整段历史重复数了 N 次」。
+ *
+ * ## `(auto)` 是自动压缩的指示灯
+ *
+ * pi 的 `footer.js` 在占用段后面跟 ` (auto)`（`autoCompactEnabled ? " (auto)" : ""`，
+ * `?/1.0M` 那一支也带）。这 6 个字符说的是「快满了会自动压，不用自己动手」——
+ * 没有它，用户只能靠记忆判断这一格的数字该不该紧张。
+ *
+ * 判定用**真的开关**（`options.autoCompactEnabled()` → 内核的 `AutoCompact`），
+ * 不是本文件的局部变量：`/settings` 里翻一下就变，`refresh()` 下一帧就跟上。
+ * `null`（这个装配不支持压缩）**不画** —— 与 `/settings` 面板里那一行不显示同一条口径：
+ * 不知道的事不替它打保票。
  */
 /** 底箱第二行算出来的结果。 */
 export interface StatsLine {
@@ -863,7 +874,7 @@ function queuedInput(text: string): QueuedInput {
   return { text, content: [{ type: 'text', text }], at: Date.now() };
 }
 
-export function statsLine(state: AgentState): StatsLine {
+export function statsLine(state: AgentState, autoCompact: boolean | null = null): StatsLine {
   const totals = createUsageTotals();
   let latestCacheHitRate: number | undefined;
   for (const message of state.messages) {
@@ -908,6 +919,8 @@ export function statsLine(state: AgentState): StatsLine {
   //
   // 这里**不自己上色**，而是把告警信息一起返回（`warning`）：整行底箱会被包进 dim，
   // 而 dim 里再嵌一个 `\x1b[0m` 结尾的颜色段会把 dim 提前关掉（见 dimLine 的注释）。
+  // 自动压缩开着才画 `(auto)`；关着 / 不知道（null）都不画。
+  const autoSuffix = autoCompact === true ? ' (auto)' : '';
   const contextWindow = state.model.contextWindow;
   if (contextWindow > 0) {
     const last = lastContextUsage(state.messages);
@@ -917,7 +930,9 @@ export function statsLine(state: AgentState): StatsLine {
       // “目录里配的窗口小于实际能发的量，该换窗口或压缩历史”。pi 也是直接显示原值。
       const percent = percentValue < 1 ? percentValue.toFixed(1) : Math.round(percentValue);
       const display = `${percent}%/${formatTokens(contextWindow)}`;
-      parts.push(display);
+      // 告警段只包数字那半截（`autoSuffix` 留在 dim 里）—— `find` 是前缀匹配，
+      // 所以带上后缀也不会找错，但没有必要让它跟着变色。
+      parts.push(display + autoSuffix);
       if (percentValue > 70) {
         warnings.push({ find: display, paint: percentValue > 90 ? red : yellow });
         level = percentValue > 90 ? 'error' : 'warn';
@@ -925,7 +940,7 @@ export function statsLine(state: AgentState): StatsLine {
     } else {
       // 还没有任何一次**有效**调用（会话刚开、或全部失败/被中断）：占用**未知**。
       // pi 这里是 `?/1.0M`，不是 `0%/1.0M` —— 后者会说谎（说“没占”）。
-      parts.push(`?/${formatTokens(contextWindow)}`);
+      parts.push(`?/${formatTokens(contextWindow)}${autoSuffix}`);
     }
   }
   return { text: parts.join(' '), warnings, level };
@@ -1621,7 +1636,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 底栏：**两行**（与 pi 同形）。
    *
    *     ~\Documents\workspace\event-loop-agent (main)
-   *     ↑6.8k ↓49 R143 CH2.1% 0.7%/1.0M        (workbuddy) cn:space-bunny
+   *     ↑6.8k ↓49 R143 CH2.1% 0.7%/1.0M (auto)   (workbuddy) cn:space-bunny
    *
    * 为什么要它：模型与用量是「我在跟谁说话、说了多少」，与对话内容无关；堆在顶行
    * 会干扰读对话。而它们又不能删 —— 换 provider 时最容易出的错就是以为还在用原厂模型。
@@ -2000,7 +2015,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // 底栏：模型名 / 用量数会变，必须补齐到全宽，否则残影会叠出来。
     // 底箱两行（形状拄 pi 截图）：
     //   第一行：`~\Documents\workspace\event-loop-agent (main)`            —— 左边
-    //   第二行：`↑6.8k ↓49 R143 CH2.1% 0.7%/1.0M      (workbuddy) cn:space-bunny`
+    //   第二行：`↑6.8k ↓49 R143 CH2.1% 0.7%/1.0M (auto)  (workbuddy) cn:space-bunny`
     //
     // 模型那行贴在**第二行**右侧（不是第一行）—— 之前我放错了行，pi 是用量与模型并排。
     // 整块上 dim（=\x1b[2m）：底箱是背景信息，不该跟对话内容抢注意力。
@@ -2010,7 +2025,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
     const width = terminal.columns ?? 100;
     // 队列面板同样要补到全宽（否则少一行时残影会留在屏幕上）。
     queuePanel.setText(padToWidth(renderQueuePanel(state, width), width));
-    const stats = statsLine(state);
+    // 第二个参数是**真的**自动压缩开关（`/settings` 里翻一下就变）—— 底栏那一格
+    // 因此能显示 pi 同款 `(auto)`，而不是写死一个「应该开着吧」。
+    const stats = statsLine(state, options.autoCompactEnabled?.() ?? null);
     const statsRow = twoColumn(stats.text, modelLine(state), width);
     // 第一行：左边 cwd + 分支，右边是扩展的状态段（`ctx.ui.setStatus`）。
     // 没有状态段时就是原来那一行（补到全宽后整体 dim）。

@@ -328,7 +328,7 @@ content 块界面也不会画。两头都补上之后是这么走的：
 
 ## 底栏统计行（与 TUI 逐字同形）
 
-终端底栏那一行是 `↑362k ↓310k R121M CH99.9% 52%/1.0M`（`statsLine()`）。pi-web-ui 自带
+终端底栏那一行是 `↑362k ↓310k R121M CH99.9% 52%/1.0M (auto)`（`statsLine()`）。pi-web-ui 自带
 的 `formatUsage()` 只到 `↑ ↓ R W $cost` —— 没有 `CH`（缓存命中率）与上下文占用。
 
 所以这一行**由服务端算好发过去**（`WebAgentState.statsText` / `statsLevel`，桥通过
@@ -338,6 +338,11 @@ content 块界面也不会画。两头都补上之后是这么走的：
 为什么不让浏览器自己算：`CH` 与上下文占用两段的口径都是「**最近一次**有效调用」，
 而那个「有效」的过滤条件（token>0 / 不是 aborted / 不是 error）与服务端那份必须一致 ——
 两边各算一份的结果是「同一个会话，终端与浏览器底栏对不上」。
+
+末尾那个 ` (auto)` 是**自动压缩开着**的指示灯（与 pi 的 `footer.js` 同形：
+`autoCompactEnabled ? " (auto)" : ""`，`?/1.0M` 那一支也带）。它由服务端按
+`kernel.autoCompactEnabled()` 拼进整行，所以终端与浏览器一起跟着 `/settings` 里
+那一行变；`null`（这个装配不支持压缩）与关着都不画。
 
 顺带两处「数字」的口径：
 
