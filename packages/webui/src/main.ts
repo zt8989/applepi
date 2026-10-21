@@ -358,7 +358,9 @@ async function main(): Promise<void> {
     onResume: (id, cwd) => agent.resumeSession(id, cwd),
     onNew: () => agent.startNewSession(),
     ...commandContext,
-    // 底栏的「技能」「设置」跑的是与 `/skills` `/settings` 同一个命令（同一个弹窗）。
+    // 底栏的「模型」「技能」「设置」都打开同一块整页设置面板的三个分区（与 pi-web 一致）。
+    // 换**当前会话**模型走 composer 上那个按钮；底栏这一格管的是「哪些模型可选」。
+    openModels: () => void runCommand('scoped-models', '', commandContext),
     openSkills: () => void runCommand('skills', '', commandContext),
     openSettings: () => void runCommand('settings', '', commandContext),
     // 窗口自己折叠时按钮不会收到点击，靠这条回调把 `aria-expanded` 拉回来。
