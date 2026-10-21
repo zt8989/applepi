@@ -189,10 +189,9 @@ const bold = (t: string) => paint('1', t);
 // 工具块的底色、边框色、路径色、diff 绿/红……全部由 pi 的 theme 给（见 packages/tui/src/theme.ts），
 // 不在这里手写 `rgbColor(0x12, 0x26, 0x1a)` 了。
 //
-// 为什么删：早先按截图取了一个深绿当底色，看着差不多，但有三个问题：亮色终端上这块深绿
-// 变成一坨脏东西；用户蓝底只能用 ANSI 34（不透明、不会铺满整行）；思考的斜体根本没有对应色。
-// 统一交给 theme 之后，四个 token 都是**跟着终端深浅色走**的，而且降级（真彩 → 256 → 16）
-// 由 pi-tui 处理 —— 手写 `\x1b[48;5;22m` 在不支持的终端上会出难看的色块。
+// 不按截图手写颜色：亮色终端上那块深绿会变成一坨脏东西，用户蓝底只能用不透明的 ANSI 34（不会铺满
+// 整行），思考的斜体也没有对应色。交给 theme 之后四个 token 都**跟着终端深浅色走**，降级（真彩 →
+// 256 → 16）由 pi-tui 处理。
 
 /** 节点配色：一眼能看出这条线上哪段失败了。 */
 function nodeColor(node: TraceNode): (t: string) => string {
@@ -504,10 +503,8 @@ function metaSuffixOf(node: TraceNode): string {
  *
  * 两个条件：节点**失败**（视觉上更跳）、或者是当前 **tip**。
  *
- * tip 现在**只有这一个标记** —— 字形上所有节点都是 `○`。早先 tip 单独画 `◎`
- * （圈里套圈），于是同一棵树上有两种圆点字形，差异又很轻微，读起来像画错；
- * 换成加粗之后树上只剩一种符号，tip 反而更跳。判据写两遍的话，一次性模式与
- * 轨迹页的 tip 迟早会不一致。
+ * tip 现在**只有这一个标记** —— 字形上所有节点都是 `○`，加粗由 `renderColoredTree()` 给（同一棵树
+ * 上两种圆点字形读起来像画错）。判据只写这一处：写两遍的话，一次性模式与轨迹页的 tip 迟早不一致。
  *
  * 两个条件合在一个 `||` 里（而不是叠两层 bold）：加粗是同一个属性。
  */
@@ -527,10 +524,8 @@ export function emphasizedTraceLine(node: TraceNode, tree: TraceTree): boolean {
  *
  * ## 为什么不再用正则从文本里抠节点 id
  *
- * 老版本是「先 `renderTree()` 拿一坨字符串，再逐行用正则找行首的 `<id> <kind>:`」，
- * 而那个 kind 白名单**漏了 `turn.start` / `turn.end` / `step.start` / `step.end`
- * 四个**（它们于是整族不上色，静默退化 —— 恰好是渲染层最难发现的一种 bug）。
- * 现在 `traceRows()` 直接把节点对象一起给出来，上色不再需要认文本格式。
+ * 上色靠 `traceRows()` 一起给出的节点对象，**不认文本格式**：从渲染出来的字符串里用正则回捞 kind
+ * 会漏项（`turn.*` / `step.*` 那一族曾经整族不上色），而那是渲染层最难发现的一种静默退化。
  */
 export function renderColoredTree(tree: TraceTree, maxWidth: number): string {
   const rows = traceRows(tree, { maxWidth });
@@ -1033,9 +1028,9 @@ export interface TuiOptions {
     /**
      * 装上的扩展（入口文件 + 来源）。
      *
-     * **不是工具名**：早先这里给的是 `tools`（扩展注册的工具名），于是界面上写着
-     * `[扩展] ask_user_question` —— 一个**工具**的名字被当成扩展名报了出去。用户照着
-     * 那一行去 `settings.json` 的 `packages` 里找，找不到，于是以为扩展没装上。
+     * **不是工具名**：给 `tools` 的话界面上会写着 `[扩展] ask_user_question` —— 一个**工具**的
+     * 名字被当成扩展名报了出去，用户照着它去 `settings.json` 的 `packages` 里找、找不到，于是以为
+     * 扩展没装上。
      * 形状与 pi 的开场一致（`pi-web-access:dist` / `orca-agent-status.ts`），
      * 见 [resource-labels.ts](resource-labels.ts)。
      *
@@ -1374,8 +1369,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
   /**
    * 顶行：页签 + 轨迹统计（**两职合一**，见 tabLine）。
    *
-   * 为什么**只有一个**顶行组件：早先是 header（统计）+ tabs（页签）两行，两行讲的是
-   * 同一件事（「我在哪页 / 这轮跑到哪了」），纵向白占一行，而对话区最缺高度。
+   * **只有一个**顶行组件：统计与页签讲的是同一件事（「我在哪页 / 这轮跑到哪了」），分两行等于
+   * 白占一行，而对话区最缺高度。
    */
   const tabs = new Text('', 0, 0);
   const transcript = new TranscriptChunks();
@@ -1643,9 +1638,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
   /**
    * 当前在哪个**整页**。
    *
-   * 「不分屏」是刻意的：早先轨迹面板与对话区上下排，结果是轨迹一多就把对话区挤没，
-   * 而它自己又不可滚 —— 于是两败俱伤。改成整页切换后，每页都能占满中间那块，
-   * 并且 ScrollView 的 `primary` 跟着它走（见 applyLayout）。
+   * 「不分屏」是刻意的：上下排的话轨迹一多就把对话区挤没，而它自己又不可滚 —— 两败俱伤。整页切换
+   * 之后每页都能占满中间那块，ScrollView 的 `primary` 跟着当前页走（见 applyLayout）。
    */
   let page: 'chat' | 'trace' = 'chat';
   /**
@@ -1707,8 +1701,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * 与 `statusCards` 分开是因为两者位置不同：状态卡钉在对话流里（会随会话滚走），
    * 而这一节是「本次会话装了什么」，应该像 pi 的 `loadedResourcesContainer` 那样一直在对话区顶部。
    *
-   * 早先它走 `notify()` + 30 秒 —— 结果用户滚上去找刚才那条提示时它已经没了，而
-   * 「我装了哪些 skill」正是需要反复对照的东西（打 `/skill:x` 时要对着名字打）。
+   * 不走 `notify()`（30 秒就消失）：「我装了哪些 skill」是要反复对照的东西 —— 打 `/skill:x` 时得
+   * 对着名字打。
    */
   const banner = { text: '' };
   /**
@@ -1822,9 +1816,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
   store.subscribe(() => {
     const state = store.getState();
     // 工作状态（思考中 / 压缩中 / 重试）**不在这里**维护 —— 它在 `refresh()` 里从
-    // state 现推（见 `workingStatusText()`）。早先这里是一串 if/else 加一个
-    // `lastLoaderMessage` 变量，三处各自记得收尾；漏一处的症状是「圈一直转」。
-    // 现推就没有这笔账。
+    // state 现推（见 `workingStatusText()`）：手工维护 `lastLoaderMessage` 那种写法要三处各自记得
+    // 收尾，漏一处就是「圈一直转」；现推幂等。
     // 压缩不再走 banner：`compact` 节点会在派生的会话流里出一条提示，
     // 随会话滚走（这就是「以 trace 为基准」：同一件事只有一个来源）。
     refresh();
@@ -1868,8 +1861,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
      * （构造时就注册了，比本监听器还早），滚的是 **primary** ScrollView —— 而本项目
      * 切页时让 primary 跟着当前页走（见 `applyLayout`），于是「只滚当前页」这个效果
      * 本来就是白得的。`Alt+↑` / `Ctrl+P` / 裸 ↑↓ 也全部归还给各自的语义
-     * （取回排队消息 / 换下一个模型 / 编辑光标）。早先这里自己拿字节序列去抢，
-     * 抢出过两个真问题 —— 那段来龙去脉在 `const ESC` 上方那片注释里。
+     * （取回排队消息 / 换下一个模型 / 编辑光标）。字节序列不能让这里自己抢 —— 抢过两次真问题，
+     * 见 `const ESC` 上方那片注释。
      */
     /** 内置的几个开关键。返回 true = 已消费。 */
     const builtins = (): boolean => {
@@ -1984,9 +1977,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
       }
       // `app.trace.toggle`（默认 Ctrl+R）：**切到轨迹页 / 切回对话页**。
       //
-      // 早先是「显示/隐藏一块贴在对话区上面的面板」，两个毛病：轨迹一多把对话区挤没，
-      // 而它自己不可滚（只看得到最早那几行）。现在是整页切换，布局要重设
-      // （中间那块换了组件，primary ScrollView 也跟着换）。
+      // 整页切换要重设布局（中间那块换了组件，primary ScrollView 也跟着换）—— 贴一块面板在对话区
+      // 上面那种写法有两个毛病：轨迹一多把对话区挤没，而它自己不可滚。
       //
       // **轨迹页仍在 `ctrl+r`**：`ctrl+t` 是 `app.thinking.toggle`（展开/收起思考块），
       // 而两边共用一份 `~/.pi/agent/keybindings.json` —— 同一个键在两个应用里含义不同时，
@@ -2002,15 +1994,14 @@ export async function runTui(options: TuiOptions): Promise<number> {
       if (actionMatches(data, 'app.tools.expand')) {
         expanded = !expanded;
         refresh();
-        // 与 pi 同一句（它的 `toggleToolOutputExpansion()`）：早先这里一声不喊。
+        // 与 pi 同一句（它的 `toggleToolOutputExpansion()`）：折叠要出声，否则用户不知道按到了。
         notify(`Tool output: ${expanded ? 'expanded' : 'collapsed'}`);
         return true;
       }
       // `app.thinking.toggle`（默认 Ctrl+T）：展开/收起思考块。**与 pi 同 id 同键**。
       //
-      // 以前这里写的是「不用 ctrl+t，那是 pi 的键」（见下面的 app.trace.toggle 注释），
-      // 所以 ctrl+t 在本项目里是空的 —— 现在**补上它**：只要含义与 pi 一致（“切思考块”），
-      // 共用一份 keybindings.json 就不再有歧义，而“按了没反应”正是一类静默退化。
+      // `ctrl+t` 与 pi 含义一致（切思考块），所以共用一份 keybindings.json 没有歧义 —— 空着反而
+      // 是一类静默退化（「按了没反应」）。
       //
       // 切换后写进 `settings.json` 的 `hideThinkingBlock`（与 pi 同一个键）——
       // 一个偏好不该只活到进程退出。
@@ -2117,9 +2108,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
    * ## 走哪一列由**按哪个键**定，不是一个模式开关
    *
    * pi 把这两件事分成两个键：回车 = `steer`，`Option+Enter` = `followUp`。
-   * 本项目早先是一个 `Ctrl+Q` 切的**模式**（`app.queue.cycle`）—— 那是坏的，因为
-   * 模式是**状态**：切过之后每条都按新列走，而屏幕上看不出自己现在在哪个模式里，
-   * 症状是「我明明按的回车，怎么排到 followUp 去了」。按键决定就没有这笔账。
+   * 不能做成一个 `Ctrl+Q` 切的**模式**：模式是**状态**，切过之后每条都按新列走，而屏幕上看不出
+   * 自己在哪个模式里 —— 症状是「我明明按的回车，怎么排到 followUp 去了」。按键决定就没有这笔账。
    *
    * ## 为什么不在这里 `notify` 一句「已排队」
    *
@@ -2164,8 +2154,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
    *
    * **不落盘**：与 pi 一致 —— `cycleThinkingLevel()` 调 `setThinkingLevel(next)` 时没带
    * `{ persist: true }`，只有 `/thinking` 面板里的 `Ctrl+S` 才存成默认，`/settings` 里改的是
-   * per-model 覆盖。（早先这份文档说 Shift+Tab 会写 settings，而代码从来没写过 ——
-   * 文档跟着实现走。）
+   * per-model 覆盖。（Shift+Tab 只改本次会话，不写 settings —— 写盘的是 `/thinking` 的 `Ctrl+S`。）
    *
    * 落点：`thinking.changed`（reducer 改 `state.thinkingLevel`），随后内核在下一轮
    * LLM 请求里带上新级别（`effects.ts` 从 `state.model.thinkingLevel` 读），
@@ -2908,26 +2897,14 @@ export async function runTui(options: TuiOptions): Promise<number> {
   };
 
   /**
-   * 恢复一个历史会话：把它的消息灌回 state。**零 token** —— 不重跑模型，
-   * 纯粹是把 JSONL 里读到的内容搬进状态树。
+   * 恢复一个历史会话：把它的消息灌回 state（零 token）。
    *
-   * ## 两条路，优先走内核那条
+   * 优先走内核那条：它换会话 id + 对齐记录器游标，不会把恢复出来的历史再写一遍盘。没接就退化成一条
+   * `conversation.restored`，但**不换 id**、没有游标概念 —— 恢复出来的消息会被当前记录器当成新消息
+   * 写盘，要说出来，不然用户以为是历史坏了。
    *
-   * 1. `options.restoreSession`（接了内核）：内核负责换会话 id + 记录器游标对齐，
-   *    不会把恢复出来的历史再写一遍盘。**这是唯一正确的那条**。
-   * 2. 没接（测试、或将来另一个前端）：退化成界面版 —— 一条 `conversation.restored`
-   *    灌完，仍然一次 dispatch（不是逐条），但**不换 id**、也没有记录器游标的概念，
-   *    于是恢复出来的消息会被当前记录器当成新消息写盘（也就是「复制一份」那个症状）。
-   *    这种情况要说出来，不然用户会以为是历史坏了。
-   *
-   * ## 为什么必须**一条** action 而不是逐条
-   *
-   * 每次 dispatch 都会让 `refresh()` 重渲染整段对话，而重渲染成本与 messages 长度成正比。
-   * 逐条灌 N 条 = O(N²)：那个 390 条消息的会话实测 62 秒（用户看到的是「卡了一分钟」）。
-   * 合成一条只渲染一次，O(N)。
-   *
-   * 轨迹**不**跟着恢复：轨迹是那一轮的产物（时间线、失败、重试），和「对话内容」是两份
-   * 并行的记录，历史轨迹在 `traces/<id>.jsonl`（`/trace` 面板只看当前轮）。
+   * 必须**一条** action：每次 dispatch 都重渲染整段对话，逐条灌是 O(N²)（390 条实测 62 秒）。
+   * 轨迹不跟着恢复（它是那一轮的产物，历史轨迹在 `traces/<id>.jsonl`）。
    */
   const restoreSession = (session: SessionSummary): void => {
     // 恢复的是**另一段历史**：上一段留下的卡/键位表归位（它们的锚点是旧会话的下标），
@@ -3032,11 +3009,10 @@ export async function runTui(options: TuiOptions): Promise<number> {
     }
     // **两个整页切换，不分屏。**
     //
-    // 早先的形状是「轨迹面板贴在对话区上面」（同一个 VStack 里两个可伸缩区），
-    // 后果有两个：轨迹一多就把对话区挤没；而它自己又不可滚，于是只剩最早那几行。
+    // 不分屏（轨迹不贴在对话区上面）：那样轨迹一多就把对话区挤没，而它自己又不可滚。
     //
-    // 现在：顶部放一行**页面标签 + 统计**（tabLine，两职合一），中间那块的**内容**
-    // 按 `page` 换掉，谁在中间谁就是 `primary`（pi-tui 的 key 处理只发给 primary
+    // 现在：顶部一行**页面标签 + 统计**（tabLine），中间那块的**内容**按 `page` 换掉，
+    // 谁在中间谁就是 `primary`（pi-tui 的 key 处理只发给 primary
     // ScrollView —— 见 layout.js 的 `node.state.primary || !context.primaryScrollView`）。
     // 所以「滚轮 / PgUp / PgDn 在轨迹页滚轨迹、在对话页滚对话」是白得的，不用自己判。
     //
@@ -3971,22 +3947,18 @@ function toolCallIdsOf(message: { content: unknown[] }): string[] {
 }
 
 /**
- * 把整段对话渲染成文本块（`from` 恒为 0：滚动交给 ScrollView）。
+ * 渲染**一条**消息（`from` 恒为 0：滚动交给 ScrollView）。
  *
- * **不加「你 ›」「助手 ›」这类前缀**：pi 靠**底色与字体形状**区分角色（用户整块蓝底、助手默认
- * 前景色、思考灰斜体）。加前缀会把蓝底变成「`你 ›` + 白字」，而模型说的话与提示挤在同一行里、
- * 斜体失效 —— 底色比前缀准。
+ * 单独抽出来是因为对话区是**增量**渲染的：每条消息各自成为一个组件，内容没变就不重算；整段渲染只有
+ * 一次性模式与测试才需要。
+ *
+ * **不加「你 ›」「助手 ›」这类前缀**：pi 靠**底色与字体形状**区分角色（用户整块蓝底、助手默认前景色、
+ * 思考灰斜体）。加前缀会把蓝底变成「`你 ›` + 白字」，模型说的话与提示挤在同一行、斜体失效。
  *
  * 直接用 pi 的组件（`UserMessageComponent` / `AssistantMessageComponent` /
- * `ToolExecutionComponent` + `createAllToolRenderers()`）而不是照着截图重画：里面有一堆眼睛看不出
- * 但错了很难受的细节（bash 折叠保留**尾部** 5 行而 read/write 保留头部 10 行、write 的块里是文件
- * 内容、edit 渲染彩色 diff、每个工具块用 `Box` 把底色补到整行）。各自都不难，**一起对**才一致。
- */
-/**
- * 渲染**一条**消息。
- *
- * 单独抽出来是因为对话区是**增量**渲染的：每条消息各自成为一个组件，内容没变就不重算。
- * 整段渲染只有一次性模式（管道输出）与测试才需要，那是同一套循环拼起来的。
+ * `ToolExecutionComponent` + `createAllToolRenderers()`）而不是照着截图重画：里面有一堆眼睛看不出但
+ * 错了很难受的细节（bash 折叠保留**尾部** 5 行而 read/write 保留头部 10 行、write 的块里是文件内容、
+ * edit 渲染彩色 diff、每个工具块用 `Box` 把底色补到整行）。各自都不难，**一起对**才一致。
  */
 export function renderMessage(
   state: AgentState,

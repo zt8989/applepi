@@ -48,9 +48,8 @@ import type {
  *
  * ## 会话身份（id / cwd）不在这里
  *
- * 早先这两个是从外面递进来的：`cwd` 一份常量、`getSessionId` 一个函数。
- * 现在它们在 **store 里**（`state.session`）—— 与 TUI 读的是同一个地方。
- * 桥只负责把它们转上线协议。
+ * 它们在 **store 里**（`state.session`），与 TUI 读的是同一个地方；桥只负责转上线协议 —— 从外面递
+ * 常量与 getter 的话，两边迟早不同步。
  */
 export interface WebBridgeOptions {
   store: AgentStore;

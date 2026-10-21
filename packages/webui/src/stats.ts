@@ -1,20 +1,10 @@
 /**
  * 底栏那一行（composer 下面）：**左端工作目录、右端统计** —— 与终端底栏同形状。
  *
- * 两段都是服务端算好的：目录走 `cwdLine()`（家目录缩 `~` + git 分支），统计走
- * `statsLine()`。原因一样：`~` 要服务端的家目录才缩得对、分支要读 `.git/HEAD`，而
- * 「同一份口径两端各算一遍」迟早会漂（终端与浏览器显示同一个会话的两个形状）。
- *
- * 这里只负责画：把 pi-web-ui 自带的 `renderStats()` 换成这一行。
- *
- * pi-web-ui 的 `formatUsage()` 只到 `↑362k ↓310k R121M`（外加 `W`/`$cost`）—— 没有
- * `CH`（缓存命中率）、上下文占用 `52%/1.0M`、自动压缩的 ` (auto)`。而终端界面的底栏
- * 有那几段（`statsLine()`）。
- * 两边要一致，最省事的做法是服务端算好整行发过来（`state.statsText` / `state.statsLevel`），
- * 这里只负责画 —— 两套算法各写一份的话，`CH` 与上下文占用的口径迟早会漂。
- *
- * `renderStats` 在 pi-web-ui 里是 private，但运行时就在原型上 —— 与本项目换
- * `tool-message` 的 `render` 同一个手法（那边的文件头有详细说明）。
+ * 两段都由服务端算好（`cwdLine()` / `statsLine()`）：`~` 要服务端的家目录才缩得对、分支要读
+ * `.git/HEAD`，而「同一份口径两端各算一遍」迟早会漂。这里只负责画 —— 把 pi-web-ui 自带的
+ * `renderStats()` 换成这一行（它的 `formatUsage()` 只到 `↑↓R W $cost`，没有 `CH`、上下文占用与
+ * `(auto)`）。
  */
 import { html, type TemplateResult } from 'lit';
 

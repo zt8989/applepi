@@ -70,8 +70,8 @@ function contentText(blocks: unknown): string {
  * 内容块里的**图片** → `<img>`（data URL 直接内联，不再回服务端取一遍）。
  *
  * 图片是**会话文件里就有的东西**：`read` 读图时 pi 把图读成 base64 塞进工具结果
- * （`{type:'image', data, mimeType}`），用户发的附件也一样。早先这两处只画了
- * `[图片]` 这个占位 —— 而「完整历史」要回答的正是「当时到底看了什么」。
+ * （`{type:'image', data, mimeType}`），用户发的附件也一样。只画 `[图片]` 占位的话，这一页就答不了
+ * 「当时到底看了什么」。
  *
  * 找不到 `data` / 空串的一律跳过：宁可少画一张，也不要一个 `src="data:;base64,"` 的破图。
  */
@@ -193,8 +193,8 @@ function schemaText(parameters: unknown): string {
  * 会话文件里第一条 `message` 就是它（pi v3 的 head：`sections` = 各段正文，
  * `toolsAdded` = 装载时那批工具的完整声明），`sections` 里 20KB 的 skills 段、
  * `toolsAdded` 里 21 份 JSON Schema 都是「模型实际收到了什么」的**唯一**证据。
- * 早先这里落到 `default` 分支，只读 `content`（head 的 content 通常是空串），
- * 于是页面上只剩一个空壳 —— 「完整历史」缺了最该看的那一段。
+ * head 必须走自己的分支：落到 `default` 只读 `content` 的话（head 的 content 通常是空串）页面上只剩
+ * 一个空壳，缺的正是最该看的那一段。
  *
  * ## 为什么折叠起来
  *

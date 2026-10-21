@@ -2,34 +2,14 @@
 /**
  * 全局 CLI 的入口 —— 一个**薄**启动器，逻辑一行也不放这里。
  *
- * 存在的理由只有一个：`packages/tui/src/main.ts` 是 TypeScript，且 `tsconfig` 用
- * `moduleResolution: "Bundler"` + 无扩展名相对导入（`import ... from './app'`）。
- * 那套写法 tsc 不 emit（`noEmit`），产物也无法被 node 的原生 ESM 解析 ——
- * 所以全局命令必须经 tsx 装载，不能直接把 main.ts 挂成 bin。
+ * 必须经 tsx 装载：`main.ts` 是 TS，且 `tsconfig` 用 `moduleResolution: "Bundler"` + 无扩展名相对
+ * 导入，tsc 不 emit，产物也无法被 node 原生 ESM 解析。所以全局命令不能直接把 `main.ts` 挂成 bin。
  *
- * 与 `pnpm start`（在仓库根跑）的等价关系：
+ * 凭证不读 `.env`：key 来自环境变量、`~/.pi/agent/auth.json` 或 models.json 里的 `apiKey` ——
+ * 从调用目录读 `.env` 会把「A 项目的 key」发给「B 项目」。
  *
- *   pnpm start → node --import tsx packages/tui/src/main.ts
- *   ela        → node packages/tui/bin/ela.mjs
- *
- * 两者现在**完全等价**：同一个入口、同一套凭证规则。
- *
- * ## 凭证：不读 .env
- *
- * key 来自 shell 环境变量、`~/.pi/agent/auth.json`、或 models.json 条目内的
- * `apiKey`。刻意没有 `.env` 这一档 —— 从调用目录读 `.env` 会把「A 项目的 key」
- * 发给「B 项目」，比读不到更难查。要带 key 用 `--api-key` 或真环境变量
- * （两者都最终写进环境变量）。
- *
- * ## 为什么用 tsx 的 tsImport 而不是 register()
- *
- * `tsx/esm` 的 `register()` 只在 `--import` 上下文里能用（它的 `initialize`
- * 拿不到 hook scope，会抛「must be loaded with --import」）。想在普通脚本里装载
- * .ts，能用的就是 `tsx/esm/api` 的 `tsImport()` —— 它内部自建 namespace，
- * 不需要进程级 preload。
- *
- * 入口 specifier **故意拼成绝对路径转的 file:// URL**：相对 specifier 会按本文件
- * （`bin/`）的位置解析，而入口在 `packages/tui/src/`，差一级。
+ * 用 tsx 的 `tsImport()` 而不是 `register()`：后者只在 `--import` 上下文里能用。入口 specifier 拼成
+ * file:// 绝对 URL：相对 specifier 会按 `bin/` 解析，而入口在 `packages/tui/src/`。
  */
 import process from 'node:process';
 import path from 'node:path';
@@ -39,43 +19,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 /**
  * herdr pane 里的身份提示（`HERDR_AGENT`）。
  *
- * herdr 认 pane 里有没有 agent，只看**前台进程身份**：它拿进程名 / argv 去比对已知 agent，
- * 认不出来就当这个 pane 没有 agent。而我们的进程是 `node …/bin/ela` —— `ela` 它不认识，
- * 也看不出这是 pi 家族。于是 pane 在 Agents 面板里没有身份；更糟的是启动期那些探测子进程
- * （比如扩展跑的 `opencode --version`）跟 ela 同一个前台进程组，会被它当成 OpenCode，
- * 结果是「先显示成 opencode、子进程退出后又变成没有 agent」。
+ * herdr 只看**前台进程身份**（进程名 / argv），而我们是 `node …/bin/ela` —— 于是 pane 没有身份，
+ * 启动期那些探测子进程还会让它误判成 OpenCode。设 `HERDR_AGENT=pi` 它就用 pi 那套 manifest 对待这个
+ * 前台进程。
  *
- * herdr 为此给了包装进程用的提示变量：设了 `HERDR_AGENT=<agent>`，它就用**指定 agent** 的
- * 屏幕 manifest 与集成来对待这个前台进程。ela 的界面与状态上报都走 pi 那一套
- * （pi-tui / pi-ai，加上 herdr 装在 `~/.pi/agent/extensions` 的 pi 扩展负责报状态与 session），
- * 所以这里默认报 `pi`。
+ * **必须 re-exec 一次**：herdr 读的是 exec 那一刻的环境，本进程里改 `process.env` 它看不到。
  *
- * **为什么必须 re-exec 一次**：herdr 读的是**进程 exec 那一刻**的环境（macOS 的
- * `KERN_PROCARGS2` / Linux 的 `/proc/<pid>/environ`），本进程里 `process.env.HERDR_AGENT = …`
- * 它看不到（实测 `ps` 也看不到）。所以只能在 exec 之前就把变量塞进环境 —— 用同一份 argv
- * 再执行一次自己，把 hint 传下去。
- *
- * **只在真的处于 herdr pane 里做**：三个变量齐全、且是个交互终端（stdin 是 TTY）才算 ——
- * 变量判据与 herdr 自己的 pi 扩展同一套，TTY 判据是为了让脚本/测试/一次性模式里
- * 少一个进程（那些场景 herdr 也不画这个 pane 的 TUI）。
- * 并且**不覆盖**已经显式设置的 `HERDR_AGENT`。`ELA_HERDR_AGENT=<name>` 换身份，
- * `ELA_HERDR_AGENT=off` 整个关掉。
- *
- * ## Windows 上不做（这条 hint 在那边没人读）
- *
- * 官方文档（*Agents → VMs and sandbox wrappers*）把这个变量限定在 **Linux / macOS**：
- * “On Linux and macOS, a host-visible wrapper can hide the real agent process…” ——
- * Windows 那份 `herdr.exe` 里连 `HERDR_AGENT` 这个字符串都不存在（那段逻辑是 `cfg(unix)`
- * 的）。也就是说这里 exec 出去的变量 Windows 上的 herdr **从来不读**：pane 依旧没有身份，
- * 白多一个常驻父进程。
- *
- * Windows（其实**所有**平台）的正解是 ela **自己上报**：见 `@ela/core/herdr` 的文件头。
- * 那边走 `HERDR_SOCKET_PATH` 上报 pane 的 agent 名/状态/会话，跨平台都算数，与这里
- * 这次 re-exec 是**互补**关系：这条 hint 给 herdr 一个「屏幕 manifest 按 pi 那套认」的
- * 提示（mac / linux），那条上报直接告诉它「这个 pane 里是 pi」。
- *
- * 代价是多一个常驻父进程（它只是阻塞等子进程，不占 CPU）+ 几十毫秒启动开销；换来的是 herdr
- * 里正确的 agent 身份、idle/working/blocked 状态与 session 恢复。
+ * 只在真的处于 herdr pane 里做（三个变量齐全 + stdin 是 TTY），且**不覆盖**已显式设置的
+ * `HERDR_AGENT`；`ELA_HERDR_AGENT=<name>` 换身份、`off` 关掉。Windows 上不做：那条 hint 只有 unix
+ * 版 `herdr` 读（Windows 的正解是 ela 自己上报，见 `@ela/core/herdr`），否则白多一个常驻父进程。
  */
 const HERDR_AGENT_HINT_ENV = 'ELA_HERDR_AGENT';
 

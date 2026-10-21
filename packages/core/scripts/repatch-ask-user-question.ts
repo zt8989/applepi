@@ -1,33 +1,19 @@
 /**
  * 重建 `patches/@juicesharp__rpiv-ask-user-question@<版本>.patch`。
  *
- * ## 这个脚本存在的理由
+ * 留着可执行的来源是因为**反向重建**太麻烦：`ask_user_question` 是内置扩展，我们对它的全部改动都在
+ * 那份 patch 里，上游升级时要靠人对着 diff 猜。这里一处改动一段代码、旁边写着为什么，跑一遍就重建。
  *
- * `ask_user_question` 是本项目的**内置扩展**（`extension-host.ts` 把它当内置按路径装载）：
- * 包是本仓库的 pinned 依赖，而我们对它的全部改动都在那份 patch 里。patch 本身可读，
- * 但**反向重建**很麻烦 —— 上游升级时要靠人对着 diff 猜。所以这里留着可执行的来源：
- * 一处改动一段代码，旁边写着为什么，跑一遍就重建。
+ * 四条路：从 `packages/core/package.json` 读 pin 的版本（**版本只有那一处**）→ `npm pack` 拿**干净**
+ * 的上游源码（不能用 `pnpm patch` 解出来的那份：pnpm 会先把已提交的 patch 应用上去，于是 `sub()`
+ * 找不到原始片段）→ 解到 `node_modules/.pnpm_patches/<包名>@<版本>` 逐条应用 → `pnpm patch-commit`
+ * 生成 patch 并登记 `patchedDependencies`。
  *
- *     pnpm repatch:ask-user-question          # 根目录；等价于下面那条
- *     pnpm --filter @ela/core repatch:ask-user-question
+ * 升级上游：改版本号 → 跑这个脚本。上游动过我们 patch 的地方会对不上，`sub()` 会**指名道姓**报
+ * 「找不到待替换的片段」，对着新代码改下面那段即可。跑完接着 `pnpm --filter @ela/core test`
+ * （那里有两条真扩展的端到端：浏览器先答 / 终端先答）。
  *
- * ## 四条路走下来
- *
- * 1. 从 `packages/core/package.json` 读出 pin 的版本（**版本只有那一处**）；
- * 2. `npm pack` 拿**干净**的上游源码 —— 不能用 `pnpm patch` 解出来的那份：pnpm 会把
- *    **已经提交的 patch** 先应用上去，于是下面的 `sub()` 找不到原始片段；
- * 3. 解到 `node_modules/.pnpm_patches/<包名>@<版本>`（`pnpm patch` 用的就是这一格），
- *    逐条应用改动；
- * 4. `pnpm patch-commit <那一格>` —— 生成 patch、把 `patchedDependencies` 登记进
- *    `pnpm-workspace.yaml`、更新 lockfile。
- *
- * ## 升级上游
- *
- * 改 `packages/core/package.json` 的版本 → 跑这个脚本。上游动过我们 patch 的地方会对不上，
- * `sub()` 会**指名道姓**（`找不到待替换的片段（哪一处）`）—— 对着上游新代码改下面那段即可。
- * 跑完记得 `pnpm --filter @ela/core test`（那里有两条真扩展的端到端：浏览器先答 / 终端先答）。
- *
- * 依赖：`npm`（取包）与 `tar`（解包；macOS / Linux / Windows 10+ 都自带）。
+ * 依赖：`npm`（取包）与 `tar`（解包）。
  */
 
 import { execFileSync } from 'node:child_process';

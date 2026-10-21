@@ -34,9 +34,8 @@ import type { HostUiOptions } from '@ela/core/extension-ui';
 /**
  * **没有手写的 default system prompt。**
  *
- * 早先这里硬编码了三行中文（"你是编码助手 / 用工具查 / 简短直给"）。现在整份 prompt 由
- * pi 的 `buildSystemPrompt` 拼（工具规则、`edit` 的坑、`AGENTS.md` 项目上下文、cwd、
- * skill 清单），见 [system-prompt.ts](system-prompt.ts)。
+ * 整份 prompt 由 pi 的 `buildSystemPrompt` 拼（工具规则、`edit` 的坑、`AGENTS.md` 项目上下文、cwd、
+ * skill 清单），见 [system-prompt.ts](system-prompt.ts) —— 不在这里硬编码。
  *
  * `--system` 变成**可选**的覆盖：给了它顶掉 pi 的 preamble（"你是 pi 里的编码助手"），
  * 其余各段（tools / rules / project_context / cwd / skills）照旧拼上 ——

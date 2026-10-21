@@ -61,21 +61,11 @@ declare module '@earendil-works/pi-tui' {
  */
 export const PROJECT_KEYBINDINGS = {
   /**
-   * 轨迹页切换 —— 默认 `ctrl+r`。
+   * 轨迹页切换 —— 默认 `ctrl+r`。不用 `ctrl+t`：那是 pi 的 `app.thinking.toggle`，而两边共用一份
+   * `keybindings.json`（见文件头）。
    *
-   * ## 为什么不接着用 `ctrl+t`
-   *
-   * 那是 pi 的 `app.thinking.toggle`，而两边共用一份 `keybindings.json`（见文件头）。
-   *
-   * ## 为什么是 `ctrl+r`
-   *
-   * 能用的单修饰 `ctrl+<字母>` 逐个排除之后剩下的：
-   *
-   *   - 编辑器自己的（`tui.editor.*`）：`ctrl+a/b/d/e/f/j/k/u/w/y/-/]` ——
-   *     占了就等于抢走「行首 / 光标左移 / 删词」这些最基本的编辑动作。
-   *   - pi 应用层的：`ctrl+g`（外部编辑器）、`ctrl+x`（复制）、`ctrl+v`（粘贴图片）、
-   *     `ctrl+s`（存 thinking 级别）、`ctrl+z`（挂起）、`ctrl+p`（循环模型）——
-   *     占了就是同一个键在两个应用里含义不同，同样没法用覆盖文件表达。
+   * 选 `ctrl+r` 是排除法：编辑器自己的 `ctrl+a/b/d/e/f/j/k/u/w/y/-/]` 占了就等于抢走行首/光标左移/
+   * 删词这些最基本的编辑动作；pi 应用层的 `ctrl+g/x/v/s/z/p` 占了就是同一个键在两个应用里含义不同。
    *   - 本项目已用的：`ctrl+c`（中断）、`ctrl+o`（展开工具）、`ctrl+l`（模型面板）。
    *
    * `ctrl+r` 是剩下里语义最贴的（pi 只在**会话面板内部**用它做重命名，而面板打开时
