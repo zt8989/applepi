@@ -60,6 +60,7 @@ import type {
 } from '@ela/core/web-protocol';
 import { agentInfos, mcpInfos, pluginInfos } from '@ela/core/config-inspect';
 import type { ExtensionEntry } from '@ela/core/extension-host';
+import type { KernelReloadReport } from '@ela/core/kernel';
 import { buildPromptHead, declaredToolSchemas } from '@ela/core/prompt-head';
 import { supportedThinkingLevels } from '../pi-actions';
 import { modelRefs } from './bridge';
@@ -104,6 +105,13 @@ export interface WebApiOptions {
   extensions: () => readonly ExtensionEntry[];
   /** 扩展装载诊断（设置 › 插件那一页显示）。 */
   extensionErrors: () => readonly string[];
+  /**
+   * 重载（`/reload`）：重装扩展 + 重读 skill / prompt / 上下文文件。
+   *
+   * 内核那一半（`Kernel.reload()`）：TUI 自己的那一半（键位表 / 显示开关 / 主题）
+   * 浏览器里不存在，所以这里只走内核。
+   */
+  reload: () => Promise<KernelReloadReport>;
 }
 
 export interface WebApi {
@@ -146,6 +154,8 @@ export interface WebApi {
   setScopedModels(ids: readonly string[] | null): Promise<WebActionResult>;
   /** 跑一条扩展命令（`/api/command`）。 */
   runCommand(name: string, arg: string): Promise<WebActionResult>;
+  /** 重载（`/reload`）：重装扩展 + 重读 skill / prompt / 上下文文件。 */
+  reload(): Promise<WebActionResult>;
 }
 
 /** 「环在跑」时不能改的东西，统一回这一句（与 TUI 各面板同一口径）。 */
@@ -497,6 +507,21 @@ export function createWebApi(options: WebApiOptions): WebApi {
       } catch (error) {
         return { ok: false, message: error instanceof Error ? error.message : String(error) };
       }
+    },
+
+    async reload() {
+      if (store.getState().phase !== 'idle') return busyResult();
+      const report = await options.reload();
+      if (!report.ok) return { ok: false, message: report.message ?? '重载失败' };
+      // 诊断（skill / prompt 冲突、扩展装载错）跟着回执一起给：重载是「重新读一遍」，
+      // 读坏了必须在这一次就说，不能等下次开设置页。
+      return {
+        ok: true,
+        message: [
+          'Reloaded extensions, skills, prompts, and context files',
+          ...report.diagnostics,
+        ].join('\n'),
+      };
     },
   };
 }

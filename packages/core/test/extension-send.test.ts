@@ -164,20 +164,36 @@ export default function (pi) {
 }
 `;
 
-/** 记下每一次 `session_start`（`/new` 该发第二次，且 `reason` 是 `new`）。 */
+/**
+ * 记下每一次 `session_start` / `session_shutdown`，并给每个扩展**实例**一个自增代号。
+ *
+ * 切会话在 pi 那边是「收掉旧激活 → 新实例重新激活」，所以代号是断言「真的换了实例」的证据：
+ * 只再发一次 `session_start` 给旧实例就是 `pi-background-tasks` 报
+ * `pi_bg_reload_owner_activation_conflict` 的那条路。
+ */
 const SESSION_START_PROBE_SOURCE = `
 export default function (pi) {
   const g = globalThis;
   g.__sessionStarts = g.__sessionStarts ?? [];
+  g.__sessionShutdowns = g.__sessionShutdowns ?? [];
+  g.__probeInstances = (g.__probeInstances ?? 0) + 1;
+  const instance = g.__probeInstances;
   pi.on('session_start', (event, ctx) => {
     g.__sessionStarts.push({
       reason: event.reason,
       previousSessionFile: event.previousSessionFile,
       sessionFile: ctx?.sessionManager?.getSessionFile?.(),
+      instance,
     });
+  });
+  pi.on('session_shutdown', (event) => {
+    g.__sessionShutdowns.push({ reason: event.reason, targetSessionFile: event.targetSessionFile, instance });
   });
 }
 `;
+
+/** 切会话要**重装宿主**（jiti 重来一遍），并行跑测试时比单纯发个事件慢得多。 */
+const SWITCH_TIMEOUT_MS = 30_000;
 
 /** 等到 `predicate` 为真（或超时）—— 扩展是 fire-and-forget，等不到就是 bug。 */
 async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
@@ -200,9 +216,14 @@ async function withKernel(
   writeFileSync(path.join(agentDir, 'extensions', 'probe.ts'), probeSource);
   const saved = process.env['PI_CODING_AGENT_DIR'];
   process.env['PI_CODING_AGENT_DIR'] = agentDir;
-  const globals = globalThis as { __emptySend?: unknown; __sessionStarts?: unknown };
+  const globals = globalThis as {
+    __emptySend?: unknown;
+    __sessionStarts?: unknown;
+    __sessionShutdowns?: unknown;
+  };
   delete globals.__emptySend;
   delete globals.__sessionStarts;
+  delete globals.__sessionShutdowns;
   try {
     const kernel = await createKernel({ provider: 'faux', demo: true, cwd, traceDir: null });
     try {
@@ -242,10 +263,21 @@ test('投不出去就抛：归一后没文本的 pi.sendMessage 不当成功', a
   });
 });
 
-test('/resume 也发 session_start{reason:\'resume\'}，且报的是恢复后的会话文件', async () => {
+test('/resume 换一次扩展激活：先 session_shutdown，再由新实例 session_start', async () => {
   await withKernel(SESSION_START_PROBE_SOURCE, async (kernel) => {
-    type Start = { reason?: string; previousSessionFile?: string; sessionFile?: string };
-    const starts = (globalThis as { __sessionStarts?: Start[] }).__sessionStarts ?? [];
+    type Start = {
+      reason?: string;
+      previousSessionFile?: string;
+      sessionFile?: string;
+      instance?: number;
+    };
+    type Shutdown = { reason?: string; targetSessionFile?: string; instance?: number };
+    const globals = globalThis as {
+      __sessionStarts?: Start[];
+      __sessionShutdowns?: Shutdown[];
+    };
+    const starts = globals.__sessionStarts ?? [];
+    const shutdowns = globals.__sessionShutdowns ?? [];
     const fileA = starts[0]?.sessionFile;
     assert.ok(fileA !== undefined, '装载时就该报出会话文件（状态类扩展靠它认对话记录在哪）');
 
@@ -256,23 +288,45 @@ test('/resume 也发 session_start{reason:\'resume\'}，且报的是恢复后的
 
     // 切到一个新会话（B），再恢复 A —— 这样「从哪个切过来」与「恢复成哪个」才是两个文件。
     kernel.newSession();
-    await waitUntil(() => starts.length >= 2);
+    await waitUntil(() => starts.length >= 2, SWITCH_TIMEOUT_MS);
     const fileB = starts[1]?.sessionFile;
 
+    // pi 的顺序：`session_shutdown` 先发（旧实例释放所有权），然后新实例接。
+    assert.deepEqual(
+      shutdowns.map((s) => s.reason),
+      ['new'],
+      '切会话必须先发 session_shutdown（pi-background-tasks 只在 shutdown 后才接受新身份）',
+    );
+    assert.equal(shutdowns[0]?.instance, starts[0]?.instance, 'shutdown 发给的是旧实例');
+    assert.notEqual(starts[1]?.instance, starts[0]?.instance, '新会话由**新实例**接手，不是旧实例接第二发');
+
     await kernel.restoreSession(fileA);
-    await waitUntil(() => starts.length >= 3);
+    await waitUntil(() => starts.length >= 3, SWITCH_TIMEOUT_MS);
 
     const resumed = starts[2];
     assert.equal(resumed?.reason, 'resume', '`/resume` 的 reason 是 resume');
     assert.equal(resumed?.previousSessionFile, fileB, '报出被切走的那个会话文件');
     assert.equal(resumed?.sessionFile, fileA, 'ctx 报的是恢复后的会话文件，不是旧的');
+    assert.notEqual(resumed?.instance, starts[1]?.instance, '恢复历史也是新实例（与 pi 的 switchSession 一致）');
+    assert.equal(shutdowns[1]?.reason, 'resume');
+    assert.equal(
+      shutdowns[1]?.targetSessionFile,
+      fileA,
+      'shutdown 里要带「切到哪里」—— 那是 SessionShutdownEvent 的 targetSessionFile',
+    );
   });
 });
 
 test('/new 也发 session_start{reason:\'new\'}（扩展靠它重新激活）', async () => {
   await withKernel(SESSION_START_PROBE_SOURCE, async (kernel) => {
-    type Start = { reason?: string; previousSessionFile?: string; sessionFile?: string };
-    const starts = (globalThis as { __sessionStarts?: Start[] }).__sessionStarts ?? [];
+    type Start = {
+      reason?: string;
+      previousSessionFile?: string;
+      sessionFile?: string;
+      instance?: number;
+    };
+    const starts =
+      (globalThis as { __sessionStarts?: Start[] }).__sessionStarts ?? [];
     assert.deepEqual(
       starts.map((s) => s.reason),
       ['startup'],
@@ -281,7 +335,7 @@ test('/new 也发 session_start{reason:\'new\'}（扩展靠它重新激活）', 
 
     const previousFile = starts[0]?.sessionFile;
     kernel.newSession();
-    await waitUntil(() => starts.length >= 2);
+    await waitUntil(() => starts.length >= 2, SWITCH_TIMEOUT_MS);
 
     assert.equal(starts[1]?.reason, 'new', '`/new` 的 reason 是 new，不是 startup');
     assert.equal(
@@ -290,6 +344,37 @@ test('/new 也发 session_start{reason:\'new\'}（扩展靠它重新激活）', 
       '要报出「从哪个会话切过来的」—— 那是 SessionStartEvent 里 previousSessionFile 的语义',
     );
     assert.notEqual(starts[1]?.sessionFile, previousFile, 'ctx 报的是新会话文件');
+    assert.notEqual(
+      starts[1]?.instance,
+      starts[0]?.instance,
+      '重发 session_start 给旧实例是 pi-background-tasks 报 activation_conflict 的那条路',
+    );
+    assert.deepEqual(
+      kernel.extensions.errors.filter((error) => !error.includes('anthropic')),
+      [],
+      '切会话不该留下任何扩展诊断',
+    );
+  });
+});
+
+test('恢复的是**同一个**会话：不重装扩展（不白断一次 MCP / 工具）', async () => {
+  await withKernel(SESSION_START_PROBE_SOURCE, async (kernel) => {
+    type Start = { reason?: string; sessionFile?: string; instance?: number };
+    const globals = globalThis as {
+      __sessionStarts?: Start[];
+      __sessionShutdowns?: unknown[];
+    };
+    const starts = globals.__sessionStarts ?? [];
+    const file = starts[0]?.sessionFile;
+    assert.ok(file !== undefined);
+    kernel.store.dispatch({ type: 'user.message', text: '第一句' });
+    await waitForIdle(kernel.store, 20_000);
+    await waitUntil(() => existsSync(file));
+
+    // webui 点侧边栏当前那一条 / 启动时 `--session <id>` 后再 restore，都会走到这里。
+    await kernel.restoreSession(file);
+    assert.equal(starts.length, 1, '同一个会话不该再发 session_start');
+    assert.deepEqual(globals.__sessionShutdowns ?? [], [], '也不该把宿主收掉');
   });
 });
 

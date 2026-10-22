@@ -229,6 +229,7 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 | `POST /api/settings` | `{autoCompact?, hideThinking?, defaultThinkingLevel?}` |
 | `POST /api/scoped-models` | `{ids}`（`null` = 全开） |
 | `POST /api/command` | `{name, arg}` → 跑一条**扩展**命令 |
+| `POST /api/reload` | 重载（`Kernel.reload()`）：重装扩展 + 重读 settings / skill / prompt / 上下文文件；回执里带重装诊断 |
 | `POST /api/sessions/archive` | `{ids, archived}` → 归档 / 恢复一批会话（`archived: false` 是恢复） |
 | `POST /api/sessions/delete` | `{ids}` → 真删会话文件 + 轨迹文件（当前会话拒绝；环在跑时拒绝） |
 
@@ -247,7 +248,8 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
 - `/model` 弹已有的模型选择器；`/thinking` 弹通用模态框；`/settings` `/scoped-models`
   `/skills` 打开同一块设置面板的三个分区（常规 / 模型 / 技能）；`/continue` 与 `/compact`
   走 WebSocket（`{type:'continue'}` / `{type:'compact'}`）—— 都是服务端 dispatch 一条
-action（前者不追加用户消息，后者摘要在服务端生成）；扩展命令走 `POST /api/command`。
+action（前者不追加用户消息，后者摘要在服务端生成）；`/reload` 走 `POST /api/reload`
+（重装扩展 + 重读资源，与 TUI 的 `/reload` 同一个内核入口）；扩展命令走 `POST /api/command`。
 - **`/help` 没有**（与 pi 一致：它的入口是补全 —— 打 `/` 就把整张表摆出来）。
 - `/skill:<名字> [问题]` **不是命令**（与 TUI 一致）：它要把 SKILL.md 展开成 `<skill>` 块
   发给模型，而文件在磁盘上 —— 所以浏览器**不拦**，当普通消息发出去，

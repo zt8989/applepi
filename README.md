@@ -385,6 +385,7 @@ tip 就在树上，不再另起一行 `HEAD →`。成败靠**颜色**（绿 / �
 | `/new` | Start a new session：换 id → 换文件。上一段完整留在 `sessions/` 里 |
 | `/compact` | Manually compact the session context：把老对话换成一段结构化摘要 |
 | `/resume` | Resume a different session：盖住输入框的历史会话选择面板（满宽，同 pi）。**零 token** —— 不重跑模型，只把消息**和轨迹树**读回来；删历史也在这里（`ctrl+d`） |
+| `/reload` | Reload keybindings, extensions, skills, prompts, themes, and context files：与 pi 同一个语义 —— 重装扩展（`survive-reload` 的后台任务会交接、不重跑）、重读 `settings.json` / skill / prompt 模板 / `AGENTS.md` 等上下文文件。环在跑时拒绝 |
 | `/continue` | Continue the interrupted turn without a new user message：超时 / 网络错误 / 轮数上限停下后，从停下的地方再跑一次。**不插一条「继续」** —— 对话、会话文件、下一次请求里都不会多出一句 user 消息（另一条 pi 没有的命令） |
 | `/quit` | 退出（与 `Ctrl+D` 同一条路：先回主屏，再打那行 `To resume this session:`） |
 | `/mcp` | MCP 服务器管理面板（内置扩展提供）：连接状态、登录、重连、改暴露方式 |

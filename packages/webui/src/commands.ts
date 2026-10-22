@@ -15,6 +15,7 @@
  * | `/skills` | 同一个设置面板的「技能」分区（只读清单，可点开看详情） |
  * | `/continue` | 走 WebSocket（`{type:'continue'}`）：服务端 dispatch `turn.continue`，不追加用户消息 |
  * | `/compact` | 走 WebSocket（`{type:'compact'}`）：服务端 dispatch `compact.request`（摘要与换 `messages` 都在服务端） |
+ * | `/reload` | `POST /api/reload`（服务端重装扩展 + 重读 skill / prompt / 上下文文件） |
  * | 扩展命令 | `POST /api/command`（服务端跑） |
  * | `/skill:<名字>` | **不走这里** —— 当普通消息发出去，服务端展开成 `<skill>` 块 |
  * | `/模板名 [参数]` | **不走这里** —— 命令表里 `source: 'prompt'` 的那些当普通消息发出，由服务端展开（正文在磁盘上） |
@@ -109,6 +110,16 @@ export async function runCommand(name: string, arg: string, ctx: CommandContext)
       // 同一条规矩：开始/拒绝都回成 notice，压掉了多少由服务端派生的提示说。
       ctx.compactSession();
       return true;
+    case 'reload': {
+      // 环在跑时服务端会拒绝（busy）；成功时回执里带重装后的诊断。
+      const result = await elaApi.reload();
+      if (!result.ok) {
+        ctx.notice(result.message ?? '重载失败', 'warn');
+        return true;
+      }
+      ctx.notice(result.message ?? 'Reloaded extensions, skills, prompts, and context files');
+      return true;
+    }
     default: {
       // 只有**扩展命令**走服务端执行；其余未命中的 `/xxx`（prompt 模板、`/new` 这类
       // 只在终端里实现的命令、以及 `/etc/hosts` 这样的普通输入）一律返回 false ——

@@ -1,11 +1,15 @@
 /**
  * 扩展的斜杠命令与快捷键。
  *
- * 命令 handler 拿到的是 `ExtensionCommandContext`，其中六个成员（`waitForIdle` /
- * `newSession` / `fork` / `navigateTree` / `switchSession` / `reload`）属于 pi 的**会话层**，
- * 本项目不接：给它们 reject 掉，扩展调时会收到「本项目不支持」，而不是
- * `undefined is not a function`。实际扩展只要 `ctx.ui.notify` / `ctx.ui.select` /
- * `pi.sendMessage`，三个都有真实现。
+ * 命令 handler 拿到的是 `ExtensionCommandContext`：基座是**官方那个**
+ * `runner.createContext()`（`sessionManager` / `modelRegistry` / `thinkingLevel` /
+ * `getSystemPrompt` / `signal` 都是真的），再补一个真实现的 `waitForIdle`。
+ *
+ * 五个**改会话**的成员（`newSession` / `fork` / `navigateTree` / `switchSession` /
+ * `reload`）不给：它们属于 pi 的会话层，本项目的会话 / 轨迹是另一套（见 sessions.md），
+ * 而且 `/reload` 会把当前宿主换掉 —— 命令自己正在那个宿主里跑。缺它们时扩展拿到
+ * `undefined is not a function`；这比官方的「统一回 `{cancelled: true}`」诚实 —— 后者会让
+ * 扩展以为「用户取消了」而继续往下走。
  *
  * 命令表是**界面**的（`tui/app.ts` 的 `SLASH_COMMANDS`），扩展命令**不并进去**：
  * 那份表是常量，而扩展命令要等 `loadExtensions()` 才知道，所以走单独通道 ——
@@ -99,17 +103,44 @@ export function installExtensionCommands(options: {
   };
   refresh();
 
+  /**
+   * 等环回到 idle（`ctx.waitForIdle`）。
+   *
+   * 命令进来时已经是 idle（`run()` 先拒了非 idle），但 handler 完全可能先
+   * `pi.sendMessage()` 再等它跑完 —— pi 的 `createCommandContext()` 也给这一个，语义相同。
+   *
+   * 用订阅而不是轮询：相位只在 dispatch 时变，`subscribe` 是它的原生通知口。
+   */
+  const waitForIdle = (): Promise<void> => {
+    if (options.store.getState().phase === 'idle') return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const unsubscribe = options.store.subscribe(() => {
+        if (options.store.getState().phase !== 'idle') return;
+        unsubscribe();
+        resolve();
+      });
+    });
+  };
+
   const makeCtx = (): unknown => {
-    // 只给 `ui` 与几个只读项。那六个会话操作也不给：`createCommandContext()` 会把它们
-    // 全填上「cancelled: true」或 no-op，比 undefined 更坏 —— 扩展会以为「fork 被取消了」
-    // 而继续往下走。
-    return {
-      ui: (options.runner.getUIContext() ?? {}) as unknown,
-      hasUI: options.runner.hasUI(),
-      isIdle: () => options.store.getState().phase === 'idle',
-      cwd: process.cwd(),
-      model: undefined,
-    };
+    // 基座是**官方那个 ctx**：`sessionManager` / `modelRegistry` / `thinkingLevel` /
+    // `getSystemPrompt` / `signal` 都是真的。以前这里手搭一个只含
+    // `ui` / `hasUI` / `isIdle` / `cwd` / `model` 的对象，于是任何要
+    // `ctx.sessionManager.getSessionId()` 的命令（`pi-background-tasks` 的 `/bg`）
+    // 一敲下去就是 `Cannot read properties of undefined (reading 'getSessionId')` ——
+    // 而错误被 handler 自己的 catch 收成一条界面提示，看着像「扩展坏了」。
+    //
+    // 用 property descriptor 抄而不是 spread：官方 ctx 的成员是**懒 getter**，
+    // spread 会把它们当场求值一次、冻成快照（runner 作废之后就绕过 stale 检查了
+    // —— pi 的 `createCommandContext()` 注释专门警告过这一点）。
+    const ctx = Object.defineProperties(
+      {},
+      Object.getOwnPropertyDescriptors(options.runner.createContext()),
+    ) as Record<string, unknown>;
+    // `waitForIdle` 是真实现：它只是「等一等」，不会让状态与界面不一致。剩下五个
+    // 改会话的仍然不给（理由见文件头）。
+    ctx['waitForIdle'] = waitForIdle;
+    return ctx;
   };
 
   return {

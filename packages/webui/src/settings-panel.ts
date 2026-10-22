@@ -874,7 +874,7 @@ export function openSettingsPanel(options: SettingsPanelOptions): () => void {
       element(
         'div',
         'ela-settings-note',
-        '只读：agent 定义来自磁盘上的 *.md（pi-subagents 的约定），改动后重启生效。',
+        '只读：agent 定义来自磁盘上的 *.md（pi-subagents 的约定），改动后 /reload 或重启生效。',
       ),
     );
   }
@@ -1071,7 +1071,7 @@ export function openSettingsPanel(options: SettingsPanelOptions): () => void {
       element(
         'div',
         'ela-settings-note',
-        `只读：改 mcp.json 后重启生效，浏览器不会去连服务器。全局：${info.globalPath}；项目：${info.projectPath}${info.projectExists ? '' : '（不存在）'}。`,
+        `只读：改 mcp.json 后 /reload 或重启生效（reload 会重连服务器），这里不会去连服务器。全局：${info.globalPath}；项目：${info.projectPath}${info.projectExists ? '' : '（不存在）'}。`,
       ),
     );
   }
@@ -1093,7 +1093,7 @@ export function openSettingsPanel(options: SettingsPanelOptions): () => void {
     }
     if (mcpInfo.servers.length === 0) {
       const page = div('ela-settings-page');
-      const node = section('MCP 服务器', '修改 mcp.json 后重启生效；这里不会去连服务器。');
+      const node = section('MCP 服务器', '修改 mcp.json 后 /reload 或重启生效；这里不会去连服务器。');
       node.append(field('全局文件', mcpInfo.globalPath, true));
       node.append(field('项目文件', `${mcpInfo.projectPath}${mcpInfo.projectExists ? '' : '（不存在）'}`, true));
       if (mcpInfo.errors.length > 0) node.append(field('诊断', mcpInfo.errors.join('\n')));

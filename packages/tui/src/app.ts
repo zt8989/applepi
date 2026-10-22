@@ -40,6 +40,7 @@ import {
 } from '@ela/core/stream';
 import type { AgentState, QueuedInput, QueueKind } from '@ela/core/state';
 import type { AgentStore } from '@ela/core/store';
+import type { KernelReloadReport } from '@ela/core/kernel';
 import type { AgentAction } from '@ela/core/actions';
 import type { Message, ToolCall } from '@earendil-works/pi-ai';
 import {
@@ -919,8 +920,7 @@ export interface ElaSlashCommand {
  * pi 有、这里**不列**的（不是忘，是不做）：`tree` / `fork` / `clone`（本项目的轨迹树是只读的
  * 执行历史，没有「在消息树上换分支」）、`export` / `import`（会话文件本身就是 JSONL，`cp` 就是那个
  * 动作）、`share`（没有账号体系）、`bug`（上报给 pi 的开发者 —— 会寄错人）、`changelog`、
- * `trust`（本项目没有「项目级、需信任才加载」的资源）、`login` / `logout`（鉴权在 pi 那边配）、
- * `reload`（装载发生在内核装配那一刻，没有热重载入口）。
+ * `trust`（本项目没有「项目级、需信任才加载」的资源）、`login` / `logout`（鉴权在 pi 那边配）。
  *
  * 本项目有、pi **没有**的只剩两条：
  *
@@ -957,6 +957,11 @@ export const SLASH_COMMANDS: ElaSlashCommand[] = [
   { name: 'new', description: 'Start a new session' },
   { name: 'compact', description: 'Manually compact the session context', web: true },
   { name: 'resume', description: 'Resume a different session' },
+  {
+    name: 'reload',
+    description: 'Reload keybindings, extensions, skills, prompts, themes, and context files',
+    web: true,
+  },
   {
     name: 'continue',
     description: 'Continue the interrupted turn without a new user message',
@@ -1099,6 +1104,16 @@ export interface TuiOptions {
    * 轨迹不跟着恢复（它是那一轮的产物，历史轨迹在 `traces/<id>.jsonl`）。
    */
   restoreSession?: ((file: string) => Promise<{ id: string; restored: number }>) | undefined;
+  /**
+   * 重载（`/reload`）：重新读 settings / 扩展 / skill / prompt 模板 / 上下文文件。
+   *
+   * 与 pi 的 `/reload` 同一个语义，但**内核那一半**由内核做（重装扩展 = 新实例、
+   * `session_shutdown{reload}` + `session_start{reload}`、重拼 prompt）。TUI 自己再补
+   * 三样只在界面侧的：键位表、`hideThinkingBlock`、主题（见 `runCommand` 的 `reload`）。
+   *
+   * 不传 = 未接内核（测试），`/reload` 会明说「没有重载入口」而不假装做了。
+   */
+  reload?: (() => Promise<KernelReloadReport>) | undefined;
   /**
    * 换模型（`/model`）。**必须由内核出手** —— 与 `restoreSession` 同一类原因：
    * 换模型是内核的一条 `model.changed`（带全能力 / 窗口），
@@ -2459,6 +2474,28 @@ export async function runTui(options: TuiOptions): Promise<number> {
   };
 
   /**
+   * 撤掉旧扩展画的界面（pi 的 `resetExtensionUI()`）：widget、底欄状态段、输入区槽位。
+   *
+   * `/reload` 在重装宿主**之前**调它：扩展实例换了之后，旧的 widget 组件没人会再移除
+   * （新实例只知道自己的 key），不撤就会一直赖在那里；底欄状态段也会与新的叠在一起。
+   */
+  const clearExtensionUi = (): void => {
+    for (const component of widgetSlots.values()) {
+      try {
+        (component as { dispose?: () => void }).dispose?.();
+      } catch {
+        // 旧 widget 的 dispose 失败不该挡住重装。
+      }
+    }
+    widgetSlots.clear();
+    extensionStatuses.clear();
+    // 非 overlay 的 `custom()` 也属于旧激活：拆掉并把焦点/输入区还给 composer。
+    mountEditorSlot(undefined);
+    applyLayout();
+    refresh();
+  };
+
+  /**
    * 斜杠命令。不发给模型 —— 那是「跟模型说」的通道，命令是「跟界面说」的。
    *
    * **只处理确实命中的命令**：未命中的 `/xxx` 在 `editor.onSubmit` 那里就分流去当
@@ -2482,7 +2519,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
           notify(
             dim(
               '没找到 skill。放 ~/.pi/agent/skills/<名字>/SKILL.md 或 <工作目录>/.pi/skills/…，' +
-                '然后 /new 换个会话（system prompt 在装载时定下，重开一卷才生效）。',
+                '然后 /reload（重读 skill / prompt / 上下文文件，不用重开会话）。',
             ),
           );
           return;
@@ -2877,6 +2914,55 @@ export async function runTui(options: TuiOptions): Promise<number> {
           return;
         }
         notify(dim(`已开新会话 ${created.id}（上一段仍在 sessions/ 里，/resume 可回来）`));
+        return;
+      }
+      case 'reload': {
+        // pi 的 `/reload`：重读 settings / 扩展 / skill / prompt 模板 / 上下文文件，
+        // 并重装扩展（新实例）。环在跑时不能做 —— 那一刻重装会把正在等的流 / 工具
+        // 交给一个已经 shutdown 的宿主。
+        if (store.getState().phase !== 'idle') {
+          notify(yellow('上一回合还没结束，等它跑完再重载'));
+          return;
+        }
+        const reload = options.reload;
+        if (reload === undefined) {
+          notify(yellow('未接内核（没有重载入口）'));
+          return;
+        }
+        // 旧激活画的界面先撤（pi 在 reload 前也调 `resetExtensionUI()`）。
+        clearExtensionUi();
+        notify(dim('Reloading keybindings, extensions, skills, prompts, themes, and context files…'));
+        void reload()
+          .then((report) => {
+            // 这三样在 TUI 侧（内核不知道）：键位表、`hideThinkingBlock`、主题。
+            // 与 pi 的 `handleReloadCommand()` 同一组收尾动作。
+            installProjectKeybindings();
+            hideThinking = readHideThinkingBlock();
+            setupTheme();
+            // 扩展的快捷键可能换了：已经展开的键位表跟着重算（不重算就一直是旧表）。
+            hotkeysLinesCache = undefined;
+            if (hotkeysSource !== undefined) {
+              hotkeysSource = hotkeysMarkdown(extensionCommands()?.shortcuts() ?? []);
+            }
+            // skill / prompt / 扩展清单与诊断是这一刻才有的 —— 用与启动同一个横幅重报
+            // （pi 的 `showLoadedResources()`）。
+            buildStartupBanner();
+            refresh();
+            if (!report.ok) {
+              notify(yellow(report.message ?? '重载失败'));
+              return;
+            }
+            const lines = [
+              'Reloaded keybindings, extensions, skills, prompts, themes, and context files',
+            ];
+            // 诊断按 pi 的 `showDiagnosticsWhenQuiet: true` 口径一起报：重载是「重新读
+            // 一遍」，读坏了（skill 重名 / 扩展装不上）必须在这一次就说。
+            lines.push(...report.diagnostics.map((diagnostic) => yellow(diagnostic)));
+            notify(lines.join('\n'));
+          })
+          .catch((error: unknown) => {
+            notify(yellow(`重载失败：${error instanceof Error ? error.message : String(error)}`));
+          });
         return;
       }
       case 'quit': {

@@ -133,7 +133,8 @@ export interface ExtensionHost {
    * handler 在 `systemPromptOptions.sections` 里写回的段与「当前生效」那份一 diff，
    * 变了的段作为一条 `prompt.segment.added` 追加（按段名 patch，**已有消息不动**）。
    * 但**整段替换**（`systemPrompt` / `forceSystemPrompt`）仍然不采信：本项目的
-   * system prompt 是装载时定下的，中途整段替换会让已发出的消息与 prompt 对不上。
+   * system prompt 是**装载 / `/reload` 时**定下的（用户显式动作可以重拼整段，见
+   * `Kernel.reload()`），扩展在一轮中途整段替换会让已发出的消息与 prompt 对不上。
    *
    * `ctx` 与事件里的 `selectedTools` 都是**真的**（官方 ctx + 当前声明给模型的工具名）
    * —— 扩展会读它们，给个最小版就是每轮一条 `Cannot read properties of undefined`
@@ -141,7 +142,10 @@ export interface ExtensionHost {
    */
   beforeAgentStart(text?: string | undefined): Promise<void>;
   /**
-   * 发 `session_start`（内核在装载 prompt **之前**调一次；`/new` 时再发一次）。
+   * 发 `session_start`。
+   *
+   * 装载时发一次（`startup` / `resume`）；切会话（`/new` / `/resume`）与 `/reload`
+   * 由**新装的宿主**再发一次（见 kernel 的 `rebindHost`）—— 旧宿主先 `shutdown()`。
    *
    * MCP 扩展靠它读 `mcp.json` 并开始连接服务器：工具是在连接过程中**动态注册**
    * 进来的（`pi.registerTool` → 我们的 `refreshTools`），所以这个顺序不能反。
@@ -193,14 +197,22 @@ export interface ExtensionHost {
    */
   emitLifecycle(event: ExtensionLifecycleEvent): void;
   /**
-   * 收掉宿主：发 `session_shutdown`（MCP 靠它关服务器），再作废 runner。
+   * 收掉这一轮激活：发 `session_shutdown`（MCP 靠它关服务器），再作废 runner。
    *
    * **可等待**，这是必需的：MCP 的 stdio 服务器是子进程，会握着事件循环。一次性模式
    * （`-p`）跑完那一刻如果不等它们关掉，进程就退不出去（`process.on('exit')` 里做不了
    * 异步收尾 —— 那一刻已经在退了）。见 `main.ts` 退出路径上的说明。
    *
    * 给一个上限：某个服务器赖着不走时也不能把退出挂死（到点就作废 runner 返回）。
+   *
+   * **不是只有退出才发**：切会话（`/new` / `/resume`）在 pi 那边同样是「收掉旧激活、
+   * 建新激活」。`pi-background-tasks` 靠这条事件释放 reload 所有权（它的
+   * `session_start` 只接受「同一个实例 + 同一个会话身份」的重复，换会话必须先 shutdown），
+   * 状态类扩展也靠它把 timer 停掉。所以切会话时内核发 `shutdown({reason:'new'|'resume'})`
+   * 然后**重新装一份宿主**（见 kernel 的 `switchExtensionHost`）。
    */
+  shutdown(options?: SessionShutdownOptions): Promise<void>;
+  /** 退出的那条路：等价于 `shutdown({reason:'quit'})`。 */
   dispose(): Promise<void>;
 }
 
@@ -283,6 +295,7 @@ function emptyHost(errors: readonly string[] = []): ExtensionHost {
     collectPromptSections: async () => ({}),
     beforeToolCall: async (_id, _name, input) => ({ input }),
     emitLifecycle: () => {},
+    shutdown: async () => {},
     dispose: async () => {},
   };
 }
@@ -551,6 +564,16 @@ function msg(error: unknown): string {
  * 剩下的子进程交给传输自己的 `process.on('exit')` 钩子兜底。
  */
 const SHUTDOWN_TIMEOUT_MS = 5_000;
+
+/**
+ * 切会话时等 `session_shutdown` 的上限（比退出宽）。
+ *
+ * 这一发不是「进程要退了」，而是交给扩展收尾：`pi-background-tasks` 要在这里把本会话
+ * 还在跑的后台任务杀掉（`stopTask` 逐个等退出），5 秒不够是常态。pi 那边（
+ * `teardownCurrent()`）根本不给上限 —— 给一个宽上限只是为了防某个扩展永远不 resolve，
+ * 而不是为了催促它。
+ */
+const SWITCH_SHUTDOWN_TIMEOUT_MS = 30_000;
 
 /**
  * 装扩展包。
@@ -852,6 +875,47 @@ export async function loadExtensionHost(
     ),
   });
 
+  /**
+   * 收掉这一轮激活。
+   *
+   * 先把 `session_shutdown` 发出去（MCP 关服务器），再作废 runner —— 反过来 handler
+   * 里的 ctx 就是 stale 的了。
+   *
+   * **要 await**：MCP 关的是 stdio 子进程，不等它们收掉，一次性模式的进程会一直挂在
+   * 它们握着的事件循环上（见接口上的注释与 `main.ts` 的退出路径）。
+   *
+   * 但仍给上限：某个服务器赖着不走时不能让退出挂死。到点就作废 runner 返回 —— 剩下的
+   * 子进程由 stdio 传输自己的 `process.on('exit')` 钩子在进程真退出时兜底杀掉。
+   */
+  const hostShutdown = async (shutdownOptions?: SessionShutdownOptions): Promise<void> => {
+    if (hostDisposed) return;
+    hostDisposed = true;
+    const reason = shutdownOptions?.reason ?? 'quit';
+    const timeoutMs = reason === 'quit' ? SHUTDOWN_TIMEOUT_MS : SWITCH_SHUTDOWN_TIMEOUT_MS;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        runner
+          .emit({
+            type: 'session_shutdown',
+            reason,
+            ...(shutdownOptions?.targetSessionFile !== undefined
+              ? { targetSessionFile: shutdownOptions.targetSessionFile }
+              : {}),
+          } as never)
+          .catch(() => {
+            // 关不干净不该让退出 / 切会话卡住。
+          }),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      runner.invalidate();
+    }
+  };
+
   return {
     tools,
     promptTools,
@@ -961,32 +1025,8 @@ export async function loadExtensionHost(
         onExtensionError(event.type, msg(error));
       }
     },
-    dispose: async () => {
-      if (hostDisposed) return;
-      hostDisposed = true;
-      // 先把 `session_shutdown` 发出去（MCP 关服务器），再作废 runner —— 反过来
-      // handler 里的 ctx 就是 stale 的了。
-      //
-      // **要 await**：MCP 关的是 stdio 子进程，不等它们收掉，一次性模式的进程会一直
-      // 挂在它们握着的事件循环上（见接口上的注释与 `main.ts` 的退出路径）。
-      //
-      // 但仍给上限：某个服务器赖着不走时不能让退出挂死。到点就作废 runner 返回 ——
-      // 剩下的子进程由 stdio 传输自己的 `process.on('exit')` 钩子在进程真退出时兜底杀掉。
-      let timer: NodeJS.Timeout | undefined;
-      try {
-        await Promise.race([
-          runner.emit({ type: 'session_shutdown', reason: 'quit' }).catch(() => {
-            // 关不干净不该让退出卡住。
-          }),
-          new Promise<void>((resolve) => {
-            timer = setTimeout(resolve, SHUTDOWN_TIMEOUT_MS);
-          }),
-        ]);
-      } finally {
-        if (timer !== undefined) clearTimeout(timer);
-        runner.invalidate();
-      }
-    },
+    shutdown: hostShutdown,
+    dispose: () => hostShutdown({ reason: 'quit' }),
   };
 }
 /** `bindCore` 的入参（比之前那串位置参数好读，而且新加的两个都是必需的）。 */
@@ -1052,6 +1092,19 @@ async function emitToolCallGate(
 
 /** `session_start` 的 `reason` —— pi 的 `SessionStartEvent` 那五个。 */
 export type SessionStartReason = 'startup' | 'reload' | 'new' | 'resume' | 'fork';
+
+/** `session_shutdown` 的 `reason` —— pi 的 `SessionShutdownEvent` 那五个。 */
+export type SessionShutdownReason = 'quit' | 'reload' | 'new' | 'resume' | 'fork';
+
+/**
+ * 发 `session_shutdown` 时要带的东西。
+ *
+ * `targetSessionFile` 只在**换会话**时有：pi 用它告诉扩展「要切到哪个文件」。
+ */
+export interface SessionShutdownOptions {
+  reason?: SessionShutdownReason | undefined;
+  targetSessionFile?: string | undefined;
+}
 
 /**
  * 发 `session_start` 时要带的东西。

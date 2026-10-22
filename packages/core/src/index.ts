@@ -148,7 +148,13 @@ export {
 
 export type { ModelCapabilities, PromptToolDefinition } from './actions';
 export type { ModelState, PromptState } from './state';
-export { createKernel, defaultSystemPrompt, type Kernel, type KernelOptions } from './kernel';
+export {
+  createKernel,
+  defaultSystemPrompt,
+  type Kernel,
+  type KernelOptions,
+  type KernelReloadReport,
+} from './kernel';
 export {
   applyMiddleware,
   promptSegmentMiddleware,
