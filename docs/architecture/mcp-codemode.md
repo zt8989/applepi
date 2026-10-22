@@ -109,7 +109,7 @@ prompt 对不上，而 prompt-cache 的前缀整个作废。
 ```
 loadExtensionHost()       装扩展、绑 core、扫一遍工具
 startSession()            发 session_start：MCP 读 mcp.json、连服务器、激活 codemode
-collectPromptSections()   跑 before_agent_start：等 direct 服务器（≤10s）、收 mcp_servers 段
+collectPromptSections()   只跑**内置**扩展的 before_agent_start：等 direct 服务器（≤10s）、收 mcp_servers 段
 declaredToolset() + prompt.init + freezeActiveTools()
 ```
 

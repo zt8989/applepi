@@ -153,6 +153,11 @@ export interface ExtensionHost {
    * MCP 就是靠这个把 `mcp_servers` 段（「有哪些服务器、工具怎么调」）塞进 prompt 的；
    * 那段是它自己那个 handler 算的（服务器列表在扩展闭包里，外面拿不到）。
    * 另外它还会用 `direct` 服务器最长 10 秒的等待 —— 所以**这一步必须在算声明工具之前调**。
+   *
+   * **只跑内置扩展**（mcp / codemode / tool-search）的 handler。用户装的扩展一律不在这里跑：
+   * 它们看到 `before_agent_start` 就认为「用户要发消息了」—— 启动时给一个假事件会让状态类
+   * 扩展（Orca 的 `orca-agent-status`）开一个永不闭合的 turn（宿主那边一直转圈），
+   * 而 pi 启动时根本不会发这个事件。它们的段在首轮真事件时作为补丁追加。
    */
   collectPromptSections(): Promise<Record<string, string>>;
   /**
@@ -792,11 +797,18 @@ export async function loadExtensionHost(
 
   // `before_agent_start` 的 handler 按注册顺序抄一份（官方 emitBeforeAgentStart 会
   // 重建 system prompt，本项目没那份可重拼的 options，所以自己调 —— 理由见
-  // `extension-prompt.ts` 文件头）。
-  const beforeAgentStart: BeforeAgentStartHandler[] = [];
+  // `extension-prompt.ts` 文件头）。`builtin` 只用于启动期收集段：见 `collectPromptSections`。
+  //
+  // `ask_user_question` 也算内置（本仓库 patch 过的那个包）：它的 handler 按 `ctx.hasUI`
+  // 摘/装自己那个工具，而本项目的 head 在启动时就冻结 —— 不跑的话，无 UI 模式（`-p`）
+  // 的 head 会多声明一个模型根本用不了的工具。
+  const beforeAgentStart: { handler: BeforeAgentStartHandler; builtin: boolean }[] = [];
   for (const ext of loaded.extensions) {
     for (const h of ext.handlers.get('before_agent_start') ?? []) {
-      beforeAgentStart.push(h as BeforeAgentStartHandler);
+      beforeAgentStart.push({
+        handler: h as BeforeAgentStartHandler,
+        builtin: ext.path.startsWith('builtin:') || (askUserQuestion !== undefined && ext.path === askUserQuestion),
+      });
     }
   }
 
@@ -834,7 +846,7 @@ export async function loadExtensionHost(
     loaded: loaded.extensions.length,
     beforeAgentStart: async (text?: string) => {
       const patch = await notifyBeforeAgentStart({
-        handlers: beforeAgentStart,
+        handlers: beforeAgentStart.map((entry) => entry.handler),
         store,
         text,
         cwd,
@@ -867,6 +879,7 @@ export async function loadExtensionHost(
     collectPromptSections: async () => {
       // MCP 把自己的 `mcp_servers` 段写进 `event.systemPromptOptions.sections`；
       // 那个 handler 还会等 `direct` 服务器最多 10 秒。两个效果都是我们要的。
+      // **只跑内置扩展**：用户装的扩展看到假 `before_agent_start` 会当成真轮。
       const sections: Record<string, string> = {};
       const event = {
         type: 'before_agent_start' as const,
@@ -886,7 +899,8 @@ export async function loadExtensionHost(
         },
       };
       const ctx = runner.createContext();
-      for (const handler of beforeAgentStart) {
+      for (const { handler, builtin } of beforeAgentStart) {
+        if (!builtin) continue;
         try {
           await handler(event as never, ctx as never);
         } catch (error) {

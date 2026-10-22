@@ -201,9 +201,11 @@ test('环自己会发：session_start / agent_start / message_end / tool_executi
         ]) {
           assert.ok(seen.includes(expected), `缺事件 ${expected}，实际：${seen.join(',')}`);
         }
-        // 顺序钉住这一次：agent_start 在最前，agent_end/agent_settled 在最后。
+        // 顺序钉住这一次：`session_start` → 装载完成时补发的 `agent_settled`（只发事件、
+        // 不进轨迹；宿主靠它把 pane 状态从 loading 变 done）→ `agent_start` 开跑。
         assert.equal(seen[0], 'session_start:file');
-        assert.equal(seen[1], 'agent_start');
+        assert.equal(seen[1], 'agent_settled', '装载完成该补发一条 agent_settled（只在真轮前）');
+        assert.equal(seen[2], 'agent_start');
         assert.deepEqual(seen.slice(-2), ['agent_end', 'agent_settled']);
 
         // 生命周期事件**也记进了轨迹**：它们是 action（`extension.lifecycle`），

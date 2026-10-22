@@ -602,6 +602,14 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     // 工具集**不是**定死的：之后 `setActiveTools`（`web_enable` / `subagents_enable`
     // 那些 loader 工具）真的会改声明，而变更由 `agent.run` 在请求前 diff 成一条
     // `toolsAdded` / `toolsRemoved` 消息声明出去（见 `prompt-head.ts`）。
+
+    // 装载完成 = 环已经 idle：给状态类扩展一个 `agent_settled`（**只发事件，不记轨迹**）。
+    //
+    // 为什么要它：Orca 的 pane 状态靠 hook 推（`agent_end` → done），而 pi 那边是 Orca
+    // 自己认进程（`--command pi` 是它的已知 agent）—— ela 不在那份名单里，只能靠 hook。
+    // 启动后若一个事件都没有（`session_start` 会被 Orca 丢掉：它没有 providerSession），
+    // 宿主就永远显示 loading。这条事件的语义是**真的**：装载完了、环是 idle、静了。
+    extensionHost.emitLifecycle({ type: 'agent_settled' });
   };
 
   // 现场装满还是推到后台：见 `KernelOptions.deferExtensions` 与 `Kernel.ready`。
