@@ -37,7 +37,7 @@ import { readCompactionEnabled, writeCompactionEnabled } from './compact';
 import path from 'node:path';
 import { declaredToolset } from './tools';
 import { buildPromptParts, buildSystemPromptText, promptToolsFrom, type PromptToolLike } from './system-prompt';
-import { loadExtensionHost } from './extension-host';
+import { loadExtensionHost, extensionMessageAction } from './extension-host';
 import type { HostUiOptions } from './extension-ui';
 import type { ExtensionHost } from './extension-host';
 import { loadSkillRegistry } from './skills';
@@ -513,11 +513,13 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       // `current`，扩展真问的时候它已经填上了。
       sessionId: () => current.sessionId,
       sessionFile: () => current.recorder?.file,
-      // 扩展的 `pi.sendMessage` 落到哪里：一条**用户消息**（于是环会跑起来），
-      // 与界面里敲一句话同一条路。
-      onSendMessage: (text) => {
-        if (text.trim() === '') return;
-        store.dispatch({ type: 'user.message', text } as AgentAction);
+      // 扩展的 `pi.sendMessage` 落到哪里：空闲时一条**用户消息**（于是环会跑起来），
+      // 与界面里敲一句话同一条路；环在跑时按 `deliverAs` 排队 —— 见
+      // `extensionMessageAction` 的注释（直接发 `user.message` 会被 reducer 丢掉）。
+      onSendMessage: (text, options) => {
+        const action = extensionMessageAction(text, options, store.getState().phase);
+        if (action === null) return;
+        store.dispatch(action);
       },
       canSend: () => store.getState().phase === 'idle',
     });
@@ -533,7 +535,12 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     // **必须在算工具表之前**：MCP 会发现「有 codemode 暴露的服务器」并激活 `codemode`
     // （走 `setActiveTools` → 本项目的 `state.prompt.tools`）；而 `direct` 服务器的工具是
     // 在连接过程中动态注册的 —— 加载后必须再扫一遍。
-    await extensionHost.startSession();
+    // `reason` 与 pi 一致：从一个**已有会话**启动是 `resume`，否则 `startup`（pi 的
+    // `hasExistingSession` 也是 `messages.length > 0`，见上面 `startupSession` 的注释）。
+    // 扩展拿它区分「新开」与「接着聊」，`pi-background-tasks` 还靠它认 reload 交接。
+    await extensionHost.startSession({
+      reason: startupSession?.hasMessages === true ? 'resume' : 'startup',
+    });
     // 收 `before_agent_start` 写的 prompt 段（MCP 的 `mcp_servers`）。
     // 它里面还会等 `direct` 服务器最多 10 秒（与 pi 一致）—— 等完了，它们的工具才注册完。
     const sections = await extensionHost.collectPromptSections();
@@ -772,6 +779,20 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       wroteInit = false;
       store.dispatch({ type: 'conversation.reset', sessionId: id } as AgentAction);
       openRecorder(id);
+      // 发 `session_start{reason:'new'}`：pi 在切新会话的同一位置发它（见它的
+      // `agent-session-runtime`），`pi-background-tasks` 靠它重新激活、MCP 重读
+      // `mcp.json`。不发的话那些扩展以为还在上一个会话里（症状：新会话的操作
+      // 还写旧会话的 runtime 目录、底栏状态不刷）。
+      //
+      // 不 await：`/new` 是同步入口，而这一发是异步的（MCP 会现连服务器）。
+      // 扩展的报错由宿主收成诊断（见 `ExtensionHost.startSession` 里的 try/catch）。
+      if (extensionHostRef !== undefined) {
+        const previousFile = previous.recorder?.file;
+        void extensionHostRef.startSession({
+          reason: 'new',
+          ...(previousFile !== undefined ? { previousSessionFile: previousFile } : {}),
+        });
+      }
       // 旧 sink 收尾（把缓冲 flush 掉）。
       if (previous.sink?.close) void previous.sink.close();
 
@@ -861,6 +882,19 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       // 第三个参数：这个文件里已经有 `thinking_level_change` 吗 —— 没有就由记录器回填一条
       // （与 pi 的 `sdk.js:279-283` 同一件事）。
       openRecorder(id, messages.length, thinking?.hasEntry === true);
+      // 与 `/new` 对称：pi 恢复会话时也发 `session_start{reason:'resume'}`（见它的
+      // `agent-session-runtime`）。扩展靠它把「现在是哪个会话」重新认一遍 ——
+      // `pi-background-tasks` 的所有权身份、状态栏、MCP 重读 `mcp.json` 全挂在上面。
+      //
+      // 在 `openRecorder` **之后**发：`ctx.sessionManager.getSessionFile()` 要报刚恢复的
+      // 那个文件，而不是上一会话的。同样不 await（与 `newSession` 一个道理）。
+      if (extensionHostRef !== undefined) {
+        const previousFile = previous.recorder?.file;
+        void extensionHostRef.startSession({
+          reason: 'resume',
+          ...(previousFile !== undefined ? { previousSessionFile: previousFile } : {}),
+        });
+      }
       if (previous.sink?.close) void previous.sink.close();
 
       return { id, restored: messages.length };

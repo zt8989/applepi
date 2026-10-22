@@ -38,6 +38,8 @@ import {
   SettingsManager,
 } from '@earendil-works/pi-coding-agent';
 import type { AgentStore } from './store';
+import type { AgentAction } from './actions';
+import type { Phase } from './state';
 import type { AgentTool, AgentToolResult } from './agent-tool';
 import {
   callableTools,
@@ -139,14 +141,17 @@ export interface ExtensionHost {
    */
   beforeAgentStart(text?: string | undefined): Promise<void>;
   /**
-   * 发 `session_start`（内核在装载 prompt **之前**调一次）。
+   * 发 `session_start`（内核在装载 prompt **之前**调一次；`/new` 时再发一次）。
    *
    * MCP 扩展靠它读 `mcp.json` 并开始连接服务器：工具是在连接过程中**动态注册**
    * 进来的（`pi.registerTool` → 我们的 `refreshTools`），所以这个顺序不能反。
    * 同样靠它，MCP 会在发现有 codemode 暴露的服务器时激活 `codemode` ——
    * 那必须发生在 `prompt.init` 之前，否则模型看不到 codemode。
+   *
+   * `pi-background-tasks` 靠它（按 `reason`）接管 reload 所有权、定 runtime 目录、
+   * 刷底栏状态。所以 `/new` 也得发 —— 见 `SessionStartOptions`。
    */
-  startSession(): Promise<void>;
+  startSession(options?: SessionStartOptions): Promise<void>;
   /**
    * 收集 `before_agent_start` 写进 `systemPromptOptions.sections` 的 prompt 段。
    *
@@ -250,8 +255,11 @@ export interface LoadExtensionHostOptions {
    *
    * 扩展用它把结论送回对话（`pi-web-access` 的命令全靠这个）。走用户消息而不是
    * 「直接改 messages」是因为它要**触发一轮**——那正是本项目环的入口（见 loop.md）。
+   *
+   * 第二个参数原样透传：`deliverAs` / `triggerTurn` 决定环在跑时排哪条队，落点自己
+   * 分不清相位（见 `extensionMessageAction`）。
    */
-  onSendMessage?: ((text: string) => void) | undefined;
+  onSendMessage?: ((text: string, options: ExtensionSendOptions) => void) | undefined;
   /** 环是不是 idle。命令在环跑着时不能执行（否则中途插消息）。 */
   canSend?: (() => boolean) | undefined;
 }
@@ -689,6 +697,17 @@ export async function loadExtensionHost(
     extensionModelRegistry(effectiveRuntime) as never,
   );
 
+  // 扩展 handler 报的错（事件、工具、命令都走 runner 的 `emitError`）收到诊断里。
+  //
+  // 不接这个 listener 的话它们**全部静默**：`runner.emit()` 逐 handler try/catch，
+  // 然后把错递给 `emitError`，而 `emitError` 只往 `errorListeners` 里发。没 listener
+  // 等于「扩展写坏了、没人知道」—— 包括 `pi.sendMessage` 投不出去时抛的那条
+  // （见 `bindCore` 里 sendMessage 的注释）。
+  runner.onError((info) => {
+    const where = info.extensionPath === undefined ? info.event : shortPath(info.extensionPath);
+    onExtensionError(String(where), info.error);
+  });
+
   //
   // `createHostUi` 把它挂成 `ctx.ui.externalQuestionnaire`：扩展（patch 过的那份）
   // 在画自己的终端组件之前把题目交过来，我们开浏览器那份弹窗。两边谁先答都算数。
@@ -810,7 +829,11 @@ export async function loadExtensionHost(
     runner,
     store,
     onError: onExtensionError,
-    ...(onSendMessage ? { onMessage: onSendMessage } : { onMessage: () => {} }),
+    // `onMessage` 只收一个字符串，且那条路只在环 idle 时才会被走到（命令先在环跑着时就被
+    // 拒了）—— 所以空的 `options` 在这里是实话，不是占位符。
+    ...(onSendMessage
+      ? { onMessage: (text: string) => onSendMessage(text, {}) }
+      : { onMessage: () => {} }),
     canSend: canSend ?? (() => store.getState().phase === 'idle'),
     shortcuts: loaded.extensions.flatMap((ext) =>
       [...ext.shortcuts.values()].map((s) => ({
@@ -864,9 +887,23 @@ export async function loadExtensionHost(
         });
       }
     },
-    startSession: async () => {
-      // 官方 `session_start`：MCP 靠它读 mcp.json 并开始连接服务器。
-      await runner.emit({ type: 'session_start', reason: 'startup' });
+    startSession: async (startOptions?: SessionStartOptions) => {
+      // 官方 `session_start`：MCP 靠它读 mcp.json 并开始连接服务器（`/new` 时也会重读）。
+      //
+      // handler 抛的错由 runner 自己收（`runner.onError` 那条路已接到诊断），这里兜的
+      // 是 emit 更外层抛的异常 —— 装载路径上 session_start 失败曾经会让整个启动挂掉，
+      // 而它和「某个扩展的 handler 写坏了」是同一类问题，该收成诊断而不是炸内核。
+      try {
+        await runner.emit({
+          type: 'session_start',
+          reason: startOptions?.reason ?? 'startup',
+          ...(startOptions?.previousSessionFile !== undefined
+            ? { previousSessionFile: startOptions.previousSessionFile }
+            : {}),
+        } as never);
+      } catch (error) {
+        onExtensionError('session_start', msg(error));
+      }
     },
     collectPromptSections: async () => {
       // MCP 把自己的 `mcp_servers` 段写进 `event.systemPromptOptions.sections`；
@@ -947,7 +984,7 @@ interface BindCoreOptions {
   runner: ExtensionRunner;
   store: AgentStore;
   runtime: AgentRuntime;
-  onSendMessage: ((text: string) => void) | undefined;
+  onSendMessage: ((text: string, options: ExtensionSendOptions) => void) | undefined;
   cwd: string;
   onError: (where: string, message: string) => void;
   /** 重扫 runner 的注册表（`refreshTools` 与装载后的第一次扫描都走它）。 */
@@ -1003,6 +1040,78 @@ async function emitToolCallGate(
   }
 }
 
+/** `session_start` 的 `reason` —— pi 的 `SessionStartEvent` 那五个。 */
+export type SessionStartReason = 'startup' | 'reload' | 'new' | 'resume' | 'fork';
+
+/**
+ * 发 `session_start` 时要带的东西。
+ *
+ * `reason` 是**语义**而不只是标签：`pi-background-tasks` 用它认「这是不是 reload 交接」
+ * （只有 `reload` 才会去接管上一个进程的存活子进程），`previousSessionFile` 标出「从哪个
+ * 会话切过来的」。pi 在 `/new` 时发 `reason: 'new'` + 旧文件路径（见它的
+ * `agent-session-runtime`），我们也照发 —— 不然扩展以为还在上一个会话里。
+ */
+export interface SessionStartOptions {
+  reason?: SessionStartReason | undefined;
+  previousSessionFile?: string | undefined;
+}
+
+/**
+ * 扩展 `pi.sendMessage(message, options)` 的那些选项 —— 与 pi 的口径逐字相同。
+ *
+ * - `deliverAs`：环在跑的时候插哪儿。`steer` 插在当前 step 的工具跑完之后，`followUp`
+ *   等回合收工再开新回合（两者见 `actions.ts` 的 `queue.input`）；`nextTurn` 在 pi 那边
+ *   是「等到下一个回合开头再说」，本项目没有那样的挂起点，按 `followUp` 处理。
+ * - `triggerTurn`：空闲时要不要就此开一个回合（pi 的默认是**要**）。本项目没有「只登记
+ *   不进模型」的 custom 条目（见本文件的 `pi.appendEntry` 那段），所以这一位只影响
+ *   「环在跑时排不排队」——空闲时一律按开新回合处理。
+ */
+export interface ExtensionSendOptions {
+  deliverAs?: 'steer' | 'followUp' | 'nextTurn' | undefined;
+  triggerTurn?: boolean | undefined;
+}
+
+/**
+ * 扩展消息的 `content` 归一成文本。
+ *
+ * **两种形状都收**：pi 的 `CustomMessage.content` 可以是纯字符串，也可以是 content 块数组。
+ * 只认数组的后果不是「少一段文字」而是**整条消息变成空串**、被落点当空消息丢掉 ——
+ * `pi-background-tasks` 的完成通知就是字符串（`<background-task-notification>…`），于是
+ * 「后台任务跑完了」这件事既没进对话也没开回合（症状：任务状态是 completed、`notified`
+ * 是 true，界面上什么都没发生）。
+ */
+export function extensionMessageText(message: unknown): string {
+  const content = (message as { content?: unknown } | undefined)?.content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((block) =>
+      typeof block === 'string'
+        ? block
+        : typeof (block as { text?: unknown })?.text === 'string'
+          ? (block as { text: string }).text
+          : undefined,
+    )
+    .filter((text): text is string => text !== undefined)
+    .join('\n');
+}
+
+/**
+ * 扩展送来的一条消息该变成哪条 action（纯函数，相位由调用方给）。
+ *
+ * 空闲时开新回合；环在跑时必须**排队**——`user.message` 在非 idle 相位下会被 reducer
+ * 直接丢掉（它只收「开始一个新回合」那种输入），于是消息静默消失。
+ */
+export function extensionMessageAction(
+  text: string,
+  options: ExtensionSendOptions,
+  phase: Phase,
+): AgentAction | null {
+  if (text.trim() === '') return null;
+  if (phase === 'idle') return { type: 'user.message', text };
+  return { type: 'queue.input', text, as: options.deliverAs === 'steer' ? 'steer' : 'followUp' };
+}
+
 /** 嵌套调用的编号：官方用 `<父 id>/<n>`，n 按父 id 各自累加。 */
 const nestedCounters = new Map<string, number>();
 function nextNestedId(callerId: string): string {
@@ -1036,26 +1145,33 @@ function bindCore(options: BindCoreOptions): void {
        *
        * 官方那个签名收的是 `CustomMessage`（带 `customType` / `display` / `details`），
        * 而本项目**不存** custom 条目（那是 pi 会话层的能力）。所以取它的 `content`
-       * 里那些 text 块拼成一条**用户消息**。
+       * 拼成一条**用户消息**。
        *
        * 丢弃 `customType` 的后果要说清：扩展的 `/curator` 那些命令靠它在转录里留
        * 一个可点开的卡片，而本项目只会把它当**普通对话**。那是外观上的降级，**不是**
        * 丢功能（结论照样回到对话里）。
+       *
+       * `options` 必须透传：`deliverAs` 决定环在跑时排哪条队，丢了它就只能靠 `user.message`
+       * ——那条在 non-idle 相位下是 no-op。
+       *
+       * **投不出去要抛**，不能静默成功：pi 的 `sendMessage` 返回 `void`，调用方唯一的
+       * 失败信号就是异常。`pi-background-tasks` 的 `notifyCompletion` 正是这么用的 ——
+       * 它先把 `task.notified` 置 true，**只在 catch 里**复位。宿主吞掉异常就等于在盘上
+       * 记一条「通知已送达」，而没人收到（症状：任务 completed、`notified: true`、
+       * 界面上什么都不发生）。本项目存不了 custom 条目，所以「归一后没有文本」和
+       * 「没接对话入口」都是**真失败**。
        */
-      sendMessage: (message: unknown) => {
-        const content = (message as { content?: unknown })?.content;
-        const text = Array.isArray(content)
-          ? content
-              .map((c) =>
-                typeof c === 'string'
-                  ? c
-                  : typeof (c as { text?: unknown })?.text === 'string'
-                    ? (c as { text: string }).text
-                    : '',
-              )
-              .join('\n')
-          : '';
-        onSendMessage?.(text);
+      sendMessage: (message: unknown, options?: ExtensionSendOptions) => {
+        const text = extensionMessageText(message);
+        if (text.trim() === '') {
+          throw new Error(
+            'pi.sendMessage：这条消息没有可投递的文本（content 为空或没有 text 块），而本项目没有「只登记、不进对话」的落点',
+          );
+        }
+        if (onSendMessage === undefined) {
+          throw new Error('pi.sendMessage：当前宿主没有接对话入口（onSendMessage 未配置），消息无处投递');
+        }
+        onSendMessage(text, options ?? {});
       },
       sendUserMessage: (content: unknown) => {
         const text = typeof content === 'string' ? content : String((content as { text?: unknown })?.text ?? '');

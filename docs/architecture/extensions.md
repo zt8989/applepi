@@ -609,7 +609,7 @@ pi 的**状态类扩展**（最具体的例子就是 Orca 装在 `~/.pi/agent/ex
 
 | 事件 | 在哪发 | 对应什么 |
 | --- | --- | --- |
-| `session_start` | `loadExtensionHost().startSession()` | 装载时一次（MCP 也靠它） |
+| `session_start` | `loadExtensionHost().startSession()`；`/new` / `/resume` 各再发一次（`reason: 'new'` / `'resume'` + `previousSessionFile`） | 装载时一次（`reason` 按「是不是已有会话」给 `startup` / `resume`；MCP 也靠它），切会话时再一次 |
 | `before_agent_start` | 界面发消息之前（已有） | 用户刚说完、即将开跑 |
 | `agent_start` | kernel 的 store 订阅器 | 相位 idle → 非 idle |
 | `agent_end` | 同一个订阅器 | 相位回到 idle |
@@ -697,6 +697,15 @@ creating the transcript」同一回事。
   `user.message`** 会被 reducer 当无效输入丢掉。`triggerTurn` 在本项目只影响「排队还是
   开新回合」那半边 —— 空闲时一律开回合（本项目没有「只登记、不进模型」的 custom 条目，
   见上一条 `appendEntry`）。
+
+  归一到空文本时 **抛**（不静默成功）：pi 的 `sendMessage` 返回 `void`，调用方唯一
+  的失败信号就是异常 —— `pi-background-tasks` 的 `notifyCompletion` 先当成功、**只在
+  catch 里**复位 `task.notified`。吞掉异常就等于在盘上记一条「通知已送达」而没人收到。
+  同理，`onSendMessage` 没配（无对话入口）也抛。
+- **扩展 handler 自己报的错** —— 不再静默：`runner.onError(...)` 接到了
+  `extensions.errors`（以前 `runner.emit()` 的 per-handler catch 把错递给一个空
+  listener 集合，等于什么都看不到）。代价：写坏的扩展现在会在启动横幅里多一行诊断
+  —— 那正是他要的。
 
 ## 折叠（`Ctrl+]`）：两种形态，两种机制
 
