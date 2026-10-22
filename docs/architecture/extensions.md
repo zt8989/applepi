@@ -701,6 +701,23 @@ creating the transcript」同一回事。
   「少一个成员就整条功能挂」的例子。两处指向同一个变量是故意的：让 Ctrl+O 与扩展
   以为的展开状态不一致，用户看到的就永远是次优的一边。
 
+### 界面还没起来时（`tui` 未就绪）的降级口径
+
+同步装载下，扩展在 `session_start` / 装载期就会碰 `ctx.ui`，而 TUI 要等
+`createKernel()` 返回之后才起。所以按「这个调用需不需要**真**界面」分三档，
+而不是一律抛一条 `[Extension issues]`：
+
+| 成员 | 未就绪时 | 为什么 |
+| --- | --- | --- |
+| `theme` | 给真的 | `setupTheme()` 比界面早得多 |
+| `setStatus` | 先**存起来**，界面起来后补喂 | `pi-background-tasks` 只在任务变化时才重设 |
+| `setWidget` | 卸下直接做；组件工厂**丢掉** | `pi-subagents` 在装载期就清自己的 widget |
+| `setTitle` / `onTerminalInput` | **忽略**（不抛） | Orca 的标题 spinner 一抛就 `clearOwnedTimers()`（整个停表）；输入监听没有界面本来也没东西可听 |
+| `custom` | **抛** | 真要画一个组件，没有界面就是做不了 |
+
+这些不是「静默说谎」：调用方拿到的都是「这件事现在没地方发生」的诚实降级，与
+「宿主没有底栏就丢掉状态」同一个口径。
+
 ## 仍然不接的
 
 - **那六个会话操作**（`waitForIdle` / `newSession` / `fork` / `navigateTree` /
