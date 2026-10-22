@@ -651,19 +651,36 @@ function traceWithSiblingSteps(steps: number): TraceTree {
   return tree;
 }
 
+/**
+ * 一份工作的耗时：**取多轮里的最小值**。
+ *
+ * 单轮计时的噪声只往上跳（GC、调度、别的测试抢 CPU），从不往下 —— 所以最小值是最接近
+ * 「这份工作本身要多久」的估计，而比值判据要的就是它。这也正是这两条用例在并行跑整套测试时
+ * 偶发假警报的原因（`pnpm -r test` 三个包同时跑，单轮计时能被抬高好几倍）。
+ */
+function bestDuration(rounds: number, work: () => void): number {
+  let best = Number.POSITIVE_INFINITY;
+  for (let round = 0; round < rounds; round += 1) {
+    const started = performance.now();
+    work();
+    best = Math.min(best, performance.now() - started);
+  }
+  return best;
+}
+
 test('轨迹：节点数翻倍，traceStats 耗时不该翻两番（O(N²) 回归）', () => {
   // 先用小的把 JIT 烘一下，否则第一次调用的编译开销会淹掉信号。
   traceStats(traceWithSiblingSteps(50));
 
-  const timeFor = (steps: number): number => {
+  const timed = (steps: number): number => {
     const tree = traceWithSiblingSteps(steps);
-    const started = performance.now();
-    for (let i = 0; i < 10; i += 1) traceStats(tree);
-    return performance.now() - started;
+    return bestDuration(5, () => {
+      for (let i = 0; i < 10; i += 1) traceStats(tree);
+    });
   };
 
-  const small = timeFor(200);
-  const large = timeFor(800);
+  const small = timed(200);
+  const large = timed(800);
   // 节点变 4 倍。线性应该是 ~4 倍，旧的 O(N²) 是 ~16 倍。
   // 阈值取 8 倍（远低于 16），留足 CI 抖动的余量，又足以抓住 O(N²)。
   assert.ok(
@@ -675,18 +692,16 @@ test('轨迹：节点数翻倍，traceStats 耗时不该翻两番（O(N²) 回�
 test('轨迹：节点数翻倍，renderTree 耗时不该翻两番（O(N²) 回归）', () => {
   renderTree(traceWithSiblingSteps(50));
 
-  const timeFor = (steps: number): number => {
+  const timed = (steps: number): number => {
     const tree = traceWithSiblingSteps(steps);
-    const started = performance.now();
-    // 25 次而不是 5 次：换掉分叉缩进之后 `renderTree` 快了一截（800 节点单次 ~0.3ms），
-    // 5 次的总时长落到「毫秒级的噪声」里 —— 并行跑整个测试集时会被 GC 与调度淹没，
-    // 于是改成偶发失败的假警报。多跑几次把信号抬出噪声（阀值相对值不变）。
-    for (let i = 0; i < 25; i += 1) renderTree(tree);
-    return performance.now() - started;
+    // 跑 25 次：`renderTree` 单次很快（800 节点 ~0.3ms），次数少了总时长会落进毫秒级噪声里。
+    return bestDuration(5, () => {
+      for (let i = 0; i < 25; i += 1) renderTree(tree);
+    });
   };
 
-  const small = timeFor(200);
-  const large = timeFor(800);
+  const small = timed(200);
+  const large = timed(800);
   assert.ok(
     large < Math.max(small * 8, 5),
     `200 节点 ${small.toFixed(2)}ms → 800 节点 ${large.toFixed(2)}ms：增长太快，像 O(N²)`,
