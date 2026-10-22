@@ -11,6 +11,10 @@
  * 所以这里读 `settings.json` 的 `theme` 字段（与 pi 同一个文件、同一个键），用 `resolveThemeSetting()`
  * 按**终端深浅色**解析；没配就按 `getTerminalTheme()` 的检测在 dark/light 之间选 —— 写死 dark 会让
  * 浅色终端出现黑底块。
+ *
+ * 还有第三种回落：打包形态下 pi 的包目录算错（`__dirname` 落在 `dist/`）→ 内置主题 JSON
+ * 读不到 → `initTheme` 同样静默回落 system。那条路由 `src/pi-package-dir.ts` 在启动时补
+ * `PI_PACKAGE_DIR`，不归这个文件管。
  */
 import {
   getTerminalTheme,
