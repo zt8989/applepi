@@ -171,26 +171,28 @@ test('扩展：没装任何包时是空宿主（不是崩）', async () => {
 });
 
 /**
- * 并行装载**不许改变声明顺序**。
+ * 串行装载：顺序 = `settings.json` 的声明顺序。
  *
- * `loadExtensionHost` 把多个扩展用 `Promise.all` 一起装（串行 2.7s → 并行 1.4s，见那里的
- * 注释）——于是**完成顺序与声明顺序不同**。而顺序是有语义的：工具表是「同名先注册者
- * 优先」，谁生效只能由 `settings.json` 里的顺序决定。按完成顺序拼结果的话，重名工具
- * 归谁就变成随机的（每次启动还可能不一样，而症状只是「那个工具偶尔行为不对」）。
+ * `loadExtensionHost` 一次 `loadExtensions()`、按声明顺序逐个 import（与 pi 同一形态）。
+ * 顺序是有语义的：工具表是「同名先注册者优先」，谁生效只能由 `settings.json` 里的顺序
+ * 决定；而扩展在 import 期就有副作用（`registerTool` / 读 `getAllTools`），并行时这些
+ * 副作用的先后不再等于声明顺序。
  *
  * 这个测试故意让**声明在前**的那个最慢（工厂里 await 一下：官方对工厂是 `await` 的），
- * 于是完成顺序正好与声明顺序相反 —— 结果一旦按完成顺序拼，`entries` 与重名工具的归属
- * 立刻会错。
+ * 并在每个扩展**装载完成**时记一笔 —— 并行时完成顺序会是 `b, c, a`，串行时是
+ * `a, b, c`。后者才是 pi 的行为。
  */
-test('扩展：并行装载，顺序仍是 settings.json 的顺序（重名工具先声明者优先）', async () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'ext-parallel-'));
+test('扩展：串行装载，顺序是 settings.json 的顺序（重名工具先声明者优先）', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'ext-serial-'));
   const saved = process.env['PI_CODING_AGENT_DIR'];
   process.env['PI_CODING_AGENT_DIR'] = dir;
   // 三个**本地**扩展文件：`packages` 里写文件路径 = 一个文件一个扩展
   // （pi 的 packages.md：「A file path loads one extension」）。
+  const order = (globalThis as { __elaExtLoadOrder?: string[] }).__elaExtLoadOrder = [];
   const extension = (name: string, delayMs: number): string => `
 export default async function (pi) {
   await new Promise((resolve) => setTimeout(resolve, ${delayMs}));
+  (globalThis.__elaExtLoadOrder ??= []).push('${name}');
   pi.registerTool({
     name: 'dup',
     description: 'from ${name}',
@@ -211,6 +213,7 @@ export default async function (pi) {
     const host = await loadExtensionHost({ builtins: false, store, cwd: dir });
     assert.equal(host.loaded, 3);
     assert.deepEqual([...host.errors], [], '三个都该装成功');
+    assert.deepEqual(order, ['a', 'b', 'c'], '装载是串行的：完成顺序 = 声明顺序（并行时 b/c 会先完成）');
     assert.deepEqual(
       host.entries.map((entry) => path.basename(entry.path)),
       ['a.ts', 'b.ts', 'c.ts'],

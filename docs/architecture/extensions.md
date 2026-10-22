@@ -55,37 +55,37 @@ typebox                     => NOT RESOLVABLE
 与 `isViewportTUI` 都成立。这一点验过，因为如果两边是两份，`showOverlay` 挂上去的
 浮层不会被我们的渲染循环认出来，而症状是「对话框显示了但不动」。
 
-### 多个扩展**并行**装载（顺序仍然是声明顺序）
+### 多个扩展**串行**装载（与 pi 同一形态）
 
-官方 `loadExtensions(paths, …)` 内部是**串行**的：一个扩展 import 完再下一个。而每个扩展
-的装载是各自独立的重活（jiti 转译 + 它自己的模块图），互相不等 —— 三个 npm 扩展实测
-**串行 2.7s / 并行 1.4s**。这一段现在被 `deferExtensions` 推到首帧之后（见 `init.md` 的启动时间线），
-但并行省的是「后台那段窗」：扩展装完之前发的消息要排队，越短越好。
-
-**别因为「pi 也是串行」就简化回去**：pi 串行只要 314ms（`PI_TIMING=1` 实测，8 个扩展），是因为它
-自己就是预打包的 `dist/bundle/cli.js`、jiti 走 bundle 的 embedded modules；同一批扩展用我们的 loader
-（未打包，见 `init.md` 的「打包」一节）串行要 0.6~1.1s —— 形态不同，不是风格不同。
-
-所以 `loadExtensionHost` 是**每个扩展单独调一次 `loadExtensions()`**，再 `Promise.all`：
+`loadExtensionHost` 是一次 `loadExtensions(paths, …)`，它内部按声明顺序逐个 import
+（一个装完再下一个）：
 
 ```ts
-const results = await Promise.all(
-  resolvedEntries.map((entry) => loadExtensions([entry.path], cwd, eventBus, runtimeHandle)),
+const loaded = await loadExtensions(
+  resolvedEntries.map((entry) => entry.path),
+  cwd,
+  eventBus,
+  runtime,
 );
-const loaded = { extensions: results.flatMap((r) => r.extensions), … };
 ```
 
-三件事让它与串行等价：
+**顺序是语义，不是巧合**：工具表是「同名先注册者优先」，谁生效只能由 `settings.json`
+里的顺序决定；而扩展在 import 期就有副作用（`registerTool` / `registerCommand` / 读
+`getAllTools`）。并行装载时这些副作用的先后不再等于声明顺序（重名工具谁先注册、
+读注册表时看不看得见别人，都变成时序问题），与 pi 的行为不一致。
 
-| | 为什么 |
-| --- | --- |
-| `eventBus` / `runtimeHandle` **共用同一个** | 扩展之间靠它们互相看见；事件是 `session_start()` 那一刻统一发的，与「谁先 import 完」无关 |
-| 结果**按原顺序**拼回去 | 工具表是「同名先注册者优先」（`runner.getAllRegisteredTools()` 按 extensions 顺序走），顺序一漂，重名工具归谁就变成随机的 |
-| 每个扩展的失败仍收成一条诊断 | 官方包在自己的 try/catch 里（不抛），拼起来与串行时一样 |
+**曾经并行过**（每个扩展单独调一次再 `Promise.all`：同一批扩展实测并行
+0.5~0.6s / 串行 0.6~1.1s）。改回串行的代价很小：`deferExtensions` 已把整段装载推离
+首帧（见 `init.md` 的启动时间线），省下的那几百毫秒只在后台窗口里。
 
-顺序这一条有测试钉住（`test/extension-host.test.ts` 的「并行装载，顺序仍是 settings.json 的顺序」）：
-那个测试故意让**声明在前**的扩展最慢（工厂里 `await` 一下，官方对工厂是 await 的），
-完成顺序因此正好与声明顺序相反 —— 一旦按完成顺序拼，`entries` 与重名工具的归属立刻会错。
+顺带说明 pi 为什么看起来「串行也很快」：pi 串行只要 314ms（`PI_TIMING=1`，8 个扩展），
+是因为它自己是预打包的 `dist/bundle/cli.js`、jiti 走 bundle 的 embedded modules；同一批
+扩展用我们的 loader（未打包，见 `init.md` 的「打包」一节）要 0.6~1.1s —— 形态不同，
+不是风格不同。
+
+测试钉住两条（`test/extension-host.test.ts` 的「串行装载，顺序是 settings.json 的顺序」）：
+让**声明在前**的扩展最慢，断言**装载完成顺序**就是声明顺序（并行时会 `b, c, a`），
+以及重名工具归先声明者。
 
 ### 为什么用 `DefaultPackageManager` 而不是自己读 `settings.json`
 

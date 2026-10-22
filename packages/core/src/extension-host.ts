@@ -599,23 +599,19 @@ export async function loadExtensionHost(
   // `pi.registerMcpServer()` 写进的注册表、runner 绑定的 refreshTools 会是两份。
   const runtimeHandle = createExtensionRuntime();
   //
-  // 官方的 `loadExtensions()` 内部是串行的（一个 import 完再下一个），而每个扩展的装载互不等待
-  // —— 实测三个 npm 扩展串行 2.7s、并行 1.4s，而这段时间整个在首帧之前的关键路径上。
+  // 与 pi 同一个形态：一次 `loadExtensions()`、内部按声明顺序**串行** import。
   //
-  // 并行不改变语义：`eventBus` / `runtimeHandle` 仍共用同一个（事件在 `startSession()` 才统一
-  // 发，与谁先注册无关）；结果**按原顺序**拼回去（工具表是同名先注册者优先，顺序漂了重名工具谁
-  // 生效就变成随机）；一个扩展失败只收进 `errors`，与串行时的诊断一样。
-  //
-  // 扩展个数很少，不需要限流。
-  const results = await Promise.all(
-    resolvedEntries.map((entry) => loadExtensions([entry.path], cwd, eventBus, runtimeHandle)),
+  // 曾经并行（每个扩展单独调一次再 `Promise.all`，省掉后台窗口里约 0.5s）。改回串行是因为
+  // 扩展在 import 期就有副作用（`registerTool` / `registerCommand` / 读 `getAllTools`），
+  // 并行时这些副作用的先后不再等于声明顺序 —— 与 pi 的行为不一致（重名工具谁先注册、
+  // 读注册表时看不看得见别人，都变成时序问题）。而并行的收益只在后台：`deferExtensions`
+  // 已把整段装载移出首帧（见 init.md 的启动时间线）。
+  const loaded = await loadExtensions(
+    resolvedEntries.map((entry) => entry.path),
+    cwd,
+    eventBus,
+    runtimeHandle,
   );
-  const loaded = {
-    extensions: results.flatMap((result) => result.extensions),
-    errors: results.flatMap((result) => result.errors),
-    warnings: results.flatMap((result) => result.warnings),
-    runtime: runtimeHandle,
-  };
   // `loadExtensions` 只知道「一个文件」，包信息在这一步补上（理由见
   // `resolveExtensionEntries` 与 `applyExtensionSourceInfo` 的注释）。
   applyExtensionSourceInfo(loaded.extensions, resolvedEntries);
@@ -675,7 +671,7 @@ export async function loadExtensionHost(
   // 路，症状离真因很远）。
   const runner = new ExtensionRunner(
     loaded.extensions,
-    loaded.runtime,
+    runtimeHandle,
     cwd,
     // **真的**会话：扩展要读条目（`pi-web-access` 的 `/search` 列历史搜索结果、
     // 判「模型这轮已经用过哪些 web 工具」）。数据源是**本项目的** `state.messages`，
