@@ -16,16 +16,23 @@
 
 `seeded` 是「装过了没有」。回放时据此判断 init 段读到没有 —— 没读到就只能重新装配。
 
-## 启动时间线：首帧不等扩展（`deferExtensions`）
+## 启动时间线：同步装载（与 pi 同一语义）
 
 ### 时间都花在哪（本机实测，`ela` 带三个 npm 扩展）
 
-| 阶段 | 量级 | 能做什么 |
+| 阶段 | 量级 | 现状 |
 | --- | --- | --- |
 | 模块装载（~1600 个模块 / 8.5MB 源码，pi 那一栈 + 各家 provider SDK） | 0.9~1.4s | **打成一个文件**（见下面「打包」一节），降到 ~0.35s |
-| 扩展装载（jiti，见 `extensions.md` 的串行装载） | 1~3s（视缓存与打包形态） | **推到后台**（`deferExtensions`） |
-| `session_start` + `collectPromptSections`（MCP 连服务器，`direct` 服务器最多等 10s） | 0.4~0.5s | 同上 |
+| 扩展装载（jiti，串行）+ `session_start` + `collectPromptSections`（MCP，`direct` 服务器最多等 10s） | 0.3~1.5s（打包）/ 0.8~1.8s（tsx） | **同步**：界面出来时已就绪 |
 | prompt 拼装 + skill 扫描 + 落盘器 + web 服务 | ~0.1s | —— |
+
+从进程启动到 `[Extensions]` 报全（也就是「能发消息」）：打包形态 **~0.95s**、`tsx` 形态
+**~1.76s**（PTY 实测）。pi 是 470~670ms —— 差的是我们的模块装载与 jiti 转译。
+
+**早先这里用过 `deferExtensions`**（首帧不等扩展：界面 ~0.35s 先出来，装载在后台跑完再重报
+开场）。首帧确实更快，但代价是启动后多一段「正在后台装载」—— 那段时间发消息会被按住，
+宿主（Orca）的状态也晚半拍。扩展装载已是串行的，绝对值不大，所以 **TUI 不再用它**
+（kernel 仍保留这个选项，`defer-extensions.test.ts` 钉着它的语义）。
 
 ### 试过并否掉的两条
 
@@ -96,38 +103,39 @@ agent-session + extensions + mcp/codemode/tool-search + components + theme） | 
 所以「改完源码忘了构建」不会让你对着旧产物调试；要强制对比两条路用 `ELA_NO_BUNDLE=1`。产物不进仓库（全局 `dist/` 已在 `.gitignore`），`pnpm build` 会先 webui
 后 tui 地构建两样。
 
-于是交互式启动的**首帧**：**~3.9s → ~1.15s**（另一半 2.2s 在后台跑完）；
-再叠上打包：**~0.35s**（扩展仍在那之后后台装完）。
+于是同步启动的**总耗时**：**~3.9s → ~1.15s**（不再有「另一半在后台跑完」）；
+再叠上打包：**~0.95s**（模块装载 ~0.35s + 扩展与 prompt ~0.6s）。
 
 ### 谁先装、谁后装
 
-`createKernel({ deferExtensions: true })`（只给交互式模式，`-p` 不给）把 `createKernel()`
-切成两段：
+`createKernel()` 现在**一次装完**（TUI 不传 `deferExtensions`）：
 
 ```
 store 建好
-  ├─ model.init            ← **不依赖扩展**，先装（底栏首帧就要显示 `(provider) model`）
-  ├─ 会话记录器（openRecorder）← 计划路径要在 session_start 时就能报出去（见下）
-  └─ 后台：扩展装载 → session_start → collectPromptSections → 按 cwd 算工具表
-            → 扫 skill → prompt.init                        ← 这一整块可能 1~3 秒
+  ├─ model.init            ← 不依赖扩展
+  ├─ 会话记录器（openRecorder）
+  └─ 扩展装载 → session_start → collectPromptSections
+     → 按 cwd 算工具表 → 扫 skill → prompt.init
 ```
 
-`model.init` 之所以要提到前面：底栏在首帧就要画 `(provider) model`，而那份数据只来自
-runtime 与启动解析出来的档位 —— 留在后面的话，扩展装载的那几秒里底栏是 `() `（看着像坏了）。
-
-会话记录器要提到**扩展装载之前**：状态类扩展在 `session_start` 那一刻读一次
-`ctx.sessionManager.getSessionFile()`，之后不再刷新，而 Orca 这类宿主靠那个路径把
-「对话记录在哪」认下来。报的是**计划路径**（空会话不建文件），第一条消息落盘后后续事件
-就真的带上 `session_id` + `session_file` —— 详见 [extensions](extensions.md) 的
-「agent 生命周期事件」那一节。
+`model.init` 之所以排在扩展前面：底栏一开始就要画 `(provider) model`，而那份数据只来自
+runtime 与启动解析出来的档位。会话记录器要提到**扩展装载之前**：状态类扩展在
+`session_start` 那一刻读一次 `ctx.sessionManager.getSessionFile()`，之后不再刷新，而 Orca
+这类宿主靠那个路径把「对话记录在哪」认下来。报的是**计划路径**（空会话不建文件），
+第一条消息落盘后后续事件就真的带上 `session_id` + `session_file` —— 详见
+[extensions](extensions.md) 的「agent 生命周期事件」那一节。
 轨迹不受这个顺序影响：`beginTrace()` 只认 `state.prompt.seeded` / `state.model.seeded`，
 而它要等用户发出第一句话才跑（见上面「推迟到第一句话」那节）。
 
-### 门：`ready` 之前**不许发消息**
+`deferExtensions: true` 仍在 kernel 里（把 store + `model.init` 先返回、其余推到后台），
+它带来的 `Kernel.ready` 门见下一节 —— TUI 现在不用它，所以那道门永远已开。
 
-这是这一档唯一的硬约束。那一刻 `state.prompt.tools` 与 system prompt 还是「没有扩展」的形状，
-先发出去的那条会定下一份**缺工具集**的 head，而 head 是不可改的历史（见 `prompt-head.ts`）——
-后面补不回来（模型会在后面的回合里发现工具多了，但第一轮已经发错了）。
+### 门：`ready` 之前**不许发消息**（只在 `deferExtensions` 下存在）
+
+这是 `deferExtensions` 下唯一的硬约束。那一刻 `state.prompt.tools` 与 system prompt 还是
+「没有扩展」的形状，先发出去的那条会定下一份**缺工具集**的 head，而 head 是不可改的历史
+（见 `prompt-head.ts`）—— 后面补不回来（模型会在后面的回合里发现工具多了，但第一轮已经发错
+了）。TUI 现在同步装载，所以这道门永远不会关上。
 
 所以 `Kernel.ready` 是「此刻的状态能不能拿去发」的唯一定义，两处消费它：
 
