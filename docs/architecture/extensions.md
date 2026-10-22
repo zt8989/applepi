@@ -448,6 +448,12 @@ prompt。`selectedTools` 是**真值**（当前声明给模型的工具名，与
 
 - **环在跑的时候不发** —— 那个事件没有对应的一轮语义。扩展可能据此注入消息，
   在工具调用的那一轮里发它等于告诉它「用户又说话了」，消息就凭空多出来。
+- **启动期只给内置扩展发** —— `collectPromptSections()` 要拿 MCP 的 `mcp_servers` 段
+  （并等 `direct` 服务器连上），所以只跑 `builtin:` 那几个 handler。用户装的扩展在启动时
+  一律**不**收到它：它们看到 `before_agent_start` 就认为「用户要发消息了」，Orca 的
+  `orca-agent-status` 会因此开一个永不闭合的 turn（宿主那边一直显示 Working/loading），
+  而 pi 启动时也不发这个事件（实测：交互式 pi 启动只发 `session_start`）。它们的段
+  在首轮真事件时作为补丁追加。
 - **handler 抛错不炸环** —— 收成诊断（与官方 `runner.onError` 同一个口径）。
 
 ## 装载失败不抛，但**看得见**
@@ -662,6 +668,10 @@ pi 的**状态类扩展**（最具体的例子就是 Orca 装在 `~/.pi/agent/ex
   `tool_execution_start` 在 `runToolCall` 里）。
 - **发出去就不管**：`emitLifecycle` 不等 handler，但**同步开始**执行 —— 调用顺序就是
   扩展看到的顺序（状态类 handler 都是同步的）。handler 报错只记诊断，不带崩整轮对话。
+- **装载完成时补发一次 `agent_settled`**（只发事件，不进轨迹）：环此刻确实 idle，而 Orca 的
+  pane 状态靠 hook 推（`agent_end` → done）。pi 那边是 Orca 自己认进程（`--command pi` 是
+  它的已知 agent），ela 不在那份名单里 —— 不补这一条的话，启动后一个状态事件都没有
+  （`session_start` 会被 Orca 丢掉：还没有 providerSession），宿主就一直显示 loading。
 
 ### 一处顺序：**会话记录器要在扩展之前建**
 

@@ -244,6 +244,46 @@ test('扩展：--no-extensions（disabled）直接跳过装载', async () => {
   }
 });
 
+test('扩展：启动期收集 prompt 段只跑内置扩展（用户扩展看到假的 before_agent_start 会以为用户发消息了）', async () => {
+  // 症状：Orca 里 ela 的 agent 状态一直 working/loading 而 pi 是 done。
+  // `collectPromptSections()` 为了拿 MCP 的 `mcp_servers` 段会跑 before_agent_start，
+  // 而 `orca-agent-status` 收到它就把宿主的状态设成 working、开一个永不闭合的 turn ——
+  // pi 启动时根本不发这个事件（只发 `session_start`）。
+  const dir = mkdtempSync(path.join(tmpdir(), 'ext-startup-sections-'));
+  const saved = process.env['PI_CODING_AGENT_DIR'];
+  process.env['PI_CODING_AGENT_DIR'] = dir;
+  writeFileSync(
+    path.join(dir, 'probe.ts'),
+    `
+export default function (pi) {
+  pi.on('before_agent_start', (event) => {
+    (globalThis.__beforeAgentStartCalls ??= []).push(event.prompt);
+    event.systemPromptOptions.sections.probe = '<probe>';
+  });
+}
+`,
+  );
+  writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ packages: ['./probe.ts'] }));
+  const calls: string[] = ((globalThis as { __beforeAgentStartCalls?: string[] }).__beforeAgentStartCalls = []);
+  try {
+    const { store } = freshStore();
+    const host = await loadExtensionHost({ builtins: false, store, cwd: dir });
+    assert.deepEqual([...host.errors], [], '试探扩展该装成功');
+    assert.deepEqual(calls, [], '装载（含 session_start）不该发 before_agent_start');
+
+    const sections = await host.collectPromptSections();
+    assert.deepEqual(calls, [], '启动期收集段不该发给用户扩展');
+    assert.deepEqual(sections, {}, '用户扩展写的段不进启动 prompt（首轮补丁追加）');
+
+    await host.beforeAgentStart('hi');
+    assert.deepEqual(calls, ['hi'], '真轮才发（prompt 是用户那句话）');
+  } finally {
+    if (saved !== undefined) process.env['PI_CODING_AGENT_DIR'] = saved;
+    else delete process.env['PI_CODING_AGENT_DIR'];
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('扩展：registerExtraTools 之后工具进注册表，且不覆盖官方工具', () => {
   // 清理上一批测试留下的（模块级状态，见 tools.ts 的注释）。
   registerExtraTools([]);
