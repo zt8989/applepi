@@ -306,13 +306,30 @@ function borderLines(screen: string[]): { row: number; dashes: number }[] {
 
 
 /**
+ * 首帧画完的判据：输出**静下来**这么久。
+ *
+ * 同步装载后，首屏要等扩展与 prompt 装完才画（打包 ~0.9s、tsx ~1.8s，机器忙时更久）。
+ * 早先这里等的是固定窗口（9s / 7s）—— 那是「首帧不等扩展」时代的假设，慢机器上会把
+ * 「还没画」当成「画完了」。改成「有输出之后静下来」：快机器上更快结束，慢机器上也等得到。
+ */
+const FIRST_PAINT_QUIET_MS = 600;
+
+/**
+ * 敲键之后等面板画完的静默窗口。
+ *
+ * 比首帧宽：`/resume` 要读会话目录、`/model` 要读模型目录，这些 IO 期间**没有输出**，
+ * 用首帧那个 600ms 会把「还在读盘」当成「面板画完了」。
+ */
+const PANEL_PAINT_QUIET_MS = 2_500;
+
+/**
  * 启动 TUI，等它画出首帧，然后杀掉。
  *
- * @param ms  存活多久（首帧很快，但 tsx 转译 + 启动有开销，给宽一点）
+ * @param ms  最长等多久（首帧画完会提前结束；同步装载下慢机器可能要十几秒）
  * @param env 环境（默认禁用颜色；要验颜色时传 `envWithColor()`）
  */
 async function firstFrame(
-  ms = 9000,
+  ms = 30_000,
   env: NodeJS.ProcessEnv = envWithoutTestHome(),
 ): Promise<{ text: string; raw: string }> {
   return new Promise((resolve, reject) => {
@@ -331,30 +348,43 @@ async function firstFrame(
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let out = '';
-    child.stdout.on('data', (d: Buffer) => (out += d.toString()));
-    child.stderr.on('data', (d: Buffer) => (out += d.toString()));
+    let settled = false;
+    let quiet: NodeJS.Timeout | undefined;
     /**
      * 收尾：**等 stdout 排空**再 resolve。
      *
      * 这一步不是可选：`stdio` 是管道，而 macOS 上**管道写是异步的** ——
      * `process.exit()` 会把还在缓冲区里的那几行丢掉（实测丢掉的是底栏）。
-     *
-     * 早先只在「计时器到点 kill」那条路上等了 300ms，`exit` 那条路直接 resolve ——
-     * 而子进程在 **stdin 是 `/dev/null`** 时（`stdio: ['ignore', …]`，也就是这里的形状）
-     * 会自己读完 EOF 退出（实测 ~1.7s），于是「进程自己退」这条路成了常态，
-     * 首帧断言稳定地看不到底栏。
      */
-    let settled = false;
     const finish = (): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (quiet !== undefined) clearTimeout(quiet);
       setTimeout(() => resolve({ text: visible(out), raw: out }), 300);
     };
-    const timer = setTimeout(() => {
+    const stop = (): void => {
       child.kill();
       finish();
-    }, ms);
+    };
+    const timer = setTimeout(stop, ms);
+    // 输出静下来 = 首帧画完（见 `FIRST_PAINT_QUIET_MS`）。
+    // 但**只在 TUI 真的开始重绘之后**才算数（stdout 出现 ESC 序列）：启动早期
+    // tsx / node 会先打几行纯文本警告，编译模块时可能静默 >600ms —— 那时当作画完
+    // 会把空屏当成首帧。
+    let rendering = false;
+    const onStdout = (d: Buffer): void => {
+      out += d.toString();
+      if (d.includes(0x1b)) rendering = true;
+      if (!rendering) return;
+      if (quiet !== undefined) clearTimeout(quiet);
+      quiet = setTimeout(stop, FIRST_PAINT_QUIET_MS);
+    };
+    const onStderr = (d: Buffer): void => {
+      out += d.toString();
+    };
+    child.stdout.on('data', onStdout);
+    child.stderr.on('data', onStderr);
     child.on('error', (error) => {
       settled = true;
       clearTimeout(timer);
@@ -365,33 +395,19 @@ async function firstFrame(
 }
 
 /**
- * 启动 TUI，敲一串键，把屏幕上的可见文本拿回来。
+ * 启动 TUI，等首帧静下来后敲一串键，再看屏幕上的可见文本。
  *
  * 名字里的 sessions 是它最早的用途（`/resume` 那个面板），现在它是**通用**的
  * 「敲两下键然后看屏幕」 —— `/session` 那张卡片、`/model` 面板都走这里。
  *
- * ## 为什么必须真的启动进程
- *
- * 「面板画出来没有」这件事只在**真终端 + 真 pi-tui 渲染**里才算发生，而且有三个坑
- * 只在那时才暴露：
- *
- * 1. `KeybindingsManager` 不装到 pi-tui 全局的话，`app.session.*` 那些键**静默失效** ——
- *    连那行按键提示都会一起消失（它用同一个 keybindings 渲染）。纯函数测试看不到。
- * 2. `onInput` 若不让路，弹窗开着时按 `Ctrl+C` 会 `process.exit(0)`（空闲分支）。
- * 3. 覆盖层的定位/高度：面板是 `Container`，里面的 `DynamicBorder` 按宽度画横线 ——
- *    宽度算错时那些横线会缺一段，而组件仍然「成功」渲染。
- *
- *
- * 不发真 Ctrl+C（``）是刻意的：那是 terminal 的 ISIG 语义，走 stdin 管道时
- * pi-tui 拿到的是字节而不是「按键」，与真终端的行为不同。「Ctrl+C 不杀进程」那条由
- * 「面板画出来了」间接证明（见那条断言的注释）。
+ * 两个「静下来」：首帧画完之后才敲键（界面没起来时敲的东西没人接），面板画完之后收工。
  *
  * @param keys 回车之前要先敲的键
- * @param ms   整个子进程活多久
+ * @param ms   最长等多久
  */
 async function sessionsPanel(
   keys = '/resume\r',
-  ms = 11000,
+  ms = 30_000,
 ): Promise<{ text: string; raw: string }> {
   return new Promise((resolve, reject) => {
     // 不给 `--web`（浏览器界面默认不起）—— 这两条测试都只关心终端首帧。
@@ -401,24 +417,48 @@ async function sessionsPanel(
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let out = '';
-    child.stdout.on('data', (d: Buffer) => (out += d.toString()));
-    child.stderr.on('data', (d: Buffer) => (out += d.toString()));
-    // 首帧之后再敲 —— 界面没起来时敲的东西没人接。
-    setTimeout(() => {
-      child.stdin.write(keys);
-    }, 7000);
-    const timer = setTimeout(() => {
+    let settled = false;
+    let quiet: NodeJS.Timeout | undefined;
+    let keysSent = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (quiet !== undefined) clearTimeout(quiet);
       child.kill();
       setTimeout(() => resolve({ text: visible(out), raw: out }), 300);
-    }, ms);
+    };
+    const timer = setTimeout(finish, ms);
+    // 同上：只有真开始重绘（stdout 出现 ESC 序列）之后，「静下来」才算首帧画完。
+    let rendering = false;
+    const onStdout = (d: Buffer): void => {
+      out += d.toString();
+      if (d.includes(0x1b)) rendering = true;
+      if (!rendering) return;
+      if (quiet !== undefined) clearTimeout(quiet);
+      quiet = setTimeout(() => {
+        if (keysSent) {
+          finish();
+          return;
+        }
+        keysSent = true;
+        child.stdin.write(keys);
+        // 敲完再等一次「静下来」：面板画完就是收工信号。
+        quiet = setTimeout(finish, PANEL_PAINT_QUIET_MS);
+      }, FIRST_PAINT_QUIET_MS);
+    };
+    const onStderr = (d: Buffer): void => {
+      out += d.toString();
+    };
+    child.stdout.on('data', onStdout);
+    child.stderr.on('data', onStderr);
     child.on('error', (error) => {
+      settled = true;
       clearTimeout(timer);
+      if (quiet !== undefined) clearTimeout(quiet);
       reject(error);
     });
-    child.on('exit', () => {
-      clearTimeout(timer);
-      resolve({ text: visible(out), raw: out });
-    });
+    child.on('exit', finish);
   });
 }
 

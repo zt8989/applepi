@@ -512,8 +512,13 @@ export function createHostUi(
       options.onNotice(`${noticePrefix(type)}${message}`);
     },
 
-    onTerminalInput: (handler) =>
-      live().addInputListener((data) => {
+    onTerminalInput: (handler) => {
+      // 界面还没起（同步装载期）就返一个空注销：输入监听本来就是交互能力，
+      // 没有界面时没东西可听。**不能抛** —— 扩展在 `session_start` / 装载期注册监听时
+      // 抛一条 `[Extension issues]` 只会让它那个功能整个不干活。
+      const ui = source();
+      if (!ui.tui) return () => {};
+      return ui.addInputListener((data) => {
         /**
          * 扔掉「松开」事件 —— Kitty 键盘协议 flag 2 下一次按键给 press + release 两条，
          * 而 release 同样能匹配扩展的快捷键，于是每个绑定的键都触发两次。
@@ -524,13 +529,18 @@ export function createHostUi(
          */
         if (isKeyRelease(data)) return undefined;
         return handler(data);
-      }),
+      });
+    },
 
-    // 终端标题：pi-tui 的 `Terminal.setTitle` 写 OSC 0/2。要活着的 tui，所以走 `live()`
-    // （Orca 的标题 spinner 在界面起来之后才可能调它）；界面没起来时它会抛，
-    // 而 spinner 自己 catch 掉并停表 —— 不会把整轮对话带崩。
+    // 终端标题：pi-tui 的 `Terminal.setTitle` 写 OSC 0/2。要活着的 tui。
+    //
+    // 界面没起（同步装载期）时**先忽略**，不抛：Orca 的标题 spinner 的 `paintTitle()`
+    // 一遇异常就 `clearOwnedTimers()` —— 抛一次，那个转圈标题就整个停了（它不会再重试
+    // 注册）。界面起来后它下一次 paint 自然写得上。
     setTitle: (title: string) => {
-      live().tui.terminal.setTitle(title);
+      const tui = source().tui;
+      if (!tui) return;
+      tui.terminal.setTitle(title);
     },
 
     // 输入框里的文字。落点在界面层（只有它知道 composer 是哪个）—— 探针／一次性模式
@@ -567,10 +577,11 @@ export function createHostUi(
       content: string[] | ((tui: TUI, theme: Theme) => Component & { dispose?: () => void }) | undefined,
       opts?: { placement?: 'aboveEditor' | 'belowEditor' },
     ) => {
-      const setWidget = source().setWidget;
-      const { tui: t, theme: th } = live();
+      const host = source();
+      const setWidget = host.setWidget;
 
-      // 卸下：两种形状都能卸。
+      // 卸下：**不需要界面**。`pi-subagents` 在装载 / `session_start` 就会清自己的
+      // widget，而同步装载时 tui 还没起 —— 为此抛一条 `[Extension issues]` 是纯噪声。
       if (content === undefined) {
         setWidget?.(key, undefined, opts);
         return;
@@ -578,27 +589,18 @@ export function createHostUi(
 
       // ① 字符串数组：扩展自己上好色了（`pi-web-access` 的活动面板就是这种：它自己
       //    `theme.fg(...)` 拼好了整行）。用 `Text` 包一层直接画。`Text` 自己缓存
-      //    render，所以反复 setWidget（面板刷新）不会变贵。
+      //    render，所以反复 setWidget（面板刷新）不会变贵；它也不依赖 tui 实例。
       if (Array.isArray(content)) {
         if (!setWidget) return;
         setWidget(key, new Text(content.join('\n'), 0, 0), opts);
         return;
       }
 
-      // ② 组件工厂。
+      // ② 组件工厂：要**真** tui 才能画。界面还没起来（同步装载期）或宿主没有 widget
+      //    槽时把这块丢掉（不抛）—— 与「没有那一格」同一口径。
       if (typeof content === 'function') {
-        const component = content(t, th);
-        // 没有界面 → 没有那一格。把组件丢掉（并 dispose）而不是抛：扩展的 widget
-        // 只是不显示，其余（工具、命令）照常，那才是诚实的降级。
-        if (!setWidget) {
-          try {
-            component.dispose?.();
-          } catch {
-            /* 忽略 */
-          }
-          return;
-        }
-        setWidget(key, component, opts);
+        if (!setWidget || !host.tui) return;
+        setWidget(key, content(host.tui, host.theme), opts);
         return;
       }
 
