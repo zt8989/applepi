@@ -508,6 +508,8 @@ async function main(): Promise<void> {
       // 设置 › 插件 / 子代理：同样是**取值函数**（与上面命令表同一个理由）。
       extensions: () => kernel.extensions.entries,
       extensionErrors: () => kernel.extensions.errors,
+      // 浏览器里的 `/reload`：重装扩展 + 重读 skill / prompt / 上下文文件（在服务端跑）。
+      reload: () => kernel.reload(),
     });
     try {
       web = await startWebServer({
@@ -568,6 +570,8 @@ async function main(): Promise<void> {
     newSession: () => kernel.newSession(),
     // 恢复历史：也必须走内核（换 id + 记录器游标对齐），界面自己做会把历史重写一遍。
     restoreSession: (file: string) => kernel.restoreSession(file),
+    // 重载：与 pi 的 `/reload` 同一个语义（内核重装扩展 + 重读资源；界面再补键位表 / 显示开关 / 主题）。
+    reload: () => kernel.reload(),
     // 浏览器侧的对话框（`ctx.ui.select/confirm/input` 的那一份）。**取值**：桥可能
     // 因为没给 `--web` 时它不存在，也可能在重连时换掉。
     dialogs: () => bridge?.dialogs,

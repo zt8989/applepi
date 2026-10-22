@@ -37,7 +37,6 @@ const PI_NOT_HERE = [
   'trust',
   'login',
   'logout',
-  'reload',
 ];
 
 test('命令表：每个名字要么在 pi 的表里，要么是写明了的 ela 自有命令', () => {
@@ -98,5 +97,14 @@ test('命令表：会话类命令不下发浏览器（只有非会话类才标 w
   const web = SLASH_COMMANDS.filter((command) => command.web === true).map((command) => command.name);
   // 浏览器侧只实现了这几条（见 `webui/src/commands.ts` 的 switch）。多标一个
   // `web: true` 的症状是「浏览器里能选到它，点了回一句未知命令」。
-  assert.deepEqual(web.sort(), ['compact', 'continue', 'model', 'scoped-models', 'settings', 'skills', 'thinking']);
+  assert.deepEqual(web.sort(), [
+    'compact',
+    'continue',
+    'model',
+    'reload',
+    'scoped-models',
+    'settings',
+    'skills',
+    'thinking',
+  ]);
 });

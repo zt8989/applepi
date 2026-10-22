@@ -448,6 +448,9 @@ async function serveApi(
         sendJson(res, 200, await api.setScopedModels(ids));
         return;
       }
+      case 'POST /api/reload':
+        sendJson(res, 200, await api.reload());
+        return;
       case 'POST /api/command':
         sendJson(
           res,

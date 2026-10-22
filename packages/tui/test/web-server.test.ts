@@ -138,6 +138,7 @@ async function start(bridgeOptions: {
     runExtensionCommand: async () => {},
     extensions: () => [],
     extensionErrors: () => [],
+    reload: async () => ({ ok: true, diagnostics: [] }),
   });
 
   // 造一份假的 dist：一个 index.html + 一个资源，外加一个不存在的路径（验 SPA 回退）。
@@ -180,6 +181,24 @@ test('web server：静态资源 + SPA 回退 + 不知道的路径不越界', asy
 
     const health = await fetch(`${ctx.server.url}healthz`);
     assert.equal(await health.text(), 'ok\n');
+  } finally {
+    await ctx.dispose();
+  }
+});
+
+test('web api：/api/reload 走内核 reload，把重载结果回给浏览器', async () => {
+  const ctx = await start();
+  try {
+    const response = await fetch(`${ctx.server.url}api/reload`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(response.status, 200);
+    const result = (await response.json()) as { ok: boolean; message?: string };
+    assert.equal(result.ok, true);
+    // 浏览器里没有键位表 / 主题那一半，文案只说内核重装的那几样。
+    assert.match(result.message ?? '', /Reloaded extensions, skills, prompts, and context files/);
   } finally {
     await ctx.dispose();
   }
@@ -433,6 +452,7 @@ test('web api：空目录给空列表；空作用域归一成 null（= 全开）
     runExtensionCommand: async () => {},
     extensions: () => [],
     extensionErrors: () => [],
+    reload: async () => ({ ok: true, diagnostics: [] }),
   });
   const info = api.models();
   assert.deepEqual(info.models, []);

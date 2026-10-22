@@ -185,9 +185,11 @@ MCP 的 `tool_call` handler 做一件很具体的事：**codemode 脚本点名�
   装载时 `direct` 服务器**等 10 秒**（官方那个上限），等到的就在；
   之后连上的仍能从脚本调（`refreshTools` 会进可调表）—— 只是模型不知道它存在，
   要 `/new` 换会话才进工具表。慢服务器建议配成 `codemode`（脚本里会等）。
-- **切会话（`/new` / `/resume`）会重发 `session_start`**（`reason: 'new'` / `'resume'` +
-  `previousSessionFile`）：MCP 会重读 `mcp.json` 并重连服务器（pi 在切会话时也这样做），
-  所以改 `mcp.json` 不用重启了。
+- **切会话（`/new` / `/resume`）= 换一次扩展激活**（`session_shutdown` → 重装宿主 →
+  `session_start`，与 pi 的 `AgentSessionRuntime` 同序）：MCP 会重读 `mcp.json` 并重连服务器，
+  所以改 `mcp.json` 不用重启了。`/reload` 走同一条路（`session_shutdown{reload}` 允许存活中
+  的后台任务交接）。注意代价与 pi 相同 —— 切会话 / reload 要重新 import 一遍扩展，
+  慢扩展（MCP 的 `direct` 服务器）会让那一次多等几秒。
 - **`deferred` 要靠 `tool_search` 装载**：它默认不进声明（模型看不见），两条路到它 ——
   模型调 `tool_search` 搜出来，或 codemode 脚本直接调。
 - **MCP 工具不进权限确认**：本项目还没有权限扩展那一层，`tool_call` 的 `block` 已经把口子

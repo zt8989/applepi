@@ -15,7 +15,7 @@
 pi install npm:@juicesharp/rpiv-ask-user-question   # 与 pi 共用同一份 settings.json
 ```
 
-装完就生效（重启即可）。`--no-extensions` 可以完全跳过。
+装完就生效（重启，或在运行中打 `/reload` 重读 `settings.json` 的 packages）。`--no-extensions` 可以完全跳过。
 
 ## 为什么不自己重写
 
@@ -307,21 +307,14 @@ pi 的会话**层**（`addEntry` / `fork` / `navigateTree`…）本项目刻意�
 
 这一节早先写的是「仍然不接」，于是 `pi-web-access` 一读就在 `undefined` 上炸。
 
-## 不接的：命令与快捷键
+## 命令与快捷键：接了（见下面「斜杠命令与快捷键：接了」）
 
-`pi-web-access` 注册了 4 个命令（`/websearch` `/curator` `/google-account` `/search`）
-与 2 个快捷键（`ctrl+shift+s` / `ctrl+shift+w`）。本项目**不接**它们，**而且明说**：
+这一节早先写的是「命令不接」：理由有二 —— 命令表是 `SLASH_COMMANDS` 常量，而命令
+handler 拿的 `ExtensionCommandContext` 里那六个会话操作本项目一个都没实现。
 
-- 命令表是 `tui/app.ts` 里的 `SLASH_COMMANDS`（唯一真相，补全念它）。
-  接进去就要往那儿塞，而那边只有 `description` + 一个 `runCommand` 里的 switch。
-- 命令 handler 在 pi 那边拿的是 `ExtensionCommandContext`（`waitForIdle` /
-  `newSession` / `fork` / `navigateTree`…），本项目**一个都没实现**。接了就在 handler
-  里炸。
-- 更糟的是**假装能用**：补全里冒出 `/websearch`、敲下去什么都不发生 —— 那是
-  「静默退化」里最难查的一种。
-
-所以工具接、命令不接。测试里钉住「装它不会往 `SLASH_COMMANDS` 里塞东西」
-（`packages/core/test/extension-host.test.ts` 的「命令与快捷键不接」）。
+后来两条都松了：命令走**单独通道**（不并进 `SLASH_COMMANDS`，`runCommand` 兜底时问扩展），
+而 handler 真正要的成员里，`ui` / `sendMessage` / `sessionManager` / `waitForIdle` 都已经
+有真实现。细节（以及仍然不接的那五个）见下面那一节。
 
 ## `pi-web-access` 的 key 依赖
 
@@ -413,7 +406,8 @@ TypeError: Cannot read properties of undefined (reading 'requestRender')
 
 **整段替换不采信，按段 patch 采信**。官方那个 `emitBeforeAgentStart` 会用
 `systemPromptOptions` **重建**整份 system prompt 并整段塞进请求；本项目的 prompt 是
-装载时定下的，整段换会让已发出的 `messages` 与 prompt 对不上。但**分段**是存着的
+装载 / `/reload` 时定下的（用户显式 reload 可以重拼整段），扩展一轮中途整段换会让已发出的
+`messages` 与 prompt 对不上。但**分段**是存着的
 （`state.prompt.sections`），于是：handler 写回的段与「当前生效」那份一 diff，
 **只有变了的段**进一条新的 system 消息（`prompt.segment.added`，`null` = 删段）。
 
@@ -485,21 +479,30 @@ snippet 里）—— 错报一条就变成永远修不掉的 `[Extension issues]
 
 ## 斜杠命令与快捷键：接了
 
-早先「命令不接」的理由是：pi 的命令 handler 拿 `ExtensionCommandContext`，而那里面
-`waitForIdle` / `newSession` / `fork` / `navigateTree` / `switchSession` / `reload`
-本项目一个都没实现。
+命令 handler 的 ctx **不是手搭的**：基座是官方 `runner.createContext()`（`ui` / `hasUI` /
+`cwd` / `mode` / `sessionManager` / `modelRegistry` / `model` / `thinkingLevel` / `signal` /
+`getSystemPrompt`… 全是真的、且是懒 getter），再补一个真实现的 `waitForIdle`。
 
-那个理由**过了一半**：那六个**确实**不接，但 handler 真正要的东西少得多。
-`pi-web-access` 那四个命令（`/websearch` `/curator` `/google-account` `/search`）
-只用到两样，而且都有真的实现：
+早先这里手搭了一个只含 `ui` / `hasUI` / `isIdle` / `cwd` / `model` 的对象，于是
+`pi-background-tasks` 的 `/bg` 一敲就是 `Cannot read properties of undefined (reading
+'getSessionId')` —— 它的 handler 把错误 catch 成一条界面提示，看着像「扩展坏了」。
+同类问题还有 `ctx.cwd`（手搭成了 `process.cwd()`，不是内核的 cwd）。
 
 | 成员 | 落在哪 |
 | --- | --- |
-| `ctx.ui.notify` | 界面那张命令反馈卡（`extension-ui.ts` → `notify()`） |
+| `ctx.ui` | `runner.getUIContext()`（我们那份 `createHostUi`） |
+| `ctx.sessionManager` | `extensionSessionManager()`：`getSessionId` / `getSessionFile` / `getBranch` / `getEntries` / `buildSessionContext` |
+| `ctx.thinkingLevel` | reducer 里的当前档位 |
+| `ctx.model` / `ctx.modelRegistry` | 主路径是真的；手写装配（demo / 降级）按 `extension-models.ts` 的口径给 `undefined` |
+| `ctx.waitForIdle()` | 订阅 store 相位，回到 idle 才 resolve（命令里先 `sendMessage` 再等它） |
 | `pi.sendMessage` | 落成一条**用户消息**（于是环会跑起来）；环在跑时按 `deliverAs` 排队 |
 
-那六个仍然 reject 掉（pi 的会话层，见 [surfaces](surfaces.md)），而不是给假 no-op ——
-后者会让扩展以为「fork 被用户取消了」而继续往下走。
+**五个改会话的仍然不给**（`newSession` / `fork` / `navigateTree` / `switchSession` /
+`reload`）：那是 pi 的会话层（见 [surfaces](surfaces.md)），而且 `/reload` 会把当前宿主
+换掉 —— 命令自己正在里面跑。缺它们时扩展拿到 `undefined is not a function`，比官方统一回
+`{cancelled: true}` 诚实：后者会让扩展以为「用户取消了」而继续往下走。
+
+回归测试：`packages/core/test/extension-command-context.test.ts`。
 
 ### 为什么不并进 `SLASH_COMMANDS`
 
@@ -631,7 +634,8 @@ pi 的**状态类扩展**（最具体的例子就是 Orca 装在 `~/.pi/agent/ex
 
 | 事件 | 在哪发 | 对应什么 |
 | --- | --- | --- |
-| `session_start` | `loadExtensionHost().startSession()`；`/new` / `/resume` 各再发一次（`reason: 'new'` / `'resume'` + `previousSessionFile`） | 装载时一次（`reason` 按「是不是已有会话」给 `startup` / `resume`；MCP 也靠它），切会话时再一次 |
+| `session_start` | `loadExtensionHost().startSession()`；**切会话时新宿主的** `startSession()`（`reason: 'new'` / `'resume'` + `previousSessionFile`） | 装载时一次（`reason` 按「是不是已有会话」给 `startup` / `resume`；MCP 也靠它），切会话时再一次 —— 但**是发给新实例的** |
+| `session_shutdown` | 退出时 `ExtensionHost.dispose()`；切会话时 `ExtensionHost.shutdown({reason, targetSessionFile})` | 收掉这一次**扩展激活**（MCP 关服务器、`pi-background-tasks` 释放 reload 所有权） |
 | `before_agent_start` | 界面发消息之前（已有） | 用户刚说完、即将开跑 |
 | `agent_start` | kernel 的 store 订阅器 | 相位 idle → 非 idle |
 | `agent_end` | 同一个订阅器 | 相位回到 idle |
@@ -672,6 +676,49 @@ pi 的**状态类扩展**（最具体的例子就是 Orca 装在 `~/.pi/agent/ex
   pane 状态靠 hook 推（`agent_end` → done）。pi 那边是 Orca 自己认进程（`--command pi` 是
   它的已知 agent），ela 不在那份名单里 —— 不补这一条的话，启动后一个状态事件都没有
   （`session_start` 会被 Orca 丢掉：还没有 providerSession），宿主就一直显示 loading。
+
+### 切会话 = 换一次扩展**激活**（不是给旧实例再发一次事件）
+
+`/new` 与 `/resume` 走的是 pi `AgentSessionRuntime` 那套顺序：`teardownCurrent()` 先发
+`session_shutdown{reason, targetSessionFile}`，再用**新的扩展实例**发
+`session_start{reason, previousSessionFile}`。内核这边对应 `switchExtensionHost()`：
+收掉旧宿主（`ExtensionHost.shutdown()`）→ `createExtensionHost()` 重新 `loadExtensions()`
+（jiti 是 `moduleCache: false`，所以是新的 handler 闭包）→ `startSession()`。
+
+为什么不能只「再发一次 `session_start`」（以前的做法）：扩展实例是**激活级**的，
+`pi-background-tasks` 把 `(pid, sessionId, cwd)` 当 reload 所有权身份，它的 `session_start`
+只接受「同一个实例 + 同一个身份」的重复；换了会话又不先 shutdown 就会抛
+`pi_bg_reload_owner_activation_conflict`（这条会以「扩展装载诊断」出现在设置页），
+而且 MCP 那边旧服务器的工具也已经被关了。
+
+两个细节：
+
+- **恢复同一个会话不重装**（webui 点侧边栏当前那一条、启动时 `--session <id>` 后再
+  `restoreSession()`）：宿主本来就绑在这个会话上，重装只是无谓地断一次工具与 MCP 连接。
+- **重装是异步的**（jiti + MCP 重连），而 `/new` 是同步入口。所以 `hostSwitch` 是「宿主
+  稳定」的信号：`beforeAgentStart` / `tool_call` 会先 `await` 它，连续切会话时只按最新那一个
+  reason 跑一遍。重装失败收进 `extensions.errors`（对话照常）。
+
+### `/reload`：同一套重装，外加把资源重读一遍
+
+`/reload` 与 pi 的 `AgentSession.reload()` 同一个语义，内核那边就是「切会话那条重装机器 +
+重拼 prompt」，不另写一套：
+
+1. 旧激活 `session_shutdown{reason:'reload'}` —— 与 `new` / `resume` 不同，**这个 reason 允许
+   交接**：`pi-background-tasks` 会把 `surviveReload` 的后台任务 handoff 给新激活（同 pid /
+   同 id / 同输出文件），不需要重跑；
+2. 重装扩展（新实例）→ `session_start{reason:'reload'}`（MCP 重读 `mcp.json` 并重连）；
+3. `resetTools(cwd)` 重读 `settings.json` 的 `defaultTools` / shell 配置，重装内置工具实例；
+4. 重新加载 skill、prompt 模板；`buildPromptParts` **每次现读** `SYSTEM.md` /
+   `APPEND_SYSTEM.md` / `AGENTS.md`，所以改了上下文文件不用重启；
+5. 一条 `prompt.init` 装回去 —— 会话已经开过树的话走**热重载**路径（追加新的 prompt 节点，
+   不改写历史，见 [init](init.md)）。
+
+界面侧再补三样内核不知道的（只在 TUI）：键位表、`hideThinkingBlock`、主题；重载前先撤掉旧激活
+画的 widget / 底栏状态（pi 的 `resetExtensionUI()`），否则新实例只会覆盖同名 key。
+
+环在跑时拒绝（与 pi 的 `isStreaming` 检查同一条理由）：那一刻重装会把正在等的流 / 工具交给一个
+已 `session_shutdown` 的宿主。
 
 ### 一处顺序：**会话记录器要在扩展之前建**
 
@@ -720,8 +767,9 @@ creating the transcript」同一回事。
 
 ## 仍然不接的
 
-- **那六个会话操作**（`waitForIdle` / `newSession` / `fork` / `navigateTree` /
-  `switchSession` / `reload`）—— pi 的会话层。
+- **五个改会话的操作**（`newSession` / `fork` / `navigateTree` / `switchSession` /
+  `reload`）—— pi 的会话层，命令 ctx 里不给。`waitForIdle` **已接**（等环回 idle），
+  见「斜杠命令与快捷键：接了」。
 - ~~**`ctx.ui.select` / `confirm` / `input`**~~ —— **已接**（见上「两端各出一份」）。
   `pi-web-access` 的 `/search` 选历史结果那条因此真能用；终端与浏览器同时弹，先答的算。
 - **`setFooter` / `setHeader`** —— 要接 pi 的应用层布局。

@@ -81,4 +81,6 @@ export const elaApi = {
     post('/api/scoped-models', { ids }),
   /** 扩展注册的命令（服务端跑）。内置命令各有自己的界面，不走这里。 */
   runCommand: (name: string, arg: string): Promise<WebActionResult> => post('/api/command', { name, arg }),
+  /** 重载：重装扩展 + 重读 skill / prompt / 上下文文件（服务端跑）。 */
+  reload: (): Promise<WebActionResult> => post('/api/reload', {}),
 };

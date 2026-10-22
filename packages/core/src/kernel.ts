@@ -35,7 +35,7 @@ import {
 } from './thinking-level';
 import { readCompactionEnabled, writeCompactionEnabled } from './compact';
 import path from 'node:path';
-import { declaredToolset } from './tools';
+import { declaredToolset, resetTools } from './tools';
 import { buildPromptParts, buildSystemPromptText, promptToolsFrom, type PromptToolLike } from './system-prompt';
 import { loadExtensionHost, extensionMessageAction } from './extension-host';
 import type { HostUiOptions } from './extension-ui';
@@ -170,7 +170,13 @@ export interface Kernel {
    * 这一条照常完成 —— 界面不能卡在「正在装载」上。
    */
   readonly ready: Promise<void>;
-  /** 开一个新会话：换 id（于是换文件）、清空对话。**不会**把新消息写进旧文件。 */
+  /**
+   * 开一个新会话：换 id（于是换文件）、清空对话。**不会**把新消息写进旧文件。
+   *
+   * 扩展那一半是**异步**的：换会话 = 换一次扩展激活（`session_shutdown` → 重装宿主 →
+   * `session_start`），与 pi 的 `newSession()` 同序。这里不等它（`/new` 是同步入口），
+   * 但重装完成前要真用宿主的地方（`beforeAgentStart` / `tool_call`）会自己等。
+   */
   newSession(): { id: string };
   /**
    * 自动压缩现在开着吗。`null` = 这个装配不支持压缩（没有 `runCompact`），
@@ -185,11 +191,24 @@ export interface Kernel {
   setAutoCompactEnabled(enabled: boolean): void;
   /**
    * 恢复一个历史会话（读文件 + 灌回 state）。**零 token**，不重跑模型。
-   * @returns 恢复的会话 id 与灌进去的消息条数。
+   *
+   * 换到**另一个**会话时，返回前扩展已经在新会话上重新激活（与 pi 的 `switchSession()`
+   * 同序：旧激活 `session_shutdown` → 新实例 `session_start`）；恢复的是同一个会话则不动扩展。
    */
   restoreSession(file: string): Promise<{ id: string; restored: number }>;
   /** 把已经读出来的消息灌回 state。 */
   restore(messages: Message[]): void;
+  /**
+   * 重载（`/reload`）：重新读 settings / 扩展 / skill / prompt 模板 / 上下文文件。
+   *
+   * 与 pi 的 `AgentSession.reload()` 同一个语义：旧激活 `session_shutdown{reason:'reload'}`
+   * （`pi-background-tasks` 在这个 reason 下做 handoff，存活中的后台任务不丢）→ 装新扩展实例
+   * → `session_start{reason:'reload'}`（MCP 重读 `mcp.json`）→ 重拼 system prompt 与工具声明。
+   *
+   * 环在跑时拒绝（`ok: false`）：那一刻重装宿主会把正在等的流 / 工具交给一个已 shutdown 的宿主。
+   * 它也会排队在会话切换后面 —— 与 `newSession` / `restoreSession` 共用同一条宿主链。
+   */
+  reload(): Promise<KernelReloadReport>;
   /**
    * 换模型。**真换** —— 之后的每个回合都发给新的那个。
    *
@@ -224,6 +243,20 @@ export interface Kernel {
 }
 
 /**
+ * `/reload` 的回执。
+ *
+ * 不给「重载了几样东西」的计数（那是实现细节）：界面只要知道成功 / 失败，以及重装后
+ * 该报哪些诊断（skill 冲突、prompt 模板冲突、扩展装载错）。
+ */
+export interface KernelReloadReport {
+  ok: boolean;
+  /** 失败原因（`ok: false` 时给界面直接显示）。 */
+  message?: string | undefined;
+  /** 重装后的诊断 —— 与开场横幅那几节同一个口径（`[Skill conflicts]` 那种）。 */
+  diagnostics: string[];
+}
+
+/**
  * 默认 system prompt 是什么。
  *
  * **它不再是手写的字符串** —— 由 pi 的 `buildSystemPrompt` 拼（工具怎么用、`edit` 的坑、
@@ -235,6 +268,11 @@ export interface Kernel {
 export async function defaultSystemPrompt(cwd: string = process.cwd()): Promise<string> {
   const { skills } = await loadSkillRegistry({ cwd });
   return buildSystemPromptText({ cwd, tools: promptToolsFrom(cwd), skills });
+}
+
+/** 诊断信息的统一形状（扩展报的错有时是字符串、有时是 Error）。 */
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export async function createKernel(options: KernelOptions): Promise<Kernel> {
@@ -350,11 +388,13 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   const { store, persistence, autoCompact } = createPersistentStore({
     runtime,
     // `tool_call` 门：MCP 靠它等「脚本/模型点名了但服务器还没连上」。
-    // `extensionHost` 在下面才建，所以走一个**闭包读当时值**的函数。
-    onToolCall: (toolCallId, name, input) =>
-      extensionHostRef === undefined
-        ? Promise.resolve({ input })
-        : extensionHostRef.beforeToolCall(toolCallId, name, input),
+    //
+    // 先等 `hostSwitch`：切会话时宿主要**重装**（见下面的 `switchExtensionHost`），
+    // 那一刻旧宿主的 MCP 已断、新宿主还没好。不等就会把工具调用递到一个死掉的宿主上。
+    onToolCall: async (toolCallId, name, input) => {
+      await hostSwitch;
+      return currentHost().beforeToolCall(toolCallId, name, input);
+    },
     // 扩展生命周期事件（`agent_start` 之外的都从 effect 来）：统一走 recordLifecycle
     // —— 先记进轨迹，再发给扩展（宿主还没装上时事件照旧记，只是没人收）。
     onExtensionEvent: recordLifecycle,
@@ -403,9 +443,37 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   // 那是一个**少东西但一致**的状态，而不是 undefined（后者会让界面在 `entries` 上炸）。
   const placeholderHost = await loadExtensionHost({ store, cwd, disabled: true });
   const deferredErrors: string[] = [];
+  /** 切会话时**重新装宿主**失败的那几条（装载失败是 `deferredErrors`，两回事）。 */
+  const hostErrors: string[] = [];
   /** 已经 `dispose()` 了 —— 后台装载完成时不能再往界面上递一个活着的宿主。 */
   let disposed = false;
+  /** 扩展装载完成；`switchExtensionHost` 要先等它（`deferExtensions` 下才有真的等待）。 */
+  let ready!: Promise<void>;
+  /**
+   * 当前这一轮扩展激活**绑在哪个会话上**（`session_start` 成功那一刻的 id / 计划文件）。
+   *
+   * 切会话的判据不是「调了 `newSession` 几次」，而是「要切的会话和宿主当前绑的不是同一个」：
+   * 恢复**同一个**会话（webui 点侧边栏当前那一条、启动时 `--session <id>` 后再 restore）
+   * 不该无谓地重装一遍扩展。
+   */
+  let hostSessionId: string | undefined;
+  let hostSessionFile: string | undefined;
+  /** 正在跑（或排队中）的宿主重装。所有要等「扩展真的就绪」的地方都 `await` 它。 */
+  let hostSwitch: Promise<void> = Promise.resolve();
+  /** 排队中的那次切换（连续切会话时只保留最新的一个 reason）。 */
+  let pendingSwitch: 'new' | 'resume' | undefined;
   const currentHost = (): ExtensionHost => extensionHostRef ?? placeholderHost;
+  /**
+   * 等宿主稳定（重装跑完了）再拿它。
+   *
+   * 切会话的重装是异步的（jiti 重装扩展 + MCP 重连），而 TUI / 浏览器可能在那一瞬已经
+   * 能发下一句了 —— 不等就会把这一轮交给一个已经 `session_shutdown` 过的旧宿主，症状是
+   * 「切完会话第一句没有扩展的 prompt 段 / 工具突然不可用」。
+   */
+  const activeHost = async (): Promise<ExtensionHost> => {
+    await hostSwitch;
+    return currentHost();
+  };
   const extensionView: ExtensionHost = {
     // 逐条转发**每次读**：就绪后界面早先抓到的那个对象里就是真的那份了。
     get tools() {
@@ -417,9 +485,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     get commands() {
       return currentHost().commands;
     },
-    // 诊断是**两份**：占位那份自己的（没有）+ 后台装载整体失败的那条。
+    // 诊断是**三份**：当前宿主自己的 + 后台装载整体失败的 + 切会话重装失败的。
     get errors() {
-      return [...currentHost().errors, ...deferredErrors];
+      return [...currentHost().errors, ...deferredErrors, ...hostErrors];
     },
     get entries() {
       return currentHost().entries;
@@ -427,18 +495,23 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     get loaded() {
       return currentHost().loaded;
     },
-    beforeAgentStart: (text?: string) => currentHost().beforeAgentStart(text),
-    startSession: () => currentHost().startSession(),
-    collectPromptSections: () => currentHost().collectPromptSections(),
+    beforeAgentStart: async (text?: string) => (await activeHost()).beforeAgentStart(text),
+    startSession: async (...args: Parameters<ExtensionHost['startSession']>) =>
+      (await activeHost()).startSession(...args),
+    collectPromptSections: async () => (await activeHost()).collectPromptSections(),
     // 参数用 `Parameters<…>` 原样透传（包括第四个 `options`）：这里少转发一个参数
     // 就是一行静默的降级（权限类扩展会丢掉 signal，而症状离真因很远）。
-    beforeToolCall: (...args: Parameters<ExtensionHost['beforeToolCall']>) =>
-      currentHost().beforeToolCall(...args),
+    beforeToolCall: async (...args: Parameters<ExtensionHost['beforeToolCall']>) =>
+      (await activeHost()).beforeToolCall(...args),
     // 同样逐次转发：后台装载完成后，早先抱着的「空宿主」视图里这个方法就指向真宿主了
     // （否则就绪前发出的那些事件永远发不到扩展上）。
+    //
+    // **不 await `hostSwitch`**：`emitLifecycle` 是同步入口（store 订阅器发的），而事件是
+    // 当下的事实 —— 重装窗口里丢一条状态事件，比把相位订阅器变成异步、打乱顺序好。
     emitLifecycle: (event: Parameters<ExtensionHost['emitLifecycle']>[0]) =>
       currentHost().emitLifecycle(event),
-    dispose: () => currentHost().dispose(),
+    dispose: async () => (await activeHost()).dispose(),
+    shutdown: async (options) => (await activeHost()).shutdown(options),
   };
 
   // 装载走 action 而不是直接写进 `createInitialState`：「装载」与「跑一轮对话」都是状态迁移，
@@ -497,8 +570,21 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
   // 那个工具块连参数都画不出来。
   //
   // 包成一个函数而不是就地 await：`deferExtensions` 时它要在后台跑（见下面那个分岔）。
-  const assembleExtensions = async (): Promise<void> => {
-    const extensionHost = await loadExtensionHost({
+
+  /**
+   * 装一份**新的**扩展宿主（同一批扩展、全新实例）。
+   *
+   * 切会话要重装（而不是把事件再发一遍给旧实例），因为 pi 的会话切换就是「收掉旧激活、
+   * 建新激活」（`AgentSessionRuntime` 的 `teardownCurrent` + `createRuntime`）：扩展实例
+   * 是**激活级**的，`pi-background-tasks` 在 `session_shutdown` 里就把自己标成 disposed，
+   * 再给它发 `session_start` 会被直接忽略；而且它只接受「同一个会话身份」的重复
+   * `session_start`，换了会话会报 `pi_bg_reload_owner_activation_conflict`。
+   *
+   * `loadExtensions()` 用的是 `moduleCache: false` 的 jiti（见官方 loader），所以再调一次
+   * 就是重新求值扩展模块 → 新的 handler 闭包，与 pi 每次切会话重建 runner 同一个效果。
+   */
+  const createExtensionHost = (): Promise<ExtensionHost> =>
+    loadExtensionHost({
       store,
       cwd,
       // 扩展要自己调模型时靠这个拿凭证（`pi-web-access` 的答案/摘要）。主路径下
@@ -523,52 +609,142 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       },
       canSend: () => store.getState().phase === 'idle',
     });
-    extensionHostRef = extensionHost;
-    // 已经退出过了（`dispose()` 早于装载完成）：这个宿主没人管了，就地收掉 ——
-    // 否则 MCP 的子进程会挂在事件循环上（症状是「Ctrl+C 之后进程不退」）。
-    if (disposed) {
-      await extensionHost.dispose();
-      return;
-    }
-    // ── 发 `session_start`：MCP 靠它读 `mcp.json` 并开始连服务器 ──
-    //
-    // **必须在算工具表之前**：MCP 会发现「有 codemode 暴露的服务器」并激活 `codemode`
-    // （走 `setActiveTools` → 本项目的 `state.prompt.tools`）；而 `direct` 服务器的工具是
-    // 在连接过程中动态注册的 —— 加载后必须再扫一遍。
-    // `reason` 与 pi 一致：从一个**已有会话**启动是 `resume`，否则 `startup`（pi 的
-    // `hasExistingSession` 也是 `messages.length > 0`，见上面 `startupSession` 的注释）。
-    // 扩展拿它区分「新开」与「接着聊」，`pi-background-tasks` 还靠它认 reload 交接。
-    await extensionHost.startSession({
-      reason: startupSession?.hasMessages === true ? 'resume' : 'startup',
+
+  /**
+   * 切会话 → 换一次扩展激活（`session_shutdown{reason}` → 重装 → `session_start{reason}`）。
+   *
+   * ## 为什么不能只「再发一次 `session_start`」
+   *
+   * 那正是之前的做法（见 `efc96e4`），在 `pi-background-tasks` 这类**按会话认所有权**的
+   * 扩展上是不合法的：它在 `session_start` 里用 `(pid, sessionId, cwd)` 当 reload 所有权
+   * 身份，重复的 `session_start` 换了身份就直接抛
+   * `pi_bg_reload_owner_activation_conflict: a repeated session_start changed the bound reload
+   * owner identity without shutdown`，而这条异常会以「扩展装载诊断」的形式出现在设置页里、
+   * 后台任务从此不可用。
+   *
+   * pi 的做法是 `teardownCurrent()` 先发 `session_shutdown`、再 `createRuntime()` 用新实例
+   * 发 `session_start` —— 这里照那个顺序做。
+   *
+   * ## 并发
+   *
+   * 重装是异步的（jiti 重装 + MCP 重连），而 `/new` 是同步入口。所以这里排队：
+   * `hostSwitch` 是「宿主稳定」的信号，所有要真的用宿主的地方先 `await` 它（见 `activeHost`）；
+   * 连续切会话时只按**最新**那一个 reason 跑一遍（`pendingSwitch`），已经在目标会话上就不重装。
+   */
+  const switchExtensionHost = (reason: 'new' | 'resume'): Promise<void> => {
+    // `--no-extensions`：宿主是个空壳，换会话没有东西可重装。
+    if (options.noExtensions === true) return Promise.resolve();
+    pendingSwitch = reason;
+    const run = async (): Promise<void> => {
+      const queuedReason = pendingSwitch;
+      pendingSwitch = undefined;
+      if (queuedReason === undefined || disposed) return;
+      // `deferExtensions` 下装载可能还在跑：等它完（`ready` 不 reject）。
+      await ready;
+      await rebindHost(queuedReason, false);
+    };
+    hostSwitch = hostSwitch.then(run, run).catch((error: unknown) => {
+      hostErrors.push(`扩展切换失败：${errorText(error)}`);
     });
+    return hostSwitch;
+  };
+
+  /**
+   * 把宿主重绑到**当前**会话上：`session_shutdown` → 装载新实例 → `session_start`。
+   *
+   * @param force 会话没变也重来一遍（`/reload`）；`/new` / `/resume` 给 false，
+   *   恢复同一个会话时直接跳过（宿主本来就在这个会话上，无谓断一次 MCP / 工具）。
+   *
+   * 调用方负责排队（`switchExtensionHost` 的 `hostSwitch` 链 / `reload` 的那一条）。
+   */
+  const rebindHost = async (
+    reason: 'new' | 'resume' | 'reload',
+    force: boolean,
+  ): Promise<boolean> => {
+    if (disposed) return false;
+    const targetId = current.sessionId;
+    if (!force && hostSessionId === targetId) return true;
+    const targetFile = current.recorder?.file;
+    const previousFile = hostSessionFile;
+    const previousHost = extensionHostRef;
+    if (previousHost !== undefined) {
+      try {
+        await previousHost.shutdown({
+          reason,
+          ...(targetFile !== undefined ? { targetSessionFile: targetFile } : {}),
+        });
+      } catch (error) {
+        hostErrors.push(`扩展收尾失败（${reason}）：${errorText(error)}`);
+      }
+    }
+    if (disposed) return false;
+    let nextHost: ExtensionHost;
+    try {
+      nextHost = await createExtensionHost();
+    } catch (error) {
+      // 旧宿主已经收掉了：扩展能力（工具执行 / MCP）在这一次之后退化，但对话照常。
+      // 写进诊断，不要静默 —— 「扩展突然不见了」比一条报错难查得多。
+      hostErrors.push(`扩展重新装载失败（${reason}）：${errorText(error)}`);
+      return false;
+    }
+    if (disposed) {
+      await nextHost.dispose();
+      return false;
+    }
+    extensionHostRef = nextHost;
+    hostSessionId = targetId;
+    hostSessionFile = targetFile;
+    try {
+      await nextHost.startSession({
+        reason,
+        ...(previousFile !== undefined ? { previousSessionFile: previousFile } : {}),
+      });
+    } catch (error) {
+      hostErrors.push(`扩展重新激活失败（${reason}）：${errorText(error)}`);
+    }
+    return true;
+  };
+
+  /**
+   * 把「当前生效的资源」装进 state：skill 清单、prompt 模板、system prompt 与工具声明。
+   *
+   * 启动装载与 `/reload` 共用这一份 —— 两处各写一遍必然漂，而漂移的症状是「prompt 里
+   * 说的工具 / skill 与实际能调的不一致」，只有账单看得见。
+   *
+   * 顺序：先收 `before_agent_start` 写的段（MCP 的 `mcp_servers`——它里面还会等 `direct`
+   * 服务器最多 10 秒），再算「声明给模型」的工具集（激活集 ∩ 注册表），最后拼 prompt。
+   *
+   * @returns 装载诊断（skill / prompt 冲突与警告），给界面的 `/reload` 回执用。
+   */
+  const applyPromptResources = async (
+    extensionHost: ExtensionHost,
+  ): Promise<{ diagnostics: string[] }> => {
     // 收 `before_agent_start` 写的 prompt 段（MCP 的 `mcp_servers`）。
     // 它里面还会等 `direct` 服务器最多 10 秒（与 pi 一致）—— 等完了，它们的工具才注册完。
-    const sections = await extensionHost.collectPromptSections();
+    const sectionPatches = await extensionHost.collectPromptSections();
     // **声明给模型**的工具在这一刻定下：激活集 ∩ 注册表，再跑一遍 `prepareLoadout`
     // （codemode 靠它把自己的描述换成「现在能调哪些工具」的清单）。
     const declared = declaredToolset(cwd);
     const declaredNames = new Set(declared.tools.map((tool) => tool.name));
     // Skill 清单：官方 `DefaultResourceLoader` 扫各个目录（`~/.pi/agent/skills`、
     // `<cwd>/.pi/skills`、cwd 与祖先的 `.agents/skills`、`~/.agents/skills`），
-    // 目录发现与重名判定与 pi 逐字相同；再由 reducer 拼进 system prompt
+    // 目录发现与重名判定与 pi 逐字相同；再由 pi 的 `buildSystemPrompt` 拼进 `<skills>` 段
     // （走 prompt.init，所以会被落盘、被回放）。
     //
     // 加载**失败不能拖垮启动**：一个写坏 frontmatter 的 skill 不该让整个界面起不来
-    // （loadSkillRegistry 已经把异常收成 diagnostics 了）。
-    //
-    // 诊断**不打到 stderr**：TUI 模式下 stderr 用户看不见，而「某个 skill 没加载上」
-    // 正是静默退化（模型少了能力，界面与用户都不知道）。它们进 state，由界面开场显示
-    // （与 pi 的 `[Skill conflicts]` 同形）。
-    const skillRegistry = await loadSkillRegistry({ cwd, ...(options.skillPaths ? { paths: options.skillPaths } : {}) });
+    // （loadSkillRegistry 已经把异常收成 diagnostics 了）。诊断进 state，由界面
+    // 开场横幅 / `/reload` 回执显示（与 pi 的 `[Skill conflicts]` 同形）。
+    const skillRegistry = await loadSkillRegistry({
+      cwd,
+      ...(options.skillPaths ? { paths: options.skillPaths } : {}),
+    });
     // Prompt 模板：与 skill 同一条装载链（`DefaultResourceLoader`），所以 pi 包清单里
     // `pi.prompts` 声明的模板（比如 pi-subagents 的 `/council`）在这里也会出现。
     // 它们**不进** system prompt，只进状态给界面用（开场横幅 / 补全 / 回车展开）。
     const promptRegistry = await loadPromptRegistry({ cwd });
     // System prompt 由 **pi 的 buildSystemPrompt** 拼（工具规则 / AGENTS.md / cwd / skill）。
-    // 我们只收集输入：工具的 snippet+guideline、AGENTS.md 上下文、skill 清单。
-    //
-    // 为什么在这里（而不是让调用方传一整串进来）：工具清单是内核按 cwd 建的，
-    // AGENTS.md 与 skill 都随 cwd 变 —— 拼 prompt 需要的正是这三样，所以它属于内核这一步。
+    // 我们只收集输入：工具的 snippet+guideline、AGENTS.md 上下文（每次现读 —— `/reload`
+    // 就是靠这一条把改了上下文文件的事带进去的）、skill 清单。
     //
     // **扩展工具与官方工具走同一条路**（同一个 `PromptToolLike` 形状、同一套筛选规则），
     // 所以在 prompt 里它们没有区别 —— 「没有 promptSnippet 就不列」那条官方语义也照样
@@ -584,7 +760,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       cwd,
       tools: promptTools,
       skills: skillRegistry.skills,
-      ...(Object.keys(sections).length > 0 ? { sections } : {}),
+      ...(Object.keys(sectionPatches).length > 0 ? { sections: sectionPatches } : {}),
       ...(options.systemPrompt !== undefined ? { customPrompt: options.systemPrompt } : {}),
       ...(options.appendSystemPrompt !== undefined
         ? { appendPrompt: options.appendSystemPrompt }
@@ -609,7 +785,33 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     // 工具集**不是**定死的：之后 `setActiveTools`（`web_enable` / `subagents_enable`
     // 那些 loader 工具）真的会改声明，而变更由 `agent.run` 在请求前 diff 成一条
     // `toolsAdded` / `toolsRemoved` 消息声明出去（见 `prompt-head.ts`）。
+    return { diagnostics: [...skillRegistry.diagnostics, ...promptRegistry.diagnostics] };
+  };
 
+  const assembleExtensions = async (): Promise<void> => {
+    const extensionHost = await createExtensionHost();
+    extensionHostRef = extensionHost;
+    // 已经退出过了（`dispose()` 早于装载完成）：这个宿主没人管了，就地收掉 ——
+    // 否则 MCP 的子进程会挂在事件循环上（症状是「Ctrl+C 之后进程不退」）。
+    if (disposed) {
+      await extensionHost.dispose();
+      return;
+    }
+    // ── 发 `session_start`：MCP 靠它读 `mcp.json` 并开始连服务器 ──
+    //
+    // **必须在算工具表之前**：MCP 会发现「有 codemode 暴露的服务器」并激活 `codemode`
+    // （走 `setActiveTools` → 本项目的 `state.prompt.tools`）；而 `direct` 服务器的工具是
+    // 在连接过程中动态注册的 —— 加载后必须再扫一遍。
+    // `reason` 与 pi 一致：从一个**已有会话**启动是 `resume`，否则 `startup`（pi 的
+    // `hasExistingSession` 也是 `messages.length > 0`，见上面 `startupSession` 的注释）。
+    // 扩展拿它区分「新开」与「接着聊」，`pi-background-tasks` 还靠它认 reload 交接。
+    await extensionHost.startSession({
+      reason: startupSession?.hasMessages === true ? 'resume' : 'startup',
+    });
+    // 记住这一轮激活绑在哪个会话上 —— 切会话时据此判「要不要重装」（见 `switchExtensionHost`）。
+    hostSessionId = current.sessionId;
+    hostSessionFile = current.recorder?.file;
+    await applyPromptResources(extensionHost);
     // 装载完成 = 环已经 idle：给状态类扩展一个 `agent_settled`（**只发事件，不记轨迹**）。
     //
     // 为什么要它：Orca 的 pane 状态靠 hook 推（`agent_end` → done），而 pi 那边是 Orca
@@ -619,15 +821,80 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
     extensionHost.emitLifecycle({ type: 'agent_settled' });
   };
 
+  /**
+   * `/reload`：重新读一遍 settings / 扩展 / skill / prompt 模板 / 上下文文件，把结果装回 state。
+   *
+   * 与 pi 的 `AgentSession.reload()` 同一个顺序：
+   * 1. 旧激活 `session_shutdown{reason:'reload'}`（`pi-background-tasks` 在这个 reason 下
+   *    会做 **handoff**：`--survive-reload` 的后台任务交接给新激活，而不是被杀掉）；
+   * 2. 重装扩展（新实例）并发 `session_start{reason:'reload'}`（MCP 重读 `mcp.json`）；
+   * 3. 重读 settings 影响的工具选择（`defaultTools` / shell 配置）、skill、prompt 模板、
+   *    `SYSTEM.md` / `APPEND_SYSTEM.md` / `AGENTS.md`，重新拼 system prompt 与工具声明。
+   *
+   * **不是第二套代码**：重装走 `rebindHost('reload', force)`（与切会话同一条机器，只是
+   * 不因「会话没变」跳过），重拼 prompt 走 `applyPromptResources()`（与启动装载同一份）。
+   *
+   * 与 pi 一样拒绝在环跑的时候重载：那一刻重装宿主会把正在等的工具 / 流交给一个已经
+   * shutdown 的宿主。
+   */
+  const reloadKernel = (): Promise<KernelReloadReport> => {
+    if (store.getState().phase !== 'idle') {
+      return Promise.resolve({
+        ok: false,
+        message: '上一回合还没结束，等它跑完再重载',
+        diagnostics: [],
+      });
+    }
+    let report: KernelReloadReport = { ok: false, diagnostics: [] };
+    const run = async (): Promise<void> => {
+      await ready;
+      if (disposed) {
+        report = { ok: false, message: '内核正在退出，没有重载', diagnostics: [] };
+        return;
+      }
+      // 加队之后环可能又跑起来了（用户在这一瞬发了消息）：进队前那次检查不算数。
+      if (store.getState().phase !== 'idle') {
+        report = { ok: false, message: '上一回合还没结束，等它跑完再重载', diagnostics: [] };
+        return;
+      }
+      // 上一次重装失败留下的诊断不该赖着：`/reload` 是「重新读一遍」的动作，报告里
+      // 只该有这一次装载的结果（扩展自身报的错在下一条 `currentHost().errors` 里）。
+      hostErrors.length = 0;
+      if (options.noExtensions !== true) {
+        const swapped = await rebindHost('reload', true);
+        if (!swapped) {
+          report = {
+            ok: false,
+            message: '扩展重新装载失败（详见诊断）',
+            diagnostics: [...hostErrors, ...currentHost().errors],
+          };
+          return;
+        }
+      }
+      if (disposed) {
+        report = { ok: false, message: '内核正在退出，没有重载', diagnostics: [] };
+        return;
+      }
+      // `defaultTools` / shell 配置可能改了：重建内置工具实例并丢掉开关缓存
+      // （与 pi 的 `_buildRuntime()` 同一个效果）。扩展工具由新宿主自己重扫。
+      resetTools(cwd);
+      const { diagnostics } = await applyPromptResources(currentHost());
+      report = { ok: true, diagnostics: [...diagnostics, ...currentHost().errors] };
+    };
+    hostSwitch = hostSwitch.then(run, run).catch((error: unknown) => {
+      report = { ok: false, message: `重载失败：${errorText(error)}`, diagnostics: [] };
+    });
+    return hostSwitch.then(() => report);
+  };
+
   // 现场装满还是推到后台：见 `KernelOptions.deferExtensions` 与 `Kernel.ready`。
-  let ready: Promise<void>;
+  //
+  // `ready` 在上面就声明过了（`activeHost` / `switchExtensionHost` 等它），这里只赋值。
   if (options.deferExtensions === true) {
     ready = assembleExtensions().catch((error) => {
       // 这一档下**不抛**：界面已经在跑了（首帧画完了），抛出去没人接 —— 收成诊断，
       // 界面读 `extensions.errors` 时会看到（与「一个扩展装不上」同一个口径）。
-      deferredErrors.push(
-        `扩展装载失败（界面不带扩展继续）：${error instanceof Error ? error.message : String(error)}`,
-      );
+      deferredErrors.push(`扩展装载失败（界面不带扩展继续）：${errorText(error)}`);
     });
   } else {
     await assembleExtensions();
@@ -787,20 +1054,14 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       wroteInit = false;
       store.dispatch({ type: 'conversation.reset', sessionId: id } as AgentAction);
       openRecorder(id);
-      // 发 `session_start{reason:'new'}`：pi 在切新会话的同一位置发它（见它的
-      // `agent-session-runtime`），`pi-background-tasks` 靠它重新激活、MCP 重读
-      // `mcp.json`。不发的话那些扩展以为还在上一个会话里（症状：新会话的操作
-      // 还写旧会话的 runtime 目录、底栏状态不刷）。
+      // 切到新会话 = 换一次扩展激活：`session_shutdown{reason:'new'}` → 重装宿主 →
+      // `session_start{reason:'new'}`（与 pi 的 `AgentSessionRuntime.newSession()` 同一个顺序）。
+      // 只再发一次 `session_start` 在 `pi-background-tasks` 上是协议违规（换身份而不先
+      // shutdown 会报 `pi_bg_reload_owner_activation_conflict`，见 `switchExtensionHost`）。
       //
-      // 不 await：`/new` 是同步入口，而这一发是异步的（MCP 会现连服务器）。
-      // 扩展的报错由宿主收成诊断（见 `ExtensionHost.startSession` 里的 try/catch）。
-      if (extensionHostRef !== undefined) {
-        const previousFile = previous.recorder?.file;
-        void extensionHostRef.startSession({
-          reason: 'new',
-          ...(previousFile !== undefined ? { previousSessionFile: previousFile } : {}),
-        });
-      }
+      // 不 await：`/new` 是同步入口（界面要立刻拿到新 id），而重装是异步的（jiti + MCP）。
+      // 重装窗口里要真用宿主的地方（`beforeAgentStart` / `tool_call`）会先等 `hostSwitch`。
+      void switchExtensionHost('new');
       // 旧 sink 收尾（把缓冲 flush 掉）。
       if (previous.sink?.close) void previous.sink.close();
 
@@ -890,19 +1151,14 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       // 第三个参数：这个文件里已经有 `thinking_level_change` 吗 —— 没有就由记录器回填一条
       // （与 pi 的 `sdk.js:279-283` 同一件事）。
       openRecorder(id, messages.length, thinking?.hasEntry === true);
-      // 与 `/new` 对称：pi 恢复会话时也发 `session_start{reason:'resume'}`（见它的
-      // `agent-session-runtime`）。扩展靠它把「现在是哪个会话」重新认一遍 ——
-      // `pi-background-tasks` 的所有权身份、状态栏、MCP 重读 `mcp.json` 全挂在上面。
+      // 与 `/new` 对称：pi 恢复会话时也是「收掉旧激活 → 建新激活」
+      // （`AgentSessionRuntime.switchSession()`），扩展靠这组事件把「现在是哪个会话」
+      // 重新认一遍 —— `pi-background-tasks` 的所有权身份、状态栏、MCP 重读 `mcp.json`
+      // 全挂在上面。恢复的是**同一个**会话时 `switchExtensionHost` 会跳过（宿主本来就在
+      // 这个会话上，无谓重装只会把工具与 MCP 连接断一次）。
       //
-      // 在 `openRecorder` **之后**发：`ctx.sessionManager.getSessionFile()` 要报刚恢复的
-      // 那个文件，而不是上一会话的。同样不 await（与 `newSession` 一个道理）。
-      if (extensionHostRef !== undefined) {
-        const previousFile = previous.recorder?.file;
-        void extensionHostRef.startSession({
-          reason: 'resume',
-          ...(previousFile !== undefined ? { previousSessionFile: previousFile } : {}),
-        });
-      }
+      // 这里**要等**：`restoreSession` 本来就是异步的，恢复完返回时扩展应该已经就绪。
+      await switchExtensionHost('resume');
       if (previous.sink?.close) void previous.sink.close();
 
       return { id, restored: messages.length };
@@ -912,6 +1168,7 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         store.dispatch({ type: 'session.restored', message } as AgentAction);
       }
     },
+    reload: reloadKernel,
     extensions: extensionView,
     ready,
     async dispose(): Promise<void> {
@@ -924,6 +1181,8 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       persistence?.dispose();
       // flush 轨迹落盘：**要等**（一次性模式末尾紧接着 `process.exit()`，不等会截断还没写下去的字节）。
       const sinkClosed = current.sink?.close?.();
+      // 正在进行的宿主重装先等它停：它看到 `disposed` 会停在半路（装载完的那份自己收掉）。
+      await hostSwitch;
       // **扩展宿主要等**：MCP 的 stdio 子进程握着事件循环，不等它们关掉进程退不出去
       // （一次性模式尤其明显，见 `Kernel.dispose()` 的接口注释）。
       // `deferExtensions` 下这里收的是占位宿主；后台装载那一路拿到真宿主后会看到
