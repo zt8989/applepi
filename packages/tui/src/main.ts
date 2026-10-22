@@ -305,16 +305,15 @@ async function main(): Promise<void> {
     process.env[`${args.provider.toUpperCase().replace(/-/g, '_')}_API_KEY`] = args.apiKey;
   }
 
-  // **交互式模式** = 没有一次性要跑的东西（`-p`）也没关掉扩展。
+  // **一次性模式** = 命令行直接给了一句话（`-p`）。它只决定界面形状（有没有 TUI、
+  // 有没有可交互的 `ctx.hasUI`），与装载时机无关 —— 装载在所有模式下都同步。
+
+  // 扩展装载**同步**：与 pi 一样，界面出来时扩展与 prompt 已经就绪。
   //
-  // 它决定两件事，而且两件必须一致：
-  //
-  // 1. 内核 `deferExtensions`：扩展推到后台装（首帧不等它）；
-  // 2. 界面拿到 `kernel.ready` 这道门：装载完成前不发消息、开场横幅要重报一次。
-  //
-  // 一旦只给其中一边，症状分别是「首帧没变快」与「发送了一条缺工具集的消息」。
-  const oneShot = args.prompt !== undefined;
-  const deferExtensions = !oneShot && !args.noExtensions;
+  // 早先交互式启动用内核的 `deferExtensions` 把整段装载推到首帧之后（首帧 3.6s → 1.1s）。
+  // 代价是启动后多一段「正在后台装载」：那段时间发消息会被按住，宿主（Orca）的状态也
+  // 晚半拍。现在扩展装载本身已经是串行的（与 pi 同一形态），打包形态下它只占 0.3~1.5s
+  // —— 不值得再为它多一层「现在能不能发」的状态。
 
   // 内核：整个应用里唯一的一次 createKernel() 装配，界面只拿到它的 store。
   // 没有第二份 store，也没有第二份环。
@@ -364,8 +363,6 @@ async function main(): Promise<void> {
       // 而扩展工具真被调用时（可能在第一轮之后）读那个引用。
       ...(args.prompt === undefined ? { uiOptions: () => requireUi(uiRef) } : {}),
       ...(args.noExtensions ? { noExtensions: true } : {}),
-      // 交互式模式：扩展装载不等（首帧 ~3.6s → ~1.1s）。见上面那个 `deferExtensions`。
-      ...(deferExtensions ? { deferExtensions: true } : {}),
       onTraceError: (error) => {
         process.stderr.write(
           `轨迹落盘失败（不影响对话）：${String(error instanceof Error ? error.message : error)}\n`,
@@ -462,16 +459,12 @@ async function main(): Promise<void> {
         stats: (state) => statsLine(state, kernel.autoCompactEnabled()),
         // 底栏左端那一行（与终端底栏逐字同形）：家目录缩 `~` + git 分支。
         cwdLabel: (state) => cwdLine(state.session.cwd, gitBranch(state.session.cwd)),
-        // 扩展装载完成的门：浏览器那侧发消息也要等它（与终端 `send()` 同一道门）——
-        // 装载前 state 里的工具集与 system prompt 还是「没有扩展」的形状，先发出去的
-        // 那条会定下一份**缺工具集**的 head（不可改的历史，见 `prompt-head.ts`）。
-        // 一次性模式不给（它本来就不推迟装载）。
-        ...(deferExtensions ? { ready: kernel.ready } : {}),
+        // 扩展装载在 `createKernel()` 里已经同步完成，这里不再需要一道「装载完成」的门。
       },
       // 开场诊断与终端那边同一个口径：装了哪些扩展 + 装载失败。
       //
-      // **取值函数**：内核 `deferExtensions` 时这两样是后台装载完才有的（见那里的
-      // `ready`）—— 传数组快照就等于永远报不出装载诊断。
+      // **取值函数**：设置页会在运行中反复读它（扩展命令可被 `/reload` 换掉），
+      // 传数组快照就等于只报装载那一刻的诊断。
       () => [
         // 只报装载**诊断**：开场那条「已装扩展：…」不进浏览器 —— 侧边栏已经能看出
         // 有哪些会话在用哪些 cwd，而扩展清单是终端那边的开场信息（`[Extensions]`），
@@ -491,8 +484,8 @@ async function main(): Promise<void> {
       setModel: (provider, id) => kernel.setModel(provider, id),
       autoCompactEnabled: () => kernel.autoCompactEnabled(),
       setAutoCompactEnabled: (enabled) => kernel.setAutoCompactEnabled(enabled),
-      // **取值函数**：扩展是后台装的（见内核的 `deferExtensions`），装载完成后
-      // 它们的命令才存在 —— 快照一次就等于浏览器那边永远看不到扩展命令。
+      // **取值函数**：命令表会在运行中变（`/reload` / 扩展自己注册），
+      // 快照一次就等于浏览器那边永远看不到后注册的命令。
       commands: () => [
         ...SLASH_COMMANDS.map((command) => ({
           name: command.name,
@@ -512,7 +505,7 @@ async function main(): Promise<void> {
         }
         return kernel.extensions.commands.run(name, arg);
       },
-      // 设置 › 插件 / 子代理：同样是**取值函数**，扩展后台装完之后再读才有内容。
+      // 设置 › 插件 / 子代理：同样是**取值函数**（与上面命令表同一个理由）。
       extensions: () => kernel.extensions.entries,
       extensionErrors: () => kernel.extensions.errors,
     });
@@ -568,12 +561,8 @@ async function main(): Promise<void> {
   const prompt = args.prompt;
   const exitCode = await runTui({
     store: kernel.store,
-    // 扩展装载的门 + **首帧不等扩展**：交互式模式把装载推到后台（首帧 3.6s → ~1.1s），
-    // 发消息、开场横幅重报都挂在 `ready` 上（见 `TuiOptions.ready`）。
-    //
-    // 一次性模式（`-p`）**不给**：它没有首帧可提前，而装载那一刻本身就已经是结果了
-    // （那时 `kernel.ready` 早就完成，给一份「已完成」的门只会让横幅白闪一帧）。
-    ...(deferExtensions ? { ready: kernel.ready } : {}),
+    // 装载在 `createKernel()` 里已经完成（同步），所以不给 `ready` 门：
+    // 界面一出来就是「能发消息」的状态，开场横幅一次报全。
     // 工作目录不在这里传：它从 `store.getState().session.cwd` 读（与浏览器同一个地方）。
     // 把内核的「开新会话」交进去 —— TUI 只拿 store，换 id（于是换文件）要内核出手。
     newSession: () => kernel.newSession(),

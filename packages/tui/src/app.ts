@@ -1014,7 +1014,7 @@ export interface TuiOptions {
    *
    * ## 为什么是**取值函数**，不是那个对象
    *
-   * 内核 `deferExtensions` 时（交互式启动，见 `kernel.ts`）扩展是**后台装的**：
+   * 内核 `deferExtensions` 时（TUI 现在不走这条，见 `kernel.ts`）扩展是**后台装的**：
    * 这里存一个对象就等于把「装载前那个空命令表」钉死，症状是扩展的斜杠命令
    * （`/websearch` 那种）**永远**不出现，而没有任何报错。取值是每次现取，
    * 于是装载完成后补全、`runCommand`、`/hotkeys` 都看得到它们。
@@ -3310,9 +3310,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
   });
 
   /**
-   * 开场横幅 —— **写成函数是因为它要报两次**。
+   * 开场横幅 —— **写成函数是因为它在 `deferExtensions` 下要报两次**。
    *
-   * `deferExtensions`（交互式启动，见 `kernel.ts`）下扩展是后台装的，而这几节的内容
+   * `deferExtensions`（TUI 现在不走这条）下扩展是后台装的，而这几节的内容
    * （skill 清单、prompt 清单、扩展清单与装载诊断）恰恰就是装载那一刻才有的：首帧那次
    * 只能报到「正在装载」，装载完成后再报一次才是**真的**。写成一次性的话，症状是
    * 「装了扩展，但开场横幅上永远看不到它」—— 而那条横幅的全部意义就是让人看见。
