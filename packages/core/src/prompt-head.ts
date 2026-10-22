@@ -20,6 +20,7 @@
  * 统一键序，于是同一份工具集每轮序列化出的字节完全相同（前缀稳定的必要条件）。
  */
 import type { PromptToolDefinition } from './actions';
+import type { AgentState } from './state';
 import {
   getCurrentSystemMessage,
   getCurrentTools,
@@ -44,6 +45,22 @@ export function declaredToolSchemas(tools: readonly PromptToolDefinition[]): Too
     description: tool.description,
     parameters: tool.parameters as Tool['parameters'],
   }));
+}
+
+/**
+ * 会话里那条 head 消息。**会话落盘**（`session-recorder`）与**扩展读 transcript**
+ * （`sessionManager.buildSessionContext()`）共用这一份 —— 两边各拼一遍的话，漂移的症状是
+ * 扩展认不出「装载时声明了哪些工具」，于是每次都当成新会话重新决定工具集。
+ *
+ * `tools` 用装载时那批（`headTools`）：head 是不可变历史（见 `PromptState`）。
+ */
+export function buildSessionHead(state: AgentState, timestamp = 0): SystemMessage {
+  const head = buildPromptHead({
+    systemPrompt: state.prompt.systemPrompt,
+    ...(state.prompt.sections !== undefined ? { sections: state.prompt.sections } : {}),
+    tools: declaredToolSchemas(state.prompt.headTools ?? state.prompt.tools),
+  });
+  return { ...head, timestamp };
 }
 
 export interface PromptHeadInput {

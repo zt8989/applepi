@@ -75,6 +75,8 @@ function hasPackage(...names: string[]): boolean {
 const hasAskUser = hasPackage('@juicesharp', 'rpiv-ask-user-question');
 /** `pi-web-access`（web 搜索 / 抓取 / PDF / GitHub）。 */
 const hasWebAccess = hasPackage('pi-web-access');
+/** `pi-subagents`（多 agent 委派）。 */
+const hasSubagents = hasPackage('pi-subagents');
 
 /** 装扩展前的工具表（测试要反复清干净，所以先存一份）。 */
 function freshStore(): ReturnType<typeof createAgentStoreWith> {
@@ -847,6 +849,38 @@ test('扩展：ask_user_question 的 before_agent_start 协调器在本项目是
       store.getState().prompt.tools.map((t) => t.name),
       names,
       '工具集在会话中途不该变（prompt 是装载时定下的）',
+    );
+  } finally {
+    restoreHome();
+  }
+});
+
+// ══════════════ pi-subagents（多 agent 委派） ══════════════
+
+test('扩展：pi-subagents 的 sessionManager 入口都在（不再报 is not a function）', { skip: !hasSubagents && '没装 pi-subagents' }, async () => {
+  // 报错原文（扩展面板里那两条）：
+  //   ctx.sessionManager.getEntries is not a function
+  //   ctx.sessionManager.buildSessionContext is not a function
+  //
+  // 两者都被**直接调用**（不判 typeof）：前者在 `session_start` 里恢复 `/命令` 的结果快照，
+  // 后者判「装载时声明了哪些工具」。少一个不是降级，是整个扩展不干活。
+  useRealHome();
+  try {
+    const { store } = freshStore();
+    const host = await loadExtensionHost({ builtins: false,
+      store,
+      cwd: process.cwd(),
+      uiOptions: () => hostUiOptions(fakeTui([])),
+    });
+    installPrompt(store);
+    registerExtraTools([]);
+    const subagentErrors = (): string[] => host.errors.filter((e) => e.includes('pi-subagents'));
+    assert.deepEqual(subagentErrors(), [], '装载（含 session_start）不该有它的诊断');
+    await host.beforeAgentStart('hi');
+    assert.deepEqual(
+      host.errors.filter((e) => e.includes('pi-subagents') || e.includes('is not a function')),
+      [],
+      '每轮的 handler 也不该撞 sessionManager 的方法',
     );
   } finally {
     restoreHome();
