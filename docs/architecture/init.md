@@ -22,7 +22,7 @@
 
 | 阶段 | 量级 | 能做什么 |
 | --- | --- | --- |
-| 模块装载（~1600 个模块 / 8.5MB 源码，pi 那一栈 + 各家 provider SDK） | 0.9~1.4s | 目前没找到可靠的减法（见下面「试过并否掉的两条」） |
+| 模块装载（~1600 个模块 / 8.5MB 源码，pi 那一栈 + 各家 provider SDK） | 0.9~1.4s | **打成一个文件**（见下面「打包」一节），降到 ~0.35s |
 | 扩展装载（jiti，见 `extensions.md` 的并行装载） | 1.4~2.7s | **推到后台**（`deferExtensions`） |
 | `session_start` + `collectPromptSections`（MCP 连服务器，`direct` 服务器最多等 10s） | 0.4~0.5s | 同上 |
 | prompt 拼装 + skill 扫描 + 落盘器 + web 服务 | ~0.1s | —— |
@@ -41,13 +41,63 @@
 4 万个文件 / 264MB（平铺在一个目录里），查表比重新编译还贵；二是 launcher 走的是
 `tsImport()`，转译后的 TS 是字符串交给 V8 的，本来就吃不到文件级缓存。
 
-**惰性 import 那些 picker / 包根 barrel**：把 `@earendil-works/pi-coding-agent` 的包根换成
-`dist/...` 深路径能省 ~0.2s（包根会把整个交互层 + `main.js` 一并拉进来），但那个包根目前
-在我们 11 个文件里被引用，而且 promp 拼装真要深路径（`system-prompt.js` / `resource-loader.js`）——
-收益不够抵消「以后升级 pi 会一次次对路径」。真要做时，先量一次 `--cpu-prof` 里
-`compileSourceTextModule` 与 `readFileUtf8` 的占比。
+**把包根 barrel 换成 `dist/...` 深路径**：直觉上包根把整个交互层 + `main.js` 一并拉进来，换掉
+应该省很多。实测**没有收益**（同一台机器，冷进程、多次交替）：
 
-于是交互式启动的**首帧**：**~3.9s → ~1.15s**（另一半 2.2s 在后台跑完）。
+| | 量级 |
+| --- | --- |
+| `import('@earendil-works/pi-coding-agent')`（包根） | 390~470ms |
+| 我们**真正用到**的那些深路径一起 import（resource-loader + tools + sdk + settings-manager +
+agent-session + extensions + mcp/codemode/tool-search + components + theme） | 400~500ms |
+
+原因是那 11 个文件的包根引用其实**指向同一批模块**（`sdk.js` 自己就要 provider SDK，
+`components` 要 pi-tui），重叠度高到换不换一样。所以没改（改了还要跟着 pi 的目录结构升级）。
+
+### 打包：`pnpm build:tui`（首帧 ~1.0s → ~0.35s）
+
+真正的大头是「读 + 编译 ESM 模块」这件事本身，而不是装了什么。把入口**打成一个文件**之后：
+
+| 量级 | 首帧（PTY 实测，交替跑） |
+| --- | --- |
+| `tsx` 直装（`ELA_NO_BUNDLE=1`，未打包） | 1044 / 1062 / 1077 / 1593ms |
+| 打包产物（`node packages/tui/bin/ela.mjs`） | **318 / 338 / 355 / 370ms** |
+| `pi` 自己（`dist/bundle/cli.js`，也是预打包的） | 470 / 471 / 670ms |
+
+拆开看（同一台机器）：
+
+| 测法 | 量级 |
+| --- | --- |
+| `import('./packages/tui/src/main.ts')`（tsx） | 982~1213ms —— 与首帧基本重合 |
+| 只打**我们自己的代码**（`--packages=external`） | 25~32ms |
+| 全量打包（含 pi / provider SDK） | import 158~199ms |
+
+所以「首帧慢」和扩展、和 `getTools()` 都无关，就是装载形态。这一步**不改变任何运行时语义**：
+执行路径、jiti、扩展 API 全是同一份代码，只是 V8 面对一个文件而不是 1600 个。
+
+#### 四个必须记住的坑（都是实测踩的）
+
+1. **CJS 依赖**（`cross-spawn` 等）：ESM 输出要 banner 补 `createRequire`，否则启动即
+   `Dynamic require of "child_process" is not supported`。
+2. **`PI_BUNDLED_NODE`**：pi 的扩展 loader 据此决定走「虚拟模块」还是「按 `__dirname` 推别名」。
+   不给的话 `__dirname` 变成 `dist/`，**每个扩展都报 `Cannot find module 'typebox'`**（扩展装载
+   全灭，而 TUI 自己还是好的）。给了之后扩展拿到的是产物里那份 pi 实例 —— 反而比别名更一致。
+3. **`PI_PACKAGE_DIR`**：主题 / 文档 / README / 导出模板都从「pi 的包目录」推，打包后
+   `__dirname` 不再指向它。启动器（`bin/ela.mjs` 的 `prepareBundleEnv`）算好真路径注入；
+   手工运行产物时要自己带上。
+4. **两处 `createRequire(import.meta.url).resolve(...)`**：patch 过的
+   `@juicesharp/rpiv-ask-user-question`（问卷少一半）与 `@ela/webui` 的 dist（浏览器界面白屏）。
+   同样由启动器注入 `ELA_ASK_USER_QUESTION_PATH` / `ELA_WEBUI_DIST`，两处消费方都写成
+   「环境变量优先、解析不到就保持原来的降级」。
+
+#### 什么时候跑产物
+
+启动器按 **mtime** 判断：`packages/tui/dist/ela.mjs` 比 `packages/core` 与 `packages/tui` 的 `src`、
+`package.json` 新就跑产物，否则回退 tsx 那条路（`webui` 的 `src` 不算：它只以 dist 路径被引用）。
+所以「改完源码忘了构建」不会让你对着旧产物调试；要强制对比两条路用 `ELA_NO_BUNDLE=1`。产物不进仓库（全局 `dist/` 已在 `.gitignore`），`pnpm build` 会先 webui
+后 tui 地构建两样。
+
+于是交互式启动的**首帧**：**~3.9s → ~1.15s**（另一半 2.2s 在后台跑完）；
+再叠上打包：**~0.35s**（扩展仍在那之后后台装完）。
 
 ### 谁先装、谁后装
 

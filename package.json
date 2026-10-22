@@ -14,17 +14,19 @@
     "start": "node --import tsx packages/tui/src/main.ts",
     "agent": "node --import tsx packages/tui/src/main.ts",
     "typecheck": "pnpm -r typecheck",
-    "build": "pnpm --filter @ela/webui build",
+    "build": "pnpm --filter @ela/webui build && pnpm --filter @ela/tui build",
     "test": "pnpm -r test",
     "core:test": "pnpm --filter @ela/core test",
     "tui:test": "pnpm --filter @ela/tui test",
 
     "config:migrate": "pnpm --filter @ela/core config:migrate",
     "models:migrate": "pnpm --filter @ela/core models:migrate",
-    "repatch:ask-user-question": "pnpm --filter @ela/core repatch:ask-user-question"
+    "repatch:ask-user-question": "pnpm --filter @ela/core repatch:ask-user-question",
+    "build:tui": "pnpm --filter @ela/tui build"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "esbuild": "^0.28.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }
