@@ -16,8 +16,9 @@
  * 2. `define: PI_BUNDLED_NODE`：pi 的扩展 loader 据此决定「虚拟模块」还是「按 `__dirname`
  *    推别名」。不给的话 `__dirname` 变成 `dist/`，每个扩展都报
  *    `Cannot find module 'typebox'`（扩展装载被静默降级成全部失败）。
- * 3. 产物位置不是 pi 的包目录：运行时要 `PI_PACKAGE_DIR` 指到真的那个（主题/文档/README
- *    都从它推），这由启动器注入，不在构建这一步写死（写死会在仓库挪位置后失效）。
+ * 3. 产物位置不是 pi 的包目录：主题 / 文档 / README 都从「pi 的包目录」推，打包后那一路必错。
+ *    `PI_PACKAGE_DIR` 由产物启动时自己解析（`src/pi-package-dir.ts`），构建这一步不写死
+ *    （写死会在仓库挪位置后失效）。
  */
 import { rm, stat } from 'node:fs/promises';
 import path from 'node:path';

@@ -89,8 +89,9 @@ agent-session + extensions + mcp/codemode/tool-search + components + theme） | 
    不给的话 `__dirname` 变成 `dist/`，**每个扩展都报 `Cannot find module 'typebox'`**（扩展装载
    全灭，而 TUI 自己还是好的）。给了之后扩展拿到的是产物里那份 pi 实例 —— 反而比别名更一致。
 3. **`PI_PACKAGE_DIR`**：主题 / 文档 / README / 导出模板都从「pi 的包目录」推，打包后
-   `__dirname` 不再指向它。启动器（`bin/ela.mjs` 的 `prepareBundleEnv`）算好真路径注入；
-   手工运行产物时要自己带上。
+   `__dirname` 不再指向它。产物启动时自己解析（`src/pi-package-dir.ts`：`import.meta.resolve`
+   ＋ `node_modules` 退路；`require.resolve` 对 pi 的 import-only `exports` 必失败）。少了
+   这一步，主题会**静默**回落 system，表现为卡片/工具块底色全丢。宿主显式设的值优先。
 4. **两处 `createRequire(import.meta.url).resolve(...)`**：patch 过的
    `@juicesharp/rpiv-ask-user-question`（问卷少一半）与 `@ela/webui` 的 dist（浏览器界面白屏）。
    同样由启动器注入 `ELA_ASK_USER_QUESTION_PATH` / `ELA_WEBUI_DIST`，两处消费方都写成

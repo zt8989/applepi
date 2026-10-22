@@ -148,9 +148,15 @@ function useBundle() {
 }
 
 /**
- * 打包后 `import.meta.url` 落在 `dist/`，三处「按本文件位置找东西」的解析会失准，
- * 所以由启动器算出真路径、用环境变量交给产物（`PI_PACKAGE_DIR` 是 pi 自己的开关，
- * 另两个是本项目的，读法见 `extension-host.ts` 与 `web/server.ts`）。
+ * 打包后 `import.meta.url` 落在 `dist/`，两处「按本文件位置找东西」的解析会失准，
+ * 所以由启动器算出真路径、用环境变量交给产物（两个都是本项目的开关，读法见
+ * `extension-host.ts` 与 `web/server.ts`）。
+ *
+ * `PI_PACKAGE_DIR` **不在这里设**：pi 的 `exports` 只有 `import` 条件，`require.resolve`
+ * 对它必失败（早先那一版就是这么静默失效的 —— 异常被 catch 掉，环境变量从没设上）。
+ * 交给产物自己解析（`src/pi-package-dir.ts`，用 `import.meta.resolve` + node_modules
+ * 退路），顺带让手工 `node dist/ela.mjs`、或别的宿主直接 import 产物时也能找到主题。
+ * 宿主显式传进来的 `PI_PACKAGE_DIR`（测试、Nix）仍然优先。
  *
  * 全都要「已设置就不覆盖」：调 `ela` 的上层（测试、宿主）有权指到别处。
  */
@@ -160,19 +166,6 @@ function prepareBundleEnv() {
   const setDefault = (name, value) => {
     if (process.env[name] === undefined) process.env[name] = value;
   };
-
-  try {
-    // `require.resolve` 拿到的是 pi 的入口（`dist/index.js`），包根是它的上一级。
-    const entryPath = tuiRequire.resolve('@earendil-works/pi-coding-agent');
-    const entryDir = path.dirname(entryPath);
-    setDefault(
-      'PI_PACKAGE_DIR',
-      path.basename(entryDir) === 'dist' ? path.dirname(entryDir) : entryDir
-    );
-  } catch {
-    // 解析不到就让 pi 自己去推 —— 那一路在打包形态下会失准，但只是「主题/文档路径不对」，
-    // 不值得让启动失败。
-  }
 
   try {
     setDefault('ELA_ASK_USER_QUESTION_PATH', coreRequire.resolve('@juicesharp/rpiv-ask-user-question'));

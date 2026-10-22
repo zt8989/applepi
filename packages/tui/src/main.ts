@@ -18,6 +18,7 @@ import { THINKING_LEVELS, isThinkingLevel } from '@ela/core/thinking-level';
 import { createKernel, type Kernel } from '@ela/core/kernel';
 import { startHerdrReporting } from '@ela/core/herdr';
 import { cwdLine, gitBranch, runTui, SLASH_COMMANDS, statsLine } from './app';
+import { ensurePiPackageDir } from './pi-package-dir';
 import { setupTheme } from './theme';
 import { keyLabel } from './keybindings';
 import { WebBridge } from './web/bridge';
@@ -287,6 +288,10 @@ function parseArgs(argv: string[]): CliArgs {
 
 
 async function main(): Promise<void> {
+  // 必须在**任何** pi 资源路径被求值之前：主题（卡片底色）、文档、README、导出模板
+  // 都按 pi 的包目录找。打包产物自己算不出那个目录，见 pi-package-dir.ts。
+  ensurePiPackageDir();
+
   let args: CliArgs;
   try {
     args = parseArgs(process.argv.slice(2));
