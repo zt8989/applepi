@@ -569,10 +569,12 @@ snippet 里）—— 错报一条就变成永远修不掉的 `[Extension issues]
 
 ## `ctx.sessionManager`：接了
 
-它只读四处：`getSessionId()`（算 opencode 的请求头）、`getSessionFile()`（`pi-subagents`
-拿它算「本会话的 subagent 产物放哪」）、`getBranch()`（恢复上次的搜索结果）、
-`buildSessionContext(branch)`（重建对话，判「这轮模型用过哪些 web 工具」），
-另外 `pi-subagents` 的 `session_start` handler 也会读前两个。
+扩展只读这几个成员：`getSessionId()`（算 opencode 的请求头）、`getSessionFile()`
+（`pi-subagents` 拿它算「本会话的 subagent 产物放哪」）、`getBranch()` / `getEntries()`
+（列会话条目）、`buildSessionContext()`（重建发给模型的上下文）。`pi-subagents` 的
+`session_start` handler 会把它们读一遍，而且**不判 `typeof`** —— 少一个的报错就是
+`ctx.sessionManager.getEntries is not a function` / `...buildSessionContext is not a
+function`，症状是整个扩展不干活（不是降级）。
 
 ### 数据源是**本项目**的会话
 
@@ -595,11 +597,25 @@ pi 那边是 `SessionManager` **类**，条目来自它自己的 `sessions/*.jso
 不写会话文件（或落盘器还没建）时返回 `undefined` —— 不编一个假路径出来。
 `pi-subagents` 对 `undefined` 有降级路径（回退到 `getSessionId()` 当身份），不报错。
 
-### `getBranch()` 必须包一层 `{type:'message', message}`
+### `getBranch()` / `getEntries()` 给的是**条目**（`{type:'message', message}`）
 
 扩展是这么调的：`buildSessionContext(ctx.sessionManager.getBranch()).messages`。
 少包那层的话官方的 `buildSessionContext` 会把消息当成条目、读不到 `.message` ——
 症状是「模型这轮用过哪些 web 工具」判不出来，于是**每次都要求 `web_enable` 重新加载一遍**。
+条目带 `id` / `parentId`（串成会话树）与 ISO `timestamp`，形状与落盘的
+`SessionEntry` 一致。
+
+### `buildSessionContext()` 要带 head，但空会话里不带
+
+`pi-subagents` 靠 transcript 里的 head（第一条 system 消息的 `toolsAdded`）判断
+「装载时声明了哪些工具」，据此决定 `subagent` / `bg_wait` 要不要重新激活。所以
+`buildSessionContext().messages` 的第一条必须是 head，构造与落盘那条共用
+`prompt-head.ts` 的 `buildSessionHead`（两边各拼一遍迟早漂移）。
+
+**例外是空会话**：pi 的 head 与第一条消息一起落盘，而 `session_start` 比两者都早 ——
+那一刻 transcript 是空的。扩展靠 `messages.length === 0` 判「新会话」走 eager 装载
+（`subagent` 工具在空会话里默认激活就靠这条）。空会话里塞一条 head 会把「新会话」
+变成「有历史」，工具于是不激活。
 
 ## agent 生命周期事件：接上（Orca 靠它们）
 

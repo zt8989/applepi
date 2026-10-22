@@ -268,6 +268,57 @@ test('sessionManager：getBranch 给的是**条目**，官方的 buildSessionCon
   assert.ok(context.messages.length > 0, 'buildSessionContext 该转出消息');
 });
 
+test('sessionManager：getEntries / buildSessionContext 都在（pi-subagents 直接调，不判 typeof）', async () => {
+  // 报错原文：`ctx.sessionManager.getEntries is not a function` /
+  // `ctx.sessionManager.buildSessionContext is not a function`。前者在 `session_start`
+  // 里恢复 `/命令` 快照，后者用来判「装载时声明了哪些工具」—— 都不判 typeof，
+  // 少了就是整个扩展不干活（而不是降级）。
+  const faux = createFauxRuntime();
+  faux.setResponses(demoResponses());
+  const { store } = createAgentStoreWith({ runtime: faux.runtime, cwd: process.cwd() });
+  const sm = extensionSessionManager(store, () => 's');
+
+  // 空会话：transcript 里**没有** head。pi 的 head 与第一条消息一起落盘，而
+  // `session_start` 更早 —— 扩展靠 `messages.length === 0` 判「新会话」走 eager 装载。
+  assert.deepEqual(sm.buildSessionContext().messages, []);
+  assert.deepEqual(sm.getEntries(), []);
+
+  store.dispatch({
+    type: 'prompt.init',
+    systemPrompt: 'test',
+    tools: [{ name: 'read', description: 'Read', parameters: { type: 'object', properties: {} } }],
+  } as never);
+  store.dispatch({ type: 'user.message', text: '你好' } as never);
+  await new Promise((r) => setTimeout(r, 300));
+
+  const context = sm.buildSessionContext();
+  const head = context.messages[0] as { role?: string; toolsAdded?: { name?: string }[] };
+  assert.equal(head.role, 'system', 'head 该是第一条（与 pi 的 transcript 同序）');
+  assert.deepEqual(
+    head.toolsAdded?.map((t) => t.name),
+    ['read'],
+    'head 的 toolsAdded 该是装载时那批工具 —— 扩展靠它认已有声明',
+  );
+  assert.equal(context.thinkingLevel, store.getState().model.thinkingLevel);
+  assert.deepEqual(context.model, {
+    provider: store.getState().model.provider,
+    modelId: store.getState().model.modelId,
+  });
+
+  // 条目要能用 `id`/`parentId` 串成一棵树（pi 的 `SessionEntry` 形状）。
+  const entries = sm.getEntries();
+  assert.equal(entries.length, context.messages.length, '两条入口读同一份条目');
+  assert.deepEqual(entries.map((e) => e.id), entries.map((_, i) => `e${i + 1}`));
+  assert.deepEqual(
+    entries.map((e) => e.parentId),
+    [null, ...entries.slice(0, -1).map((e) => e.id)],
+  );
+  assert.ok(
+    entries.every((e) => e.type === 'message' && typeof e.timestamp === 'string'),
+    '条目该是 {type:"message", id, parentId, timestamp, message} 那个形状',
+  );
+});
+
 test('界面：扩展的 widget 槽在底部布局里（applyLayout 读它）', async () => {
   // 纯静态检查：`tui/app.ts` 的底部 VStack 要真的展开 `widgetSlots`。
   // —— 那段是「VStack 的 children 建时定下」，不展开就**不显示**，而扩展的

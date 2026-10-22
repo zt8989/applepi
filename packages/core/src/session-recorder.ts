@@ -9,8 +9,8 @@
  * 否则流式更新会把同一条 message 写几十遍。
  */
 import { createSessionHeader, SessionWriter } from './session-file';
-import { buildPromptHead, declaredToolSchemas } from './prompt-head';
-import type { Message, SystemMessage } from '@earendil-works/pi-ai';
+import { buildSessionHead } from './prompt-head';
+import type { Message } from '@earendil-works/pi-ai';
 import type { AgentState } from './state';
 import type { AgentAction } from './actions';
 
@@ -44,15 +44,10 @@ export interface SessionRecorder {
  * pi v3 会话开头那条 **system 消息**：system prompt（`sections`）+ 工具（`toolsAdded`）。
  *
  * 形状与发给 provider 的 head 一模一样，pi 恢复会话时正是靠它把工具表与各段 prompt 装回来。
- * 用**装载时**那批工具（`headTools`，不可变历史），不是「当前」那份。
+ * 构造在 `prompt-head.ts`（扩展读 transcript 时用的是同一份）。
  */
-function sessionHead(state: AgentState): SystemMessage {
-  const head = buildPromptHead({
-    systemPrompt: state.prompt.systemPrompt,
-    ...(state.prompt.sections !== undefined ? { sections: state.prompt.sections } : {}),
-    tools: declaredToolSchemas(state.prompt.headTools ?? state.prompt.tools),
-  });
-  return { ...head, timestamp: Date.now() };
+function sessionHead(state: AgentState): Message {
+  return buildSessionHead(state, Date.now());
 }
 
 /**
