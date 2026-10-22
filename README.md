@@ -56,8 +56,13 @@ npm link          # 把 `ela` 装成全局命令（软链本仓库）
 
 全局入口是 `packages/tui/bin/ela.mjs`：**一个只做装载的启动器**，一行逻辑也不放它里面 ——
 `packages/tui/src/main.ts` 是 TypeScript 且用 `moduleResolution: "Bundler"` + 无扩展名相对导入，
-tsc 不 emit（`noEmit`），产物也没法被 node 原生 ESM 解析，所以必须经 tsx 装载
+tsc 不 emit（`noEmit`），产物也没法被 node 原生 ESM 解析，所以要么跑打包产物，要么经 tsx 装载
 （`tsx/esm/api` 的 `tsImport()`，不用改 tsx 的 exports，不用 patch）。
+
+**优先跑打包产物**（`pnpm build:tui` → `packages/tui/dist/ela.mjs`）：首帧 1.0s → 0.34s，
+差的全是「读 + 编译 1600 个 ESM 模块」。产物比源码旧（或没构建过）就自动回退 tsx 那条路，
+`ELA_NO_BUNDLE=1` 强制回退（对拍两者用）。细节与四个打包坑见
+[init.md](docs/architecture/init.md) 的「打包」一节。
 npm 只拷 `bin/`（`files` 之外的仓库文件不会跟着走），入口全部靠 `import.meta.url`
 推 **tui 包根** —— 与调用时的 cwd 无关，因此**任何目录里都能跑**：
 
@@ -118,6 +123,7 @@ install 然后失败**。
 **首帧不等扩展**：三个 npm 扩展装载加上 MCP 连服务器实测 2~3 秒，而它过去整个在首帧之前。
 现在交互式启动把这一块推到后台（`deferExtensions`）：界面 ~1.1s 就出来，扩展装完再报一次开场、
 在那之前发的消息会排队等装载完成（不丢，见 [init.md](docs/architecture/init.md) 的启动时间线）。
+再把入口打成单个文件（`pnpm build:tui`）之后，首帧进一步降到 ~0.35s。
 
 **为什么与 pi 同址**：provider 目录改一次两边都得知道，key 改一次两边都得用。分两个目录的
 代价是每次改配置要同步两次，收益仅仅是一个命名上的所有权标记。会话目录名（`--<cwd>--` 编码）

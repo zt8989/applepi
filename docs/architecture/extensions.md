@@ -59,7 +59,12 @@ typebox                     => NOT RESOLVABLE
 
 官方 `loadExtensions(paths, …)` 内部是**串行**的：一个扩展 import 完再下一个。而每个扩展
 的装载是各自独立的重活（jiti 转译 + 它自己的模块图），互相不等 —— 三个 npm 扩展实测
-**串行 2.7s / 并行 1.4s**，而这段时间整个在「界面画出来」之前（见 `init.md` 的启动时间线）。
+**串行 2.7s / 并行 1.4s**。这一段现在被 `deferExtensions` 推到首帧之后（见 `init.md` 的启动时间线），
+但并行省的是「后台那段窗」：扩展装完之前发的消息要排队，越短越好。
+
+**别因为「pi 也是串行」就简化回去**：pi 串行只要 314ms（`PI_TIMING=1` 实测，8 个扩展），是因为它
+自己就是预打包的 `dist/bundle/cli.js`、jiti 走 bundle 的 embedded modules；同一批扩展用我们的 loader
+（未打包，见 `init.md` 的「打包」一节）串行要 0.6~1.1s —— 形态不同，不是风格不同。
 
 所以 `loadExtensionHost` 是**每个扩展单独调一次 `loadExtensions()`**，再 `Promise.all`：
 
@@ -485,7 +490,7 @@ snippet 里）—— 错报一条就变成永远修不掉的 `[Extension issues]
 | 成员 | 落在哪 |
 | --- | --- |
 | `ctx.ui.notify` | 界面那张命令反馈卡（`extension-ui.ts` → `notify()`） |
-| `pi.sendMessage` | 落成一条**用户消息**（于是环会跑起来） |
+| `pi.sendMessage` | 落成一条**用户消息**（于是环会跑起来）；环在跑时按 `deliverAs` 排队 |
 
 那六个仍然 reject 掉（pi 的会话层，见 [surfaces](surfaces.md)），而不是给假 no-op ——
 后者会让扩展以为「fork 被用户取消了」而继续往下走。
@@ -680,9 +685,18 @@ creating the transcript」同一回事。
 - **`pi.appendEntry`** —— 存「不发给模型」的会话条目（pi 会话层）。给 no-op 而不是报错，
   于是扩展自己的 `if (results.length === 0)` 会走：`/search` 回一句
   「No stored search results」。**代价：`/search` 看不到历史搜索结果。**
-- **`pi.sendMessage` 的 `customType` / `display` / `details`** —— 我们只取 `content` 里
-  那些 text 块拼成一条用户消息。后果：扩展 `/curator` 那种「在转录里留一个可点开的
-  卡片」会退化成**普通对话**。外观上的降级，结论照样回到对话里。
+- **`pi.sendMessage` 的 `customType` / `display` / `details`** —— 我们只取 `content`
+  拼成一条用户消息（字符串与 content 块数组都收）。后果：扩展 `/curator` 那种「在
+  转录里留一个可点开的卡片」会退化成**普通对话**。外观上的降级，结论照样回到对话里。
+
+  第二个参数的 `deliverAs` 是真的执行的：空闲时开新回合，环在跑时 `steer` 进 steer 队、
+  `followUp`（以及 `nextTurn`）进 followUp 队 —— 见 `extension-host.ts` 的
+  `extensionMessageAction`。这两条都不能省：**只收块数组**会让字符串 `content` 归一成
+  空串（`pi-background-tasks` 的 `<background-task-notification>` 正是字符串，症状是
+  「任务 completed、`notified` 是 true，界面上什么都不发生」）；**环在跑时发
+  `user.message`** 会被 reducer 当无效输入丢掉。`triggerTurn` 在本项目只影响「排队还是
+  开新回合」那半边 —— 空闲时一律开回合（本项目没有「只登记、不进模型」的 custom 条目，
+  见上一条 `appendEntry`）。
 
 ## 折叠（`Ctrl+]`）：两种形态，两种机制
 

@@ -50,14 +50,19 @@ export interface WebServerHandle {
 
 /** 找 `@ela/webui` 的 dist。返回 `undefined` = 还没构建（服务器照样起，给一页说明）。 */
 export function resolveWebuiDist(): string | undefined {
+  const candidates: string[] = [];
+  // 打包产物里 `import.meta.url` 在 `dist/`，从那里解析不到 workspace 里的 `@ela/webui` ——
+  // 启动器算好路径注入（见 `bin/ela.mjs` 的 `prepareBundleEnv`）。
+  const injected = process.env['ELA_WEBUI_DIST'];
+  if (injected !== undefined && injected !== '') candidates.push(injected);
   try {
     const require = createRequire(import.meta.url);
     const manifest = require.resolve('@ela/webui/package.json');
-    const dist = path.join(path.dirname(manifest), 'dist');
-    return existsSync(path.join(dist, 'index.html')) ? dist : undefined;
+    candidates.push(path.join(path.dirname(manifest), 'dist'));
   } catch {
-    return undefined;
+    // 没装 webui（或产物被 prune）时只剩注入的那一条。
   }
+  return candidates.find((dir) => existsSync(path.join(dir, 'index.html')));
 }
 
 /**

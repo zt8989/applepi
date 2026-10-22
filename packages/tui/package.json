@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node --import tsx src/main.ts",
+    "build": "node ../../scripts/build-tui.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --import ../../test-support/isolated-home.ts --test test/*.test.ts"
   },

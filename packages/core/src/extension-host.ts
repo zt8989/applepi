@@ -402,6 +402,10 @@ function discoverExtensionsInDir(dir: string): string[] {
  * `/resume` 那种"模型看不到这个工具"的降级比崩了好。
  */
 function askUserQuestionEntryPath(): string | undefined {
+  // 打包产物里 `import.meta.url` 在 `dist/`，从那里解析不到本仓库 `node_modules` 里的这个包 ——
+  // 启动器算好路径用环境变量注入（见 `bin/ela.mjs` 的 `prepareBundleEnv`）。
+  const injected = process.env['ELA_ASK_USER_QUESTION_PATH'];
+  if (injected !== undefined && injected !== '') return injected;
   try {
     return createRequire(import.meta.url).resolve('@juicesharp/rpiv-ask-user-question');
   } catch {
