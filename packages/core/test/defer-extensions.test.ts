@@ -3,7 +3,7 @@
  *
  * ## 这一档解决什么
  *
- * 启动的大头是扩展装载（jiti，实测 2~3s，见 `extension-host.ts` 里并行装载那段注释），
+ * 启动的大头是扩展装载（jiti，实测 2~3s，见 `extension-host.ts` 里串行装载那段注释），
  * 而它整个在「界面画出来」之前。打开这一档，`createKernel()` 在 store 与 `model.init`
  * 就绪之后就返回，界面立刻画首帧，扩展在后台装。
  *

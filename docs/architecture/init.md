@@ -23,7 +23,7 @@
 | 阶段 | 量级 | 能做什么 |
 | --- | --- | --- |
 | 模块装载（~1600 个模块 / 8.5MB 源码，pi 那一栈 + 各家 provider SDK） | 0.9~1.4s | **打成一个文件**（见下面「打包」一节），降到 ~0.35s |
-| 扩展装载（jiti，见 `extensions.md` 的并行装载） | 1.4~2.7s | **推到后台**（`deferExtensions`） |
+| 扩展装载（jiti，见 `extensions.md` 的串行装载） | 1~3s（视缓存与打包形态） | **推到后台**（`deferExtensions`） |
 | `session_start` + `collectPromptSections`（MCP 连服务器，`direct` 服务器最多等 10s） | 0.4~0.5s | 同上 |
 | prompt 拼装 + skill 扫描 + 落盘器 + web 服务 | ~0.1s | —— |
 
