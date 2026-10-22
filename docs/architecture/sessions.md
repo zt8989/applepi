@@ -139,6 +139,13 @@ kernel.restore(messages);      // 只灌（消息已读出来时）
 - 没有网络请求
 - 恢复出来的 assistant 消息就是当时的原文
 
+### 想接着跑被打断的那一轮：`/continue`
+
+恢复只把消息搬回来，**不会自动再调模型**。要「从停下的地方再跑一次」，用 `/continue`：它
+dispatch `turn.continue` —— 相位回 `thinking`、计数器归零、开一个新回合容器，但**不插一条
+user 消息**。所以「继续」不会变成对话历史（会话文件里也不会多一行 user），模型看到的仍是
+中断前那份上下文。超时 / 网络错误 / 轮数上限停下后同理（见 [loop](loop.md) 的「续跑」）。
+
 ### 走 action，不直接改 state
 
 恢复用**一条** `conversation.restored`，而不是直接改 `store`：

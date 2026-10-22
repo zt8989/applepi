@@ -371,7 +371,7 @@ tip 就在树上，不再另起一行 `HEAD →`。成败靠**颜色**（绿 / �
 | `/model` | Select model：盖住输入框的模型选择面板；`/model <id>` 精确命中就直接切。面板里 `Ctrl+S` 存默认模型 |
 | `/thinking` | Set thinking level：思考级别面板；`/thinking <级别>` 直接切。面板里 **`Ctrl+S` 存默认级别**，`Shift+Tab` 循环（**不**存） |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling（含每模型写死一档的 `p/id:high` 写法） |
-| `/skills` | 列出**真的进了 system prompt** 的 skill。表里唯一一条 pi 没有的命令 —— 磁盘上有、模型不知道，是这里最难归因的一类问题 |
+| `/skills` | 列出**真的进了 system prompt** 的 skill。两条 pi 没有的命令之一 —— 磁盘上有、模型不知道，是这里最难归因的一类问题 |
 | `/copy` | Copy last agent message to clipboard（与 `Ctrl+X` 同一条路） |
 | `/name [<名字>]` | Set session display name：写进会话文件的 `session_info`（pi 读得懂同一个 entry）；不带参数 = 看当前名字 |
 | `/session` | Show session info and stats：文件 / ID / 名字 + 消息条数 + token（含缓存命中率）+ 费用（按模型拆） |
@@ -379,6 +379,7 @@ tip 就在树上，不再另起一行 `HEAD →`。成败靠**颜色**（绿 / �
 | `/new` | Start a new session：换 id → 换文件。上一段完整留在 `sessions/` 里 |
 | `/compact` | Manually compact the session context：把老对话换成一段结构化摘要 |
 | `/resume` | Resume a different session：盖住输入框的历史会话选择面板（满宽，同 pi）。**零 token** —— 不重跑模型，只把消息**和轨迹树**读回来；删历史也在这里（`ctrl+d`） |
+| `/continue` | Continue the interrupted turn without a new user message：超时 / 网络错误 / 轮数上限停下后，从停下的地方再跑一次。**不插一条「继续」** —— 对话、会话文件、下一次请求里都不会多出一句 user 消息（另一条 pi 没有的命令） |
 | `/quit` | 退出（与 `Ctrl+D` 同一条路：先回主屏，再打那行 `To resume this session:`） |
 | `/mcp` | MCP 服务器管理面板（内置扩展提供）：连接状态、登录、重连、改暴露方式 |
 | `/skill:<名字>` | 把某个 skill 的正文展开后，连同你写的问题一起发给模型 |

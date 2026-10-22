@@ -588,6 +588,46 @@ export class WebBridge {
         abortRun();
         return [];
       }
+      case 'continue': {
+        // 续跑（`/continue`）：与 TUI 同一条 action、同一套守卫。
+        // 不算「提问」—— 不追加 user 消息，模型看到的仍是中断前那份上下文。
+        const state = this.options.store.getState();
+        if (state.phase !== 'idle') {
+          return [{ type: 'notice', level: 'warn', text: '上一回合还在跑，先中断再续跑' }];
+        }
+        if (state.compacting) {
+          return [{ type: 'notice', level: 'warn', text: '正在压缩上下文，压完再续跑' }];
+        }
+        if (state.messages.length === 0) {
+          return [{ type: 'notice', level: 'warn', text: '这个会话还没有消息，先聊一句再 /continue' }];
+        }
+        // 与 prompt 同一道门：扩展装载前开跑会用「没有扩展」的工具集与 prompt。
+        // 装载期间环可能已经跑起来或换了会话 —— 因此不在这里重复守卫，交给
+        // `turn.continue` 自己的守卫（它拿到的才是那一刻的状态）。
+        if (this.options.ready !== undefined && !this.extensionsReady) {
+          const ready = this.options.ready;
+          void ready.then(() => {
+            this.options.store.dispatch({ type: 'turn.continue' });
+          });
+          return [{ type: 'notice', level: 'info', text: '扩展还在装载，装载完就续跑' }];
+        }
+        this.options.store.dispatch({ type: 'turn.continue' });
+        return [];
+      }
+      case 'compact': {
+        // 手动压缩（`/compact`）：与 TUI 同一条 action，守卫同一口径。
+        const state = this.options.store.getState();
+        if (state.phase !== 'idle') {
+          return [{ type: 'notice', level: 'warn', text: '上一回合还没结束，等它跑完再压缩' }];
+        }
+        if (state.compacting) {
+          return [{ type: 'notice', level: 'warn', text: '正在压缩中（摘要要打一次网络）' }];
+        }
+        this.options.store.dispatch({ type: 'compact.request', reason: 'manual' });
+        // 浏览器没有 TUI 那条工作状态行（`workingStatusText`），而压缩要打一次网络、
+        // 几秒里界面上什么都不会变 —— 所以这里主动报一句「开始了」。
+        return [{ type: 'notice', level: 'info', text: '正在压缩上下文…（摘要要打一次网络）' }];
+      }
       case 'setModel': {
         const ok = this.options.setModel(message.provider, message.id);
         return ok

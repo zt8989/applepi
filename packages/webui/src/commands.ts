@@ -13,13 +13,16 @@
  * | `/settings` | 设置面板（常规 / 模型 / 技能 / 子代理 / 插件 / MCP）；这一条落在「常规」 |
  * | `/scoped-models` | 同一个设置面板的「模型」分区（可用模型 / 作用域） |
  * | `/skills` | 同一个设置面板的「技能」分区（只读清单，可点开看详情） |
+ * | `/continue` | 走 WebSocket（`{type:'continue'}`）：服务端 dispatch `turn.continue`，不追加用户消息 |
+ * | `/compact` | 走 WebSocket（`{type:'compact'}`）：服务端 dispatch `compact.request`（摘要与换 `messages` 都在服务端） |
  * | 扩展命令 | `POST /api/command`（服务端跑） |
  * | `/skill:<名字>` | **不走这里** —— 当普通消息发出去，服务端展开成 `<skill>` 块 |
  * | `/模板名 [参数]` | **不走这里** —— 命令表里 `source: 'prompt'` 的那些当普通消息发出，由服务端展开（正文在磁盘上） |
  * | 未命中的 `/xxx` | **不走这里** —— 返回 false，当普通消息发给模型（与 pi 一致，不报错） |
  *
- * 会话类命令（`/new` `/resume` `/compact` `/session` …）服务端**不下发**，所以这里也不认
- * —— 前端只做服务端说能做的。
+ * 会话类命令（`/new` `/resume` `/session` …）服务端**不下发**，所以这里也不认
+ * —— 前端只做服务端说能做的。`/continue` 与 `/compact` 是例外：它们都只 dispatch
+ * 一条 action（不动会话 id、不换文件），所以服务端标了 `web: true`。
  */
 
 import { elaApi } from './api';
@@ -31,6 +34,10 @@ export interface CommandContext {
   notice(text: string, tone?: 'info' | 'warn' | 'error'): void;
   /** 打开模型选择器（`model-picker.ts`，目录从 `/api/models` 现取）。 */
   openModelPicker(): void;
+  /** 续跑被打断的那一轮（`/continue`）：服务端 dispatch，不追加用户消息。 */
+  continueRun(): void;
+  /** 手动压缩上下文（`/compact`）：摘要在服务端生成，结果回成 notice。 */
+  compactSession(): void;
 }
 
 /** 拆一条 `/命令 参数…`。开头不是 `/` 就给 `null`（= 当普通消息发）。 */
@@ -93,6 +100,14 @@ export async function runCommand(name: string, arg: string, ctx: CommandContext)
       return true;
     case 'skills':
       openSettingsPanel({ tab: 'skills', notice: ctx.notice });
+      return true;
+    case 'continue':
+      // 守卫（跑着 / 压缩中 / 空会话）在服务端，拒绝理由会回成 notice。
+      ctx.continueRun();
+      return true;
+    case 'compact':
+      // 同一条规矩：开始/拒绝都回成 notice，压掉了多少由服务端派生的提示说。
+      ctx.compactSession();
       return true;
     default: {
       // 只有**扩展命令**走服务端执行；其余未命中的 `/xxx`（prompt 模板、`/new` 这类

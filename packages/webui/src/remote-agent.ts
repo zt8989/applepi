@@ -233,6 +233,25 @@ export class RemoteAgent {
     this.send({ type: 'abort' });
   }
 
+  /**
+   * 续跑被打断的那一轮（`/continue`）：**不追加用户消息**，只让服务端从当前上下文再跑一次。
+   *
+   * 守卫（跑着 / 压缩中 / 空会话 / 扩展未装载）全在服务端 —— 浏览器只发一条，
+   * 拒绝理由由服务端回成 notice。
+   */
+  continueRun(): void {
+    this.send({ type: 'continue' });
+  }
+
+  /**
+   * 手动压缩上下文（`/compact`）：摘要与 messages 替换都在服务端做，浏览器只发一条。
+   *
+   * 守卫（跑着 / 正在压）同样在服务端 —— 拒绝理由会回成 notice。
+   */
+  compactSession(): void {
+    this.send({ type: 'compact' });
+  }
+
   /** 回答一个扩展对话框。`cancelled` = 用户把它关了（不是空答案）。 */
   respondUi(id: string, response: { value?: string; cancelled?: boolean }): void {
     this.send({ type: 'ui-response', id, ...response });

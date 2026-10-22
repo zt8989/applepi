@@ -22,7 +22,7 @@ import { SLASH_COMMANDS } from '../src/app';
 const piByName = new Map(BUILTIN_SLASH_COMMANDS.map((command) => [command.name, command]));
 
 /** 本项目有、pi 没有的那几条（每一条都要有理由，见命令表的注释）。 */
-const ELA_ONLY = new Set(['skills']);
+const ELA_ONLY = new Set(['skills', 'continue']);
 
 /** pi 有、本项目**故意不做**的（命令表的注释里逐条写了为什么）。 */
 const PI_NOT_HERE = [
@@ -98,5 +98,5 @@ test('命令表：会话类命令不下发浏览器（只有非会话类才标 w
   const web = SLASH_COMMANDS.filter((command) => command.web === true).map((command) => command.name);
   // 浏览器侧只实现了这几条（见 `webui/src/commands.ts` 的 switch）。多标一个
   // `web: true` 的症状是「浏览器里能选到它，点了回一句未知命令」。
-  assert.deepEqual(web.sort(), ['model', 'scoped-models', 'settings', 'skills', 'thinking']);
+  assert.deepEqual(web.sort(), ['compact', 'continue', 'model', 'scoped-models', 'settings', 'skills', 'thinking']);
 });

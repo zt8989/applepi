@@ -213,6 +213,20 @@ export type WebClientMessage =
   | { type: 'setThinking'; level: string }
   | { type: 'newSession' }
   /**
+   * 续跑被打断的那一轮（`/continue`）：服务端 dispatch `turn.continue`，**不插一条「继续」**。
+   *
+   * 与 `prompt` 分开：`prompt` 是一条真实的用户消息（会进 `messages` / 会话文件），
+   * 而续跑只是「从停下的地方再跑一次」，不该凭空多一句 user。
+   */
+  | { type: 'continue' }
+  /**
+   * 手动压缩上下文（`/compact`）：服务端 dispatch `compact.request`（`reason: 'manual'`）。
+   *
+   * 与 `continue` 一样只发生在服务端：摘要要调一次 LLM、还会整份换掉 `messages`——
+   * 浏览器不能自己算，也不该拿一份旧快照去拍。
+   */
+  | { type: 'compact' }
+  /**
    * 恢复一个历史会话（侧边栏里点一条）。
    *
    * **只传 id + cwd**，不传文件路径：路径由服务端自己拼（`findSessionFile`）——
@@ -499,6 +513,10 @@ export function parseClientMessage(raw: string): WebClientMessage | undefined {
     }
     case 'newSession':
       return { type: 'newSession' };
+    case 'continue':
+      return { type: 'continue' };
+    case 'compact':
+      return { type: 'compact' };
     case 'resumeSession': {
       const id = (value as { id?: unknown }).id;
       const cwd = (value as { cwd?: unknown }).cwd;

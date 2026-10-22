@@ -230,6 +230,9 @@ async function main(): Promise<void> {
   const commandContext = {
     notice: (text: string, tone: 'info' | 'warn' | 'error' = 'info') => pushNotice(text, tone),
     openModelPicker: () => void openModelPickerFromApi(),
+    // 引用后声明的 `agent`：调用发生在用户回车那一刻，那时它早已就绪。
+    continueRun: () => agent.continueRun(),
+    compactSession: () => agent.compactSession(),
   };
   /**
    * 侧边栏。先声明、后赋值：agent 的回调里要用它，而侧边栏的钩子又要用 agent

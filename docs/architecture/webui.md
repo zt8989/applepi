@@ -245,8 +245,9 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
   同一个分工：命令是「跟界面说」的通道，消息才是「跟模型说」。**例外是未命中的 `/xxx`**：
   不报错、不拦，当普通消息发出去（与 pi、终端一致）。
 - `/model` 弹已有的模型选择器；`/thinking` 弹通用模态框；`/settings` `/scoped-models`
-  `/skills` 打开同一块设置面板的三个分区（常规 / 模型 / 技能）；扩展命令走
-  `POST /api/command`。
+  `/skills` 打开同一块设置面板的三个分区（常规 / 模型 / 技能）；`/continue` 与 `/compact`
+  走 WebSocket（`{type:'continue'}` / `{type:'compact'}`）—— 都是服务端 dispatch 一条
+action（前者不追加用户消息，后者摘要在服务端生成）；扩展命令走 `POST /api/command`。
 - **`/help` 没有**（与 pi 一致：它的入口是补全 —— 打 `/` 就把整张表摆出来）。
 - `/skill:<名字> [问题]` **不是命令**（与 TUI 一致）：它要把 SKILL.md 展开成 `<skill>` 块
   发给模型，而文件在磁盘上 —— 所以浏览器**不拦**，当普通消息发出去，
@@ -257,10 +258,16 @@ provider），而内核能真发出去的只有 `ModelRuntime.getAvailableSnapsh
   `@ela/core/prompts` 的 `expandPromptTemplate()` 展开；`commands.ts` 只负责认出它们
   并放行，不把它们当命令执行。
 
-**只做非会话类**：`/new` `/resume` `/compact` `/session` `/name` `/copy` `/quit` 服务端**不下发**
-（命令表里没标 `web: true`），所以下拉里看不到它们；直接在浏览器里打这些名字也不会
-报错 —— 它们同样走「未命中 → 当普通消息」那条路（那几件要么动会话本身、要么是终端
-的事，界面还在终端那边）。
+**能用的内置命令**（服务端标了 `web: true`）：`/settings` `/model` `/thinking`
+`/scoped-models` `/skills` `/continue` `/compact`。`/continue` 与 `/compact` 是两条
+「会话类但标了 web」的例外 —— 它们只 dispatch 一条 action（不动会话 id、不换文件），
+所以浏览器里做一半也不会把状态弄坏。压缩开始时服务端会回一句提示（浏览器没有 TUI
+那条「压缩中…」工作状态行），压掉了多少由压缩节点派生的提示说。
+
+其余内置命令服务端**不下发**（`/new` `/resume` `/session` `/name` `/copy`
+`/hotkeys` `/quit`），下拉里看不到；直接在浏览器里打这些名字也不会报错 —— 它们走
+「未命中 → 当普通消息」那条路。其中 `/new` 与 `/resume` 的**功能**在侧边栏有按钮（只是
+没有对应的斜杠命令）；`/session` `/name` `/copy` `/hotkeys` `/quit` 确实还没有浏览器入口。
 
 ## 扩展对话框（`ctx.ui.select` / `confirm` / `input`）与问卷
 

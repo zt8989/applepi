@@ -261,6 +261,14 @@ export type AgentAction =
    */
   | { type: 'turn.end' }
   /**
+   * 续跑当前回合（`/continue`）：**不插 user 消息**，在当前 tip 下直接开一个新回合。
+   *
+   * 超时 / 网络错误 / 轮数上限把回合停下之后，想接着干只能再发一句「继续」——
+   * 那句话会作为真实历史进 `messages`、进会话文件、进下一次请求。这条 action 让
+   * 「从停下的地方再跑一次」不必污染对话：起步与 `user.message` 完全一样，只少那条消息。
+   */
+  | { type: 'turn.continue' }
+  /**
    * 开一步的容器。
    *
    * **不带 stepIndex / attempt** —— 那两个数 reducer 自己能从 state 算出来
