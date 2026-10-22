@@ -471,6 +471,59 @@ function beginTrace(state: AgentState, now: number): TraceTree {
 }
 
 /**
+ * 续跑前把「停在工具调用中途」的那一刻补完整。
+ *
+ * ## 为什么需要
+ *
+ * 进程被外部超时杀掉时，最后一条消息很可能是一条带 `toolCall` 的 assistant（工具结果
+ * 还没回来）—— 这是消息序列里**非法**的形状：OpenAI / Anthropic 都要求每个 toolCall 后面
+ * 紧跟一个 toolResult。不补的话，`/continue` 第一次请求就会被 provider 拒掉，正好死在用户
+ * 最需要它的场景（长时间工具跑到一半被砍）。
+ *
+ * ## 为什么只看**末尾**
+ *
+ * 只在末尾追加，不往中间插：`SessionWriter` 的游标是「已写条数」，中插会让它把末尾几条
+ * 当成新消息重写一遍（真发生过：一份 390 行的会话被整份复制）。而崩溃现场就是「尾巴上挂着
+ * 个没回结果的 assistant」，末尾追加恰好就是合法位置。
+ *
+ * 历史中间本来就有悬空调用的（比如先手动发过「继续」、provider 已经拒了）不在修复范围：
+ * 那已经不是「续跑」能救的对话，让它保持原样比偷偷改写历史更诚实。
+ *
+ * @returns 补全后的消息流；不需要补时返回 null（调用方原样用 `state.messages`）。
+ */
+function repairTailToolCalls(messages: readonly Message[]): Message[] | null {
+  let index = messages.length - 1;
+  const answered = new Set<string>();
+  while (index >= 0) {
+    const message = messages[index];
+    if (message === undefined || message.role !== 'toolResult') break;
+    answered.add(message.toolCallId);
+    index -= 1;
+  }
+  const assistant = index >= 0 ? messages[index] : undefined;
+  if (assistant === undefined || assistant.role !== 'assistant') return null;
+  const missing = assistant.content.filter(
+    (block): block is ToolCall => block.type === 'toolCall' && !answered.has(block.id),
+  );
+  if (missing.length === 0) return null;
+  const now = Date.now();
+  return [
+    ...messages,
+    ...missing.map(
+      (call): ToolResultMessage => ({
+        role: 'toolResult',
+        toolCallId: call.id,
+        toolName: call.name,
+        content: [{ type: 'text', text: '（上次运行在这里被中断，工具没有返回结果）' }],
+        details: null,
+        isError: true,
+        timestamp: now,
+      }),
+    ),
+  ];
+}
+
+/**
  * 把「模型 / 思考级别变了」补成**一个** `model.init` 节点 —— 推迟到下次真要发消息时补。
  *
  * 不在 `model.init` / `thinking.changed` 里当场补：那两个是**界面动作**，而轨迹树要回答的是
@@ -962,6 +1015,65 @@ const transitions: TransitionHandlers = {
       stopCauseDetail: null,
       // 相位得离开 idle，否则 waitForIdle 会以为已经收工而提前返回。
       phase: 'thinking',
+    };
+  },
+
+  /**
+   * 续跑当前回合（`/continue`）：**不插 user 消息**，直接在当前 tip 下开一个新回合。
+   *
+   * 为什么需要：超时 / 网络错误 / 轮数上限停下之后，想接着干就只能再发一句「继续」。
+   * 那句话作为真实历史进 `messages`、进会话文件、进下一次请求 —— 模型每被续一次，
+   * 上下文里就多一句废话。而用户要的只是「从停下的地方再跑一次」。
+   *
+   * 与 `user.message` 的差别只在**那一条消息**：装载节点、模型变更那一笔、计数器归零、
+   * 相位都在这里做；回合容器照旧交给 `turn.start`（它与 user.message 同一分工）。
+   *
+   * 守卫与 `/compact` 同一口径：
+   * - 跑着时不许续 —— 会多开一条并行的环，两条流写同一份 messages；
+   * - 压缩期间不许续 —— 压缩要整份换 messages，正跑着的请求回来会找不到自己的 toolCall；
+   * - 一条消息都没有不许续 —— 没有可续的上下文，模型只能凭空开口（或直接 400）。
+   *
+   * 另外会把「停在工具调用中途」的尾巴补完整（进程被杀时最后一条常是带 toolCall、没有
+   * toolResult 的 assistant）—— 见 `repairTailToolCalls()`。
+   *
+   * 被守卫拦下时**原样返回**：接线会根据相位判断起不起步（见 `turn.continue` 那条）。
+   */
+  'turn.continue': (state) => {
+    if (state.phase !== 'idle') return state;
+    if (state.compacting) return state;
+    if (state.messages.length === 0) return state;
+    const now = Date.now();
+    // 与 user.message 同一顺序：先补装载节点，再补「换过模型 / 档位」那一笔。
+    // 恢复出来的会话可能没有轨迹文件（`traceBegun` 假）—— 这条续跑就是它第一次留痕，
+    // 得把装载节点补上，否则树上直接冒出一个没头的回合。
+    const begun = beginTrace(state, now);
+    const withModel = flushModelChange({ ...state, trace: begun }, now);
+    // 停在工具调用中途（进程被砍的典型现场）：补一条「工具没返回结果」，否则下一个请求
+    // 就是非法消息序列。只在末尾追加，理由见 `repairTailToolCalls()`。
+    const repaired = repairTailToolCalls(withModel.messages);
+    return {
+      ...withModel,
+      traceBegun: true,
+      phase: 'thinking',
+      messages: repaired ?? withModel.messages,
+      error: null,
+      errorNodeId: null,
+      errorKind: null,
+      // 上一回合的收工理由作废：这一轮还没停。
+      stopReason: null,
+      stopCause: null,
+      stopCauseDetail: null,
+      aborted: false,
+      // 新回合的计数器归零（含 `turns` —— 否则撞过轮数上限的会话续跑第一步就又被砍）。
+      ...newTurnCounters(),
+      streamingText: '',
+      thinkingText: '',
+      pendingToolCalls: [],
+      executing: [],
+      openLlmNodeId: null,
+      openStepNodeId: null,
+      // **不填 openTurnNodeId**：容器由 `turn.start` 开（与 user.message 同一条规则）。
+      openTurnNodeId: null,
     };
   },
 
@@ -1772,6 +1884,7 @@ export function loopWiring(table: {
   | 'user.message'
   | 'turn.start'
   | 'turn.end'
+  | 'turn.continue'
   | 'step.start'
   | 'step.end'
   | 'agent.run'
@@ -1817,6 +1930,23 @@ export function loopWiring(table: {
       if (state.openTurnNodeId === null) return [];
       return [startStep()];
     },
+
+    /**
+     * 续跑：与 `user.message` 同一条起步（`turn.start` 自带 `step.start` + `agent.run`），
+     * 只是没有那条 user 消息。
+     *
+     * 判据必须同时看三样，与迁移的守卫一一对应：
+     * - `phase === 'thinking'`：迁移接受时才会把相位推离 idle；
+     * - `openTurnNodeId === null`：已经跑着的回合容器开着（被相位挡掉那种）；
+     * - `!compacting`：压缩中同样被挡（那时相位仍是 idle，只是多一层保险）。
+     *
+     * 只看相位会把「跑着时又敲了一次 /continue」当成接受 —— `turn.start` 的防重入
+     * 守卫会吞掉它，但那是空转一圈才被吞，而这里就该直接不发。
+     */
+    'turn.continue': (_action, state) =>
+      state.phase === 'thinking' && state.openTurnNodeId === null && !state.compacting
+        ? [redispatch({ type: 'turn.start' })]
+        : [],
 
     // step.start 只开容器；调 LLM 的 Cmd 在 startStep() 里与它一起发出。
     'step.start': () => [],

@@ -26,7 +26,7 @@ reducer 里没有一个 `await`、没有一个 `fetch`。真正干活的 `Cmd.ru
 | 接线（effects） | `reducer.ts` 的 `loopWiring` | action → Cmd[]（纯数据，无 `if`） |
 | effect 表 | `effects.ts` 的 `createPiAiEffectTable` | `agent.run` / `tool.call` 的真正实现 |
 
-15 种 action 里，`transitions` 全部有对应项。其中 **`llm.giveup` 目前没有任何地方 dispatch**
+36 种 action 里，`transitions` 全部有对应项。其中 **`llm.giveup` 目前没有任何地方 dispatch**
 （`llm.failed` 在重试用尽时直接把相位推到 `idle` 就够了），留着是给「显式收工」用的备用口。
 
 ## 环上每一步
@@ -47,6 +47,7 @@ reducer 里没有一个 `await`、没有一个 `fetch`。真正干活的 `Cmd.ru
 | `llm.failed`（可重试且还有次数） | 开 `error` 节点、**关掉这个 step**，**相位留在 `thinking`** | `Cmd.action(step.start)` + `agent.run`（重试是**兄弟** step） |
 | `llm.failed`（重试用尽 / 不可重试） | 开 `error` 节点，关掉 step，相位 → `idle` | `Cmd.action(turn.end)` |
 | `turn.end` | 关掉回合容器（**推进 tip**）；队列里还有 followUp 则**接着开新回合** | 无（`turn.start` 由迁移直接开） |
+| `turn.continue` | **不追加消息**：相位 → `thinking`、计数器归零、清掉上一次的收工理由 | `Cmd.action(turn.start)`（与 `user.message` 同一条起步，只少那条消息） |
 | `queue.input` | 运行中则入队；**空闲时直接转成 `user.message`** | 转 user.message 时：`Cmd.action(turn.start)` |
 | `queue.delivered`（steer） | 插入 user 消息，节点挂在**当前回合容器**下，**不开新回合** | `step.start` + `agent.run` |
 | `queue.delivered`（followUp） | 插入 user 消息，**关掉旧回合 + 开新回合** | 有下一条 followUp 时 `Cmd.action(turn.start)` |
@@ -139,6 +140,29 @@ action，所以不会漏。
 注意 `turns` 数的是**LLM 调用次数**，不是工具调用次数：一次 `llm.done` 加 1，
 哪怕这一轮并行发了 5 个工具调用。`user.message` 时归零，所以它管的是「一个用户消息 + ReAct 循环」。
 需要兜底时用 `--max-turns <n>`。
+
+## 续跑（`/continue`）
+
+超时 / 网络错误 / 轮数上限把回合停下之后，想接着干以前只能再发一句「继续」。那句话会作为
+**真实历史**进 `messages`、进会话文件、进下一次请求 —— 模型每被续一次，上下文里就多欠一句废话。
+
+`/continue` dispatch 一条 `turn.continue`，它做的是 `user.message` 的全部事情，**只少那条 user 消息**：
+
+- 相位 `idle → thinking`，清掉 `error` / `stopReason` / `stopCause`；
+- `newTurnCounters()` 归零（其中 `turns` 归零很重要：撞过轮数上限的会话，不归零的话续跑第一步就又被砍）；
+- 接线发 `turn.start`（它自带 `step.start` + `agent.run`），于是在当前 tip 下开一个新回合。
+
+三条守卫：环在跑时不接（会开第二条并行的环）、压缩期间不接（`messages` 正要整份换掉）、
+一条消息都没有不接（没有可续的上下文）。被挡掉时迁移原样返回，接线按相位与
+`openTurnNodeId` 就能分辨「真的接了」还是「被守卫挡了」。
+
+恢复会话（`ela --session <id>`）后同理：恢复只搬消息，不会自动再调模型 —— 接着跑被打断的那一轮
+也是这条命令。
+
+进程被外部超时杀掉时，最后一条常是「带 `toolCall`、没有 `toolResult`」的 assistant（工具跑到一半）——
+`turn.continue` 会在**末尾**补一条 `isError` 的 toolResult（「上次运行在这里被中断」），否则第一个
+请求就会被 provider 以非法消息序列拒掉。只补末尾：中插会让会话记录器的「已写条数」游标错位，
+把末尾几条当成新消息重写一遍。
 
 ## 相关
 

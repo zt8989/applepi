@@ -86,3 +86,14 @@ test('parseClientMessage：text 不是字符串就整条丢掉（附件的 text 
   assert.equal(parseClientMessage('{"type":"prompt","text":42}'), undefined);
   assert.deepEqual(parseClientMessage('{"type":"prompt","text":""}'), { type: 'prompt', text: '' });
 });
+
+test('parseClientMessage：continue / compact 只认形状（多余字段丢掉）', () => {
+  // 续跑与压缩都不带参数：`/continue 继续`、`/compact 现在` 里那个人话 arg 不该变成协议字段。
+  assert.deepEqual(parseClientMessage('{"type":"continue"}'), { type: 'continue' });
+  assert.deepEqual(parseClientMessage('{"type":"continue","text":"继续"}'), { type: 'continue' });
+  assert.equal(parseClientMessage('{"type":"Continue"}'), undefined);
+  assert.deepEqual(parseClientMessage('{"type":"compact"}'), { type: 'compact' });
+  assert.deepEqual(parseClientMessage('{"type":"compact","reason":"threshold"}'), {
+    type: 'compact',
+  });
+});

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createAgentStore } from '@ela/core/store';
+import { createAgentStore, waitForIdle } from '@ela/core/store';
 import { createFauxRuntime, demoResponses } from '@ela/core/provider';
 import { createTraceTree } from '@ela/core/trace';
 import type { Api, Model } from '@earendil-works/pi-ai';
@@ -678,6 +678,58 @@ test('bridge：resumeSession 交给内核回调；环在跑时先拒绝', async 
     assert.equal(refused[0]?.type, 'notice');
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(calls.length, 1, '跑着的时候一次都没转给内核');
+  } finally {
+    await ctx.dispose();
+  }
+});
+
+/**
+ * `/continue`（浏览器里）：**不追加用户消息**，只让服务端从当前上下文再跑一次。
+ *
+ * 与 `prompt` 的区别正是这条测试的意义：都是「模型开始回答」，但续跑不该在对话里
+ * 凭空多出一句 user —— 那句「继续」会进会话文件、进下一次请求。
+ */
+test('bridge：continue 续跑当前上下文，不追加一条「继续」', async () => {
+  const ctx = await start();
+  try {
+    // 空会话：拒绝并说清原因（不假装成功，也不给 provider 发一个空请求）。
+    const refused = ctx.bridge.handle({ type: 'continue' });
+    assert.equal(refused[0]?.type, 'notice');
+
+    ctx.store.dispatch({
+      type: 'conversation.restored',
+      sessionId: 'web-test-session',
+      messages: [{ role: 'user', content: '在吗', timestamp: 1 }],
+    });
+    // `start()` 里排好的 demo 回合（先调工具、再回答）还没被消费，正好给这次续跑用。
+    assert.deepEqual(ctx.bridge.handle({ type: 'continue' }), []);
+
+    const state = await waitForIdle(ctx.store);
+    assert.equal(state.stopCause, 'completed');
+    assert.equal(
+      state.messages.filter((message) => message.role === 'user').length,
+      1,
+      '续跑不该多出一句 user（那正是 /continue 与普通提问的区别）',
+    );
+  } finally {
+    await ctx.dispose();
+  }
+});
+
+/**
+ * `/compact`（浏览器里）：压缩要整份换掉 `messages`，所以环在跑时必须先拒绝 ——
+ * 拒绝理由要说清（与 TUI 同一口径），而不是静默无反应。
+ */
+test('bridge：compact 环在跑时被拒（不会换掉正在使用的 messages）', async () => {
+  const ctx = await start();
+  try {
+    ctx.store.dispatch({ type: 'user.message', text: '跑起来' });
+    const refused = ctx.bridge.handle({ type: 'compact' });
+    const notice = refused[0];
+    assert.equal(notice?.type, 'notice');
+    if (notice?.type === 'notice') assert.equal(notice.level, 'warn');
+    assert.equal(ctx.store.getState().compacting, false, '被拒时不该留下「压缩中」');
+    await waitForIdle(ctx.store);
   } finally {
     await ctx.dispose();
   }

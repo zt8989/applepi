@@ -922,8 +922,13 @@ export interface ElaSlashCommand {
  * `trust`（本项目没有「项目级、需信任才加载」的资源）、`login` / `logout`（鉴权在 pi 那边配）、
  * `reload`（装载发生在内核装配那一刻，没有热重载入口）。
  *
- * 本项目有、pi **没有**的只剩 `/skills`：`disable-model-invocation` 与重装 prompt 都能让「磁盘上
- * 有、模型不知道」，会话中途能查一次是必要的诊断。
+ * 本项目有、pi **没有**的只剩两条：
+ *
+ * - `/skills`：`disable-model-invocation` 与重装 prompt 都能让「磁盘上有、模型不知道」，
+ *   会话中途能查一次是必要的诊断。
+ * - `/continue`：超时 / 网络错误 / 轮数上限停下后接着跑，**不插一条「继续」**。
+ *   恢复会话（`/resume` / `ela --session`）后接着跑被打断的那一轮也用它 —— 不然用户只能
+ *   再发一句「继续」，而那句话会被当成真实对话历史写进会话文件。
  */
 export const SLASH_COMMANDS: ElaSlashCommand[] = [
   { name: 'settings', description: 'Open settings menu', web: true },
@@ -950,8 +955,13 @@ export const SLASH_COMMANDS: ElaSlashCommand[] = [
   { name: 'session', description: 'Show session info and stats' },
   { name: 'hotkeys', description: 'Show all keyboard shortcuts' },
   { name: 'new', description: 'Start a new session' },
-  { name: 'compact', description: 'Manually compact the session context' },
+  { name: 'compact', description: 'Manually compact the session context', web: true },
   { name: 'resume', description: 'Resume a different session' },
+  {
+    name: 'continue',
+    description: 'Continue the interrupted turn without a new user message',
+    web: true,
+  },
   { name: 'quit', description: 'Quit ela' },
 ];
 
@@ -2805,6 +2815,39 @@ export async function runTui(options: TuiOptions): Promise<number> {
         // 那时才说「压掉了多少」。先报一句「开始了」再报一句「压了多少」是重复，
         // 而且失败时用户会同时看到两条矛盾的话。
         refresh();
+        return;
+      }
+      case 'continue': {
+        // 从「停下的地方再跑一次」：**不插 user 消息**（理由见 core 的 `turn.continue`）。
+        //
+        // 三种情况不续：跑着（会开第二条并行的环）、压缩中（messages 正要整份换掉）、
+        // 一条消息都没有（没有可续的上下文）。
+        const snapshot = store.getState();
+        if (snapshot.phase !== 'idle') {
+          notify(yellow(`上一回合还在跑，先按 ${keyLabel('app.interrupt')} 中断再续跑`));
+          return;
+        }
+        if (snapshot.compacting) {
+          notify(yellow('正在压缩上下文，压完再续跑'));
+          return;
+        }
+        if (snapshot.messages.length === 0) {
+          notify(dim('这个会话还没有消息 —— 先聊一句，/continue 才有可续的回合'));
+          return;
+        }
+        // 与 send() 同一个门：扩展还没装载完就开跑，这一轮会用「没有扩展」的工具集与
+        // prompt —— 而那正是恢复会话后最不该发生的一次请求。
+        if (sending) return;
+        sending = true;
+        void (async () => {
+          try {
+            await ready;
+          } finally {
+            sending = false;
+          }
+          store.dispatch({ type: 'turn.continue' });
+          refresh();
+        })();
         return;
       }
       case 'new': {
