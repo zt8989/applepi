@@ -3397,9 +3397,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
     // 一次性模式没有终端尺寸（不走 TUI），给 0 = 不折行、不截断（truncateToWidth 的约定）。
     //
     // **必须剥掉控制序列**：这一段是管道/重定向的接收方，拿到 OSC 8 超链接（文件路径那行
-    // `]8;;file:///…\…]8;;`）只会得到一团乱码。官方渲染器对文件路径默认加超链接
-    // （`renderToolPath` → `linkPath`），而 `getCapabilities().hyperlinks` 在
-    // 「终端没被认出来」时是 true，所以管一次输出才靠谱。
+    // `]8;;file:///…\…]8;;`）只会得到一团乱码。官方渲染器对文件路径加超链接
+    // （`renderToolPath` → `linkPath`），而那是按**终端能力**自动判的 —— 在 iTerm2 / VSCode /
+    // Warp / Windows Terminal 这些被认出来的终端里为真，所以不能指望它关着。
     // 注意是连 OSC 133 区域标记一起剥 —— pi-tui 的 `stripTerminalSequences` 两者都吃。
     const plain = stripTerminalSequences(renderTranscript(store.getState(), 0, 0, true));
     process.stdout.write(`${plain}\n`);

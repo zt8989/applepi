@@ -11,6 +11,9 @@ import {
   matchesKey,
   getKeybindings,
   setKeybindings,
+  getCapabilities,
+  setCapabilities,
+  resetCapabilitiesCache,
 } from '@earendil-works/pi-tui';
 import { formatCwdForFooter } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js';
 import {
@@ -768,12 +771,20 @@ test('工具块上方本来就有空隙（用户块现在与它们一致了）',
 test('一次性模式（管道输出）不吐控制序列：OSC 8 超链接会被终端当乱码', () => {
   // 官方渲染器给文件路径加超链接（renderToolPath → linkPath），而管道里那些
   // `]8;;file:///…\…]8;;` 是**肉眼可见的乱码**。一次性模式承诺的是「纯文本」。
-  const state = toolState({ toolName: 'read', args: { path: 'package.json' } });
-  const raw = renderTranscript(state, 0, 0, false);
-  assert.ok(raw.includes('\x1b]8;'), `前置条件：确实产生了超链接，实际没有：${JSON.stringify(raw)}`);
-  const plain = stripTerminalSequences(raw);
-  assert.ok(!plain.includes('\x1b]'), `剥完不该还有 OSC 序列：${JSON.stringify(plain)}`);
-  assert.ok(plain.includes('read package.json'), `内容要还在：${plain}`);
+  //
+  // 超链接是按**终端能力**自动判的（pi-tui 对未知终端取保守值 false），所以在测试里显式打开：
+  // 不打开的话这条用例在 CI / 无 `TERM_PROGRAM` 的环境里根本走不到渲染路径。
+  setCapabilities({ ...getCapabilities(), hyperlinks: true });
+  try {
+    const state = toolState({ toolName: 'read', args: { path: 'package.json' } });
+    const raw = renderTranscript(state, 0, 0, false);
+    assert.ok(raw.includes('\x1b]8;'), `前置条件：确实产生了超链接，实际没有：${JSON.stringify(raw)}`);
+    const plain = stripTerminalSequences(raw);
+    assert.ok(!plain.includes('\x1b]'), `剥完不该还有 OSC 序列：${JSON.stringify(plain)}`);
+    assert.ok(plain.includes('read package.json'), `内容要还在：${plain}`);
+  } finally {
+    resetCapabilitiesCache();
+  }
 });
 
 test('主题：没配 theme 时跟随终端深浅色（写死 dark 会让浅色终端出现黑底块）', () => {
