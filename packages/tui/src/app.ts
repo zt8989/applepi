@@ -3774,8 +3774,10 @@ function renderAssistant(
   if (visible.length === 0) {
     // 纯工具调用消息：工具块自己显示错误，但 `length`（截断）仍要在这条消息上
     // 说一句（与 pi 一致：截断可能发生在工具调用完成之前）。
+    // 有收尾说明时 pi 是无条件 `Spacer(1)` + 文字 —— 消息本身没画东西也一样，
+    // 空行不能省：否则「操作已中止」会顶在前一块（工具卡/用户消息）正下面。
     const tail = stopNoticeLine(content, stop);
-    return tail !== undefined ? tail : [];
+    return tail !== undefined ? ['', ...tail] : [];
   }
   const message = {
     role: 'assistant',
@@ -3804,6 +3806,11 @@ function renderAssistant(
 }
 
 /**
+ * 中止时 provider 侧的占位原文（无信息量，不当成「具体原因」透传，见 `stopNoticeLine`）。
+ */
+const ABORT_PLACEHOLDER_RE = /^Request( was)? aborted\.?$/;
+
+/**
  * 助手消息的收尾行（空行由调用方补）。形状照抄 pi 的组件：`length` 一句、
  * `aborted` / `error` 各一句（都没有工具调用时才画 —— 工具的错误由工具块显示）。
  */
@@ -3818,9 +3825,15 @@ function stopNoticeLine(
   const errorMessage = stop?.errorMessage;
   if (reason === 'length') return [theme.fg('error', t('assistant.truncated'))];
   if (reason === 'aborted') {
-    // 与 pi 同一个判断：provider 的占位原文不算「具体原因」。
+    // 与 pi 同一个判断：provider 的占位原文不算「具体原因」。pi 只排了
+    // `Request was aborted` 一种，但中止占位原文实际有三种 —— pi-ai 自建的
+    // `createAbortError()` 是 `Request aborted`（provider-retry），部分 provider
+    // 路径是 `Request was aborted`，OpenAI SDK 的默认中止错误还带句号。都是
+    // 「被喊停了」，没有信息量，不该当成原因透传。
     const specific =
-      errorMessage !== undefined && errorMessage !== '' && errorMessage !== 'Request was aborted'
+      errorMessage !== undefined &&
+      errorMessage !== '' &&
+      !ABORT_PLACEHOLDER_RE.test(errorMessage)
         ? t('assistant.abortedWithReason', { reason: errorMessage })
         : t('assistant.aborted');
     return [theme.fg('error', specific)];
