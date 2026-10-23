@@ -64,9 +64,8 @@ type TransitionHandlers = {
  * 仍然是超时前那个节点的 id —— 在 turn 容器下面长出 git 那样的分叉。
  */
 function openStepNode(state: AgentState, now: number): { state: AgentState; node: TraceNode } {
-  const attempt = state.llmAttempts + 1;
-  // 「重试」= 本次 step 不是第一次尝试（第一次失败后接线又发了 agent.run）。
-  const retry = attempt > 1;
+  // 重试不再开新容器（`llm.failed` 在原容器上原地重试），所以走到这里的永远是「新的一步」
+  // （回合起步、工具批次后的下一轮），不是「重试」。
   // step 挂到 **turn 节点**下面（而不是 tip）—— 这是新层级里唯一需要改的地方：
   // 工具结果会推进 tip（tool.result 在集合里），若 step 也挂 tip，
   // 第二个 step 就会挂到第一个 step 的 tool.result 底下，层数无法控制。
@@ -74,7 +73,7 @@ function openStepNode(state: AgentState, now: number): { state: AgentState; node
   const stepIndex = state.stepIndex + 1;
   const { tree, node } = appendNode(state.trace, parentId, 'step.start', {
     status: 'pending',
-    label: retry ? `第 ${stepIndex} 步（重试）` : `第 ${stepIndex} 步`,
+    label: `第 ${stepIndex} 步`,
     meta: { provider: state.providerName, model: state.modelId },
     createdAt: now,
   });
@@ -85,8 +84,11 @@ function openStepNode(state: AgentState, now: number): { state: AgentState; node
       openLlmNodeId: node.id,
       openStepNodeId: node.id,
       stepIndex,
-      llmAttempts: attempt,
-      retrying: retry,
+      // 尝试计数从 1 起步：这是这个容器里的第一次尝试。重试由 `llm.failed`
+      // 在**同一个容器**上 +1 —— 重试预算因此是「每个 step 各自的预算」，
+      // 不会像旧实现那样被回合内前面的 step 吃掉。
+      llmAttempts: 1,
+      retrying: false,
       // 这个 step 里已经完成的工具数（step.end 要用它写节点标签）。
       stepToolCalls: 0,
     },
@@ -199,8 +201,8 @@ function newTurnCounters(): Pick<
 /**
  * 失败：在 attempt 下挂一个 error 节点。
  *
- * 注意 error 节点**不推进 tip**（见 trace.ts 的 TIP_ADVANCING_KINDS）—— 所以下一次重试开的新 attempt，
- * parent 拿到的仍然是超时前那个节点，于是树长成 git 那样的分叉，而不是「错误的子节点才是正史」。
+ * 注意 error 节点**不推进 tip**（见 trace.ts 的 TIP_ADVANCING_KINDS）—— 所以下一次重试的产出
+ * 仍然挂在同一个 step 容器里，而不是「错误的子节点才是正史」。
  */
 function closeLlmFailure(
   state: AgentState,
@@ -210,19 +212,20 @@ function closeLlmFailure(
   /** effect 告诉我们的节点 id（它知道自己开的是哪个 step）。 */
   nodeId: string | null,
   cause: StopCause,
+  /** 还要重试：容器保持开着（不打闭合标记），error 只是它的一个孩子。 */
+  willRetry: boolean,
 ): AgentState {
   // **effect 若带了自己的 nodeId，以它为准**（与旧代码一致）。
   //
-  // 为什么要这个优先级：step 容器**会被重开**。一次重试开的是新的兄弟 step，而失败的
-  // 那一步早已关掉（`llm.failed` 里的 `closeStepNode`）—— 于是到下一次失败时
-  // `openStepNodeId` 可能已经指向**下一个** step 或是 null。若无脑用 state 里的那个，
-  // error 节点会被挂到错误的父下（症状：树分叉位置对不上，且不报错）。
-  // effect 手里握着自己开的那一步，所以它的说法更权威。
+  // 为什么要这个优先级：工具批次的失败走这里时 `openStepNodeId` 已是 null，
+  // 而 effect 手里握着自己发起调用的那个节点，所以它的说法更权威。
   const openId = nodeId ?? state.openStepNodeId;
   let { trace } = state;
   // 用户自己按停止不是故障：标成 aborted（灰的），别和真错误（红的）混为一谈。
   const status = kind === 'aborted' ? 'aborted' : 'error';
-  if (openId) trace = patchNode(trace, openId, { status, endedAt: now });
+  // 容器的闭合标记只在**真的收工**时打：重试时容器还开着，打了 status/endedAt
+  // 树就会把还开着的容器画成已闭合，时长也停在第一次失败的那一刻。
+  if (openId && !willRetry) trace = patchNode(trace, openId, { status, endedAt: now });
   const { tree, node } = appendNode(trace, openId, 'error', {
     status,
     label: error,
@@ -232,7 +235,15 @@ function closeLlmFailure(
     createdAt: now,
     endedAt: now,
   });
-  return { ...state, trace: tree, openLlmNodeId: null, errorNodeId: node.id, errorKind: kind };
+  return {
+    ...state,
+    trace: tree,
+    // 重试时容器还开着，尝试节点仍是它（下一次 attempt 的产出继续挂它下面）；
+    // 收工时置空，与 `closeStepNode` 的语义对齐。
+    openLlmNodeId: willRetry ? openId : null,
+    errorNodeId: node.id,
+    errorKind: kind,
+  };
 }
 
 /**
@@ -1085,6 +1096,8 @@ const transitions: TransitionHandlers = {
    */
   'step.start': (state) => {
     // 防重入：上一个 step 还开着时不要又开一个。
+    // 重试不走这里（容器一直开着，接线只补 agent.run），所以这个守卫现在
+    // 只挡「容器已开时又来一条 step.start」的重复起步。
     if (state.openStepNodeId !== null) return state;
     let base = state;
     // **先把上一个回合收尾（幂等）。**
@@ -1106,14 +1119,7 @@ const transitions: TransitionHandlers = {
     const opened = openStepNode(base, Date.now());
     return {
       ...opened.state,
-      // **重试要清掉上一次的错误**。
-      //
-      // 为什么这里要清（`agent.run` 也会清）：重试路径是
-      // `llm.failed →（接线）step.start → agent.run`，而 `agent.run` 的守卫是
-      // 「phase 为 thinking 且 step 已开着就返回」。这一步已经把 step 开上了，
-      // 于是 `agent.run` 走进那条守卫直接返回 —— 它清不掉 error。
-      //
-      // 留着不清的症状是「重试已经成功，底栏还挂着上一条超时红字」。
+      // 新的一步从干净状态开始（上一条失败的红字不该带进新容器）。
       error: null,
       errorNodeId: null,
       errorKind: null,
@@ -1249,27 +1255,50 @@ const transitions: TransitionHandlers = {
   /**
    * 失败。**错误在这里也变成树上的一节点**，而且它不推进 tip。
    *
-   * 可重试且还有次数时，相位**保持 thinking**：接线看到 thinking 就再发一条 agent.run，
-   * 而 agent.run 开的新 attempt 挂回同一个父节点 —— 于是「重试」在树上就是一次分叉。
-   * 这就是需求里「尝试调用的父 id 指向超时前的节点」的实现。
+   * 可重试且还有次数时，相位**保持 thinking**，接线只再发一条 agent.run：
+   * 下一次尝试的产出继续挂进**当前这个 step 容器** —— 一次超时、断连怎么重试，
+   * 树上都是一个容器装着全部尝试，而不是每个失败各开一个兄弟 step。
    */
   'llm.failed': (state, action) => {
     const kind: LlmErrorKind = action.kind ?? 'unknown';
     const cause = causeFromKind(kind, action.cause);
-    const closed = closeLlmFailure(state, Date.now(), action.error, kind, action.nodeId ?? null, cause);
     // 只有一个确实在跑的 step 才谈得上「重试」；工具批次的失败走这里时 openStepNodeId 已是 null。
     const wasLlmAttempt = state.openStepNodeId !== null;
     const canRetry =
-      wasLlmAttempt && isRetryable(kind) && closed.llmAttempts < closed.maxLlmAttempts;
-    // **无论要不要重试，都得先关掉这个 step 容器** —— 失败的那一步已经结束了。
-    //
-    // 为什么要重试也关：重试在树上长成的是**兄弟**（同一个 turn 下的另一个
-    // `step.start`），而不是同一个容器的第二次尝试。否则树会长成
-    // 「一个 step 里挤着两次尝试」，而失败与重试哪个在前就再也分不清了 ——
-    // 那正是原先 git 分叉语义要表达的东西。
-    //
-    // 而 `step.start` 的防重入守卫靠的正是 `openStepNodeId === null`，不关它，
-    // 重试开的新 step 会被直接丢掉（环停在 thinking，用户看到「卡住了」）。
+      wasLlmAttempt && isRetryable(kind) && state.llmAttempts < state.maxLlmAttempts;
+    const closed = closeLlmFailure(
+      state,
+      Date.now(),
+      action.error,
+      kind,
+      action.nodeId ?? null,
+      cause,
+      canRetry,
+    );
+    if (canRetry) {
+      // **重试不开新容器**：error 已经作为孩子挂进当前 step 容器，容器保持开着。
+      // 原来尝试计数由 step.start 开新容器时 +1，现在容器不重开，就在这里 +1 ——
+      // 下一次失败时 `llmAttempts < maxLlmAttempts` 的判据才能数对。
+      return {
+        ...closed,
+        llmAttempts: closed.llmAttempts + 1,
+        phase: 'thinking',
+        // 与旧路径同口径：重试开始就清掉上一条失败的红字（error 卡仍在树上）。
+        error: null,
+        errorNodeId: null,
+        errorKind: null,
+        retrying: true,
+        streamingText: '',
+        thinkingText: '',
+        executing: [],
+        aborted: false,
+        // 还要重试 = 这一轮**没停**，别让界面以为收工了。
+        stopReason: null,
+        stopCause: null,
+        stopCauseDetail: null,
+      };
+    }
+    // 不重试（重试用尽 / 不可重试 / 工具批次失败）= 这一步真的结束，关掉容器。
     const withStep = closeStepNode(
       closed,
       Date.now(),
@@ -1277,20 +1306,19 @@ const transitions: TransitionHandlers = {
     );
     return {
       ...withStep,
-      phase: canRetry ? 'thinking' : 'idle',
+      phase: 'idle',
       error: action.error,
       errorKind: kind,
       errorNodeId: closed.errorNodeId,
-      retrying: canRetry,
+      retrying: false,
       streamingText: '',
       thinkingText: '',
       executing: [],
       aborted: kind === 'aborted',
-      // 还要重试 = 这一轮**没停**，别让界面以为收工了。
-      stopReason: canRetry ? null : kind === 'aborted' ? 'aborted' : 'error',
-      // 还要重试 = 还没停，原因留空；真停了就记**具体**原因（用户手动 / 超时 / 鉴权…）。
-      stopCause: canRetry ? null : cause,
-      stopCauseDetail: canRetry ? null : stopCauseText(cause),
+      // 真停了就记**具体**原因（用户手动 / 超时 / 鉴权…）。
+      stopReason: kind === 'aborted' ? 'aborted' : 'error',
+      stopCause: cause,
+      stopCauseDetail: stopCauseText(cause),
     };
   },
 
@@ -2031,14 +2059,13 @@ export function loopWiring(table: {
      * 失败后要不要重试。reducer 已经判好了：`state.retrying` 为真就说明「可重试且还有次数」，
      * 并且它把相位留在了 thinking（所以环没闭合，waitForIdle 不会提前返回）。
      *
-     * 这里补一个 step.start（它自带 agent.run），环就自己转起来了；新 step 会挂在
-     * **同一个 turn 节点**下，因为失败没有推进 tip —— 树上于是长出一根分叉，
-     * 和 git log --graph 一个形状。
+     * 重试的 step 容器**已经开着**（迁移不再关它），所以这里只补一条 agent.run 让环转起来：
+     * 下一次尝试的产出继续挂进同一个容器。不再发 step.start —— 容器已开，发了也会被防重入守卫吞掉。
      *
      * 不重试（重试用尽 / 不可重试）= 这一步结束。队列里有东西就继续，没有才关回合。
      */
     'llm.failed': (_action, state) => {
-      if (state.retrying) return [startStep()];
+      if (state.retrying) return [redispatch({ type: 'agent.run' })];
       return [closeTurn()];
     },
 

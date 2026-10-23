@@ -1,13 +1,13 @@
 /**
  * 轨迹树（trace tree）—— 像 git log 一样的一次尝试一节点的结构。
  *
- * 想法照搬 git：执行历史不是一条线而是一棵树（节点有 parentId，重试就是分支，`tipId` 是
+ * 想法照搬 git：执行历史不是一条线而是一棵树（节点有 parentId，`tipId` 是
  * 「最后一条成功闭合的节点」）。
  *
- * 最关键的一点：**attempt 节点的 parent 取的是「发起时」的 tip，而不是它自己产生的失败结果。**
- * 所以「第 1 次超时 → 记一个 error 节点（不推进 tip）→ 重试」的两次尝试是**兄弟**，树上长成
- * 分叉。若错误节点推进了 tip，第二次尝试就会挂在错误节点底下 —— 那等于说「错误的子节点才是
- * 正确的历史」，不是 git 的语义。
+ * 最关键的一点：**error 节点不推进 tip**，后续尝试的产出与它平级、顺序即先后 ——
+ * 所以重试（连同它的多次失败）都包在**同一个 step 容器**里，树上不长分叉。
+ * 若错误节点推进了 tip，后续产出就会挂在错误节点底下 —— 那等于说「错误的子节点才是
+ * 正确的历史」，不是想要的表达。
  *
  * 本文件是纯函数：没有 IO、没有 `Date.now()`、没有随机数。同一个 action 序列必然产出同一棵树，
  * 所以树能在 reducer 里算、能在测试里断言、也能从 JSONL 回放重建。
@@ -166,11 +166,11 @@ function nextNodeId(tree: TraceTree): { id: string; seq: number } {
 
 /**
  * 只有这几类节点推进 tip。**容器（turn.* / step.start）永远不推进** ——
- * 它们是分叉的容器，闭合点是里面的 result / error / turn.end 子节点。
+ * 它们是区间的起点，闭合点是里面的 result / error / turn.end 子节点。
  *
- * 这条规则正是「重试的父 id 指向超时前的节点」的根本原因：失败的 step 容器自己不闭合，
- * 挂在它下面的 error 节点也不闭合（error 不在这个集合里），
- * 于是 tip 原地不动，下一次尝试的 parent 仍然取到超时前那个节点。
+ * 这条规则正是「重试的产出与失败平级、全在同一个容器里」的根本原因：
+ * 挂在容器下的 error 节点不推进 tip（error 不在这个集合里），
+ * 于是后续尝试的产出与失败排在同一层，顺序即先后。
  */
 const TIP_ADVANCING_KINDS: ReadonlySet<TraceNodeKind> = new Set<TraceNodeKind>([
   'user',
@@ -327,7 +327,7 @@ export function traceStats(tree: TraceTree): TraceStats {
     if (node.kind === 'turn.start') turns += 1;
     // 步数 = `step.start` 的个数 —— 同理，与「轮」同口径：「**开始调模型**就是一步」。
     //
-    // 重试会另开一个 step，所以「步」> 「轮」里的 ReAct 循环长度（含重试）；两个数一起看才说得清。
+    // 每个 step 容器计一步（重试不换容器，步数就是 ReAct 循环长度；重试单独看 retries）。
     if (node.kind === 'step.start') steps += 1;
     if (node.kind === 'tool.result') toolCalls += 1;
     // 只数 kind==='error' 的**错误节点**。不能按 status 数：失败的容器节点本身也会被
@@ -335,36 +335,25 @@ export function traceStats(tree: TraceTree): TraceStats {
     if (node.kind === 'error') errors += 1;
     if (node.endedAt !== null) durationMs += node.endedAt - node.createdAt;
   }
-// 「重试」= 同一个父节点下有**多个 step 容器**。只数 step.start，**不能把 tool.call 算进来**：
-// 模型一轮里并行发两个工具时它们是同一个 llm.result 下的兄弟，按「多兄弟即重试」会虚增重试。
-//
-// 一遍扫描就够：「同父下已见过几个 step.start」与「那组里有没有失败」各按 parentId 分桶计数，
-// 于是不需要 `childrenOf()`（每次重扫 `tree.order`），也不需要事后 `filter` + `indexOf`
-// （同父下很多 step 时是 O(k²)，而那正是重试链的形状）。判据口径与渲染层 `isForkGroup` 一致。
+// 重试已改为**同一个 step 容器内原地重试**（不再开兄弟 step），所以口径是：
+// 容器内每个 error 孩子对应一次失败尝试；容器最终以成功收口时全部算重试，
+// 以失败/中止收口时最后一个 error 是收工本身，不算重试。
+// 一遍扫描分两桶：error 按 parentId 计数，再逐个 step 容器汇总。
   let retries = 0;
   if (steps > 0) {
-    /** parentId → 迄今见过的 step.start 个数。 */
-    const seenSteps = new Map<string, number>();
-    /** parentId → 那组里有没有失败过的 step。 */
-    const groupFailed = new Set<string>();
+    /** parentId → 容器内 error 孩子个数。 */
+    const errorsByParent = new Map<string, number>();
     for (const id of tree.order) {
       const node = tree.nodes[id];
-      if (!node || node.parentId === null) continue;
-      if (node.kind !== 'step.start') continue;
-      const parentId = node.parentId;
-      const seenBefore = seenSteps.get(parentId) ?? 0;
-      // index > 0：它是同父下的第 2 个及以后的尝试。
-      //
-      // **而且那组里必须有失败的** —— 一个回合里模型本来就会跑好几个 step
-      // （模型→工具→模型→工具…），那是**同一个回合的正常推进**，不是重试。
-      // 早期版本写成「同父下有多个 step.start 就是重试」，于是每个正常回合都虚增一次
-      // —— 而顶栏恰恰显示这个数，用户会看到「重试 3」却一次超时都没发生。
-      if (seenBefore > 0 && groupFailed.has(parentId)) retries += 1;
-      seenSteps.set(parentId, seenBefore + 1);
-      // 失败标记要在**本轮之后**才可能影响后面的兄弟 —— 同一个 step 自己失败了
-      // 不该把自己算成重试（它没有更早的兄弟）。而它失败要让**下一个** step 记上，
-      // 所以直接写在同一个循环里，顺序天然对。
-      if (node.status === 'error') groupFailed.add(parentId);
+      if (!node || node.kind !== 'error' || node.parentId === null) continue;
+      errorsByParent.set(node.parentId, (errorsByParent.get(node.parentId) ?? 0) + 1);
+    }
+    for (const id of tree.order) {
+      const node = tree.nodes[id];
+      if (!node || node.kind !== 'step.start') continue;
+      const failed = errorsByParent.get(id) ?? 0;
+      if (failed === 0) continue;
+      retries += node.status === 'ok' ? failed : Math.max(0, failed - 1);
     }
   }
 

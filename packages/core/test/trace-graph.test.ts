@@ -171,26 +171,24 @@ test('装载节点（prompt.* / model.init）平铺 —— 它们本来就并列
   }
 });
 
-test('重试：两个 step 块并排在轮的缩进里，各自 `└─` 收口', () => {
+test('重试：所有尝试包在同一个 step 容器里，error 与 result 依次排列', () => {
   const state = play(
     { type: 'user.message', text: '你好' },
     { type: 'turn.start' },
     { type: 'step.start' },
     { type: 'llm.failed', error: 'LLM 调用超时', kind: 'timeout' },
-    { type: 'step.start' },
+    // 重试不开新容器：没有第二条 step.start，下一次尝试直接发生在同一个容器里。
     { type: 'llm.done', message: assistantMessage([{ type: 'text', text: '好了' }], 'stop') },
   );
   const rendered = renderTree(state.trace, { maxWidth: 0 });
   console.log(`\n${rendered}\n`);
 
-  // 两个 step 容器是兄弟 → 同一个缩进（1 层），不是一个比一个深。
+  // 一个容器，error 与 result 都是它的孩子（同一层缩进，不是谁套谁）。
   assert.match(rendered, /^│  ○  n3 step\.start: 第 1 步/m);
-  assert.match(rendered, /^│  ○  n6 step\.start: 第 2 步（重试）/m);
-  // 各自的闭合点与自己的容器同列（`step.end` 先弹栈再画）。
-  assert.match(rendered, /^│  └─ n5 step\.end/m);
-  assert.match(rendered, /^│  └─ n8 step\.end/m);
-  // 失败那个的 error 孩子比它深一层。
   assert.match(rendered, /^│  │  ○  n4 error: LLM 调用超时/m);
+  assert.match(rendered, /^│  │  ○  n5 llm\.result: 好了/m);
+  // 容器用它自己的闭合点收口，失败与成功都在括号里面。
+  assert.match(rendered, /^│  └─ n6 step\.end/m);
   // user 在最左列（它不开缩进）。
   assert.match(rendered, /^○  n1 user: 你好/m);
 });
@@ -220,29 +218,28 @@ test('回合没有 turn.end 时，下一句话也要从最左列开始', () => {
 });
 
 test('树结构本身没变：缩进只影响画法，不影响父子关系', () => {
-  // 防「为了让界面好看把树改平了」—— 那会让 tip、重试的分叉、回放全失去意义。
+  // 防「为了让界面好看把树改平了」—— 那会让 tip、重试的顺序、回放全失去意义。
   const state = play(
     { type: 'user.message', text: '你好' },
     { type: 'turn.start' },
     { type: 'step.start' },
     { type: 'llm.failed', error: '超时', kind: 'timeout' },
-    { type: 'step.start' },
     { type: 'llm.done', message: assistantMessage([{ type: 'text', text: '好了' }], 'stop') },
   );
   const steps = state.trace.order.filter((id) => state.trace.nodes[id]?.kind === 'step.start');
   const userNode = state.trace.order[0] ?? '';
   const turnNode = state.trace.order[1] ?? '';
-  assert.equal(steps.length, 2);
-  // 两个 step 仍是**同一个父**（重试的 git 语义核心，见 trace.ts 的文件注释）。
+  assert.equal(steps.length, 1, '重试不开新容器，全程一个 step');
+  // step 仍挂在 turn 容器下面（重试不改变这个父子关系）。
   assert.equal(state.trace.nodes[turnNode]?.kind, 'turn.start');
   assert.equal(state.trace.nodes[turnNode]?.parentId, userNode, 'turn 挂在 user 下面');
   for (const id of steps) {
     assert.equal(state.trace.nodes[id]?.parentId, turnNode, '缩进不能动父子关系');
   }
-  // 成功后才推进 tip —— 而且推进的是 `llm.result`（n7），**不是**随后的 `step.end`。
-  assert.equal(state.trace.tipId, 'n7', 'tip 是 llm.result，不是 step.end');
-  assert.equal(state.trace.nodes['n7']?.kind, 'llm.result');
-  assert.equal(state.trace.nodes['n8']?.kind, 'step.end');
+  // 成功后才推进 tip —— 而且推进的是 `llm.result`（n5），**不是**随后的 `step.end`。
+  assert.equal(state.trace.tipId, 'n5', 'tip 是 llm.result，不是 step.end');
+  assert.equal(state.trace.nodes['n5']?.kind, 'llm.result');
+  assert.equal(state.trace.nodes['n6']?.kind, 'step.end');
 });
 
 test('所有节点都是 `○` —— tip 不再换字形（早先 tip 是 `◎`，树上有两种圈）', () => {

@@ -578,19 +578,28 @@ export function isRetryable(kind: LlmErrorKind): boolean {
 /** 从错误信息猜类别（effect 只拿到一个 Error，分类放在这里统一做）。 */
 export function classifyLlmError(error: string): LlmErrorKind {
   const text = error.toLowerCase();
-  if (text.includes('abort')) return 'aborted';
-  if (text.includes('timeout') || text.includes('timed out') || text.includes('超时')) {
-    return 'timeout';
-  }
+  // network 要在 abort 之前认：ECONNABORTED 是连接错误，不是用户中断。
   if (
     text.includes('network') ||
     text.includes('fetch failed') ||
     text.includes('econnreset') ||
+    text.includes('econnrefused') ||
+    text.includes('econnaborted') ||
     text.includes('socket hang up') ||
     text.includes('enotfound') ||
+    // openai / anthropic / google 的 SDK 连接失败都抛 APIConnectionError，
+    // 默认文案就是「Connection error.」—— 不认它的话会落进 unknown，错过重试。
+    text.includes('connection error') ||
+    text.includes('connection refused') ||
+    text.includes('connection reset') ||
+    text.includes('connection closed') ||
     text.includes('网络')
   ) {
     return 'network';
+  }
+  if (text.includes('abort')) return 'aborted';
+  if (text.includes('timeout') || text.includes('timed out') || text.includes('超时')) {
+    return 'timeout';
   }
   if (
     text.includes('unauthorized') ||

@@ -99,19 +99,16 @@ test('轨迹落盘：错误节点也会被写进 JSONL（这就是「错误也�
     assert.match(errorNode?.detail ?? '', /超时/);
     assert.equal(errorNode?.status, 'error');
 
-    // 重试产生了一个新的 step 节点，且父 id 指向超时前的容器。
+    // 重试不开新容器：全程只有一个 step 容器，两次尝试（error + 后续产出）都是它的孩子。
     const attempts = added.filter((n) => n?.kind === 'step.start');
-    assert.ok(attempts.length >= 2, '至少两次尝试');
-    // 多了一层 turn：重试的兄弟关系长在 **turn 容器**下面，而不是 user 下面。
-    // 「父 id 指向超时前的节点」这条需求没变，只是那棵树深了一节。
+    assert.equal(attempts.length, 1, '重试不开新容器，只有一个 step');
     const turnNode = added.find((n) => n?.kind === 'turn.start');
     assert.ok(turnNode, '有 turn 容器');
     const userNode = added.find((n) => n?.kind === 'user');
     assert.ok(userNode);
     assert.equal(turnNode?.parentId, userNode.id, 'turn 挂在 user 下面');
-    for (const attempt of attempts) {
-      assert.equal(attempt?.parentId, turnNode.id, '每次尝试的父 id 都指向同一个 turn 容器');
-    }
+    assert.equal(attempts[0]?.parentId, turnNode.id, 'step 容器挂在 turn 下面');
+    assert.equal(errorNode?.parentId, attempts[0]?.id, 'error 挂在 step 容器下面');
 
     // 从文件回放，树与内存里的一致。
     const replayed = replayTrace(text, sessionId);

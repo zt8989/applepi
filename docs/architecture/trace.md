@@ -7,7 +7,7 @@ Agent 的执行历史不是一条流水。`packages/core/src/trace.ts` 把它做
 | git | 这里 |
 | --- | --- |
 | commit 有 parent | 每个节点有 `parentId` |
-| commit 有分支（`--graph` 里的 `│` `/` `\`） | **重试就是分支** |
+| commit 有分支（`--graph` 里的 `│` `/` `\`） | 重试曾是分支，现在改为**同一个容器里的多次尝试**（见下） |
 | HEAD 指向当前所在的线 | `tipId` = 最后一条推进 tip 的节点 |
 | `git reflog` 只追加不改写 | `~/.pi/agent/traces/<时间戳>_<id>.jsonl` 追加写 JSONL |
 
@@ -69,9 +69,8 @@ function advancesTip(node) {
 **容器（`turn.start` / `step.start` / `step.end` / `tool.call`）一律不推进 tip**，
 `error` 也不推进。只有 `turn.end` 这个**回合的闭合点**推进。
 
-这条不变量就是「重试的父 id 指向超时前的节点」的全部实现：第一次失败时 step 自己闭合了
-（status 变 error）但不推进 tip，它的 error 子节点也不推进，于是 tip 原地不动，下一次尝试开
-新节点时 parent 拿到的仍是那个从没动过的节点。
+这条不变量（error 不推进 tip）保证失败不会把后续尝试挂到「错误的子节点才是正史」下面：
+重试的产出与失败平级，先后顺序就是树上的兄弟顺序。
 
 ## 一次正常对话长这样
 
@@ -94,24 +93,25 @@ function advancesTip(node) {
 见下面渲染一节。）
 
 一个回合里模型可以跑很多步（模型→工具→模型→…），**那是同一个回合的正常推进，不是重试**
-—— `traceStats` 的 `retries` 因此要求那组兄弟里**有失败的**才算。
+—— `traceStats` 的 `retries` 数的是「同一个 step 容器里被后续尝试覆盖的失败」。
 
-## 于是重试长这样（分叉在 step 这一层）
+## 于是重试长这样（所有尝试包在同一个容器里）
 
 ```
 ○  n1 user: 你好
 ○  n2 turn.start: 回合 1
 │  ○  n3 step.start: 第 1 步
 │  │  ○  n4 error: LLM 调用超时（1s） (kind=timeout, cause=timeout)
-│  └─ n5 step.end: 第 1 步结束（0 个工具调用） (tools=0)
-│  ○  n6 step.start: 第 2 步（重试）
-│  │  ○  n7 llm.result: 好了        ← tip（界面上加粗）
-│  └─ n8 step.end: 第 2 步结束（0 个工具调用） (tools=0)
+│  │  ○  n5 llm.result: 好了        ← tip（界面上加粗）
+│  └─ n6 step.end: 第 1 步结束（0 个工具调用） (tools=0)
+└─ n7 turn.end: 回合 1 结束：模型说完了 (reason=completed, steps=1)
 ```
 
-`n6` 的父 id 是 `n2`（**那个 turn 容器**，它从没动过），不是 `n4`（失败节点）。
-失败与重试是**兄弟** —— 所以在轨道上它们是**同一个缩进下的两个 step 块**。
-如果错误节点推进了 tip，重试就会被挂到「错误的子节点才是正史」下面，那就不是 git 了。
+重试**不开新容器**：`llm.failed` 把 error 节点挂进当前 step 容器后容器保持开着，
+接线只补一条 `agent.run`，下一次尝试的产出继续挂进**同一个容器**。
+失败与成功是容器里的**兄弟节点**，顺序即先后。超时、断连怎么重试，
+树上都是一个容器装着全部尝试 —— 用户看到的步数不会被重试数撑大。
+容器只在真收工时（重试用尽 / 不可重试 / 成功）才打上闭合标记。
 
 ## 纯函数
 
@@ -171,7 +171,7 @@ function advancesTip(node) {
 | --- | --- | --- |
 | `turn.end` / `step.end` | 关掉 `parentId` 那个作用域 | 闭合点自己画在容器那一列（`└─`） |
 | `turn.start` | 先关掉已经开着的回合 | 回合不嵌套；上一个回合没等到 `turn.end` 时也要收 |
-| `step.start` | 先关掉已经开着的步 | 重试/下一步开新容器时，旧那一格不该还挂着 |
+| `step.start` | 先关掉已经开着的步 | 下一步开新容器时，旧那一格不该还挂着（重试不经过这里：容器不关，自然也不重开） |
 | `user`（`meta.queued !== 'steer'`） | 清空整个栈 | 「用户又发了一句话」= 新回合从根层开始 |
 
 最后一条不是防御性代码：**「回合结束了而 `turn.end` 还没落下来」是真实存在的中间态**

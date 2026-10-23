@@ -44,7 +44,7 @@ reducer 里没有一个 `await`、没有一个 `fetch`。真正干活的 `Cmd.ru
 | `tool.start` | 开一个 `tool.call` 节点 | 无 |
 | `tool.result` | 开 `tool.result`（失败则开 `error`），并入 messages，累加本步工具数 | 无 |
 | `tool.batch.done` | **关掉 step**，相位 → `thinking`（撞上限则 → `idle` + `stop` 节点） | steer 有货：`Cmd.action(queue.delivered)`；否则 `step.start` + `agent.run` |
-| `llm.failed`（可重试且还有次数） | 开 `error` 节点、**关掉这个 step**，**相位留在 `thinking`** | `Cmd.action(step.start)` + `agent.run`（重试是**兄弟** step） |
+| `llm.failed`（可重试且还有次数） | 开 `error` 节点（挂在当前 step 容器下），**容器保持开着**，尝试计数 +1，**相位留在 `thinking`** | `Cmd.action(agent.run)`（重试在**同一个容器**里进行，不另开 step） |
 | `llm.failed`（重试用尽 / 不可重试） | 开 `error` 节点，关掉 step，相位 → `idle` | `Cmd.action(turn.end)` |
 | `turn.end` | 关掉回合容器（**推进 tip**）；队列里还有 followUp 则**接着开新回合** | 无（`turn.start` 由迁移直接开） |
 | `turn.continue` | **不追加消息**：相位 → `thinking`、计数器归零、清掉上一次的收工理由 | `Cmd.action(turn.start)`（与 `user.message` 同一条起步，只少那条消息） |
@@ -66,10 +66,13 @@ reducer 里没有一个 `await`、没有一个 `fetch`。真正干活的 `Cmd.ru
 
 ## 接线表里几处刻意的「绕圈」
 
-`user.message`、`llm.failed`（重试）、`tool.batch.done` 三处发的是「再 dispatch 一次」
-而不是直接调 `runAgent()`。原因是：**只有让 reducer 再看到一次 `step.start`，它的迁移才会开出
-一个新的 step 容器。** 直接调下一个 effect 的话，这一轮 LLM 在树上就没有节点，
-它的 `llm.result` 会变成孤儿（parent 为 null，浮在根上）。
+`user.message`、`tool.batch.done` 两处发的是「再 dispatch 一次」而不是直接调 `runAgent()`。
+原因是：**只有让 reducer 再看到一次 `step.start`，它的迁移才会开出一个新的 step 容器。**
+直接调下一个 effect 的话，这一轮 LLM 在树上就没有节点，它的 `llm.result` 会变成孤儿
+（parent 为 null，浮在根上）。
+
+`llm.failed`（重试）的绕圈不一样：容器一直开着，不需要再开，但还是要绕一圈 ——
+让接线重新读迁移后的状态（`retrying`、计数），再发 `agent.run` 把环转起来。
 
 ## 两个必须记住的 redux-loop 陷阱
 
