@@ -7,7 +7,7 @@
  * 连带登记「谁喊的中断」：只 `abort()` 不带原因的话，effect 侧只能从「流断了」反推、
  * 一律记成 aborted，「用户按停止」与「内核关闭顺手 abort」就分不开。
  */
-import type { StopCause } from './state';
+import { stopCauseText, type StopCause } from './state';
 
 let current: AbortController | null = null;
 /** 本次中断的原因；`beginRun()` 会清掉它。 */
@@ -46,7 +46,9 @@ export function lastAbortCause(): StopCause {
 /** abort 携带的原因对象，effect 侧据此分类，不必去猜 error 文案。 */
 export class RunAbortedError extends Error {
   constructor(readonly cause: StopCause) {
-    super(cause === 'user' ? '运行被用户中断' : `运行被中断（${cause}）`);
+    // 文案与界面的停止原因同一个词源（i18n）：不然界面上「用户手动中断」后面
+    // 会跟一句说法不同的「运行被用户中断」，同一件事两个名字。
+    super(stopCauseText(cause));
     this.name = 'RunAbortedError';
   }
 }

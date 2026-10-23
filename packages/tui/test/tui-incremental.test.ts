@@ -17,9 +17,11 @@ import { stripTerminalSequences } from '@earendil-works/pi-tui';
 import {
   renderTranscript,
   renderMessage,
+  sessionEntries,
   StreamingLines,
   TranscriptChunks,
   TraceChunks,
+  traceNoticeCards,
   workingStatusText,
 } from '../src/app';
 import { createTraceTree, appendNode, patchNode, renderTree, traceStats, type TraceTree } from '@ela/core/trace';
@@ -63,6 +65,18 @@ function withErrorNotice(state: AgentState, label: string, cause?: string): Agen
     meta: cause !== undefined ? { cause } : {},
     createdAt: 1,
     endedAt: 1,
+  });
+  return { ...state, trace: tree };
+}
+
+/** 往树上追加一条带消息的节点（`kind` 决定它是不是消息条目）。 */
+function withMessageNode(state: AgentState, kind: 'user' | 'llm.result', message: Message): AgentState {
+  const { tree } = appendNode(state.trace, null, kind, {
+    status: 'ok',
+    label: kind === 'user' ? '用户' : '回答',
+    createdAt: 1,
+    endedAt: 1,
+    message,
   });
   return { ...state, trace: tree };
 }
@@ -350,14 +364,15 @@ test('错误提示从 trace 派生并画在对话流里（不再靠 state.error 
   // 旧行为：错误来自 `state.error`，而它会在下一次提问 / 重试时被清成 null ——
   // 用户看到的就是「报过错，一重新发就没了」。现在错误是轨迹上的节点，
   // 只要节点还在，提示就一直在。
-  let state = withErrorNotice(stateOf(history(2)), 'LLM 调用超时', 'timeout');
+  let state = withErrorNotice(stateOf(history(2)), '大模型调用超时（2m00s）', 'timeout');
   const out = stripTerminalSequences(renderTranscript(state, 0, 80, false));
-  assert.ok(out.includes('大模型调用超时'), out);
-  assert.ok(out.includes('LLM 调用超时'), out);
+  // title 带上时长；detail 是同一句话，不再重复显示（“✗ 大模型调用超时 大模型调用超时…”）。
+  assert.ok(out.includes('大模型调用超时（2m00s）'), out);
+  assert.ok(!out.includes('大模型调用超时 大模型调用超时'), out);
   // 重新发一句话（error 被清空）之后，提示仍在。
   state = { ...state, error: null } as AgentState;
   const again = stripTerminalSequences(renderTranscript(state, 0, 80, false));
-  assert.ok(again.includes('LLM 调用超时'), `重发后错误提示应该还在：${again}`);
+  assert.ok(again.includes('大模型调用超时'), `重发后错误提示应该还在：${again}`);
 });
 
 function chunksLines(state: AgentState, width: number): string {
@@ -379,6 +394,72 @@ test('用户中止：只说一句「用户手动中断」，不提示去看轨�
   const out = stripTerminalSequences(renderTranscript(state, 0, 80, false));
   assert.ok(out.includes('用户手动中断'), `要报出原因：${out}`);
   assert.ok(!out.includes('Ctrl+R'), `用户自己按的停止不该被推去排查：${out}`);
+});
+
+// ── 卡片与卡片、卡片与消息之间：恰好一个空行 ──
+//
+// 提示卡（trace 派生）与命令反馈卡一样钉在消息边界上。它们的空隙由两层叠出来：
+// 卡自带前导空行；下一块若自带前导空行（pi 助手消息的 `Spacer(1)`，行上挂着
+// OSC133 标记）就不再补第二行 —— 早先 `isBlank` 只 `trim()`，带标记的空行被当成
+// 内容行，结果「超时卡与思考行之间空了两行」。
+
+/** 从带 trace 的 state 渲染增量对话区（含 trace 派生的提示卡；思考折叠，与用户截图同形态）。 */
+function traceRenderLines(state: AgentState, width: number): string[] {
+  const chunks = new TranscriptChunks();
+  chunks.update(state, width, false, traceNoticeCards(sessionEntries(state)), undefined, undefined, -1, true);
+  return chunks.render(width).map((line) => stripTerminalSequences(line).replace(/\s+$/, ''));
+}
+
+const THINKING_PLACEHOLDER = '思考中';
+
+function collapsedThinkingMessage(text: string): Message {
+  return {
+    role: 'assistant',
+    content: [
+      { type: 'thinking', thinking: '想一点' },
+      { type: 'text', text },
+    ],
+    api: 'x',
+    provider: 'p',
+    model: 'm',
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: 'stop',
+    timestamp: 3,
+  } as unknown as Message;
+}
+
+function blankCountBetween(lines: string[], from: string, to: string): number {
+  const start = lines.findIndex((line) => line.includes(from));
+  const end = lines.findIndex((line) => line.includes(to));
+  assert.ok(start >= 0 && end > start, `两段都要画出来：${JSON.stringify(lines)}`);
+  return lines.slice(start + 1, end).filter((line) => line === '').length;
+}
+
+test('超时卡与下一条消息（思考行）之间恰好一个空行', () => {
+  const answer = collapsedThinkingMessage('回答');
+  let state = stateOf([
+    { role: 'user', content: '你好', timestamp: 1 } as Message,
+    answer,
+  ]);
+  // 先把消息挂上树（两条消息节点），再把超时节点补在两条消息之间 —— 顺序与真
+  // 会话一致：用户 → 超时 → 重试后的回答。
+  state = withMessageNode(state, 'user', state.messages[0]!);
+  state = withErrorNotice(state, '大模型调用超时（2m00s）', 'timeout');
+  state = withMessageNode(state, 'llm.result', answer);
+  const lines = traceRenderLines(state, 80);
+  const blanks = blankCountBetween(lines, '大模型调用超时', THINKING_PLACEHOLDER);
+  assert.equal(blanks, 1, `卡与思考行之间要恰好一个空行：${JSON.stringify(lines, null, 0)}`);
+});
+
+test('两张提示卡相邻：恰好一个空行', () => {
+  let state = stateOf([{ role: 'user', content: '你好', timestamp: 1 } as Message]);
+  state = withMessageNode(state, 'user', state.messages[0]!);
+  state = withErrorNotice(state, '大模型调用超时（2m00s）', 'timeout');
+  // 第二张卡：网络错误（cause 不同，语气也不同 —— 正好验证「卡叠卡」）。
+  state = withErrorNotice(state, 'fetch failed', 'network');
+  const lines = traceRenderLines(state, 80);
+  const blanks = blankCountBetween(lines, '大模型调用超时', '网络错误');
+  assert.equal(blanks, 1, `卡与卡之间要恰好一个空行：${JSON.stringify(lines, null, 0)}`);
 });
 
 // ── 工作状态（画在 composer 上框线上，与 pi 同位置） ──

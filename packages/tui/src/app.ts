@@ -72,6 +72,7 @@ import {
   writeModelThinkingLevel,
 } from '@ela/core/thinking-level';
 import { NO_SCOPE, readScopedModels, writeDefaultModel, readHideThinkingBlock, writeHideThinkingBlock, type ModelScope, type ScopedModelItem } from '@ela/core/model-scope';
+import { t } from '@ela/core/i18n';
 import type { AgentRuntime } from '@ela/core/provider';
 import type { Model, ModelThinkingLevel } from '@earendil-works/pi-ai';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -101,7 +102,7 @@ import {
   createReadToolDefinition,
   createWriteToolDefinition,
 } from '@earendil-works/pi-coding-agent';
-import { getMarkdownTheme, getEditorTheme, type Theme } from '@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';// pi 底栏的官方实现（靠 pnpm patch 打开的子路径）。数字格式与算法都与 pi 一致 ——
+import { getMarkdownTheme, getEditorTheme, theme, type Theme } from '@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js';// pi 底栏的官方实现（靠 pnpm patch 打开的子路径）。数字格式与算法都与 pi 一致 ——
 // 两边对不上会让人以为算错了。
 // 见 docs/architecture/provider.md「为什么要 pnpm patch」。
 import { formatCwdForFooter, formatTokens } from '@earendil-works/pi-coding-agent/dist/modes/interactive/components/footer.js';
@@ -2020,7 +2021,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
         expanded = !expanded;
         refresh();
         // 与 pi 同一句（它的 `toggleToolOutputExpansion()`）：折叠要出声，否则用户不知道按到了。
-        notify(`Tool output: ${expanded ? 'expanded' : 'collapsed'}`);
+        notify(t(expanded ? 'notify.toolOutput.expanded' : 'notify.toolOutput.collapsed'));
         return true;
       }
       // `app.thinking.toggle`（默认 Ctrl+T）：展开/收起思考块。**与 pi 同 id 同键**。
@@ -2033,7 +2034,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
       if (actionMatches(data, 'app.thinking.toggle')) {
         hideThinking = !hideThinking;
         refresh();
-        notify(`Thinking blocks: ${hideThinking ? 'hidden' : 'visible'}`);
+        notify(t(hideThinking ? 'notify.thinkingBlocks.hidden' : 'notify.thinkingBlocks.visible'));
         // 落盘是**尽力而为**：内存里那个值已经是权威（界面当然立刻跟着变），
         // 写不进去（没权限）只影响「下次启动的默认值」—— 那种情况下说一句，别静默。
         void writeHideThinkingBlock(hideThinking, cwd).then((ok) => {
@@ -2192,7 +2193,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
     if (next === undefined) {
       // pi 的文案（`Current model does not support thinking`）——说的是「没得切」，
       // 而不是「你敲错了键」。
-      notify('Current model does not support thinking');
+      notify(t('notify.thinking.unsupported'));
       return;
     }
     store.dispatch({ type: 'thinking.changed', level: next as typeof before });
@@ -2241,7 +2242,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
     }
     if (nextIndex === currentIndex) {
       // pi 的两句（`cycleModel()`）：作用域里只有一个 vs 整个 provider 下只有一个。
-      notify(scoped.length > 0 ? 'Only one model in scope' : 'Only one model available');
+      notify(t(scoped.length > 0 ? 'notify.model.onlyOneInScope' : 'notify.model.onlyOneAvailable'));
       return;
     }
     if (!options.setModel(next.provider, next.id, {
@@ -2697,7 +2698,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
         // 与内核启动时的 clamp 是同一个来源。
         const levels = supportedThinkingLevels(currentModelObject());
         if (levels.length === 0) {
-          notify('Current model does not support thinking');
+          notify(t('notify.thinking.unsupported'));
           return;
         }
         /** 真的换一档。`persist` = `Ctrl+S`（写 `settings.json` 的 `defaultThinkingLevel`）。 */
@@ -3740,24 +3741,25 @@ function renderAssistant(
   content: readonly unknown[],
   width: number,
   isStreaming = false,
-  /** 思考块是否折叠（`Ctrl+T`）。折叠时官方组件只留一行斜体 `Thinking…`。 */
+  /** 思考块是否折叠（`Ctrl+T`）。折叠时官方组件只留一行斜体的思考占位行。 */
   hideThinking = false,
   /**
    * 这条消息是怎么停的（`message.stopReason` / `message.errorMessage`）。
    *
-   * ## 为什么要把它交给官方组件
+   * ## 收尾说明为什么不交给官方组件画
    *
-   * pi 的 `AssistantMessageComponent` 自己会画那几种收尾：
+   * pi 的 `AssistantMessageComponent` 会自己在末尾补那几种收尾：
    *
    * | `stopReason` | 它画什么 |
    * | --- | --- |
-   * | `aborted`（且没有工具调用） | 空一行 + `Operation aborted`（`Request was aborted` 这种 provider 原文会被它换成这句） |
+   * | `aborted`（且没有工具调用） | 空一行 + `Operation aborted` |
    * | `length` | 空一行 + `Response was truncated before completion.` |
    * | `error`（且没有工具调用） | 空一行 + `Error: <原因>` |
    *
-   * 本项目早先只过滤出 text/thinking 块重建一个**假消息**（丢掉 stopReason），于是那些说明
-   * 一行都不画，而自己又在尾部用中文重写了一遍（还附上「按 Ctrl+R 看轨迹树」）——
-   * 同一件事两处表达，且两处都与 pi 不一样。现在把字段原样传进去，低层交给 pi 画。
+   * 那三句是它**硬编码的英文**，改不了 —— 界面其它文案都是中文，唯独收尾是英文。
+   * 所以这里不把 `stopReason` 传给它（它就不画），收尾由下面自己画，形状与它
+   * 一致（空一行 + 一行错误色），句子走 i18n；`aborted` 时 provider 给了具体
+   * 原因就带上（与 pi 同一个选择：具体原因比一句统一文案有用）。
    */
   stop?: { stopReason?: string | undefined; errorMessage?: string | undefined } | undefined,
 ): string[] {
@@ -3769,21 +3771,61 @@ function renderAssistant(
     if (c.type === 'thinking') return (c.thinking ?? '').trim() !== '';
     return false;
   });
-  if (visible.length === 0) return [];
+  if (visible.length === 0) {
+    // 纯工具调用消息：工具块自己显示错误，但 `length`（截断）仍要在这条消息上
+    // 说一句（与 pi 一致：截断可能发生在工具调用完成之前）。
+    const tail = stopNoticeLine(content, stop);
+    return tail !== undefined ? tail : [];
+  }
   const message = {
     role: 'assistant',
     content: visible,
-    // 官方组件靠这两个字段决定「要不要在末尾补一行中止/截断/错误说明」。
-    ...(stop?.stopReason === undefined ? {} : { stopReason: stop.stopReason }),
-    ...(stop?.errorMessage === undefined ? {} : { errorMessage: stop.errorMessage }),
+    // 收尾说明自己画（见上），stopReason/errorMessage 不给官方组件 ——
+    // 给了它会再画一遍英文的那三句。
   } as never;
-  // 第二个参数就是官方的 `hideThinkingBlock` —— 折叠的渲染（那一行 `Thinking…`）由
-  // 它自己负责，我们只管把开关传对。
-  const component = new AssistantMessageComponent(message, hideThinking, getMarkdownTheme(), 'Thinking…', 1);
+  // 第二个参数就是官方的 `hideThinkingBlock` —— 折叠的渲染（那一行思考占位）由
+  // 它自己负责，我们只管把开关与占位文案传对。
+  const component = new AssistantMessageComponent(
+    message,
+    hideThinking,
+    getMarkdownTheme(),
+    t('thinking.label'),
+    1,
+  );
   // 构造器已经渲染过一次；显式再调一次是为了把「是否还在流式」告诉它 ——
   // 官方用它决定列表编号等细节要不要稳定。
   component.updateContent(message, isStreaming);
-  return component.render(usableWidth(width));
+  const lines = component.render(usableWidth(width));
+  const tail = stopNoticeLine(content, stop);
+  if (tail !== undefined && lines.length > 0) {
+    lines.push('', ...tail);
+  }
+  return lines;
+}
+
+/**
+ * 助手消息的收尾行（空行由调用方补）。形状照抄 pi 的组件：`length` 一句、
+ * `aborted` / `error` 各一句（都没有工具调用时才画 —— 工具的错误由工具块显示）。
+ */
+function stopNoticeLine(
+  content: readonly unknown[],
+  stop?: { stopReason?: string | undefined; errorMessage?: string | undefined } | undefined,
+): string[] | undefined {
+  const reason = stop?.stopReason;
+  if (reason !== 'length' && reason !== 'aborted' && reason !== 'error') return undefined;
+  const hasToolCalls = content.some((raw) => (raw as { type?: string }).type === 'toolCall');
+  if (reason !== 'length' && hasToolCalls) return undefined;
+  const errorMessage = stop?.errorMessage;
+  if (reason === 'length') return [theme.fg('error', t('assistant.truncated'))];
+  if (reason === 'aborted') {
+    // 与 pi 同一个判断：provider 的占位原文不算「具体原因」。
+    const specific =
+      errorMessage !== undefined && errorMessage !== '' && errorMessage !== 'Request was aborted'
+        ? t('assistant.abortedWithReason', { reason: errorMessage })
+        : t('assistant.aborted');
+    return [theme.fg('error', specific)];
+  }
+  return [theme.fg('error', t('assistant.error', { message: errorMessage || t('assistant.unknownError') }))];
 }
 
 /**
@@ -4753,7 +4795,12 @@ export class TranscriptChunks {
     // 会「贴着」。这里按「上一行 / 下一块首行是不是**无底色**空行」判断，是才不重复补。
     // 带底色的 padding 行含转义序列，`trim()` 不为空 —— 于是这里认得出它、照补一行。
     let pendingBlankBelow = false;
-    const isBlank = (line: string | undefined): boolean => line === undefined || line.trim() === '';
+    // 「无底色的空行」要与 `collapseBlankRows` 同一判据：pi 的助手消息块自带前导空行
+    // （`Spacer(1)`），首行上还挂着 OSC133 区域标记 —— 只 `trim()` 的话它看起来是
+    // 非空行，于是这里又补一行，卡与下一条消息之间就成了两个空行。
+    // 带底色的 padding 行含 SGR，不算空行（那是卡片的一部分，得照补隔行）。
+    const isBlank = (line: string | undefined): boolean =>
+      line === undefined || (BLANK_ROW.test(line) && !SGR_SEQUENCE.test(line));
     const pushBlock = (blockLines: readonly string[]): void => {
       if (pendingBlankBelow && blockLines.length > 0) {
         if (!isBlank(lines[lines.length - 1]) && !isBlank(blockLines[0])) lines.push('');

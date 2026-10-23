@@ -30,6 +30,7 @@ import {
   type CompactReason,
 } from './compact';
 import { formatDuration } from './trace';
+import { t } from './i18n';
 
 /** `compact.done` 需要的载荷（effect 的返回值 = 成功 action 的字段）。 */
 type CompactOutcomeForAction = {
@@ -278,8 +279,9 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
     readonly timeoutMs: number;
 
     constructor(timeoutMs: number) {
-      // 复用 trace 的格式化：小于 1s 的超时（测试里很常见）显示 400ms 而不是 0s。
-      super(`LLM 调用超时（${formatDuration(timeoutMs)}）`);
+      // 文案与界面的停止原因同一个词源（i18n）：小于 1s 的超时（测试里很常见）
+      // 显示 400ms 而不是 0s。
+      super(t('timeout.withDuration', { duration: formatDuration(timeoutMs) }));
       this.name = 'LlmTimeoutError';
       this.timeoutMs = timeoutMs;
     }

@@ -124,6 +124,27 @@ test('LLM 失败：错误从 trace 派生，重新发消息后仍然在（不再
   assert.ok(errorNotice, '应当有一条 error 提示');
   if (errorNotice?.kind !== 'notice') throw new Error('unreachable');
   assert.equal(errorNotice.nodeId.startsWith('n'), true);
+  // 超时卡只说一次：时长并进主句，detail 不再重复同一句话（旧轨迹里
+  // 「LLM 调用超时（1s）」那种旧文案也能提取出时长，一样归一）。
+  assert.equal(errorNotice.title, '大模型调用超时（1s）');
+  assert.equal(errorNotice.detail, undefined);
+
+  // provider 报的英文超时（没有括号时长）也归一成同一句中文。
+  let state2 = seed();
+  state2 = reduce(state2, { type: 'user.message', text: '你好' });
+  state2 = reduce(state2, { type: 'agent.run' });
+  state2 = reduce(state2, {
+    type: 'llm.giveup',
+    error: 'Request timed out after 120000ms',
+    kind: 'timeout',
+    cause: 'timeout',
+  });
+  const en = deriveStream(state2.trace, state2.messages).find(
+    (e) => e.kind === 'notice' && e.tone === 'error',
+  );
+  assert.ok(en?.kind === 'notice');
+  assert.equal(en.title, '大模型调用超时');
+  assert.equal(en.detail, undefined);
 
   // 重新发一句话：state.error 被清空（这是旧行为里错误消失的原因）……
   state = reduce(state, { type: 'user.message', text: '再试一次' });

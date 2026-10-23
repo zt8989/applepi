@@ -11,6 +11,7 @@ import type { SkillInfo } from './skills';
 import type { PromptTemplateInfo } from './prompts';
 import { compactionSettings, type CompactionSettings } from './compact';
 import { createTraceTree, newSessionId, type TraceTree } from './trace';
+import { t } from './i18n';
 
 /** 相位：只描述「现在在等谁」，不含任何驱动方式的信息。 */
 export type Phase = 'idle' | 'thinking' | 'calling-tools';
@@ -103,33 +104,26 @@ export type StopCause =
    */
   | 'compact-error';
 
-/** 停止原因 → 一句人话（界面与日志直接用，不必各写一份文案）。 */
+/** 停止原因 → 一句人话（界面与日志直接用，不必各写一份文案）。文案在 i18n 表里。 */
 export function stopCauseText(cause: StopCause): string {
-  switch (cause) {
-    case 'user':
-      return '用户手动中断';
-    case 'timeout':
-      return '大模型调用超时';
-    case 'network':
-      return '网络错误';
-    case 'auth':
-      return '鉴权失败（API key 无效或无权限）';
-    case 'model':
-      return '模型侧报错';
-    case 'llm-error':
-      return '大模型调用失败';
-    case 'tool-error':
-      return '工具批次整体失败';
-    case 'maxTurns':
-      return '已达单回合轮数上限';
-    case 'shutdown':
-      return '被内核关闭';
-    case 'compact-error':
-      return '上下文压缩失败（对话原样保留）';
-    case 'completed':
-      return '模型自己说完了';
-  }
+  const key = CAUSE_I18N_KEY[cause];
+  return t(key);
 }
+
+/** StopCause → i18n key（llm-error / compact-error 是驼峰，不是把连字符直接搬过去）。 */
+const CAUSE_I18N_KEY: Record<StopCause, string> = {
+  completed: 'stopCause.completed',
+  maxTurns: 'stopCause.maxTurns',
+  user: 'stopCause.user',
+  timeout: 'stopCause.timeout',
+  network: 'stopCause.network',
+  auth: 'stopCause.auth',
+  model: 'stopCause.model',
+  'llm-error': 'stopCause.llmError',
+  'tool-error': 'stopCause.toolError',
+  shutdown: 'stopCause.shutdown',
+  'compact-error': 'stopCause.compactError',
+};
 
 
 /**

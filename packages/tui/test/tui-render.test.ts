@@ -301,12 +301,11 @@ setupTheme(undefined, 'dark');
 
 // ─── 收尾说明（中止 / 截断）与命令反馈卡：形状照 pi ───
 
-test('中止的消息：pi 的组件画 `Operation aborted`，本项目不再自己写一段中文', () => {
-  // 官方 `AssistantMessageComponent` 自己处理 `stopReason`：
-  //   aborted（无工具调用）→ 空一行 + `Operation aborted`（`Request was aborted` 这种
-  //   provider 原文会被它换成这一句）；length → `Response was truncated before completion.`；
-  //   error → `Error: <原因>`。本项目早先重建假消息时丢掉了 stopReason，于是这些一行都不画，
-  //   而自己在尾部用中文重写了一遍（还附上「按 Ctrl+R 看轨迹树」）。
+test('中止的消息：收尾是 i18n 的中文，占位原文不再透传', () => {
+  // 官方组件的那三句收尾是硬编码英文（`Operation aborted` / `Response was truncated…` /
+  // `Error: …`），改不了 —— 所以 stopReason 不再传给它，收尾由本项目自己画：
+  // 句子走 i18n，形状与它一致（空一行 + 一行错误色）。`Request was aborted` 这种
+  // provider 占位原文不算具体原因，换成统一的「操作已中止」。
   const aborted = {
     role: 'assistant',
     content: [{ type: 'text', text: '我正在想' }],
@@ -324,9 +323,20 @@ test('中止的消息：pi 的组件画 `Operation aborted`，本项目不再自
     phase: 'idle',
   } as unknown as AgentState;
   const out = stripTerminalSequences(renderTranscript(state, 0, 80, false));
-  assert.ok(out.includes('Operation aborted'), `要画 pi 那句：${out}`);
-  assert.ok(!out.includes('Request was aborted'), `provider 原文该被换成那句：${out}`);
+  assert.ok(out.includes('操作已中止'), `要画中文收尾：${out}`);
+  assert.ok(!out.includes('Request was aborted'), `占位原文不该透传：${out}`);
+  assert.ok(!out.includes('Operation aborted'), `不再出英文：${out}`);
   assert.ok(out.includes('我正在想'), '部分内容要留着');
+
+  // provider 给了具体原因：带上（与 pi 同一个选择 —— 具体原因比统一文案有用）。
+  const specific = {
+    ...aborted,
+    errorMessage: 'Context length exceeded',
+  } as unknown as Message;
+  const out2 = stripTerminalSequences(
+    renderTranscript({ ...state, messages: [state.messages[0]!, specific] } as AgentState, 0, 80, false),
+  );
+  assert.ok(out2.includes('操作已中止：Context length exceeded'), `具体原因要带上：${out2}`);
 });
 
 test('命令反馈卡：上面一行空行 + 左边一格（pi 的 Spacer(1) + paddingX=1）', () => {
@@ -594,7 +604,7 @@ test('Ctrl+T 折叠思考：正文仍在，思考文字消失、只剩一行提�
 
   const hidden = stripTerminalSequences(renderTranscript(state, 0, 60, false, undefined, true));
   assert.ok(!hidden.includes('先想一下用户的意图'), `折叠后思考正文不该在：${hidden}`);
-  assert.ok(hidden.includes('Thinking'), `折叠后应留一行提示：${hidden}`);
+  assert.ok(hidden.includes('思考中'), `折叠后应留一行提示：${hidden}`);
   assert.ok(hidden.includes('答案是 42。'), `正文不受影响：${hidden}`);
 });
 
@@ -611,7 +621,7 @@ test('Ctrl+T 切换后历史块要重画（缓存键带了 hideThinking）', () 
   chunks.update(state, 60, false, [], undefined, undefined, -1, true);
   const hidden = stripTerminalSequences(chunks.render(60).join('\n'));
   assert.ok(!hidden.includes('一段思考'), `折叠后不该读到展开时的缓存：${hidden}`);
-  assert.ok(hidden.includes('Thinking'), hidden);
+  assert.ok(hidden.includes('思考中'), hidden);
 });
 
 test('纯 toolCall 的助手消息不产生空行（它由紧跟的 toolResult 块负责）', () => {

@@ -90,28 +90,50 @@ function toneOfCause(cause: StopCause | undefined, status: TraceNode['status']):
   return 'error';
 }
 
+/** 尾部的中文/英文括号段：超时时长就在那里（「大模型调用超时（2m00s）」）。 */
+const TRAILING_PARENS = /[（(]([^（）()]*)[）)]\s*$/;
+
+/**
+ * 提示卡的主句。
+ *
+ * 错误原文（节点 detail）里常常已经带着停止原因的句子 —— 早期超时消息是
+ * 「LLM 调用超时（2m00s）」，而停止原因又是另一句「大模型调用超时」，卡上
+ * 两个名字挨着（“✗ 大模型调用超时 LLM 调用超时（2m00s）”）。现在异常消息与
+ * 停止原因同一个词源（i18n），但**重复显示仍然要去掉**：卡上只说一次。
+ *
+ * - 能从原文尾部提到括号段（如「（2m00s）」）→ 拼在停止原因后面，时长不丢。
+ * - 提不到（用户中断、provider 英文原文）→ 就用停止原因那句。
+ */
+function noticeTitle(cause: StopCause | undefined, label: string, raw: string): string {
+  if (cause === undefined) return label;
+  const text = stopCauseText(cause);
+  if (cause !== 'timeout') return text;
+  const parens = TRAILING_PARENS.exec(raw)?.[1];
+  return parens !== undefined && parens !== '' ? `${text}（${parens}）` : text;
+}
+
+/**
+ * 提示卡的详情行。超时的详情就是主句自己（时长已拼进去），不再重复；
+ * 其余原因保留原文 —— provider 的原话（网络错误具体报什么）是排查要用的。
+ */
+function noticeDetail(cause: StopCause | undefined, raw: string): string | undefined {
+  if (cause === 'timeout') return undefined;
+  return raw;
+}
+
 function noticeOf(node: TraceNode): StreamNoticeEntry | undefined {
   switch (node.kind) {
-    case 'error': {
-      const cause = causeOf(node);
-      return {
-        kind: 'notice',
-        id: node.id,
-        nodeId: node.id,
-        tone: toneOfCause(cause, node.status),
-        title: cause !== undefined ? stopCauseText(cause) : node.label,
-        detail: node.detail ?? node.label,
-      };
-    }
+    case 'error':
     case 'stop': {
       const cause = causeOf(node);
+      const raw = node.detail ?? node.label;
       return {
         kind: 'notice',
         id: node.id,
         nodeId: node.id,
         tone: toneOfCause(cause, node.status),
-        title: cause !== undefined ? stopCauseText(cause) : node.label,
-        detail: node.detail ?? node.label,
+        title: noticeTitle(cause, node.label, raw),
+        detail: noticeDetail(cause, raw),
       };
     }
     case 'model.changed': {
