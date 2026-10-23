@@ -101,6 +101,7 @@ export interface KernelOptions {
    * 面板上打勾的那一档一定是同一个）。
    */
   thinkingLevel?: ModelThinkingLevel | undefined;
+  /** 一次 LLM 调用的空闲超时（毫秒）：流上这么久没有任何事件就掐。 */
   llmTimeoutMs?: number | undefined;
   maxLlmAttempts?: number | undefined;
   maxTurns?: number | undefined;

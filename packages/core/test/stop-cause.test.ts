@@ -296,6 +296,36 @@ test('超时：stopCause=timeout，且**不**被记成用户中断', async () =>
   assert.notEqual(state.stopCause, 'user', '这条是它自己超时的，不能赖到用户头上');
 });
 
+test('慢而健康的流不被总时长误杀：每段间隔都小于空闲闸，总时长超过它也照样跑完', async () => {
+  // win-ai-harness 事故的形状：104k 上下文的长生成实跑 121s，被 2 分钟**总时长**闸
+  // 在流还健康时搜掉，重试同理，六次全灭。空闲语义下这样的流必须活下来：
+  // 每段间隔都远小于闸，但总时长稳超闸值 —— 旧代码下这条测试必挂。
+  const faux = createFauxRuntime();
+  const store = createAgentStore({
+    runtime: faux.runtime,
+    systemPrompt: 'test',
+    llmTimeoutMs: 100,
+    maxLlmAttempts: 1,
+    streamFn: () =>
+      ({
+        async *[Symbol.asyncIterator]() {
+          for (const d of ['一', '直', '在', '流', '…']) {
+            await new Promise((r) => setTimeout(r, 25)); // 间隔 25ms ≪ 闸 100ms
+            yield { type: 'text_delta', delta: d } as never;
+          }
+          await new Promise((r) => setTimeout(r, 25));
+          const message = assistantMessage('一直在流…');
+          yield { type: 'done', reason: 'stop', message } as never;
+        },
+      }) as never,
+  });
+
+  store.dispatch({ type: 'user.message', text: '慢慢说' });
+  const state = await waitForIdle(store);
+  assert.equal(state.stopCause, 'completed', '字节一直在到，跑多久都不该被搜');
+  assert.equal(state.error, null);
+});
+
 test('停止原因落在轨迹树的 error 节点 meta 上（回放也分得清）', async () => {
   const faux = createFauxRuntime();
   const store = createAgentStore({
