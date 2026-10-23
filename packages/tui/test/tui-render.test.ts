@@ -328,6 +328,24 @@ test('中止的消息：收尾是 i18n 的中文，占位原文不再透传', ()
   assert.ok(!out.includes('Operation aborted'), `不再出英文：${out}`);
   assert.ok(out.includes('我正在想'), '部分内容要留着');
 
+  // 占位原文不止一种：pi-ai 自建中止错误是 `Request aborted`，OpenAI SDK 的
+  // 带句号 —— 同样不能当「具体原因」拼上去。
+  for (const placeholder of ['Request aborted', 'Request was aborted.']) {
+    const outVariant = stripTerminalSequences(
+      renderTranscript(
+        { ...state, messages: [state.messages[0]!, { ...aborted, errorMessage: placeholder }] } as AgentState,
+        0,
+        80,
+        false,
+      ),
+    );
+    assert.ok(
+      !outVariant.includes(placeholder),
+      `占位原文不该透传：${placeholder}：${outVariant}`,
+    );
+    assert.ok(outVariant.includes('\n操作已中止'), `要画统一的中文收尾：${outVariant}`);
+  }
+
   // provider 给了具体原因：带上（与 pi 同一个选择 —— 具体原因比统一文案有用）。
   const specific = {
     ...aborted,
@@ -337,6 +355,34 @@ test('中止的消息：收尾是 i18n 的中文，占位原文不再透传', ()
     renderTranscript({ ...state, messages: [state.messages[0]!, specific] } as AgentState, 0, 80, false),
   );
   assert.ok(out2.includes('操作已中止：Context length exceeded'), `具体原因要带上：${out2}`);
+});
+
+test('中止的消息没有可见内容时，收尾上面也要有空行（pi 的 Spacer(1) 无条件）', () => {
+  // 用户在下一轮 LLM 还没吐字时就按了停止：那条 assistant 消息是空的，只剩
+  // stopReason/errorMessage。pi 的组件对这种情况也是无条件 Spacer(1) + 收尾 ——
+  // 空行不能省，否则收尾会顶在前一块（工具卡）正下面。
+  const emptyAborted = {
+    role: 'assistant',
+    content: [{ type: 'text', text: '' }],
+    api: 'openai-completions',
+    provider: 'p',
+    model: 'm',
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: 'aborted',
+    errorMessage: 'Request aborted',
+    timestamp: 3,
+  } as unknown as Message;
+  const out = stripTerminalSequences(
+    renderTranscript(
+      { messages: [{ role: 'user', content: '停', timestamp: 2 } as Message, emptyAborted], toolTimings: {} } as AgentState,
+      0,
+      80,
+      false,
+    ),
+  ).split('\n');
+  const index = out.findIndex((line) => line.includes('操作已中止'));
+  assert.ok(index > 0, `收尾要画出来：${out.join('/')}`);
+  assert.equal(out[index - 1], '', '收尾上面要有一行空行');
 });
 
 test('命令反馈卡：上面一行空行 + 左边一格（pi 的 Spacer(1) + paddingX=1）', () => {
