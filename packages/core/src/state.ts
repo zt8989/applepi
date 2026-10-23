@@ -453,7 +453,7 @@ export interface AgentState {
   } | null;
   /** 允许的最大 LLM 尝试次数（含首次），2 = 失败后重试一次。 */
   maxLlmAttempts: number;
-  /** 一次 LLM 调用的超时（毫秒）。effect 读它给流上闸。 */
+  /** 一次 LLM 调用的空闲超时（毫秒）：流上这么久没有任何事件就掐。effect 读它给流上闸。 */
   llmTimeoutMs: number;
   /** 已经落盘到 seq 游标的节点数；持久化失败时不动，好让下一轮重试。 */
   persistedSeq: number;
@@ -466,7 +466,7 @@ export interface InitialStateOptions {
   toolNames: readonly string[];
   thinkingLevel?: ModelThinkingLevel | undefined;
   maxTurns?: number | undefined;
-  /** 一次 LLM 调用的超时（毫秒）；超时按可重试错误处理。 */
+  /** 一次 LLM 调用的空闲超时（毫秒）：流上这么久没有任何事件就掐；按可重试错误处理。 */
   llmTimeoutMs?: number | undefined;
   /** 单轮内最多几次 LLM 尝试（含首次），2 = 失败后重试一次。 */
   maxLlmAttempts?: number | undefined;
@@ -478,6 +478,8 @@ export interface InitialStateOptions {
   trace?: TraceTree | undefined;
 }
 
+// 空闲语义而非总时长：卡的是「多久没收到数据」，长生成跑多久都不受限（上游 pi 的
+// undici bodyTimeout 同语义）。总时长闸会把生成时间恰好超过阈值的请求变成死循环。
 export const DEFAULT_LLM_TIMEOUT_MS = 120_000;
 
 export function createInitialState(options: InitialStateOptions): AgentState {

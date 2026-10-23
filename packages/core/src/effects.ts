@@ -179,13 +179,19 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
       messages: state.messages,
     });
     const controller = beginRun();
-    // 超时闸：到点就 abort 掉这次流。分类是 timeout → 可重试，于是环自己会再试一次。
+    // 超时闸是**空闲闸**：从发出请求起计时，每收到一条流事件就重置 —— 掐的是
+    // 「多久没收到任何数据」，不是「总共跑了多久」。慢而健康的流（大上下文长生成
+    // 跑满几分钟、字节一直在到）不能杀；该杀的是首字节迟迟不来、或流到半路断流的
+    // 死寂。总时长语义会把长生成确定性杀掉：生成恰好超过阈值时，重试永远同理，
+    // 一次都成功不了。分类是 timeout → 可重试，于是环自己会再试一次。
     // 手动中断（Ctrl-C）也走 abort，但它不是超时 —— 用 source 区分开。
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort(new LlmTimeoutError(state.llmTimeoutMs));
-    }, state.llmTimeoutMs);
+    const armIdleTimer = () =>
+      setTimeout(() => {
+        timedOut = true;
+        controller.abort(new LlmTimeoutError(state.llmTimeoutMs));
+      }, state.llmTimeoutMs);
+    let timer = armIdleTimer();
     try {
       // await 是必要的：浏览器侧 resolveKey 是 async（key 在 IndexedDB 里）。
       const model = modelOf(state);
@@ -216,6 +222,10 @@ export function createPiAiEffectTable(options: PiAiEffectsOptions): EffectTable 
       const stream = streamFn(model, context, streamOptions);
       let final: AssistantMessage | undefined;
       for await (const event of stream) {
+        // 任何事件都是「传输活着」的证据：重置空闲计时。done/error 之后循环即出，
+        // 重复上闸无害（finally 会清）。
+        clearTimeout(timer);
+        timer = armIdleTimer();
         if (event.type === 'text_delta' && event.delta) {
           dispatch({ type: 'llm.delta', delta: event.delta });
         } else if (event.type === 'thinking_delta' && event.delta) {

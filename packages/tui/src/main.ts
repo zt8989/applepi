@@ -105,7 +105,7 @@ const USAGE = `redux-agent —— Redux Loop 驱动的 Agent Loop（pi-tui 界�
   -s, --system <text>    覆盖 system prompt 的前言（工具规则 / AGENTS.md / cwd 仍照旧拼上）
       --append-system <t> 追加一条规则（进 <addendum>；.pi/APPEND_SYSTEM.md 优先）
       --max-turns <n>    单回合最多几轮 LLM 调用（默认不限制）
-      --llm-timeout <ms> 一次 LLM 调用的超时（默认 120000）；超时按可重试错误处理
+      --llm-timeout <ms> 一次 LLM 调用的空闲超时（默认 120000）：流上这么久没有任何数据就掐；按可重试错误处理
       --attempts <n>     单轮内最多几次 LLM 尝试（含首次，默认 2；超时/网络错会自动重试）
       --api-key <key>    直接给 key（否则读 DEEPSEEK_API_KEY）
       --no-trace         不把轨迹落盘到 traces/
