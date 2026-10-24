@@ -701,7 +701,8 @@ export function shouldYieldInput(
 /**
  * 排队中的用户输入卡片（在输入框**之上**，一直挂着直到投递出去）。
  *
- * 形状与 pi 的 `updatePendingMessagesDisplay()` 逐行同构：
+ * 形状与 pi 的 `updatePendingMessagesDisplay()` 逐行同构（提示行里的键名是
+ * **实时解析**的，这只是 macOS 上的样子；Windows 上那行会是 `Alt+Q`）：
  *
  * ```
  *  ↳ Option+Up to edit all queued messages
@@ -1967,7 +1968,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
         cycleThinking();
         return true;
       }
-      // pi 的 `app.message.followUp`（`Option+Enter`）：**这一条**排成 followUp。
+      // pi 的 `app.message.followUp`（macOS/Linux 是 `Option+Enter`，Windows 上是
+      // `Ctrl+Q` —— 见 `keybindings.ts` 文件头）：**这一条**排成 followUp。
       //
       // 必须挂在这个全局监听器上，不能等编辑器：编辑器只认「提交」一个动作，而
       // 「提交到哪一列」是应用层的事（pi 也是把它当 `app.*` 键处理的）。见 `queue()`。
@@ -1975,7 +1977,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
         followUp();
         return true;
       }
-      // pi 的 `app.message.dequeue`（`Alt+Up`）：把排队消息还回编辑器。
+      // pi 的 `app.message.dequeue`（macOS/Linux 是 `Alt+Up`，Windows 上是 `Alt+Q`）：
+      // 把排队消息还回编辑器。
       if (actionMatches(data, 'app.message.dequeue')) {
         if (restoreQueuedToEditor() === 0) notify(dim('没有排队的消息可还回'));
         refresh();
@@ -2118,7 +2121,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
       // 真正的做法与 pi 一样：**排进队列**，看它什么时候插进去。
       //
       // 回车 = **steer**（当前 step 的工具跑完后、下一次 LLM 调用前插进去）。
-      // 要「等它说完再插」（followUp）按 `Option+Enter` —— 与 pi 同一套键位。
+      // 要「等它说完再插」（followUp）按 `app.message.followUp`（mac 是 `Option+Enter`、
+      // Windows 是 `Ctrl+Q`）—— 与 pi 同一套键位。
       queue(queuedInput(input), 'steer');
       return;
     }
@@ -2133,7 +2137,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
    *
    * ## 走哪一列由**按哪个键**定，不是一个模式开关
    *
-   * pi 把这两件事分成两个键：回车 = `steer`，`Option+Enter` = `followUp`。
+   * pi 把这两件事分成两个键：回车 = `steer`，`app.message.followUp` = `followUp`
+   * （mac 是 `Option+Enter`、Windows 是 `Ctrl+Q`）。
    * 不能做成一个 `Ctrl+Q` 切的**模式**：模式是**状态**，切过之后每条都按新列走，而屏幕上看不出
    * 自己在哪个模式里 —— 症状是「我明明按的回车，怎么排到 followUp 去了」。按键决定就没有这笔账。
    *
@@ -2455,7 +2460,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
   };
 
   /**
-   * pi 的 `app.message.followUp`（`Option+Enter`）：流式时按 followUp 入队；空闲时等同回车。
+   * pi 的 `app.message.followUp`（mac 是 `Option+Enter`、Windows 是 `Ctrl+Q`）：流式时按
+   * followUp 入队；空闲时等同回车。
    *
    * 与 pi 的 `handleFollowUp()` 同口径：空闲时**等同回车**（这时候没有「等它说完」可言，
    * 直接发就是最贴意图的事），跑着才排队。

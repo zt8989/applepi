@@ -54,20 +54,44 @@
 
 ## 要补的动作（按 pi 的 id 实现）
 
-| id | 默认键 | 本项目要做的 |
+| id | 默认键（macOS/Linux → Windows） | 本项目要做的 |
 | --- | --- | --- |
-| `app.model.cycleForward` / `app.model.cycleBackward` | `Ctrl+P` / `Shift+Ctrl+P` | 在 `currentScope` 里循环换模型（内核已有 `setModel`） |
+| `app.model.cycleForward` / `app.model.cycleBackward` | `Ctrl+P` / `Shift+Ctrl+P` → `Ctrl+P` / `Alt+P` | 在 `currentScope` 里循环换模型（内核已有 `setModel`） |
 | `app.thinking.cycle` | `Shift+Tab` | 循环 thinking 级别，发 `thinking.changed`（**不**落盘 —— pi 的 `cycleThinkingLevel()` 没带 `persist`；存默认走 `/thinking` 面板里的 `Ctrl+S`）。见 [thinking](thinking.md) |
-| `app.message.followUp` | `Alt+Enter` | 流式时按 followUp 入队；空闲时等同回车 |
-| `app.message.dequeue` | `Alt+Up` | 把队列内容还回编辑器（需要新增 `queue.clear` action） |
+| `app.message.followUp` | `Alt+Enter` → **`Ctrl+Q`** | 流式时按 followUp 入队；空闲时等同回车 |
+| `app.message.dequeue` | `Alt+Up` → `Alt+Q` | 把队列内容还回编辑器（需要新增 `queue.clear` action） |
 | `app.editor.external` | `Ctrl+G` | 复用 pi 的 `editInExternalEditor()` |
 | `app.message.copy` | `Ctrl+X` | 复制选区或最后一条 assistant 消息（复用 pi 的 clipboard utils） |
-| `app.clipboard.pasteImage` | `Ctrl+V` | 复用 pi 的 `readClipboardFilePaths/Image/Text` |
-| `app.suspend` | `Ctrl+Z` | 复用 pi 的 `handleCtrlZ()` 实现 |
+| `app.clipboard.pasteImage` | `Ctrl+V` → `Alt+V` | 复用 pi 的 `readClipboardFilePaths/Image/Text` |
+| `app.suspend` | `Ctrl+Z` → **不绑** | 复用 pi 的 `handleCtrlZ()` 实现 |
 | `app.interrupt` | `Escape` | 中断 / 还队列 |
 | `app.clear` | `Ctrl+C` | 清空编辑器；两次退出 |
 | `app.exit` | `Ctrl+D` | 编辑器为空时退出 |
 | `tui.editor.historyPrevious/Next` | `Up` / `Down` | 交给编辑器（`CustomEditor` 已实现） |
+
+## Windows：默认键不是同一批（followUp 是 `Ctrl+Q`，不是 `Alt+Enter`）
+
+pi 的 `KEYBINDINGS` 在模块装载时就读了它自己的 `useWindowsKeybindings()`（`win32` **或** WSL
+都算 Windows），本项目 `{ ...PI_KEYBINDINGS, ...PROJECT_KEYBINDINGS }` 直接拿到那一批。所以上表
+里「→」右边的键只在 Windows 上生效，`/hotkeys` 也只会列出那一批。
+
+最常被当成 bug 的一条是 followUp：`Alt+Enter` 在 Windows Terminal 里是**全屏开关**，
+那一串根本到不了应用 —— 按下去只整屏放大，看起来就是「Windows 上没有 followUp 的快捷键」。
+pi 的对策就是换键（`Ctrl+Q`），本项目跟随。**不要**给它补回 `alt+enter`：那样只是
+把同一个按不动的键多写进一份文档。个别终端（WezTerm、VS Code 终端）确实能让它上来，
+那就由用户自己写覆盖：
+
+```json
+{ "app.message.followUp": ["ctrl+q", "alt+enter"] }
+```
+
+两条推论，都是「少写一份会骗人的说明书」的直接结果：
+
+- 所有**给人看**的键名走 `keyLabel()` / `actionKeys()`（`/hotkeys`、顶行、底栏提示），
+  它们是同一份解析结果；注释与文档里写死的键名默认是 mac 的值。
+- Windows 上 `app.suspend` 的默认是空数组（`ctrl+z` 在那儿不归应用），所以 `/hotkeys`
+  里**没有 `app.suspend` 那一行** —— 表只列真能按的。测试盯的是「解绑的动作不凑空键名行」，
+  而不是“每个动作都得有键名”。
 
 ## 测试要跟着改
 

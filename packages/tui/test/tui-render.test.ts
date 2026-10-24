@@ -38,11 +38,13 @@ import {
 import { gitBranch } from '../src/app';
 import { resolveThemeName, setupTheme } from '../src/theme';
 import {
+  actionKeys,
   createProjectKeybindings,
   formatKeyId,
   installProjectKeybindings,
   keyLabel,
 } from '../src/keybindings';
+import { legacySequence } from './key-sequences';
 import { createTraceTree, appendNode, patchNode } from '@ela/core/trace';
 import { createInitialState, type AgentState } from '@ela/core/state';
 import type { Message } from '@earendil-works/pi-ai';
@@ -1450,15 +1452,22 @@ test('TraceChunks：空树时给一句说明（0 高度会让面板整个消失�
 });
 
 
-test('翻页与 Alt+↑ 都归 pi 的键位表管（不再自己列字节序列）', () => {
+test('翻页与 `app.message.dequeue` 都归 pi 的键位表管（不再自己列字节序列）', () => {
   // 这条钉的是「不再自己造键」这个决定（来龙去脉见 `app.ts` 里 `const ESC` 上方那段）：
-  // 翻页 = pi 的 `tui.altScreen.pageUp/pageDown`，`Alt+↑` = pi 的 `app.message.dequeue`，
+  // 翻页 = pi 的 `tui.altScreen.pageUp/pageDown`，还回排队消息 = pi 的 `app.message.dequeue`，
   // `Ctrl+P` = pi 的 `app.model.cycleForward`。早先这三样都被本项目的字节序列表抢走。
+  //
+  // 键名**不写死**：`app.message.dequeue` 的默认键按平台而异（mac `Alt+↑`、Windows `Alt+Q`），
+  // 写死 `Alt+↑` 在 Windows 上必挂 —— 而这正是「断言在替 pi 定平台」那类假失败。
   const kb = getKeybindings();
   const ESC = String.fromCharCode(27);
   assert.ok(kb.matches(`${ESC}[5~`, 'tui.altScreen.pageUp'), 'PgUp 应该翻上整页');
   assert.ok(kb.matches(`${ESC}[6~`, 'tui.altScreen.pageDown'), 'PgDn 应该翻下整页');
-  assert.ok(kb.matches(`${ESC}[1;3A`, 'app.message.dequeue'), 'Alt+↑ 应该是「还回排队消息」');
+  const dequeueKeys = actionKeys('app.message.dequeue');
+  assert.ok(dequeueKeys.length > 0, 'app.message.dequeue 该有默认键');
+  for (const key of dequeueKeys) {
+    assert.ok(kb.matches(legacySequence(key), 'app.message.dequeue'), `${key} 应该是「还回排队消息」`);
+  }
   assert.ok(kb.matches(String.fromCharCode(16), 'app.model.cycleForward'), 'Ctrl+P 应该是换下一个模型');
   // 裸 ↑↓ 不属于任何翻页动作 —— 它是编辑器的光标 / 对话框的选项导航。
   // （Orca 这类不支持 Kitty 键盘协议的终端发来的就是这一串。）
