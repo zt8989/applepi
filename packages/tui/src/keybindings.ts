@@ -16,6 +16,28 @@
  * `keybindings.json` 里同一个键不能有两个含义，所以轨迹页用本项目自己的 `app.trace.toggle`
  * （默认 `ctrl+r`）。
  *
+ * ## Windows 上默认键**不是同一批**（pi 自己按平台分叉）
+ *
+ * pi 的 `KEYBINDINGS` 在模块装载时就读了 `useWindowsKeybindings()`（`win32` **或** WSL 都算
+ * Windows），所以本项目 spread 过来时拿到的已经是那一批：
+ *
+ * | 动作 | macOS / Linux | Windows |
+ * | --- | --- | --- |
+ * | `app.message.followUp` | `alt+enter` | `ctrl+q` |
+ * | `app.message.dequeue` | `alt+up` | `alt+q` |
+ * | `app.clipboard.pasteImage` | `ctrl+v` | `alt+v` |
+ * | `app.model.cycleBackward` | `shift+ctrl+p` | `alt+p` |
+ * | `app.suspend` | `ctrl+z` | 不绑（`[]`） |
+ *
+ * followUp 尤其容易让人以为「Windows 上没有这个快捷键」：`Alt+Enter` 在那边的默认含义是
+ * **Windows Terminal 的全屏开关**，那一串根本到不了应用 —— 按下去只会整屏放大。所以 pi
+ * 在 Windows 上改用 `Ctrl+Q`。**不要**在本项目里再给它加回 `alt+enter`：加了也只是
+ * 「文档里多一个按不动的键」。真想改就写 `keybindings.json`，那里的覆盖优先级最高。
+ *
+ * 于是「现在到底按哪个键」只有一个权威来源：`keyLabel()` / `actionKeys()`（它们读的是解析后
+ * 的键位表），也就是 `/hotkeys`、顶行提示、底栏提示三处。**注释与文档里写死的键名只在
+ * mac 上是对的** —— 碰到平台相关的动作，说键的时候要连 Windows 一起说。
+ *
  * 用户覆盖读 `~/.pi/agent/keybindings.json`（与 pi 同一个文件、同一套格式，值也可以是数组），
  * 旧名字走 pi 的 `migrateKeybindingsConfig()` 迁移。读不到就用全套默认值、**不抛** —— 键位是可选
  * 配置，不该让界面起不来。
@@ -77,7 +99,7 @@ export const PROJECT_KEYBINDINGS = {
    */
   'app.trace.toggle': { defaultKeys: 'ctrl+r', description: '切换「对话 / 轨迹」两页' },
   // 排队走哪一列没有自己的键位 —— 与 pi 同一套：`Enter` → steer，
-  // `app.message.followUp`（默认 `Option+Enter`）→ followUp。
+  // `app.message.followUp`（mac 是 `Option+Enter`、Windows 是 `Ctrl+Q`，见文件头）→ followUp。
   // 这里早先有个 `app.queue.cycle`（`ctrl+q`）切「入队模式」，已删（理由见 app.ts 的 `queue()`）。
 
   /**

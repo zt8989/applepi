@@ -10,6 +10,7 @@ import {
 import {
   ALL_KEYBINDINGS,
   PROJECT_KEYBINDINGS,
+  actionKeys,
   actionMatches,
   createProjectKeybindings,
   formatKeyId,
@@ -19,6 +20,7 @@ import {
   keybindingsPath,
 } from '../src/keybindings';
 import { hotkeysMarkdown, renderHotkeys } from '../src/hotkeys';
+import { legacySequence } from './key-sequences';
 import { setupTheme } from '../src/theme';
 import path from 'node:path';
 
@@ -70,27 +72,59 @@ test('本项目自己的动作都在定义表里', () => {
 });
 
 /**
+ * 每个 followUp 键 id 对应的**字节序列样本**。
+ *
+ * 为什么按字节测：`alt+enter` 在不同终端发的不是同一串字节 —— 传统终端 `ESC CR`、
+ * kitty 键盘协议 `ESC[13;3u`、xterm 的 modifyOtherKeys `ESC[27;3;13~`。少认一种，
+ * 那个终端里 followUp 就「按了没反应」，而这正是最难归因的一类症状（用户不知道
+ * 自己终端开了什么协议，只知道自己按了键没反应）。`ctrl+q` 是普通控制字符
+ * （`DC1`），只有一种字节。
+ *
+ * `legacySequence()` 负责从**键 id** 推字节（所以断言里不写死 mac 的默认键），
+ * 这里只额外补 `alt+enter` 的另外两种协议形状。
+ */
+function followUpSequences(key: string): readonly string[] {
+  const forms = [legacySequence(key)];
+  if (key === 'alt+enter') forms.push('\u001b[13;3u', '\u001b[27;3;13~');
+  return forms;
+}
+
+/**
  * 排队走哪一列由**按哪个键**定，与 pi 同一套：回车 = steer（编辑器提交），
- * `Option+Enter` = `app.message.followUp`。
+ * `app.message.followUp` = followUp。
  *
- * ## 为什么这条要按字节序列测
+ * ## 键名因平台而异，所以这里**问键位表**而不是写死
  *
- * macOS 上 `Option+Enter` 在不同终端发的**不是同一串字节**：传统终端 `ESC CR`、
- * kitty 键盘协议 `ESC[13;3u`、xterm 的 modifyOtherKeys `ESC[27;3;13~`。
- * 少认一种，那个终端里 followUp 就「按了没反应」—— 而这正是最难归因的一类症状
- * （用户不知道自己终端开了什么协议，只知道自己按了键没反应）。
+ * pi 的默认键按平台分叉（它的 `useWindowsKeybindings()`：`win32` 与 WSL 都算 Windows）：
+ * macOS/Linux 是 `alt+enter`，**Windows 是 `ctrl+q`** —— Windows Terminal 把
+ * `Alt+Enter` 当全屏开关，那一串根本到不了应用（按下去只整屏放大，看起来就像
+ * 「Windows 上没有这个快捷键」）。
+ *
+ * 写死 `Option+Enter` 的断言在 Windows 上必挂，而挂的原因不是代码坏了，是断言在替
+ * pi 决定平台。所以这里从 `actionKeys()` 拿**这一台机器上真正生效**的键，再逐个验字节序列。
  *
  * 早先本项目是 `ctrl+q` 切「入队模式」（`app.queue.cycle`），已删：模式是**状态**，
  * 切过之后每条都按新列走，而屏幕上看不出自己现在在哪个模式里 —— 症状是
  * 「我明明按的回车，怎么排到 followUp 去了」。
  */
-test('排队键位与 pi 一致：Option+Enter 命中 app.message.followUp，裸回车归「提交」', () => {
+test('排队键位与 pi 一致：followUp 键（mac 是 Option+Enter，Windows 是 Ctrl+Q）命中 app.message.followUp，裸回车归「提交」', () => {
   withDefaultKeybindings(() => {
-    for (const seq of ['\u001b\r', '\u001b[13;3u', '\u001b[27;3;13~']) {
-      assert.ok(
-        actionMatches(seq, 'app.message.followUp'),
-        `${JSON.stringify(seq)} 该命中 app.message.followUp（Option+Enter）`,
-      );
+    const keys = actionKeys('app.message.followUp');
+    assert.ok(keys.length > 0, 'app.message.followUp 该有默认键');
+    for (const key of keys) {
+      for (const seq of followUpSequences(key)) {
+        assert.ok(
+          actionMatches(seq, 'app.message.followUp'),
+          `${JSON.stringify(seq)} 该命中 app.message.followUp（${key}）`,
+        );
+      }
+    }
+    if (process.platform === 'win32') {
+      // 钉住 Windows 的这一个具体键：`Ctrl+Q` 是本项目在 Windows 上唯一能按的
+      // followUp 键（`Alt+Enter` 被终端吃掉），键名同时出现在 `/hotkeys` 与底栏提示。
+      assert.deepEqual(keys, ['ctrl+q'], 'win32 上 followUp 是 pi 的 ctrl+q');
+      assert.ok(!actionMatches('\u001b\r', 'app.message.followUp'), 'Alt+Enter 在 Windows 上不归 followUp');
+      assert.equal(keyLabel('app.message.followUp'), 'Ctrl+Q');
     }
     assert.ok(!actionMatches('\r', 'app.message.followUp'), '裸回车是「提交」，不该被当成 followUp');
     assert.ok(actionMatches('\r', 'tui.input.submit'), '裸回车要能提交（= steer）');
@@ -264,8 +298,16 @@ test('/hotkeys：与 pi 对齐的动作都列在表里（它们现在真的能�
     'app.clear',
     'app.exit',
   ] as const) {
+    const keys = actionKeys(live);
+    if (keys.length === 0) {
+      // 这一台机器上 pi 的默认**本来就是空**：`app.suspend` 在 Windows 上是 `[]`
+      // （`ctrl+z` 在那儿不是「挂到后台」）。这时表里不该给它凑一行 —— 那行会是
+      // 「空键名 + 描述」，读的人只会以为表格坏了。
+      assert.ok(!md.includes('| `` |'), `解绑的动作不该留空键名的行：\n${md}`);
+      continue;
+    }
     const label = keyLabel(live);
-    assert.notEqual(label, '', `${live} 默认该有键名`);
+    assert.notEqual(label, '', `${live} 有键就该解析得出键名`);
     // 循环模型那一行是「两个键一个单元格」（`Ctrl+P / Shift+Ctrl+P`），所以
     // 只要行里出现这个键名就算列了 —— 直接包含整个 `` `label` `` 会漏掉合行。
     assert.ok(md.includes(label), `表里该出现 ${live}（${label}）：\n${md}`);

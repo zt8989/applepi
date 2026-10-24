@@ -48,7 +48,7 @@ telemetry、project trust……），本项目没那些功能 —— 硬摆上�
 - **本项目不读**（pi 读）：`transport`、`httpIdleTimeoutMs`、`cacheWarming`、
   `steeringMode` / `followUpMode`（这两个定的是**投递粒度**：`all` = 一次全插进去，
   `one-at-a-time` = 一条一条来。本项目恒定「一条一条」—— 排队那两条走哪一列由**按键**
-  决定（回车 = steer，`Option+Enter` = followUp），与这两个键无关，所以不能拿它们当那一行的值）、
+  决定（回车 = steer，`app.message.followUp` = followUp），与这两个键无关，所以不能拿它们当那一行的值）、
   `terminal.*` / `images.*`、`tuiMode` / `fullscreen*`、`mermaid`、`showCacheMissNotices`、
   `collapseChangelog`、`enableInstallTelemetry`、`defaultProjectTrust`、
   `doubleEscapeAction`、`treeFilterMode`、`quietStartup`、`warnings`。

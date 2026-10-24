@@ -274,10 +274,13 @@ content 块，历史里的图片画成缩略图、文档画成文件格子。
 `Ctrl+T` 展开/收起模型的思考块，`Ctrl+L` 开模型面板。
 **pi 的整套键位都可用**（冲突以 pi 为准）：`Ctrl+P`/`Shift+Ctrl+P` 循环换模型，
 `Shift+Tab` 循环思考级别，`Ctrl+G` 交给 `$EDITOR`，`Ctrl+X` 复制最后一条回答，
-`Ctrl+V` 粘贴（文件/图片/文本），`Ctrl+Z` 挂后台，`Alt+Enter`（macOS `Option+Enter`）排 follow-up，
-`Alt+Up` 把排队消息还回输入框。**中断是 `Escape`，`Ctrl+C` 是清空编辑器（连按两次退出）、
+`Ctrl+V` 粘贴（文件/图片/文本，Windows 上是 `Alt+V`），`Ctrl+Z` 挂后台（Windows 上无默认键），
+`Alt+Enter`（macOS `Option+Enter`，Windows 上是 `Ctrl+Q`）排 follow-up，
+`Alt+Up`（Windows 上是 `Alt+Q`）把排队消息还回输入框。**中断是 `Escape`，`Ctrl+C` 是清空编辑器（连按两次退出）、
 `Ctrl+D` 退出** —— 这三个与 pi 一致（不再把 `Ctrl+C` 当中断）。
-`/hotkeys` 打出完整的一份（形状与 pi 的 `/hotkeys` 相同）。
+`/hotkeys` 打出完整的一份（形状与 pi 的 `/hotkeys` 相同）——
+**以它为准**：上面这批键有一部分在 Windows 上不是同一个（pi 按平台分叉，例如 followUp 在
+Windows 上是 `Ctrl+Q`，因为 `Alt+Enter` 被 Windows Terminal 吃成全屏开关）。
 布局照抄 pi 的终端界面：**顶行把页签与轨迹统计合并成一行**（`对话 │ 轨迹 3轮2步 错误1 (Ctrl+R)`），
 模型与工作目录在底栏，工具调用是带底色的整块。
 
@@ -316,7 +319,7 @@ content 块，历史里的图片画成缩略图、文档画成文件格子。
 | **followUp** | 模型没有工具调用了（回合收工），然后**开一个新回合** | 「先按你说的做，弄完再说下一件事」 |
 
 两列队列各自 FIFO、互不排队。语义与 pi 的 `steer()` / `followUp()` 一致，
-**键位也同一套**：回车 = steer，`Alt+Enter`（macOS `Option+Enter`）= followUp。
+**键位也同一套**：回车 = steer，`Alt+Enter`（macOS `Option+Enter`，Windows 上是 `Ctrl+Q`）= followUp。
 底区会一直列着排队的消息，形状与 pi 逐行同构：
 
 ```
