@@ -1,10 +1,15 @@
 /**
- * Node 端的轨迹落盘：追加写 `traces/<时间戳>_<id>.jsonl`。
+ * Node 端的轨迹落盘：追加写 `traces/--<cwd 编码>--/<时间戳>_<id>.jsonl`。
  *
  * 用 JSONL 追加而不是整树覆盖写：崩溃只丢最后没 flush 的一行；长会话不会越写越慢；
  * `wc -l` 就知道这次会话发生过多少次尝试。
+ *
+ * **目录布局与 sessions/ 一致**（`--<cwd 编码>--/` 子目录，见 config-home 的
+ * `traceDirFor`）：会话与它的轨迹同生同死，按工作目录归类后两边的目录名、文件名
+ * 一一对应 —— 删一条会话时轨迹就在同名的旁边；跨项目 `/resume` 时轨迹也跟着
+ * cwd 走，不会把两个项目的树混在一个平目录里。
  */
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import {
@@ -14,29 +19,49 @@ import {
   type TraceSink,
 } from './trace-store';
 import type { TraceTree } from './trace';
-import { tracesDir, findFileById, traceFileName, sessionIdFromFileName } from './config-home';
+import {
+  traceDirFor,
+  findFileById,
+  traceFileName,
+  sessionIdFromFileName,
+} from './config-home';
 
 /**
- * 轨迹目录；不给就落在配置家目录（`~/.redux-agent/traces/`）—— 轨迹是会话级产物，
- * 跟会话文件放一起才对。传字符串则用该目录（相对路径相对进程 cwd），测试用。
+ * 轨迹目录；不给就落在配置家目录（`~/.pi/agent/traces/`）。传字符串则用该目录
+ * （相对路径相对进程 cwd），测试用 —— 旧形状是平目录，读回时仍然认。
  */
 export type TraceDir = string | null;
-
-/** 解析成绝对目录。 */
-function resolveDir(dir?: TraceDir): string {
-  if (dir) return path.resolve(dir);
-  return tracesDir();
-}
 
 /**
  * 某个会话的轨迹 JSONL 路径。
  *
- * **先按 id 扫目录**（新名 `<时间戳>_<id>.jsonl` 与旧名 `<id>.jsonl` 都认）；找不到就
- * 按新形状拼一个（时间戳取现在）—— 调用方多是「准备写」。真要判存在自己 `existsSync`。
+ * **在 cwd 对应的目录里按 id 扫**（新名 `<时间戳>_<id>.jsonl` 与旧名 `<id>.jsonl` 都认），
+ * 找不到就按新形状拼一个（时间戳取现在）—— 调用方多是「准备写」。真要判存在自己
+ * `existsSync`。旧平布局由启动时的 `migrateFlatTraces()` 一次性归位（见 config-home），
+ * 这里不再回退去扫。
  */
-export function tracePath(sessionId: string, dir?: TraceDir): string {
-  const target = resolveDir(dir);
-  return findFileById(target, sessionId) ?? path.join(target, traceFileName(sessionId));
+export interface TracePathOptions {
+  /** 工作目录：轨迹落在它编码出来的子目录里。 */
+  cwd?: string;
+  /** 显式目录（测试 / 自定义布局）：给了就**只**用这个目录，不再叠 cwd 编码。 */
+  dir?: string;
+}
+
+export function tracePath(sessionId: string, options?: TracePathOptions | string): string {
+  if (typeof options === 'string') {
+    // 旧的位置参数形态（第二个参数就是目录）：只在那个目录里找。
+    const target = path.resolve(options);
+    return findFileById(target, sessionId) ?? path.join(target, traceFileName(sessionId));
+  }
+  const { cwd, dir } = options ?? {};
+  if (dir) {
+    const target = path.resolve(dir);
+    return findFileById(target, sessionId) ?? path.join(target, traceFileName(sessionId));
+  }
+  const scoped = traceDirFor(cwd ?? process.cwd());
+  const hit = findFileById(scoped, sessionId);
+  if (hit !== null) return hit;
+  return path.join(scoped, traceFileName(sessionId));
 }
 
 /**
@@ -76,9 +101,9 @@ export function createFileSink(filePath: string): TraceSink {
  */
 export async function loadSession(
   sessionId: string,
-  dir?: TraceDir,
+  options?: TracePathOptions | string,
 ): Promise<ReplayedSession | null> {
-  const file = tracePath(sessionId, dir);
+  const file = tracePath(sessionId, options);
   if (!existsSync(file)) return null;
   const text = await readFile(file, 'utf8');
   return replaySession(text, sessionId);
@@ -87,26 +112,26 @@ export async function loadSession(
 /** 只读回轨迹树（不要消息）。 */
 export async function loadTrace(
   sessionId: string,
-  dir?: TraceDir,
+  options?: TracePathOptions | string,
 ): Promise<TraceTree | null> {
-  const file = tracePath(sessionId, dir);
+  const file = tracePath(sessionId, options);
   if (!existsSync(file)) return null;
   const text = await readFile(file, 'utf8');
   return replayTrace(text, sessionId);
 }
 
 /**
- * 列出所有已落盘的**轨迹**会话 id。
- *
- * 注意这不是「会话列表」—— 后者在 `config-home` 的 `listSessions()`。
+ * 列出所有已落盘的**轨迹**会话 id：扫 cwd 对应的子目录；显式 `dir` 则扫那个目录
+ * （测试）。跨项目找 id 用 config-home 的 `findTraceFile`。
  */
-export async function listSessions(dir?: TraceDir): Promise<string[]> {
-  const { readdir } = await import('node:fs/promises');
-  const target = resolveDir(dir);
+export async function listTraceSessionIds(options?: TracePathOptions): Promise<string[]> {
+  const target = options?.dir
+    ? path.resolve(options.dir)
+    : traceDirFor(options?.cwd ?? process.cwd());
   if (!existsSync(target)) return [];
-  const entries = await readdir(target);
-  return entries
-    .filter((name) => name.endsWith('.jsonl') && !name.endsWith('.init.jsonl'))
-    .map((name) => sessionIdFromFileName(name))
-    .sort();
+  const entries = await readdir(target, { withFileTypes: true });
+  const names = entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl') && !entry.name.endsWith('.init.jsonl'))
+    .map((entry) => entry.name);
+  return names.map((name) => sessionIdFromFileName(name)).sort();
 }

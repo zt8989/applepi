@@ -31,6 +31,7 @@ import {
   readSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -93,6 +94,168 @@ export function tracesDir(): string {
   return path.join(configHome(), 'traces');
 }
 
+/**
+ * 某个工作目录的**轨迹**目录：`traces/--<cwd 编码>--/`。
+ *
+ * 与 sessions/ 同一套编码（`encodeCwd`）、同一个理由：会话与轨迹同生同死，按 cwd
+ * 归类后两边目录一一对应 —— 删会话时轨迹就在旁边；跨项目 `/resume` 轨迹也跟着走，
+ * 不会把两个项目的树混在一个平目录里。
+ */
+export function traceDirFor(cwd: string): string {
+  return path.join(tracesDir(), encodeCwd(cwd));
+}
+
+/** 找不到 cwd 的轨迹去哪：`traces/--unknown--/`。不丢数据，也不散在平目录里。 */
+export const TRACE_UNKNOWN_DIR_NAME = '--unknown--';
+
+/** 迁移标记文件：存在即表示平目录已归位，启动不再扫。 */
+export function traceMigrateMarkerPath(): string {
+  return path.join(configHome(), 'trace_migrate');
+}
+
+/**
+ * 一次性的旧轨迹迁移：把平的 `traces/*.jsonl` 按 cwd 归位到 `traces/--<cwd>--/`。
+ *
+ * 旧布局是平目录（`traces/<时间戳>_<id>.jsonl`），轨迹没有自己的 cwd 字段，归属从
+ * 两个来源拼：① 自己的 `prompt.init.sections.cwd`（`<cwd>\n…\n</cwd>` 包着）；
+ * ② 同 id 的 sessions 文件头（header 一定有 cwd）。两者都拿不到（多半是只有装载段、
+ * 没接过话的空会话）进 `--unknown--/`，不丢数据。
+ *
+ * 只跑一次：`~/.pi/agent/trace_migrate` 标记文件存在就直接返回。迁移是 rename（同盘
+ * 原子），不是复制 —— 中途崩了最坏留下半个目录，下次启动标记没写就再跑一遍。
+ *
+ * @returns 迁移摘要；标记已存在时返回 null（什么都没做）。
+ */
+export function migrateFlatTraces(): TraceMigrationResult | null {
+  const marker = traceMigrateMarkerPath();
+  if (existsSync(marker)) return null;
+
+  const root = tracesDir();
+  const result: TraceMigrationResult = { moved: 0, unknown: 0, failed: [] };
+
+  // 平目录里的文件：只拿**文件**，`--<cwd>--/` 子目录（新布局已在用）不碰。
+  let flat: string[];
+  try {
+    flat = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl'))
+      .map((entry) => entry.name);
+  } catch {
+    // 目录不存在 = 全新安装，直接写标记收工。
+    writeFileSync(marker, `${new Date().toISOString()} nothing to migrate\n`, 'utf8');
+    return result;
+  }
+
+  // id -> cwd，来源②：同 id 的 sessions 文件头。
+  const id2cwd = new Map<string, string>();
+  const sessionsRoot = sessionsDir();
+  let sessionDirs: string[] = [];
+  try {
+    sessionDirs = readdirSync(sessionsRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    sessionDirs = [];
+  }
+  for (const dir of sessionDirs) {
+    const full = path.join(sessionsRoot, dir);
+    let names: string[] = [];
+    try {
+      names = readdirSync(full);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!name.endsWith('.jsonl')) continue;
+      const id = sessionIdFromFileName(name);
+      if (id2cwd.has(id)) continue;
+      try {
+        const header = JSON.parse(readFileSync(path.join(full, name), 'utf8')) as {
+          cwd?: unknown;
+        };
+        if (typeof header.cwd === 'string' && header.cwd !== '') {
+          id2cwd.set(id, header.cwd);
+        }
+      } catch {
+        // 坏 header 不挡迁移：这个 id 落到 unknown 而已。
+      }
+    }
+  }
+
+  const unknownDir = path.join(root, TRACE_UNKNOWN_DIR_NAME);
+  for (const name of flat) {
+    const file = path.join(root, name);
+    const id = sessionIdFromFileName(name);
+    let cwd = id2cwd.get(id);
+    if (cwd === undefined) {
+      // 来源①：自己的 prompt.init.sections.cwd（`<cwd>\n…\n</cwd>` 包着）。
+      cwd = cwdFromTraceFile(file);
+    }
+    const target = path.join(
+      cwd ? traceDirFor(cwd) : unknownDir,
+      name,
+    );
+    try {
+      mkdirSync(path.dirname(target), { recursive: true });
+      // rename 而不是 copy+delete：同盘原子，不留半份。
+      renameSync(file, target);
+      if (cwd) {
+        result.moved += 1;
+      } else {
+        result.unknown += 1;
+      }
+    } catch (error) {
+      result.failed.push({
+        file: name,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  try {
+    mkdirSync(configHome(), { recursive: true });
+    writeFileSync(
+      marker,
+      `${new Date().toISOString()} moved=${result.moved} unknown=${result.unknown} failed=${result.failed.length}\n`,
+      'utf8',
+    );
+  } catch {
+    // 标记写不出来（只读目录？）：下次启动会再跑一遍，rename 过的文件已经不在平目录，
+    // 幂等。
+  }
+  return result;
+}
+
+/**
+ * 从轨迹文件里抽 cwd：第一条 `prompt.init` 的 `sections.cwd` 是 `<cwd>\n<路径>\n</cwd>`。
+ * 没有 sections（老版本）或没有 prompt.init 返回 null。只读到命中为止，不整文件扫。
+ */
+function cwdFromTraceFile(file: string): string | undefined {
+  try {
+    const head = readFileSync(file, 'utf8').slice(0, 512 * 1024);
+    for (const line of head.split('\n')) {
+      if (!line.includes('"prompt.init"')) continue;
+      const record = JSON.parse(line) as { sections?: { cwd?: string } };
+      const raw = record.sections?.cwd ?? '';
+      const match = /<cwd>\n([\s\S]*?)\n<\/cwd>/.exec(raw);
+      if (match) return match[1];
+      return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+/** `migrateFlatTraces()` 的结果。 */
+export interface TraceMigrationResult {
+  /** 有 cwd、归进了对应项目目录的文件数。 */
+  moved: number;
+  /** 没有 cwd 线索、进 `--unknown--/` 的文件数。 */
+  unknown: number;
+  /** rename 失败的（权限 / 被占用）。 */
+  failed: { file: string; reason: string }[];
+}
+
 /** 缺文件时返回 null，不抛 —— 配置目录可能还没建。 */
 export function readJsonIfExists<T>(file: string): T | null {
   if (!existsSync(file)) return null;
@@ -125,8 +288,8 @@ export function sessionPath(sessionId: string, cwd: string): string {
   return path.join(sessionDirFor(cwd), `${sessionId}.jsonl`);
 }
 
-export function tracePathFor(sessionId: string): string {
-  return path.join(tracesDir(), `${sessionId}.jsonl`);
+export function tracePathFor(sessionId: string, cwd?: string): string {
+  return path.join(traceDirFor(cwd ?? process.cwd()), `${sessionId}.jsonl`);
 }
 
 /**
@@ -218,9 +381,13 @@ export function findSessionFileById(sessionId: string): string | null {
   return null;
 }
 
-/** 轨迹文件的实际路径：先按 id 扫目录，找不到就用旧形状拼一个。 */
-export function findTraceFile(sessionId: string): string {
-  return findFileById(tracesDir(), sessionId) ?? tracePathFor(sessionId);
+/**
+ * 轨迹文件的实际路径：在 cwd 对应的子目录里按 id 扫，找不到就拼新形状。
+ * 旧平布局由 `migrateFlatTraces()` 启动时一次性归位，这里不扫平目录。
+ */
+export function findTraceFile(sessionId: string, cwd?: string): string {
+  const scoped = traceDirFor(cwd ?? process.cwd());
+  return findFileById(scoped, sessionId) ?? tracePathFor(sessionId, cwd);
 }
 
 /**
@@ -567,18 +734,18 @@ export interface CleanResult {
 
 export function cleanSessions(ids: readonly string[]): CleanResult {
   const result: CleanResult = { removed: 0, sessions: 0, failed: [] };
-  // 目录名 → 里面的会话 id，避免同一个会话被列两次（listSessions 按目录遍历）。
-  const byId = new Map<string, string>();
+  // 目录名 → 会话 id → cwd（轨迹目录按它编码），避免同一个会话被列两次。
+  const byId = new Map<string, { file: string; cwd?: string }>();
   for (const session of listSessions()) {
-    if (!byId.has(session.id)) byId.set(session.id, session.file);
+    if (!byId.has(session.id)) byId.set(session.id, { file: session.file, cwd: session.cwd });
   }
   for (const id of ids) {
-    const file = byId.get(id);
-    if (!file) {
+    const entry = byId.get(id);
+    if (!entry) {
       result.failed.push({ id, reason: `找不到会话 ${id}` });
       continue;
     }
-    const targets = [file, findTraceFile(id)];
+    const targets = [entry.file, findTraceFile(id, entry.cwd)];
     let ok = true;
     for (const target of targets) {
       try {

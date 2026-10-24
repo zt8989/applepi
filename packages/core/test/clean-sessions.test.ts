@@ -24,7 +24,8 @@ function fakeSession(id: string, cwd: string): string {
   mkdirSync(dir, { recursive: true });
   const header = JSON.stringify({ type: 'session', version: 1, id, timestamp: new Date().toISOString(), cwd });
   writeFileSync(path.join(dir, `${id}.jsonl`), `${header}\n`, 'utf8');
-  const trace = tracePathFor(id);
+  // 轨迹与 sessions 同一套 cwd 编码（cleanSessions 也是按会话的 cwd 去找轨迹的）。
+  const trace = tracePathFor(id, cwd);
   mkdirSync(path.dirname(trace), { recursive: true });
   writeFileSync(trace, '{"op":"add"}\n', 'utf8');
   return id;
@@ -35,14 +36,14 @@ test('cleanSessions：会话文件与轨迹文件**都**删掉', () => {
   const id = fakeSession('sess-a', cwd);
   const sessionFile = listSessions().find((s) => s.id === id)?.file;
   assert.ok(sessionFile, '刚造的会话要能被列出来');
-  assert.ok(existsSync(tracePathFor(id)), '轨迹文件在');
+  assert.ok(existsSync(tracePathFor(id, cwd)), '轨迹文件在');
 
   const result = cleanSessions([id]);
   assert.equal(result.sessions, 1);
   assert.equal(result.removed, 2, '会话 + 轨迹，两个文件');
   assert.equal(result.failed.length, 0);
   assert.equal(existsSync(sessionFile), false, '会话文件删了');
-  assert.equal(existsSync(tracePathFor(id)), false, '轨迹也删了 —— 只删会话的话 traces/ 会一直涨');
+  assert.equal(existsSync(tracePathFor(id, cwd)), false, '轨迹也删了 —— 只删会话的话 traces/ 会一直涨');
   assert.equal(listSessions().some((s) => s.id === id), false);
 });
 

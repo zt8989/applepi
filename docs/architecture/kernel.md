@@ -8,7 +8,7 @@
 export function createKernel(options: KernelOptions): Kernel {
   // 1. runtime（真 provider，或 demo 的 faux）
   // 2. 会话身份（sessionId + cwd）→ 进 store 的 `state.session`
-  //    文件名由 id 决定：traces/<时间戳>_<id>.jsonl、sessions/<cwd>/<时间戳>_<id>.jsonl
+  //    文件名由 id 决定：traces/--<cwd>--/<时间戳>_<id>.jsonl、sessions/<cwd>/<时间戳>_<id>.jsonl（同一套编码）
   // 3. 落盘 sink（traceDir === null 则完全不落盘）
   // 4. createPersistentStore({...})  ← 环在这里诞生
   return { store, runtime, sessionId, persistence, dispose };
@@ -49,7 +49,7 @@ export function createKernel(options: KernelOptions): Kernel {
 createKernel
 ├── runtime          provider.ts：createModels + deepseekProvider，或 demo 的 faux
 ├── sessionId        trace.ts 的 newSessionId()
-├── sink             trace-file.ts：追加写 ~/.pi/agent/traces/<时间戳>_<id>.jsonl
+├── sink             trace-file.ts：追加写 ~/.pi/agent/traces/--<cwd>--/<时间戳>_<id>.jsonl
 └── createPersistentStore
     ├── store         createStore + redux-loop 的 install()
     ├── trace         trace.ts 的 createTraceTree（sessionId 相同）

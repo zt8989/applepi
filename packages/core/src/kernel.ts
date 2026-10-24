@@ -328,9 +328,15 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
 
   const openResources = (id: string, resumeFrom?: number): SessionResources => {
     const dir = options.traceDir;
+    // 轨迹与 sessions/ 同一套 cwd 编码目录（`traces/--<cwd>--/`）；显式 --trace-dir
+    // 仍然优先（测试 / 自定义布局）。cwd 在下面才解析，这里先用 options 重算一遍。
+    const resolvedCwd = path.resolve(options.cwd ?? process.cwd());
     return {
       sessionId: id,
-      sink: dir === null ? undefined : createFileSink(tracePath(id, dir ?? undefined)),
+      sink:
+        dir === null
+          ? undefined
+          : createFileSink(tracePath(id, dir ? { cwd: resolvedCwd, dir } : { cwd: resolvedCwd })),
       recorder: null, // 由下面的 openRecorder 填（它要等 store 建好）
     };
   };
@@ -1111,7 +1117,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       // 读不到（旧会话、或当时开了 --no-trace）不是错误：发不带树的那条 action。
       const traceDir = options.traceDir;
       const tree =
-        id !== '' && traceDir !== null ? await loadTrace(id, traceDir ?? undefined) : null;
+        id !== '' && traceDir !== null
+          ? await loadTrace(id, traceDir ? { cwd, dir: traceDir } : { cwd })
+          : null;
       // 轨迹落盘器的游标也要跟着推 —— 它只看 messages 有没有变长，看不出这些是「读回来的」
       // 而不是「新产生的」。不推的话，它会把整批历史当新消息重写一遍，
       // 于是轨迹文件里同一批消息出现两次。

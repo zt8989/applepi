@@ -12,7 +12,7 @@
 import process from 'node:process';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
-import { findSessionFile } from '@ela/core/config-home';
+import { findSessionFile, migrateFlatTraces } from '@ela/core/config-home';
 import { defaultProviderSpec, providerNames } from '@ela/core/provider';
 import { THINKING_LEVELS, isThinkingLevel } from '@ela/core/thinking-level';
 import { createKernel, type Kernel } from '@ela/core/kernel';
@@ -319,6 +319,18 @@ async function main(): Promise<void> {
   // 代价是启动后多一段「正在后台装载」：那段时间发消息会被按住，宿主（Orca）的状态也
   // 晚半拍。现在扩展装载本身已经是串行的（与 pi 同一形态），打包形态下它只占 0.3~1.5s
   // —— 不值得再为它多一层「现在能不能发」的状态。
+
+  // 旧轨迹迁移：平的 `traces/*.jsonl` 归位到 `traces/--<cwd>--/`。只跑一次（标记文件），
+  // 且必须在 createKernel 之前 —— 内核的 sink 会往新布局写，迁移要抢先看旧布局。
+  // 失败只报告不拦截：迁移不了就那样，别挡着人用工具。
+  const migration = migrateFlatTraces();
+  if (migration && (migration.moved > 0 || migration.unknown > 0 || migration.failed.length > 0)) {
+    process.stderr.write(
+      `[trace] 旧轨迹迁移：${migration.moved} 个归位，${migration.unknown} 个无 cwd 进 --unknown--` +
+        (migration.failed.length > 0 ? `，${migration.failed.length} 个失败` : '') +
+        '\n',
+    );
+  }
 
   // 内核：整个应用里唯一的一次 createKernel() 装配，界面只拿到它的 store。
   // 没有第二份 store，也没有第二份环。

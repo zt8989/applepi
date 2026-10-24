@@ -251,9 +251,10 @@ export function openSessionPicker(options: SessionPickerOptions): () => void {
   return close;
 }
 
-/** 删掉一条会话的轨迹文件（`traces/<时间戳>_<id>.jsonl`）。删不掉不算失败 —— 清理是尽力而为。 */
+/** 删掉一条会话的轨迹文件（`traces/--<cwd>--/<时间戳>_<id>.jsonl`，旧布局平目录也认）。
+ * 删不掉不算失败 —— 清理是尽力而为。 */
 export function deleteSessionTrace(session: SessionSummary): boolean {
-  const file = findTraceFile(session.id);
+  const file = findTraceFile(session.id, session.cwd);
   if (!existsSync(file)) return true;
   try {
     rmSync(file, { force: true });

@@ -90,8 +90,9 @@ export {
 export { STREAM_NOTICE_ROLE, type WebStreamItem, type WebStreamNotice } from './web-protocol';
 export {
   createFileSink,
-  listSessions,
+  listTraceSessionIds,
   loadSession,
+  loadTrace,
   tracePath,
 } from './trace-file';
 export {

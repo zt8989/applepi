@@ -9,7 +9,21 @@ Agent 的执行历史不是一条流水。`packages/core/src/trace.ts` 把它做
 | commit 有 parent | 每个节点有 `parentId` |
 | commit 有分支（`--graph` 里的 `│` `/` `\`） | 重试曾是分支，现在改为**同一个容器里的多次尝试**（见下） |
 | HEAD 指向当前所在的线 | `tipId` = 最后一条推进 tip 的节点 |
-| `git reflog` 只追加不改写 | `~/.pi/agent/traces/<时间戳>_<id>.jsonl` 追加写 JSONL |
+| `git reflog` 只追加不改写 | `~/.pi/agent/traces/--<cwd 编码>--/<时间戳>_<id>.jsonl` 追加写 JSONL |
+
+## 盘上位置
+
+轨迹与 sessions/ 同一套目录编码：`traces/--<cwd 编码>--/<时间戳>_<id>.jsonl`（编码规则见
+config-home 的 `encodeCwd`，与 sessions/ 一致）。理由：会话与轨迹同生同死，按 cwd
+归类后两边目录一一对应 —— 删会话时轨迹就在旁边；跨项目 `/resume` 轨迹也跟着走。
+
+找不到 cwd 的旧轨迹（多半是只有装载段、没接过话的空会话）在 `traces/--unknown--/`。
+
+**旧布局迁移**：轨迹曾经放在平的 `traces/<时间戳>_<id>.jsonl`。启动时
+`migrateFlatTraces()`（config-home）做一次性归位 —— 按 trace 自己的
+`prompt.init.sections.cwd` 或同 id sessions 文件头的 `cwd` 把文件 rename 进
+`traces/--<cwd>--/`；两者都拿不到的进 `--unknown--`。跑完写
+`~/.pi/agent/trace_migrate` 标记文件，之后启动直接跳过（代码里也不再有平目录回退扫）。
 
 ## 节点模型
 
