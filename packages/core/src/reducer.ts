@@ -1,5 +1,12 @@
 import { Cmd, loop, type CmdType, type LoopReducer } from 'redux-loop';
-import type { AssistantMessage, Message, ToolCall, ToolResultMessage } from '@earendil-works/pi-ai';
+import type {
+  AssistantMessage,
+  ImageContent,
+  Message,
+  TextContent,
+  ToolCall,
+  ToolResultMessage,
+} from '@earendil-works/pi-ai';
 import type { AgentAction, AgentActionType, ModelSpec } from './actions';
 import {
   createInitialState,
@@ -264,6 +271,65 @@ export function causeFromKind(kind: LlmErrorKind, cause?: StopCause): StopCause 
 function summarize(text: string): string {
   const first = text.trim().split('\n')[0] ?? '';
   return first.length > 60 ? `${first.slice(0, 59)}…` : first;
+}
+
+/**
+ * 一批 followUp 能不能合成**一条**消息发。
+ *
+ * ## 为什么不看来源扩展
+ *
+ * 「这几条是不是同一个扩展发的」拿不到：官方 loader 里 `pi.sendMessage` 是**所有扩展
+ * 共用的一个函数**（`runtime.sendMessage = actions.sendMessage`，每个扩展的 `pi`
+ * 都只是转发，签名里没有扩展身份），`bindCore` 只收到 `(message, options)`。宿主层
+ * 想认「这是 pi-background-tasks 连发的 N 条完成通知」只能看**内容长得像不像**。
+ *
+ * 判据：每条 trim 后的首行、尾行都非空，且**所有条目首行一致、尾行一致**。这正好
+ * 刻画「同一模板连发」的形状 —— 同一个扩展的完成通知都是同一个标签包的
+ * （首行 `<background-task-notification>`、尾行 `</background-task-notification>`），
+ * 而两个不同来源/不同形状的消息几乎不可能首尾都撞上。不合并不丢消息，只是
+ * 退回「一条一个回合」的老路。
+ */
+function followUpsMergeable(queue: readonly QueuedInput[]): boolean {
+  if (queue.length < 2) return false;
+  let firstLine: string | undefined;
+  let lastLine: string | undefined;
+  for (const item of queue) {
+    const lines = item.text.trim().split('\n');
+    const head = lines[0] ?? '';
+    const tail = lines[lines.length - 1] ?? '';
+    // 空首/尾行（单行外的空白）说明形状对不上模板，宁可不合。
+    if (head === '' || tail === '') return false;
+    if (firstLine === undefined) {
+      firstLine = head;
+      lastLine = tail;
+    } else if (head !== firstLine || tail !== lastLine) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * 把一列 followUp 合成一条消息的文本与 content 块。
+ *
+ * 文本：每条 trim 后用空行连接 —— 每条通知是完整的一块，空行让模型分得清条数。
+ * content：**每条都带**块时拼接（条目之间插一个空行文本块）；有缺就退化为 undefined
+ * （落点会用拼好的纯文本）。实际只有纯文本一种 —— `pi.sendMessage` 的调用方
+ * （`extensionMessageAction`）只传 text —— 但类型上允许，这里不丢内容。
+ */
+function mergeFollowUps(queue: readonly QueuedInput[]): {
+  text: string;
+  content: (TextContent | ImageContent)[] | undefined;
+} {
+  const text = queue.map((item) => item.text.trim()).join('\n\n');
+  const all = queue.every((item) => item.content !== undefined);
+  if (!all) return { text, content: undefined };
+  const blocks: (TextContent | ImageContent)[] = [];
+  queue.forEach((item, i) => {
+    if (i > 0) blocks.push({ type: 'text', text: '\n\n' });
+    blocks.push(...(item.content ?? []));
+  });
+  return { text, content: blocks };
 }
 
 /**
@@ -996,10 +1062,19 @@ const transitions: TransitionHandlers = {
     // 接住它就成了无人投递的孤儿，还会在未来某个无关回合的 tool.batch.done
     // 迟到插播。steer 优先于 followUp：它更早想说话。
     const queuedAs: 'steer' | 'followUp' = state.steerQueue.length > 0 ? 'steer' : 'followUp';
-    const queued = (queuedAs === 'steer' ? state.steerQueue : state.followUpQueue)[0];
+    const queue = queuedAs === 'steer' ? state.steerQueue : state.followUpQueue;
+    const queued = queue[0];
     if (queued === undefined) {
       return { ...closed, stepIndex: 0, turnSteps: state.turnSteps };
     }
+    // **多条同构的 followUp 合成一条**（判据见 `followUpsMergeable`）：
+    // pi-background-tasks 这类扩展会在同一个收工点连发 N 条完成通知，一条一个回合
+    // 会让模型为每条通知各跑一整回合（慢、贵、上下文全是「收到通知→好的」）。
+    // 合并后它们作为**同一条** user 消息开一个回合。合并不丢消息，只是换打包方式。
+    const merging = queuedAs === 'followUp' && followUpsMergeable(state.followUpQueue);
+    const merged = merging ? mergeFollowUps(state.followUpQueue) : undefined;
+    const text = merged?.text ?? queued.text;
+    const content = merged?.content ?? queued.content;
     const now = Date.now();
     // 「换过模型 / 档位」那一笔也先落下来：这条话马上要开一个新回合，
     // 而新回合用的是「此刻生效」的那一版。
@@ -1010,13 +1085,14 @@ const transitions: TransitionHandlers = {
     // 所以落点（tip 下面、开新容器）与 followUp 相同，只是 meta 还标着来路。
     const message: Message = {
       role: 'user',
-      content: queued.content ?? queued.text,
+      content: content ?? text,
       timestamp: now,
     };
+    // label 在合并时带条数（`followUp×3`），树上看得出来这是几条并成的一条。
     const userNode = appendNode(flushed.trace, attachPoint(flushed.trace), 'user', {
       status: 'ok',
-      label: `${queuedAs}: ${summarize(queued.text)}`,
-      detail: queued.text,
+      label: `${queuedAs}${merging ? `×${state.followUpQueue.length}` : ''}: ${summarize(text)}`,
+      detail: text,
       message,
       meta: { queued: queuedAs },
       createdAt: now,
@@ -1038,9 +1114,10 @@ const transitions: TransitionHandlers = {
       // 否则新回合的第一步会被标成「重试」，`turns` 也会跨回合累计。
       ...newTurnCounters(),
       messages: [...closed.messages, message],
-      // 只从取货的那条队列里消费一条，另一条原样保留（两列互不影响）。
+      // 合并时整列一次消费；否则只取一条（两列互不影响的老规矩不变）。
       steerQueue: queuedAs === 'steer' ? closed.steerQueue.slice(1) : closed.steerQueue,
-      followUpQueue: queuedAs === 'followUp' ? closed.followUpQueue.slice(1) : closed.followUpQueue,
+      followUpQueue:
+        queuedAs === 'followUp' ? (merging ? [] : closed.followUpQueue.slice(1)) : closed.followUpQueue,
       // 新的一句话 = 上一回合的收工理由作废。
       stopReason: null,
       stopCause: null,
