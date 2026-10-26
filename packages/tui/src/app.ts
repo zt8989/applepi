@@ -31,7 +31,7 @@ import {
   type TuiInputListener,
 } from '@earendil-works/pi-tui';
 import { abortRun } from '@ela/core/run-control';
-import { traceRows, traceStats, formatDuration, type TraceNode, type TraceTree } from '@ela/core/trace';
+import { traceRows, traceStats, formatDuration, shortId, type TraceNode, type TraceTree } from '@ela/core/trace';
 import {
   deriveStream,
   streamMessages,
@@ -485,7 +485,7 @@ export class TraceChunks implements Component {
     const prefix = this.layout.get(node.id) ?? '';
     const elapsed = node.endedAt === null ? '' : ` ${formatDuration(node.endedAt - node.createdAt)}`;
     const meta = metaSuffixOf(node);
-    const text = `${prefix}${node.id} ${node.kind}: ${node.label}${elapsed}${meta}`;
+    const text = `${prefix}${shortId(node.id)} ${node.kind}: ${node.label}${elapsed}${meta}`;
     const line = truncateToWidth(text, width);
     // 失败与 tip 都加粗 —— 判据在 `emphasizedTraceLine()`（与 renderColoredTree 同一份）。
     return emphasizedTraceLine(node, tree) ? bold(color(line)) : color(line);

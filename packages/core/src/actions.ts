@@ -415,11 +415,7 @@ export type AgentAction =
    * 压失败。**对话原样保留**（压缩是优化，不是正确性要求）。
    */
   | { type: 'compact.failed'; error: string; reason: CompactReason }
-  /**
-   * 轨迹节点已落盘。持久化是 effect（写文件 / localStorage），它把游标推回来，
-   * 于是 reducer 知道自己已经写过哪一段，重复的记录不会二次落盘。
-   */
-  | { type: 'trace.persisted'; upToSeq: number }
+
   /**
    * 恢复历史：把一条**已有会话里读回来的**消息塞进 messages。
    *

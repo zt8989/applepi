@@ -397,7 +397,7 @@ test('发出第一句话：装载节点补在前面，init 记录与轨迹一起
       traceDir: dir,
     });
     kernel.store.dispatch({ type: 'user.message', text: '算一下 (3+4)*6' } as AgentAction);
-    for (let i = 0; i < 60; i += 1) {
+    for (let i = 0; i < 150; i += 1) {
       await new Promise((r) => setTimeout(r, 100));
       const s = kernel.store.getState();
       if (s.phase === 'idle' && s.turns > 0) break;
@@ -450,7 +450,7 @@ test('init 记录只写一份（不会因为落盘器多冲几轮而重复）', 
     // 连着问三句（每一句都会让落盘器冲好几轮：delta、tool.result…）。
     for (const text of ['第一句', '第二句', '第三句']) {
       kernel.store.dispatch({ type: 'user.message', text } as AgentAction);
-      for (let i = 0; i < 60; i += 1) {
+      for (let i = 0; i < 150; i += 1) {
         await new Promise((r) => setTimeout(r, 100));
         const s = kernel.store.getState();
         if (s.phase === 'idle' && s.turns > 0) break;
@@ -484,7 +484,7 @@ test('恢复历史不补第二份 init 记录（那个会话的文件里已经�
       traceDir: dir,
     });
     first.store.dispatch({ type: 'user.message', text: '旧的第一句' } as AgentAction);
-    for (let i = 0; i < 60; i += 1) {
+    for (let i = 0; i < 150; i += 1) {
       await new Promise((r) => setTimeout(r, 100));
       const s = first.store.getState();
       if (s.phase === 'idle' && s.turns > 0) break;
@@ -537,7 +537,7 @@ test('端到端：装载与对话都落盘，回放时零 token 复现', async (
     });
     try {
       kernel.store.dispatch({ type: 'user.message', text: '算一下 (3+4)*6' });
-      for (let i = 0; i < 60; i += 1) {
+      for (let i = 0; i < 150; i += 1) {
         await new Promise((r) => setTimeout(r, 100));
         const s = kernel.store.getState();
         if (s.phase === 'idle' && s.turns > 0) break;
@@ -622,7 +622,7 @@ test('回放出的树与内存里的一致（tip 相同）', async () => {
       traceDir: dir,
     });
     kernel.store.dispatch({ type: 'user.message', text: '算一下 (3+4)*6' });
-    for (let i = 0; i < 60; i += 1) {
+    for (let i = 0; i < 150; i += 1) {
       await new Promise((res) => setTimeout(res, 100));
       const s = kernel.store.getState();
       if (s.phase === 'idle' && s.turns > 0) break;

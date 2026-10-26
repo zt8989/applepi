@@ -45,7 +45,7 @@ import {
   keyLabel,
 } from '../src/keybindings';
 import { legacySequence } from './key-sequences';
-import { createTraceTree, appendNode, patchNode } from '@ela/core/trace';
+import { createTraceTree, appendNode, patchNode, shortId } from '@ela/core/trace';
 import { createInitialState, type AgentState } from '@ela/core/state';
 import type { Message } from '@earendil-works/pi-ai';
 
@@ -1335,18 +1335,21 @@ function linesOf(chunks: TraceChunks, width = 80): string[] {
 test('TraceChunks：节点多了也能全部拿到（一块一行，不是整棵树一坨）', () => {
   const chunks = new TraceChunks();
   let tree = createTraceTree('s');
+  const ids: string[] = [];
   for (let i = 0; i < 120; i++) {
-    tree = appendNode(tree, tree.tipId, 'llm.result', {
+    const next = appendNode(tree, tree.tipId, 'llm.result', {
       status: 'ok', label: '节点 ' + i, createdAt: i, endedAt: i,
-    }).tree;
+    });
+    tree = next.tree;
+    ids.push(next.node.id);
   }
   chunks.update(tree, 80, '');
   const lines = linesOf(chunks);
   // 120 个节点 = 120 行 —— **一行都没丢**。
   // 旧形状（整棵树塞进一块 Text）在这里会被布局裁掉，用户只看到最早那几行。
   assert.equal(lines.length, 120, '每个节点一行');
-  assert.match(lines[0] ?? '', /n1 llm.result: 节点 0/);
-  assert.match(lines[119] ?? '', /n120 llm.result: 节点 119/);
+  assert.match(lines[0] ?? '', new RegExp(`${shortId(ids[0]!)} llm\\.result: 节点 0`));
+  assert.match(lines[119] ?? '', new RegExp(`${shortId(ids[119]!)} llm\\.result: 节点 119`));
 });
 
 test('轨迹：所有节点都是 `○`，tip 靠加粗区分（不再有第二个圈 `◎`）', () => {
@@ -1356,16 +1359,18 @@ test('轨迹：所有节点都是 `○`，tip 靠加粗区分（不再有第二�
   // 判据抽在 `emphasizedTraceLine()` 里、`TraceChunks.lineOf()` 与 `renderColoredTree()`
   // 共用 —— 一次性模式与轨迹页的 tip 因此不会分家。
   let tree = createTraceTree('s');
-  tree = appendNode(tree, null, 'user', { status: 'ok', label: '你好', createdAt: 0, endedAt: 0 }).tree;
-  tree = appendNode(tree, tree.tipId, 'llm.result', {
+  const user = appendNode(tree, null, 'user', { status: 'ok', label: '你好', createdAt: 0, endedAt: 0 });
+  tree = user.tree;
+  const result = appendNode(tree, tree.tipId, 'llm.result', {
     status: 'ok', label: '好了', createdAt: 1, endedAt: 1,
-  }).tree;
-  assert.equal(tree.tipId, 'n2');
-  assert.equal(emphasizedTraceLine(tree.nodes['n2']!, tree), true, 'tip 要加粗');
-  assert.equal(emphasizedTraceLine(tree.nodes['n1']!, tree), false, '非 tip 不加粗');
+  });
+  tree = result.tree;
+  assert.equal(tree.tipId, result.node.id);
+  assert.equal(emphasizedTraceLine(tree.nodes[result.node.id]!, tree), true, 'tip 要加粗');
+  assert.equal(emphasizedTraceLine(tree.nodes[user.node.id]!, tree), false, '非 tip 不加粗');
   // 失败的节点也加粗 —— 这是原有行为，别被这次改动带走。
-  const failed = patchNode(tree, 'n1', { status: 'error' });
-  assert.equal(emphasizedTraceLine(failed.nodes['n1']!, failed), true, '失败也加粗');
+  const failed = patchNode(tree, user.node.id, { status: 'error' });
+  assert.equal(emphasizedTraceLine(failed.nodes[user.node.id]!, failed), true, '失败也加粗');
 
   // 字形：树上只有 `○` / `└─`，一个 `◎` 都没有；tip 那行与其它行在**字形上**一模一样。
   const plain = stripTerminalSequences(renderColoredTree(tree, 0));
@@ -1378,7 +1383,7 @@ test('轨迹：所有节点都是 `○`，tip 靠加粗区分（不再有第二�
   const colored = renderColoredTree(tree, 0).split('\n');
   const boldLines = colored.filter((line) => line.includes('\x1b[1m'));
   assert.equal(boldLines.length, 1, `只有 tip 那一行加粗：${colored.join('\n')}`);
-  assert.ok(boldLines[0]?.includes('n2 llm.result'), boldLines[0]);
+  assert.ok(boldLines[0]?.includes(`${shortId(result.node.id)} llm.result`), boldLines[0]);
 
   // 轨迹页（TraceChunks）走同一条路：tip 那行加粗，字形里没有 `◎`。
   // 注意用**未剥 ANSI** 的 `render()`（`linesOf()` 会把加粗剥掉，`◎` 那三条断言看不出差别）。
@@ -1388,16 +1393,19 @@ test('轨迹：所有节点都是 `○`，tip 靠加粗区分（不再有第二�
   assert.equal(/◎/.test(stripTerminalSequences(pageLines.join('\n'))), false, pageLines.join('\n'));
   const pageBold = pageLines.filter((line) => line.includes('\x1b[1m'));
   assert.equal(pageBold.length, 1, `轨迹页也只有 tip 那一行加粗：${pageLines.join('\n')}`);
-  assert.ok((pageBold[0] ?? '').includes('n2 llm.result'), pageBold[0]);
+  assert.ok((pageBold[0] ?? '').includes(`${shortId(result.node.id)} llm.result`), pageBold[0]);
 });
 
 test('TraceChunks：只重算变化的那个节点（追加，不是全量重画）', () => {
   const chunks = new TraceChunks();
   let tree = createTraceTree('s');
+  let lastNodeId = '';
   for (let i = 0; i < 30; i++) {
-    tree = appendNode(tree, tree.tipId, 'tool.call', {
+    const next = appendNode(tree, tree.tipId, 'tool.call', {
       status: 'pending', label: '工具 ' + i, createdAt: i,
-    }).tree;
+    });
+    tree = next.tree;
+    lastNodeId = next.node.id;
   }
   chunks.update(tree, 80, '');
   const before = linesOf(chunks);
@@ -1413,9 +1421,12 @@ test('TraceChunks：只重算变化的那个节点（追加，不是全量重画
     if (before[i] !== after[i]) changed += 1;
   }
   assert.equal(changed, 1, '只有一个节点的行变了');
-  // 耗时是 endedAt - createdAt = 100 - 29 = 71ms（节点号从 1 起，所以是 n30）。
-  // 行首是轨道符号（所有节点都是 `○`，见 trace.ts 的 `traceRows`），成败在颜色里。
-  assert.match(after[29] ?? '', /n30 tool\.call: 工具 29 71ms/, '最后那个节点闭合了');
+  // 耗时是 endedAt - createdAt = 100 - 29 = 71ms（最后一个节点）。行首是轨道符号，成败在颜色里。
+  assert.match(
+    after[29] ?? '',
+    new RegExp(`${shortId(lastNodeId)} tool\\.call: 工具 29 71ms`),
+    '最后那个节点闭合了',
+  );
 });
 
 test('TraceChunks：节点变少时旧块被丢掉（/new、恢复别的会话之后不残留）', () => {

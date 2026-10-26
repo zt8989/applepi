@@ -14,6 +14,7 @@
  */
 import { uuidv7 } from '@earendil-works/pi-ai';
 import type { Message } from '@earendil-works/pi-ai';
+import { sha1Hex } from './sha1';
 
 /** 节点类型。 */
 /**
@@ -103,7 +104,13 @@ export type TraceNodeKind =
 export type TraceNodeStatus = 'pending' | 'ok' | 'error' | 'aborted';
 
 export interface TraceNode {
-  /** reducer 内单调自增的整数，转成字符串就是稳定 id（如 "n7"）。 */
+  /**
+   * 节点 id：**git 那样的内容 hash**（SHA-1，40 位十六进制）。
+   *
+   * 由「父 id + 创建序数 + 创建时刻的全部内容」算出：同一串 action 必然产出同一串 id，
+   * 内容不同则 id 不同 —— 与 commit 的寻址方式同构。节点后来被 patch（闭合、流式改标签）
+   * **不改 id**：hash 只取 `appendNode` 那一刻的内容，正如 commit 之后 amend 才会换 hash。
+   */
   readonly id: string;
   /** 父节点 id；根为 null。 */
   readonly parentId: string | null;
@@ -145,6 +152,41 @@ export interface TraceTree {
 }
 
 /**
+ * 节点 id 的显示形态：前 7 位（git 短 hash 的惯例）。文件里存全长 40 位，
+ * 渲染行只打短 hash —— 整行 40 位会把每一行都撑宽到没法看。
+ *
+ * 旧格式（v1）的 id 是 `n7` 这种短字符串，原样返回 —— 回放旧文件时照样能画。
+ */
+export function shortId(id: string): string {
+  return id.length <= 12 ? id : id.slice(0, 7);
+}
+
+/**
+ * 树的根 id（第一个 `parentId === null` 的节点）。
+ *
+ * v2 的树是**单一根**：根就是 system prompt（`prompt.base`，role=system），
+ * 其余所有节点（user / turn / model.* …）都从它长出 —— 与「仓库从首个 commit 长出来」
+ * 同一个形状。旧文件（v1）可能有多棵根（上下文族与对话族两条线），这里返回**第一棵**。
+ */
+export function rootIdOf(tree: TraceTree): string | null {
+  for (const id of tree.order) {
+    const node = tree.nodes[id];
+    if (node && node.parentId === null) return id;
+  }
+  return null;
+}
+
+/**
+ * 新节点的默认挂载点：有 tip 挂 tip，没 tip 挂**根**。
+ *
+ * v2 只允许一个根（system 节点）；tip 还没立起来时（刚装载完、还没有任何
+ * 推进 tip 的节点），新节点要挂在根上而不是自己也当根 —— 否则树上会长出第二棵根。
+ */
+export function attachPoint(tree: TraceTree): string | null {
+  return tree.tipId ?? rootIdOf(tree);
+}
+
+/**
  * 生成会话 id：**UUIDv7**，与 pi 完全同一形状（直接用 pi-ai 导出的 `uuidv7()`）。
  *
  * 不用 `s<base36 时间戳>`：那种 id 在同一毫秒内两次开新会话会撞，于是两次会话续写同一个文件；
@@ -159,9 +201,54 @@ export function createTraceTree(sessionId: string): TraceTree {
   return { nodes: {}, order: [], tipId: null, nextSeq: 1, sessionId };
 }
 
-function nextNodeId(tree: TraceTree): { id: string; seq: number } {
+/**
+ * 节点 id = SHA-1(规范化的创建时内容)。
+ *
+ * hash 输入带 **创建序数** `n`：同一毫秒内两个内容完全一样的节点（同一批并行工具调用、
+ * 同样的参数）否则会撞出同一个 hash —— 序数把它们分开，而它本身就是 reducer 状态的一部分，
+ * 不破坏「同一串 action 必然产出同一棵树」。
+ *
+ * 导出给 v1→v2 迁移用：迁移按**同一条规范**重算旧节点的 hash，两边才能算出同构的 id。
+ */
+export function computeNodeId(
+  parentId: string | null,
+  ordinal: number,
+  content: {
+    kind: TraceNodeKind;
+    status: TraceNodeStatus;
+    label: string;
+    detail?: string | undefined;
+    meta?: Readonly<Record<string, string>> | undefined;
+    message?: Message | undefined;
+    createdAt: number;
+    endedAt?: number | null | undefined;
+  },
+): string {
+  return sha1Hex(
+    JSON.stringify({
+      parentId,
+      n: ordinal,
+      kind: content.kind,
+      status: content.status,
+      label: content.label,
+      detail: content.detail ?? null,
+      meta: content.meta ?? null,
+      message: content.message ?? null,
+      createdAt: content.createdAt,
+      endedAt: content.endedAt ?? null,
+    }),
+  );
+}
+
+function nextNodeId(
+  tree: TraceTree,
+  parentId: string | null,
+  content: Parameters<typeof computeNodeId>[2],
+): { id: string; seq: number } {
   const seq = tree.nextSeq;
-  return { id: `n${seq}`, seq };
+  // hash 输入的 parentId 与真正写进节点的必须是同一个 —— 回退到根这件事
+  // 由调用方（attachPoint）决定，这里只负责寻址。
+  return { id: computeNodeId(parentId, seq, content), seq };
 }
 
 /**
@@ -201,10 +288,10 @@ export function appendNode(
     endedAt?: number | null | undefined;
   },
 ): { tree: TraceTree; node: TraceNode } {
-  const { id, seq } = nextNodeId(tree);
+  const { id, seq } = nextNodeId(tree, parentId, { ...options, kind });
   const node: TraceNode = {
     id,
-    // 显式接受 null（根），不继承父节点 —— parentId 就是调用方在**发起那一刻**的 tip。
+    // 显式接受 null（根），不继承父节点 —— parentId 就是调用方在**发起那一刻**的挂载点。
     parentId: parentId === null ? null : parentId,
     kind,
     status: options.status,
@@ -516,7 +603,8 @@ export function traceRows(tree: TraceTree, options: TreeRenderOptions = {}): Tra
     const marker = SCOPE_CLOSE_KINDS.has(node.kind) ? CORNER : DOT;
     const prefix = RAIL.repeat(stack.length) + marker;
     const elapsed = node.endedAt === null ? '' : ` ${formatDuration(node.endedAt - node.createdAt)}`;
-    const head = `${prefix}${node.id} ${node.kind}: ${node.label}${elapsed}${metaSuffix(node)}`;
+    // 显示用短 hash（前 7 位），与 git log 同一个习惯；全长在文件与数据层。
+    const head = `${prefix}${shortId(node.id)} ${node.kind}: ${node.label}${elapsed}${metaSuffix(node)}`;
     rows.push({ node, prefix, text: truncate(head, maxWidth) });
 
     if (SCOPE_OPEN_KINDS.has(node.kind)) stack.push({ id: node.id, kind: node.kind });
@@ -597,13 +685,14 @@ export function serializeTree(tree: TraceTree): SerializedTrace {
 
 /** 从 JSONL 的一行回放：重放每条记录，得到与当初一致的树。 */
 export function applyTraceRecord(tree: TraceTree, record: SerializedTraceNode): TraceTree {
-  const seq = Number.parseInt(record.id.replace(/^n/, ''), 10);
   const nodes: Record<string, TraceNode> = { ...tree.nodes, [record.id]: { ...record } };
   return {
     ...tree,
     nodes,
     order: tree.order.includes(record.id) ? tree.order : [...tree.order, record.id],
-    nextSeq: Number.isNaN(seq) ? tree.nextSeq : Math.max(tree.nextSeq, seq + 1),
+    // id 是 hash，序数从它身上解不出来；序数本来就是「第几个节点」，
+    // 按已收到的节点数接着数即可 —— 与在线推进的计数一致。
+    nextSeq: tree.order.length + 1,
     // 回放必须与在线推进用同一条规则，否则重放出来的 HEAD 会和当时不一致。
     tipId: advancesTip({ ...record }) ? record.id : tree.tipId,
   };

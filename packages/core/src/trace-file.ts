@@ -10,7 +10,7 @@
  * cwd 走，不会把两个项目的树混在一个平目录里。
  */
 import { appendFile, mkdir, readFile, readdir } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readSync } from 'node:fs';
 import path from 'node:path';
 import {
   replaySession,
@@ -118,6 +118,44 @@ export async function loadTrace(
   if (!existsSync(file)) return null;
   const text = await readFile(file, 'utf8');
   return replayTrace(text, sessionId);
+}
+
+/**
+ * 数一个轨迹文件的**完整行数**（不含末尾没换行的半行 —— 那是崩溃残骸，读回时也会被跳过）。
+ *
+ * 用途只有一处：续写已有文件前把落盘器的行游标拨到文件末尾（`seq` 严格等于行号的前提）。
+ * 分块流式数换行，不把全文读进内存。文件不存在返回 0。
+ */
+export function countTraceLines(file: string): number {
+  let fd: number | undefined;
+  try {
+    fd = openSync(file, 'r');
+    const buf = Buffer.allocUnsafe(64 * 1024);
+    let newlines = 0;
+    let pos = 0;
+    let partial = false;
+    for (;;) {
+      const read = readSync(fd, buf, 0, buf.length, pos);
+      if (read <= 0) break;
+      pos += read;
+      partial = buf[read - 1] !== 0x0a;
+      for (let i = 0; i < read; i += 1) {
+        if (buf[i] === 0x0a) newlines += 1;
+      }
+    }
+    // 末尾没换行的半行不算一行：追加会从新行开始，行号才算得准。
+    return partial ? newlines + 1 : newlines;
+  } catch {
+    return 0;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // 读失败后的清理失败不值得抛。
+      }
+    }
+  }
 }
 
 /**

@@ -239,12 +239,12 @@ test('需求核心：超时重试不开新 step 容器，所有尝试都包在�
   assert.equal(steps.length, 1, '重试不开新容器，全程只有一个 step');
   const rendered = renderTree(state.trace, { maxWidth: 0 });
   console.log(`\n${rendered}\n`);
-  assert.match(rendered, /^│  ○  n3 step\.start: 第 1 步/m);
-  assert.match(rendered, /^│  │  ○  n4 error/m);
-  assert.match(rendered, /^│  │  ○  n5 llm\.result/m);
-  assert.match(rendered, /^│  └─ n6 step\.end/m);
+  assert.match(rendered, /^│  ○  [\da-f]{7} step\.start: 第 1 步/m);
+  assert.match(rendered, /^│  │  ○  [\da-f]{7} error/m);
+  assert.match(rendered, /^│  │  ○  [\da-f]{7} llm\.result/m);
+  assert.match(rendered, /^│  └─ [\da-f]{7} step\.end/m);
   // turn 容器在最左列（它自己不开缩进）。
-  assert.match(rendered, /^○  n2 turn\.start: 回合 1/m);
+  assert.match(rendered, /^○  [\da-f]{7} turn\.start: 回合 1/m);
   assert.equal(/◎/.test(rendered), false, '树上不该再有两种圆点');
 });
 
