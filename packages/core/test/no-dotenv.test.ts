@@ -21,6 +21,10 @@ import { resolveApiKey } from '../src/provider';
  *   2. `~/.pi/agent/auth.json`
  *   3. models.json 条目内的 `apiKey`
  *
+ * 三处皆无时返回 `undefined` 而不是抛错：与 pi 一致，由服务端裁决 —— 客户端
+ * 提前拦会误伤 loopback 免验 key 的网关（如 magpie 的 127.0.0.1 端点）。
+ * 与 pi 一样，models.json 里的占位符（如 "apiKey": "magpie"）也照发。
+ *
  * 仓库里**不该再有** `.env` / `.env.example`，脚本里也不该再有 `--env-file`。
  */
 
@@ -63,7 +67,7 @@ test('package.json 的脚本里没有 --env-file', () => {
   }
 });
 
-test('凭证错误信息指向 auth.json / 环境变量，不提 .env', () => {
+test('没配 key 的 provider 返回 undefined，不在客户端拦（与 pi 一致）', () => {
   // 造一个必定没有 key 的 provider 名：真实 env 里不会有这么个变量。
   const missing = 'definitely-not-a-real-provider-xyz';
   assert.equal(
@@ -71,14 +75,21 @@ test('凭证错误信息指向 auth.json / 环境变量，不提 .env', () => {
     undefined,
     '探针前提：这个 provider 在环境里确实没有 key',
   );
-  assert.throws(
-    () => resolveApiKey(missing),
-    (error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      // 报错是用户看到的第一手信息 —— 指向一个已经删掉的口子比不指更糟。
-      assert.match(message, /auth\.json/, '要指向 auth.json');
-      assert.equal(message.includes('.env'), false, '不该再提 .env');
-      return true;
-    },
+  assert.equal(resolveApiKey(missing), undefined);
+});
+
+test('models.json 条目内的 apiKey 占位符也被当作 key（第三档）', () => {
+  const home = process.env['PI_CODING_AGENT_DIR'];
+  assert.ok(home, '测试必须跑在隔离的 PI_CODING_AGENT_DIR 下');
+  const provider = 'placeholder-gateway';
+  fs.writeFileSync(
+    path.join(home, 'models.json'),
+    JSON.stringify({
+      providers: {
+        [provider]: { baseUrl: 'http://127.0.0.1:9/v1', apiKey: provider, models: [] },
+      },
+    }),
+    'utf8',
   );
+  assert.equal(resolveApiKey(provider), provider);
 });

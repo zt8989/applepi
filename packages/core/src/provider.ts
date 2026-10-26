@@ -173,14 +173,17 @@ export function defaultStreamFn(runtime: AgentRuntime): StreamFn {
   return (model, context, options) => runtime.models.streamSimple(model, context, options);
 }
 
-/** 这些 provider 不需要 API key。 */
-const KEYLESS_PROVIDERS = new Set(['faux']);
-
 /**
  * 取该 provider 的 API key。**三处来源，不读任何 `.env`**：
  * 1. shell 环境变量 `<ID>_API_KEY`（`--api-key` 也走这条路）；
  * 2. `~/.pi/agent/auth.json`（与 pi 同址，两边共用一份凭证）；
- * 3. models.json 条目内的 `apiKey`。
+ * 3. models.json 条目内的 `apiKey` —— pi 同款：占位符也算数，本地网关
+ *    常在 loopback 上免验 key（如 magpie 的 127.0.0.1 端点），占位符就是给
+ *    这类端点用的。
+ *
+ * 三处皆无时返回 `undefined`，**不在客户端拦**：与 pi 一致，请求照样发，
+ * 由服务端裁决。在这里提前抛错会误伤免验端点 —— 「本该能用的 provider」
+ * 会因为找不到 key 而根本发不出请求。
  *
  * 刻意**没有** `.env` 这一档：从调用目录读 `.env` 会把「A 项目的 key」发给「B 项目」。
  */
@@ -193,12 +196,8 @@ export function resolveApiKey(provider: string): string | undefined {
   // 再看 `~/.pi/agent/auth.json`（pi 官方 `getAgentDir()`，见 config-home.ts）。
   const fromAuth = loadPiAuth()[provider]?.key;
   if (fromAuth) return fromAuth;
-  if (KEYLESS_PROVIDERS.has(provider)) return undefined;
-  throw new Error(
-    `缺少 ${envName}。两处任选其一：` +
-      `~/.pi/agent/auth.json 写 {"${provider}": {"type": "api_key", "key": "…"}}，` +
-      `或 shell 里设 ${envName}（或跑 ela --api-key）。`,
-  );
+  // 最后看 models.json 条目内的 `apiKey` —— 字面占位符（如 "magpie"）也照发。
+  return loadPiModels()?.providers?.[provider]?.apiKey || undefined;
 }
 
 
