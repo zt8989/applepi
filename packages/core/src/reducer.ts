@@ -11,7 +11,7 @@ import {
   type StopCause,
   type TurnEndReason,
 } from './state';
-import { appendNode, patchNode, type TraceNode, type TraceNodeStatus, type TraceTree } from './trace';
+import { appendNode, attachPoint, patchNode, type TraceNode, type TraceNodeStatus, type TraceTree } from './trace';
 import { compactReasonText, type CompactReason } from './compact';
 import { buildPromptHead, declaredToolSchemas, toolDeclarationDelta } from './prompt-head';
 import type { ExtensionLifecycleEvent } from './extension-events';
@@ -362,10 +362,16 @@ function appendPromptNodes(tree: TraceTree, prompt: AgentState['prompt'], now: n
   const skills = prompt.skills ?? [];
   // detail 用 **state 里的** systemPrompt（已经拼好 skill 清单），
   // 而不是 init action 载荷里的那份：树上要显示的就是真正发给模型的那一整段。
-  const { tree: afterBase, node: baseNode } = appendNode(tree, tree.tipId, 'prompt.base', {
+  //
+  // parent 取挂载点：树还空时它就是 null —— **这条节点就是根**（v2 单一根：全树
+  // 从 system prompt 长出来，与「仓库从首个 commit 长出来」同构）；热重载时树已有
+  // 根，挂到当前 tip 下（重复装载是追加，见 docs/architecture/trace.md）。
+  // meta.role = 'system'：根节点在文件里能被直接认出来（迁移后的旧文件同样带上）。
+  const { tree: afterBase, node: baseNode } = appendNode(tree, attachPoint(tree), 'prompt.base', {
     status: 'ok',
     label: summarize(prompt.systemPrompt),
     detail: prompt.systemPrompt,
+    meta: { role: 'system' },
     createdAt: now,
     endedAt: now,
   });
@@ -406,7 +412,9 @@ function appendModelNode(
 ): TraceTree {
   const caps = model.capabilities;
   // 能力逐条写进 meta：树上就能一眼看出「这个模型能不能中途插 system」。
-  return appendNode(tree, tree.tipId, kind, {
+  // 挂载点取 attachPoint：beginTrace 里 tip 还是 null（装载族不推进 tip），
+  // 于是 model.init 挂在**根**（system 节点）下，而不是自己也当一棵根。
+  return appendNode(tree, attachPoint(tree), kind, {
     status: 'ok',
     label: `${model.provider}/${model.modelId}`,
     meta: {
@@ -438,7 +446,7 @@ function appendLifecycleNode(
 ): TraceTree {
   const meta: Record<string, string> = {}
   if (event.type === 'agent_end') meta['messages'] = String(event.messages.length);
-  return appendNode(tree, tree.tipId, 'extension.event', {
+  return appendNode(tree, attachPoint(tree), 'extension.event', {
     status: 'ok',
     label: event.type,
     ...(Object.keys(meta).length > 0 ? { meta } : {}),
@@ -658,8 +666,8 @@ const transitions: TransitionHandlers = {
       ...(action.source !== undefined ? { source: action.source } : {}),
     } as Message;
     // 也进轨迹树：追加 prompt 是「上下文变了」，树上要看得见它插在哪个 attempt 之前。
-    // parent 取此刻的 tip —— 于是它就落在「下一轮会读它的那次调用」的正上方。
-    const { tree } = appendNode(state.trace, state.trace.tipId, 'prompt.segment', {
+    // parent 取挂载点（tip，没有 tip 则根）—— 于是它就落在「下一轮会读它的那次调用」的正上方。
+    const { tree } = appendNode(state.trace, attachPoint(state.trace), 'prompt.segment', {
       status: 'ok',
       label: action.text === '' ? summarize(Object.keys(action.sections ?? {}).join(' ')) : summarize(action.text),
       detail:
@@ -743,8 +751,9 @@ const transitions: TransitionHandlers = {
     // —— 装载那一版刚由第一步补过。
     const begun = beginTrace(state, now);
     const withModel = flushModelChange({ ...state, trace: begun }, now);
-    // 用户节点是一棵新树的根，并且推进 tip —— 后面所有的回合都挂在它下面。
-    const { tree, node } = appendNode(withModel.trace, withModel.trace.tipId, 'user', {
+    // user 节点挂到挂载点（tip，首句话时还没有 tip 则挂到根/system 下）——
+    // 它推进 tip，后面所有的回合都挂在它下面。
+    const { tree, node } = appendNode(withModel.trace, attachPoint(withModel.trace), 'user', {
       status: 'ok',
       label: summarize(action.text),
       detail: action.text,
@@ -863,8 +872,10 @@ const transitions: TransitionHandlers = {
     // 同样先落在它前面（第一次发话时由 user.message 补过，这里一般是空操作）。
     const withModel = flushModelChange(state, now);
     // steer 的 user 节点挂在**当前回合容器**下面（它是这回合里的一个额外输入）；
-    // followUp 的则是**新回合的起点**，所以要挂在 tip 下面（新容器稍后开在它底下）。
-    const parentId = isSteer ? (state.openTurnNodeId ?? withModel.trace.tipId) : withModel.trace.tipId;
+    // followUp 的则是**新回合的起点**，要挂在挂载点（tip，没有 tip 则根）下面。
+    const parentId = isSteer
+      ? (state.openTurnNodeId ?? attachPoint(withModel.trace))
+      : attachPoint(withModel.trace);
     const userNode = appendNode(withModel.trace, parentId, 'user', {
       status: 'ok',
       label: `${isSteer ? 'steer' : 'followUp'}: ${summarize(action.text)}`,
@@ -899,8 +910,8 @@ const transitions: TransitionHandlers = {
     //
     // 旧回合的结局记 'completed'：它确实是正常说完的（正要接下一句）。
     const closed = closeTurnNode(base, now, 'completed', turnReasonText('completed'));
-    // 新容器挂在 **tip** 下面（即那条 followUp 的 user 节点，它推进了 tip）。
-    const opened = appendNode(closed.trace, closed.trace.tipId, 'turn.start', {
+    // 新容器挂在挂载点（即那条 followUp 的 user 节点，它推进了 tip）。
+    const opened = appendNode(closed.trace, attachPoint(closed.trace), 'turn.start', {
       status: 'pending',
       label: `回合 ${closed.turnIndex + 1}`,
       createdAt: now,
@@ -936,8 +947,8 @@ const transitions: TransitionHandlers = {
     // （走 user.message 的路已经在补 user 节点前刷过了，这里一般是空操作；
     //  留着它是因为这一条才是「在 turn.start 之前」的硬保证。）
     const withModel = flushModelChange(state, now);
-    // turn 挂到 **tip**（即那条 user 节点）下面。
-    const { tree, node } = appendNode(withModel.trace, withModel.trace.tipId, 'turn.start', {
+    // turn 挂到挂载点（tip，即那条 user 节点）下面。
+    const { tree, node } = appendNode(withModel.trace, attachPoint(withModel.trace), 'turn.start', {
       status: 'pending',
       label: `回合 ${turnIndex}`,
       createdAt: now,
@@ -1002,7 +1013,7 @@ const transitions: TransitionHandlers = {
       content: queued.content ?? queued.text,
       timestamp: now,
     };
-    const userNode = appendNode(flushed.trace, flushed.trace.tipId, 'user', {
+    const userNode = appendNode(flushed.trace, attachPoint(flushed.trace), 'user', {
       status: 'ok',
       label: `${queuedAs}: ${summarize(queued.text)}`,
       detail: queued.text,
@@ -1011,7 +1022,7 @@ const transitions: TransitionHandlers = {
       createdAt: now,
       endedAt: now,
     });
-    const opened = appendNode(userNode.tree, userNode.tree.tipId, 'turn.start', {
+    const opened = appendNode(userNode.tree, attachPoint(userNode.tree), 'turn.start', {
       status: 'pending',
       label: `回合 ${closed.turnIndex + 1}`,
       createdAt: now,
@@ -1336,8 +1347,9 @@ const transitions: TransitionHandlers = {
   'llm.giveup': (state, action) => {
     const cause = causeFromKind(action.kind, action.cause);
     const now = Date.now();
-    // stop 节点挂在 **turn 容器**下面（与 step 同理：回合是它们共同的父）。
-    const parentId = state.openTurnNodeId ?? state.trace.tipId;
+    // stop 节点挂在 **turn 容器**下面（与 step 同理：回合是它们共同的父）；
+    // 连容器都没有的极端情形挂到挂载点（tip，没有 tip 则根），不另立根。
+    const parentId = state.openTurnNodeId ?? attachPoint(state.trace);
     const { tree } = appendNode(state.trace, parentId, 'stop', {
       status: 'ok',
       label: action.error,
@@ -1380,12 +1392,6 @@ const transitions: TransitionHandlers = {
     messages: [...state.messages, action.message],
   }),
 
-  /** 持久化游标：effect 写完文件后推回来，避免同一段重复落盘。 */
-  'trace.persisted': (state, action) => ({
-    ...state,
-    persistedSeq: Math.max(state.persistedSeq, action.upToSeq),
-  }),
-
   /**
    * 工具调用。llm.done 的迁移已经把相位推到 calling-tools 了，所以这里**不能**再要求 idle ——
    * 那个守卫是给「llm.done 直接调 runTools」的老接线写的；现在 tool.call 是被重新 dispatch 进来的，
@@ -1405,7 +1411,7 @@ const transitions: TransitionHandlers = {
   'tool/start': (state, action) => {
     const now = Date.now();
     const argsText = JSON.stringify(action.call.arguments ?? {});
-    const { tree, node } = appendNode(state.trace, state.trace.tipId, 'tool.call', {
+    const { tree, node } = appendNode(state.trace, attachPoint(state.trace), 'tool.call', {
       status: 'pending',
       label: `${action.call.name} ${argsText}`,
       detail: argsText,
@@ -1539,7 +1545,7 @@ const transitions: TransitionHandlers = {
       // 撞上限：留一个 stop 节点（推进 tip），这样「为什么停了」也在树上。
       //
       // stop 挂在 **turn 容器**下面，与 step 同父 —— 它们是同一回合里的两件事。
-      const parentId = state.openTurnNodeId ?? state.trace.tipId;
+      const parentId = state.openTurnNodeId ?? attachPoint(state.trace);
       const { tree } = appendNode(withStep.trace, parentId, 'stop', {
         status: 'ok',
         label: `已达单回合上限（${state.maxTurns} 轮）`,
@@ -1606,10 +1612,10 @@ const transitions: TransitionHandlers = {
   'compact.request': (state, action) => {
     if (state.compacting) return state;
     if (state.phase !== 'idle') return state;
-    // tree 上开一个 pending 节点，parent 取此刻的 tip。
+    // tree 上开一个 pending 节点，parent 取挂载点（tip，没有 tip 则根）。
     // **先开 pending 再等结果**，而不是等压缩完才开：那样中途挂掉就什么都没有，
     // 而「开始压缩了」这个事实本身就该留在树上。
-    const { tree, node } = appendNode(state.trace, state.trace.tipId, 'compact', {
+    const { tree, node } = appendNode(state.trace, attachPoint(state.trace), 'compact', {
       status: 'pending',
       label: compactReasonText(action.reason),
       createdAt: Date.now(),
@@ -1730,7 +1736,6 @@ const transitions: TransitionHandlers = {
       // 保留装载好的两块（会话级的，不是对话级的）。
       prompt: state.prompt,
       model: state.model,
-      persistedSeq: state.persistedSeq,
     };
   },
 
@@ -1740,9 +1745,10 @@ const transitions: TransitionHandlers = {
    * 结果与「`conversation.reset` + N 条 `session.restored`」一样，但只 dispatch 一次：界面每
    * dispatch 一次就重渲染整段对话，逐条灌是 O(N²)。
    *
-   * `conversation.reset` 的那些字段一个都不能少：轨迹树要换 id（于是换落盘文件）、`persistedSeq`
-   * 要带过来（那条游标属于轨迹文件）。漏掉任一个，恢复之后的第一句话要么写进旧轨迹文件、要么把
-   * 旧轨迹重写一遍。
+   * `conversation.reset` 的那些字段一个都不能少：轨迹树要换 id（于是换落盘文件）。
+   * 漏掉任一个，恢复之后的第一句话要么写进旧轨迹文件、要么把旧轨迹重写一遍。
+   * 落盘游标（seq/行号）不在 state 里 —— 它属于**文件**，由落盘器在换会话时拨
+   * （见 trace-store 的 `beginSession`），不在这里带。
    *
    * 不动 `phase` / `trace`（除了换 id）：这些消息是「上次发生的」，开新节点或推进 tip 会把历史
    * 伪装成这一轮。**相位必须带着走**：清成 idle 的话，恢复前正在等 token 的那条流回来时会被当成
@@ -2147,7 +2153,7 @@ export function loopWiring(table: {
  *
  * ## 为什么要抽出来而不是写两遍
  *
- * 这里列的是「换会话时**哪些东西要带着走**」——prompt、model、persistedSeq、
+ * 这里列的是「换会话时**哪些东西要带着走**」——prompt、model、
  * 以及正在跑的现场。这类清单**天然会变**（将来加一项），而两处各写一遍的代价是：
  * 只改了一处，于是「有轨迹的恢复」与「没轨迹的恢复」行为不同。
  * 那个症状（有时恢复有轨迹、有时没有）比「全都没有」难查得多。
@@ -2173,10 +2179,9 @@ function restoredConversationState(
   });
   return {
     ...fresh,
-    // 会话级的三块带着走：换会话不等于换模型/系统提示。
+    // 会话级的两块带着走：换会话不等于换模型/系统提示。
     prompt: state.prompt,
     model: state.model,
-    persistedSeq: state.persistedSeq,
     // 「正在跑」的现场也带着走（见 conversation.restored 的注释）。
     phase: state.phase,
     streamingText: state.streamingText,

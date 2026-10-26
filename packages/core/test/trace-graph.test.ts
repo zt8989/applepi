@@ -5,7 +5,7 @@ import { createAgentStore, waitForIdle } from '../src/store';
 import { createFauxRuntime } from '../src/provider';
 import { createInitialState } from '../src/state';
 import { createAgentReducer } from '../src/reducer';
-import { appendNode, createTraceTree, renderTree, traceRows, type AgentState } from '../src/index';
+import { appendNode, createTraceTree, renderTree, shortId, traceRows, type AgentState } from '../src/index';
 import type { AgentAction } from '../src/actions';
 
 /**
@@ -110,13 +110,15 @@ test('一轮一步：轮一层、步一层，容器开与关在同一列', () =>
   );
   const rendered = renderTree(state.trace, { maxWidth: 0 });
   console.log(`\n${rendered}\n`);
+  // id 是内容 hash：按 order 位置取短 hash 拼期望行（节点次序 = 行次序）。
+  const [u, t, s, r, se, te] = state.trace.order.map((id) => shortId(id));
   assert.deepEqual(maskDurations(rendered), [
-    '○  n1 user: 算一下 <t>',
-    '○  n2 turn.start: 回合 1',
-    '│  ○  n3 step.start: 第 1 步 <t> (provider=faux, model=fake)',
-    '│  │  ○  n4 llm.result: 42 <t>',
-    '│  └─ n5 step.end: 第 1 步结束（0 个工具调用） <t> (tools=0)',
-    '└─ n6 turn.end: 回合 1 结束：模型说完了 <t> (reason=completed, steps=1)',
+    `○  ${u} user: 算一下 <t>`,
+    `○  ${t} turn.start: 回合 1`,
+    `│  ○  ${s} step.start: 第 1 步 <t> (provider=faux, model=fake)`,
+    `│  │  ○  ${r} llm.result: 42 <t>`,
+    `│  └─ ${se} step.end: 第 1 步结束（0 个工具调用） <t> (tools=0)`,
+    `└─ ${te} turn.end: 回合 1 结束：模型说完了 <t> (reason=completed, steps=1)`,
   ]);
 });
 
@@ -146,8 +148,8 @@ test('缩进用完即还：第 2 轮不该比第 1 轮深', () => {
   for (const line of userLines) assert.equal(indentOf(line), 0, `user 该在最左列：${line}`);
   // 三个 turn.start 也全在最左列，三个 turn.end 都是 `└─`（统一一种符号 —— 包括
   // 最后一个同时是 tip 的那个）。
-  assert.equal(lines(rendered).filter((line) => /^○  n\d+ turn\.start/.test(line)).length, 3);
-  assert.equal(lines(rendered).filter((line) => /^└─ n\d+ turn\.end/.test(line)).length, 3);
+  assert.equal(lines(rendered).filter((line) => /^○  [\da-f]{7} turn\.start/.test(line)).length, 3);
+  assert.equal(lines(rendered).filter((line) => /^└─ [\da-f]{7} turn\.end/.test(line)).length, 3);
 });
 
 test('装载节点（prompt.* / model.init）平铺 —— 它们本来就并列，不是链', () => {
@@ -184,13 +186,13 @@ test('重试：所有尝试包在同一个 step 容器里，error 与 result 依
   console.log(`\n${rendered}\n`);
 
   // 一个容器，error 与 result 都是它的孩子（同一层缩进，不是谁套谁）。
-  assert.match(rendered, /^│  ○  n3 step\.start: 第 1 步/m);
-  assert.match(rendered, /^│  │  ○  n4 error: LLM 调用超时/m);
-  assert.match(rendered, /^│  │  ○  n5 llm\.result: 好了/m);
+  assert.match(rendered, /^│  ○  [\da-f]{7} step\.start: 第 1 步/m);
+  assert.match(rendered, /^│  │  ○  [\da-f]{7} error: LLM 调用超时/m);
+  assert.match(rendered, /^│  │  ○  [\da-f]{7} llm\.result: 好了/m);
   // 容器用它自己的闭合点收口，失败与成功都在括号里面。
-  assert.match(rendered, /^│  └─ n6 step\.end/m);
+  assert.match(rendered, /^│  └─ [\da-f]{7} step\.end/m);
   // user 在最左列（它不开缩进）。
-  assert.match(rendered, /^○  n1 user: 你好/m);
+  assert.match(rendered, /^○  [\da-f]{7} user: 你好/m);
 });
 
 test('回合没有 turn.end 时，下一句话也要从最左列开始', () => {
@@ -210,11 +212,11 @@ test('回合没有 turn.end 时，下一句话也要从最左列开始', () => {
   const rendered = renderTree(state.trace, { maxWidth: 0 });
   console.log(`\n${rendered}\n`);
 
-  assert.match(rendered, /^○  n6 user: 第二句/m);
-  assert.match(rendered, /^○  n7 turn\.start: 回合 2/m);
-  assert.match(rendered, /^│  ○  n8 step\.start: 第 1 步/m);
+  assert.match(rendered, /^○  [\da-f]{7} user: 第二句/m);
+  assert.match(rendered, /^○  [\da-f]{7} turn\.start: 回合 2/m);
+  assert.match(rendered, /^│  ○  [\da-f]{7} step\.start: 第 1 步/m);
   // 第 1 轮里那几行的缩进不受影响。
-  assert.match(rendered, /^│  │  ○  n4 llm\.result: 好/m);
+  assert.match(rendered, /^│  │  ○  [\da-f]{7} llm\.result: 好/m);
 });
 
 test('树结构本身没变：缩进只影响画法，不影响父子关系', () => {
@@ -236,10 +238,12 @@ test('树结构本身没变：缩进只影响画法，不影响父子关系', ()
   for (const id of steps) {
     assert.equal(state.trace.nodes[id]?.parentId, turnNode, '缩进不能动父子关系');
   }
-  // 成功后才推进 tip —— 而且推进的是 `llm.result`（n5），**不是**随后的 `step.end`。
-  assert.equal(state.trace.tipId, 'n5', 'tip 是 llm.result，不是 step.end');
-  assert.equal(state.trace.nodes['n5']?.kind, 'llm.result');
-  assert.equal(state.trace.nodes['n6']?.kind, 'step.end');
+  // 成功后才推进 tip —— 而且推进的是 `llm.result`（倒数第二个），**不是**随后的 `step.end`。
+  const resultNode = state.trace.order[state.trace.order.length - 2] ?? '';
+  const endNode = state.trace.order[state.trace.order.length - 1] ?? '';
+  assert.equal(state.trace.tipId, resultNode, 'tip 是 llm.result，不是 step.end');
+  assert.equal(state.trace.nodes[resultNode]?.kind, 'llm.result');
+  assert.equal(state.trace.nodes[endNode]?.kind, 'step.end');
 });
 
 test('所有节点都是 `○` —— tip 不再换字形（早先 tip 是 `◎`，树上有两种圈）', () => {
@@ -307,7 +311,10 @@ test('插话（steer）属于当前回合 —— 它来了不收口', () => {
   console.log(`\n${rendered}\n`);
   // 插话那一行仍在轮/步的缩进里（它没有把括号弹掉）。它是最后一个推进 tip 的节点 ——
   // 而 tip 不再换字形，所以这里也是普通的 `○`（加粗在 `emphasizedTraceLine()` 那个判据里）。
-  assert.match(rendered, /^│  │  ○  n5 user: steer: 顺便看下版本/m);
+  assert.match(
+    rendered,
+    new RegExp(`^│  │  ○  ${shortId(steer.node.id)} user: steer: 顺便看下版本`, 'm'),
+  );
 });
 
 // ── 并行工具要走真环（工具节点是 effect 开的，reducer 造不出来） ──
@@ -352,13 +359,15 @@ test('并行工具：两个都是一层步缩进里的两行，谁也不是谁�
   assert.equal(indentOf(callLines[1] ?? ''), 2, `两个 tool.call 同层：${callLines[1]}`);
   assert.notEqual(callLines[0], callLines[1]);
   // 树形没被拉坏：两个 tool.call 的父仍是那个 llm.result，各自挂着自己的结果/错误。
+  // 行里是短 hash；用短 → 全长反查表拿回节点 id。
+  const byShort = new Map(state.trace.order.map((id) => [shortId(id), id]));
   for (const line of callLines) {
-    const id = /n(\d+)/.exec(line)?.[0] ?? '';
+    const id = byShort.get(/\s([\da-f]{7}) tool\.call: /.exec(line)?.[1] ?? '') ?? '';
     const node = state.trace.nodes[id];
     assert.equal(state.trace.nodes[node?.parentId ?? '']?.kind, 'llm.result');
     const kids = state.trace.order.filter((other) => state.trace.nodes[other]?.parentId === id);
     assert.equal(kids.length, 1, '每个 tool.call 下挂着一个结果或一个 error');
   }
   // 失败那个是 error 节点，不是 tool.result。
-  assert.match(rendered, /○  n\d+ error: .*Command exited with code 1/);
+  assert.match(rendered, /○  [\da-f]{7} error: .*Command exited with code 1/);
 });

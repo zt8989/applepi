@@ -12,7 +12,7 @@
 import process from 'node:process';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
-import { findSessionFile, migrateFlatTraces } from '@ela/core/config-home';
+import { findSessionFile, migrateFlatTraces, migrateTracesV2 } from '@ela/core/config-home';
 import { defaultProviderSpec, providerNames } from '@ela/core/provider';
 import { THINKING_LEVELS, isThinkingLevel } from '@ela/core/thinking-level';
 import { createKernel, type Kernel } from '@ela/core/kernel';
@@ -328,6 +328,17 @@ async function main(): Promise<void> {
     process.stderr.write(
       `[trace] 旧轨迹迁移：${migration.moved} 个归位，${migration.unknown} 个无 cwd 进 --unknown--` +
         (migration.failed.length > 0 ? `，${migration.failed.length} 个失败` : '') +
+        '\n',
+    );
+  }
+
+  // v1 → v2 内容迁移（版本头 + seq=行号 + hash id + 单一根）。同样只跑一次（标记文件），
+  // 且同样要在 createKernel 之前 —— 内核的 sink 会往文件追加，迁移要抢先看旧内容。
+  const v2 = migrateTracesV2();
+  if (v2 && (v2.upgraded > 0 || v2.failed.length > 0)) {
+    process.stderr.write(
+      `[trace] 轨迹格式升级 v1→v2：${v2.upgraded} 个升级` +
+        (v2.failed.length > 0 ? `，${v2.failed.length} 个失败` : '') +
         '\n',
     );
   }

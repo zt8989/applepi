@@ -48,6 +48,7 @@ import {
   type SessionHeader,
   type SessionInfoEntryLike,
 } from './session-file';
+import { upgradeTraceToV2 } from './trace-store';
 
 /** 末尾读多少字节（找「最后一次说话」）。见 `listSessions` 的表。 */
 const TAIL_BYTES = 256 * 1024;
@@ -111,6 +112,11 @@ export const TRACE_UNKNOWN_DIR_NAME = '--unknown--';
 /** 迁移标记文件：存在即表示平目录已归位，启动不再扫。 */
 export function traceMigrateMarkerPath(): string {
   return path.join(configHome(), 'trace_migrate');
+}
+
+/** v2 格式迁移的标记文件：存在即表示旧内容已升级，启动不再扫。 */
+export function traceV2MigrateMarkerPath(): string {
+  return path.join(configHome(), 'trace_v2');
 }
 
 /**
@@ -254,6 +260,107 @@ export interface TraceMigrationResult {
   unknown: number;
   /** rename 失败的（权限 / 被占用）。 */
   failed: { file: string; reason: string }[];
+}
+
+/** `migrateTracesV2()` 的结果。 */
+export interface TraceV2MigrationResult {
+  /** 从 v1 升级到 v2 的文件数。 */
+  upgraded: number;
+  /** 本来就是 v2、没动的文件数。 */
+  skipped: number;
+  /** 升级失败的（读/写/替换）。文件保持原样，下次手动删标记还能重试。 */
+  failed: { file: string; reason: string }[];
+}
+
+/**
+ * 一次性的 v1 → v2 内容迁移（用户可见的格式升级，见 trace-store 的 `upgradeTraceToV2`）。
+ *
+ * v1：无版本头、节点 id 是 `n7`、树上允许多棵根；v2：首行版本头、每行带 `seq`（严格等于
+ * 行号，后续分页取数用）、节点 id 是内容 hash、全树单根（system prompt）。
+ *
+ * 只跑一次：`~/.pi/agent/trace_v2` 标记文件存在就直接返回。逐文件替换是原子的
+ * （临时文件 + rename）：中途崩了最坏留下一个没升级的文件，删掉标记重跑即可。
+ *
+ * 必须在 `migrateFlatTraces()` **之后**调：它扫的是 `--<cwd>--/` 新目录布局。
+ *
+ * @returns 迁移摘要；标记已存在时返回 null（什么都没做）。
+ */
+export function migrateTracesV2(): TraceV2MigrationResult | null {
+  const marker = traceV2MigrateMarkerPath();
+  if (existsSync(marker)) return null;
+
+  const root = tracesDir();
+  const result: TraceV2MigrationResult = { upgraded: 0, skipped: 0, failed: [] };
+
+  // 只扫子目录（`--<cwd>--/` 与 `--unknown--/`）；平目录里的残留归 migrateFlatTraces 管。
+  let dirs: string[];
+  try {
+    dirs = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    // 目录不存在 = 全新安装，直接写标记收工。
+    writeMarkerV2(result);
+    return result;
+  }
+
+  for (const dir of dirs) {
+    let names: string[];
+    try {
+      names = readdirSync(path.join(root, dir));
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      // `.init.jsonl` 不是轨迹树（见 trace-file 的 listTraceSessionIds 同一过滤器）。
+      if (!name.endsWith('.jsonl') || name.endsWith('.init.jsonl')) continue;
+      const file = path.join(root, dir, name);
+      try {
+        // 廉价预检：首行已声明 v2 的直接跳过，不整文件读。
+        const head = readFileSync(file, 'utf8').split('\n', 1)[0] ?? '';
+        try {
+          const firstLine = JSON.parse(head) as { v?: unknown };
+          if (firstLine && firstLine.v === 2) {
+            result.skipped += 1;
+            continue;
+          }
+        } catch {
+          // 首行不是合法 JSON（空文件 / 截断）：交给升级函数按坏行丢弃的同一口径处理。
+        }
+        const upgraded = upgradeTraceToV2(readFileSync(file, 'utf8'));
+        if (!upgraded.upgraded) {
+          result.skipped += 1;
+          continue;
+        }
+        // 原子替换：写临时文件再 rename，中途崩了不损原文件。
+        const tmp = `${file}.migrating`;
+        writeFileSync(tmp, upgraded.text, 'utf8');
+        renameSync(tmp, file);
+        result.upgraded += 1;
+      } catch (error) {
+        result.failed.push({
+          file: `${dir}/${name}`,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  writeMarkerV2(result);
+  return result;
+}
+
+function writeMarkerV2(result: TraceV2MigrationResult): void {
+  try {
+    mkdirSync(configHome(), { recursive: true });
+    writeFileSync(
+      traceV2MigrateMarkerPath(),
+      `${new Date().toISOString()} upgraded=${result.upgraded} skipped=${result.skipped} failed=${result.failed.length}\n`,
+      'utf8',
+    );
+  } catch {
+    // 标记写不出来（只读目录？）：下次启动会再跑一遍；升级是按版本号幂等的。
+  }
 }
 
 /** 缺文件时返回 null，不抛 —— 配置目录可能还没建。 */

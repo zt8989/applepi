@@ -29,8 +29,8 @@ config-home 的 `encodeCwd`，与 sessions/ 一致）。理由：会话与轨迹
 
 ```ts
 interface TraceNode {
-  id: string;                    // "n7"，reducer 内单调自增
-  parentId: string | null;       // 根为 null
+  id: string;                    // 40 位 SHA-1 内容 hash（git 那样），显示取前 7 位
+  parentId: string | null;       // 根为 null（全树只有一棵根：system prompt）
   kind: 'user' | 'turn.start' | 'turn.end'      // 回合容器
       | 'step.start' | 'step.end'               // 步容器（= 一次 LLM 调用 + 它的工具批次）
       | 'llm.result'
@@ -50,6 +50,23 @@ interface TraceNode {
 ```
 
 `turn.*` / `step.*` 是**容器**（区间），`llm.result` / `tool.result` / `error` 是里面的**事件**。
+
+### id 是内容 hash（git 同款）
+
+节点 id 是 **SHA-1(父 id + 创建序数 + 创建时刻的全部内容)**，40 位十六进制，与 commit 的
+寻址方式同构：同内容必同 id，改一个字段就换 id。渲染行只打前 7 位短 hash
+（`shortId()`），全长留在文件与数据层。序数（第几个节点）参与 hash —— 同一毫秒里两个
+内容完全一样的节点（一批参数相同的并行工具调用）靠它分开。hash 里含 `createdAt`，
+所以两次运行同一串 action 的 id **不**相同 —— 与 git 的 commit hash 含时间戳同一语义。
+节点后来被 patch（闭合、流式改标签）**不改 id**：hash 只取 `appendNode` 那一刻的内容。
+
+### 树是单根的：全树从 system prompt 长出来
+
+根节点（`parentId === null` 的那一个）就是 **system prompt**（`prompt.base`，`meta.role`
+= `'system'`）—— 仓库从首个 commit 长出来，对话从 system 长出来。user / turn /
+`model.init` / `model.changed` 全部从它长出：新节点的挂载点是 `attachPoint(tree)` =
+「tip，没有 tip 则根」，不再有第二棵根。旧文件（v1）可能有两棵根（上下文族与对话族
+两条线），迁移时除第一棵外全部重挂到 system 根下（见下面「落盘与回放」）。
 
 ### 消息挂在节点上
 
@@ -89,21 +106,21 @@ function advancesTip(node) {
 ## 一次正常对话长这样
 
 ```
-○  n1 user: 今天几号？
-○  n2 turn.start: 回合 1
-│  ○  n3 step.start: 第 1 步
-│  │  ○  n4 llm.result: 我来查 [调用 bash]
-│  │  ○  n5 tool.call: bash {"command":"date +%m-%d"} (tool=bash)
-│  │  ○  n6 tool.result: 10 月 5 日 (tool=bash)
-│  └─ n7 step.end: 第 1 步结束（1 个工具调用） (tools=1)
-│  ○  n8 step.start: 第 2 步
-│  │  ○  n9 llm.result: 今天是 10 月 5 日
-│  └─ n10 step.end: 第 2 步结束（0 个工具调用） (tools=0)
-└─ n11 turn.end: 回合 1 结束：模型说完了 (reason=completed, steps=2)
+○  3f9a2c1 user: 今天几号？
+○  b21d77e turn.start: 回合 1
+│  ○  8c04e9f step.start: 第 1 步
+│  │  ○  51aa0d2 llm.result: 我来查 [调用 bash]
+│  │  ○  9d31c7a tool.call: bash {"command":"date +%m-%d"} (tool=bash)
+│  │  ○  e2f8b60 tool.result: 10 月 5 日 (tool=bash)
+│  └─ 44c0e18 step.end: 第 1 步结束（1 个工具调用） (tools=1)
+│  ○  7b5aa93 step.start: 第 2 步
+│  │  ○  c1d2e3f llm.result: 今天是 10 月 5 日
+│  └─ 0aa11bb step.end: 第 2 步结束（0 个工具调用） (tools=0)
+└─ 5e4d3c2 turn.end: 回合 1 结束：模型说完了 (reason=completed, steps=2)
 ```
 
 （渲染时会带上每个节点的耗时与 `meta`；这里为了让形状好读，把它们省了。
-最后一行就是当前 tip（`n11`）—— 它在字形上与别的节点一样，只在界面上**加粗**，
+最后一行就是当前 tip（`5e4d3c2`）—— 它在字形上与别的节点一样，只在界面上**加粗**，
 见下面渲染一节。）
 
 一个回合里模型可以跑很多步（模型→工具→模型→…），**那是同一个回合的正常推进，不是重试**
@@ -112,13 +129,13 @@ function advancesTip(node) {
 ## 于是重试长这样（所有尝试包在同一个容器里）
 
 ```
-○  n1 user: 你好
-○  n2 turn.start: 回合 1
-│  ○  n3 step.start: 第 1 步
-│  │  ○  n4 error: LLM 调用超时（1s） (kind=timeout, cause=timeout)
-│  │  ○  n5 llm.result: 好了        ← tip（界面上加粗）
-│  └─ n6 step.end: 第 1 步结束（0 个工具调用） (tools=0)
-└─ n7 turn.end: 回合 1 结束：模型说完了 (reason=completed, steps=1)
+○  3f9a2c1 user: 你好
+○  b21d77e turn.start: 回合 1
+│  ○  8c04e9f step.start: 第 1 步
+│  │  ○  51aa0d2 error: LLM 调用超时（1s） (kind=timeout, cause=timeout)
+│  │  ○  9d31c7a llm.result: 好了        ← tip（界面上加粗）
+│  └─ 44c0e18 step.end: 第 1 步结束（0 个工具调用） (tools=0)
+└─ 5e4d3c2 turn.end: 回合 1 结束：模型说完了 (reason=completed, steps=1)
 ```
 
 重试**不开新容器**：`llm.failed` 把 error 节点挂进当前 step 容器后容器保持开着，
@@ -129,8 +146,9 @@ function advancesTip(node) {
 
 ## 纯函数
 
-`trace.ts` 里没有 IO、没有 `Date.now()`、没有随机数。节点 id 由 reducer 单调自增（`nextSeq`），
-不含时间戳。所以同一串 Action 必然产出同一棵树 —— 能在测试里逐字断言，也能从 JSONL 回放重建。
+`trace.ts` 里没有 IO、没有 `Date.now()`、没有随机数。节点 id 是创建内容的 SHA-1
+（见上面「id 是内容 hash」），同一棵树必然产出同一串 id —— 能在测试里逐字断言，
+也能从 JSONL 回放重建（回放不重算 hash，id 就在记录里）。
 
 `appendNode` / `patchNode` 都是返回新树，不改原对象。
 
@@ -197,7 +215,7 @@ function advancesTip(node) {
 ### 节点状态画在颜色上，不在字上
 
 `✓` / `✗` / `⊘` / `·` 那套状态字符已经删掉：成功绿、失败红**加粗**、进行中黄、
-上下文族（`prompt.*` / `model.init` / `model.changed` / `extension.event`）暗。理由：`✓ n7 llm.result` 里那个 `✓` 占了宽度，
+上下文族（`prompt.*` / `model.init` / `model.changed` / `extension.event`）暗。理由：`✓ 51aa0d2 llm.result` 里那个 `✓` 占了宽度，
 而它说的信息与颜色重复；轨道符号要能一眼区分的是「这是哪个节点」，不是「它成没成」。
 
 代价是**纯文本那一份（`renderTree()`）看不出成败** —— 落盘、回放、统计都不受影响
@@ -223,14 +241,34 @@ function advancesTip(node) {
 而且「错误也要持久化」这个要求恰恰需要它**不能**因为出错路径而不执行 —— 一个订阅器对成功与
 失败一视同仁，这正是要的语义。
 
-两种 op，追加写 JSONL：
+### 文件形状：v2（首行版本头，每行 seq 严格等于行号）
+
+```jsonl
+{"seq":1,"op":"header","v":2}
+{"seq":2,"op":"prompt.init",…}
+{"seq":3,"op":"add","node":{"id":"3f9a2c1b8d0e46a7…","parentId":null,…}}
+{"seq":4,"op":"close","id":"3f9a2c1b8d0e46a7…","status":"ok","endedAt":1700000000000}
+{"seq":5,"op":"message",…}
+```
+
+**`seq` 就是行号**（版本头是第 1 行，`seq:1`）。它是**分页游标**：后续取「某一段轨迹」
+不用解析任何一行，两个行号就知道边界在哪。落盘器写盘前逐条盖章（`seq = ++nextLine`），
+行号游标属于**文件**，不在 state 里 —— 换会话就是换文件，内核调 `beginSession()` 把
+「下一行行号 / 要不要写版本头 / 文件里已有几个节点」一次拨到位，于是续写不会重复写版本头，
+恢复会话也不会把读回来的树整棵重写一遍（那是旧游标放 state 里的两个真 bug）。
+
+记录的 op 一览：
 
 | op | 什么时候 | 内容 |
 | --- | --- | --- |
-| `add` | 节点首次出现 | 完整字段 |
+| `header` | 永远是第 1 行 | 文件版本 `v: 2` |
+| `prompt.init` / `model.init` | 装载段 | system prompt / 工具 / 模型能力 |
+| `add` | 节点首次出现 | 完整字段（id 是 40 位 hash） |
 | `close` | 节点从 `pending` 变成闭合 | 只带 `id` / `status` / `endedAt` |
+| `message` | 每条对话消息 | 回放零 token 复现用 |
 
-两个游标各管一段：`persistedSeq`（已 add 到的最大 seq）与 `needClose`（已 add 过、后来闭合的节点）。
+驱动器的游标：已写节点数（`order` 前缀长度）、`needClose`（已 add 过、后来闭合的节点）、
+已写消息数、行号。
 
 选 JSONL 而不是整树覆盖写：崩溃只丢最后没 flush 的一行；追加写不会重写整个文件；
 一行一个节点，`wc -l` 就知道这次会话发生过多少次尝试。
@@ -239,6 +277,19 @@ function advancesTip(node) {
 
 回放（`replayTrace`）逐行重放，**坏行直接跳过** —— 崩溃截断的半行丢掉即可。
 回放用的 tip 规则与在线推进是同一个 `advancesTip`，否则重放出来的 HEAD 会和当时不一致。
+v1 文件（无版本头、id 是 `n7` 这种自增号）照常回放 —— id 只是透明字符串，
+渲染时 `shortId()` 原样保留短 id。
+
+### 旧文件迁移：v1 → v2（一次性）
+
+旧格式算 **v1**（无版本头、无 seq、自增 id、多棵根），新格式算 **v2**。启动时
+`migrateTracesV2()`（config-home）扫 `traces/--<cwd>--/`（含 `--unknown--/`）下的每个文件：
+首行声明 `v: 2` 的跳过；否则按 `upgradeTraceToV2()`（trace-store，纯函数）升级 ——
+补版本头、逐行盖新 seq、节点 id 重算成 hash（与在线 `computeNodeId` 同一条规范）、
+`close` 的引用一起换、除第一棵根外全部重挂到 system 根下、`prompt.base` 补 `meta.role`
+= `'system'`。逐文件原子替换（临时文件 + rename），失败不指别的文件；全部跑完写
+`~/.pi/agent/trace_v2` 标记，之后启动不再扫（与平目录迁移 `migrateFlatTraces()` 同一套模式，
+且必须排在它后面）。
 
 ## 统计
 
@@ -318,13 +369,29 @@ function advancesTip(node) {
     const TIP_ADVANCING_KINDS = new Set(['user', 'llm.result', 'tool.result', 'stop']);
     // prompt.* 与 model.init 都不在里面
 
-于是三个装载节点是**平级兄弟**，不是对话的祖先（`n1`/`n2` 有父子关系，见下），
-`n3` 的 parent 是 null 而 `n4`（user）也是 null —— 上下文与对话是两条线，
-混进同一棵「历史」树会让重试分叉的语义变糊。
+```
+○  3f9a2c1 prompt.base: 你是…   ← 根，role=system
+│  ○  b21d77e prompt.tools: bash, read
+│  ○  8c04e9f model.init: anthropic/claude…
+○  51aa0d2 user: 今天几号？      ← 从根长出来
+│  ○  … turn.start / step.start / llm.result
+└─ …
+```
 
-同一次 `prompt.init` 产出的两个节点之间**是**有父子关系的（`prompt.tools` 挂在 `prompt.base` 下）。
-那里要显式用 base 的 `id` 当 parent，不能用它的 `tipId` —— `prompt.base` 不推进 tip，
-取 `tipId` 会拿到装载前的值，两兄弟就散了。
+### 它们**不推进 tip**
+
+它们是「上下文」，不是「发生过的事」：
+
+    const TIP_ADVANCING_KINDS = new Set(['user', 'llm.result', 'tool.result', 'stop']);
+    // prompt.* 与 model.init 都不在里面
+
+于是装载节点是根下的**平级兄弟**：`prompt.tools` / `prompt.skills` 挂在 `prompt.base`
+（根）下面，`model.init` 也挂在根下（它的挂载点是 `attachPoint`，树刚开时 tip 还是
+null，于是落在根上），`user` 同样从根长出 —— 全树一根，没有第二条线。
+
+同一次 `prompt.init` 产出的两个节点之间**是**有父子关系的（`prompt.tools` 挂在
+`prompt.base` 下）。那里要显式用 base 的 `id` 当 parent，不能用它的 `tipId` ——
+`prompt.base` 不推进 tip，取 `tipId` 会拿到装载前的值，两兄弟就散了。
 
 ### 重复装载是追加
 

@@ -398,7 +398,6 @@ test('conversation.restored 与「逐条版」状态等价（除了刻意换掉�
 
   assert.deepEqual(now.messages, old.messages, 'messages 完全一致');
   assert.equal(now.phase, old.phase, '相位一致');
-  assert.equal(now.persistedSeq, old.persistedSeq, '轨迹落盘游标要带着走（别把旧轨迹重写一遍）');
 });
 
 // ── 开新会话：必须换文件 ──

@@ -176,7 +176,7 @@ test('conversation.restored 的状态结果与「reset + 逐条 session.restored
   assert.deepEqual(batched, stepwise, '两条路出来的状态树必须一模一样');
 });
 
-test('conversation.restored：保留装载好的 prompt / model 与 persistedSeq（会话级状态）', () => {
+test('conversation.restored：保留装载好的 prompt / model（会话级状态）', () => {
   const reduce = typedReducer();
   let state = reduce(seed('from'), { type: 'prompt.init', systemPrompt: '装载的', tools: [] });
   state = reduce(state, {
@@ -186,7 +186,6 @@ test('conversation.restored：保留装载好的 prompt / model 与 persistedSeq
     thinkingLevel: 'off',
     capabilities: CAPS,
   });
-  state = reduce(state, { type: 'trace.persisted', upToSeq: 42 });
 
   state = reduce(state, {
     type: 'conversation.restored',
@@ -196,7 +195,6 @@ test('conversation.restored：保留装载好的 prompt / model 与 persistedSeq
 
   assert.equal(state.prompt.seeded, true, 'prompt 保留（换会话不等于换模型/系统提示）');
   assert.equal(state.model.seeded, true, 'model 保留');
-  assert.equal(state.persistedSeq, 42, 'persistedSeq 属于轨迹文件，不该被清零');
   assert.equal(state.trace.sessionId, 'to', '会话 id 换掉了（于是之后的消息写进新文件）');
 });
 

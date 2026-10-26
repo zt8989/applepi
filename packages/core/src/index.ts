@@ -46,7 +46,10 @@ export { abortRun, isRunning } from './run-control';
 
 export {
   appendNode,
+  applyTraceRecord,
+  attachPoint,
   childrenOf,
+  computeNodeId,
   createTraceTree,
   deserializeTree,
   formatDuration,
@@ -56,7 +59,9 @@ export {
   patchNode,
   pathTo,
   renderTree,
+  rootIdOf,
   serializeTree,
+  shortId,
   traceRows,
   traceStats,
   type SerializedTrace,
@@ -75,7 +80,10 @@ export {
   replaySession,
   replayTrace,
   toJsonl,
+  TRACE_FILE_VERSION,
+  upgradeTraceToV2,
   type TracePersistence,
+  type TracePayload,
   type TraceRecord,
   type TraceSink,
 } from './trace-store';

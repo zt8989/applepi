@@ -455,8 +455,6 @@ export interface AgentState {
   maxLlmAttempts: number;
   /** 一次 LLM 调用的空闲超时（毫秒）：流上这么久没有任何事件就掐。effect 读它给流上闸。 */
   llmTimeoutMs: number;
-  /** 已经落盘到 seq 游标的节点数；持久化失败时不动，好让下一轮重试。 */
-  persistedSeq: number;
 }
 
 export interface InitialStateOptions {
@@ -568,7 +566,6 @@ export function createInitialState(options: InitialStateOptions): AgentState {
     lastCompaction: null,
     maxLlmAttempts: options.maxLlmAttempts ?? 2,
     llmTimeoutMs: options.llmTimeoutMs ?? DEFAULT_LLM_TIMEOUT_MS,
-    persistedSeq: 0,
   };
 }
 

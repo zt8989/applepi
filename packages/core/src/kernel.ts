@@ -14,7 +14,8 @@ import {
   type AgentRuntime,
 } from './provider';
 import { createPersistentStore } from './store';
-import { createFileSink, loadTrace, tracePath, type TraceDir } from './trace-file';
+import { createFileSink, countTraceLines, loadTrace, tracePath, type TraceDir } from './trace-file';
+import { existsSync } from 'node:fs';
 import { newSessionId } from './trace';
 import type { AgentStore } from './store';
 import type { InitRecord, TracePersistence, TraceSink } from './trace-store';
@@ -1059,6 +1060,9 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
       //   但这里要在 dispatch **之前**清 wroteInit —— 那个订阅器在 dispatch 时就会看到
       //   「已经开始了」，从而给一个空会话写 init。）
       wroteInit = false;
+      // 新会话 = 新文件：落盘器的游标拨回起点（第 1 行是版本头，下一行从 2 起）。
+      // 必须在 dispatch 之前 —— flush 是订阅器，conversation.reset 一落地就会看游标。
+      persistence?.beginSession({ nextLine: 1, headerPending: true, existingNodes: 0 });
       store.dispatch({ type: 'conversation.reset', sessionId: id } as AgentAction);
       openRecorder(id);
       // 切到新会话 = 换一次扩展激活：`session_shutdown{reason:'new'}` → 重装宿主 →
@@ -1120,11 +1124,20 @@ export async function createKernel(options: KernelOptions): Promise<Kernel> {
         id !== '' && traceDir !== null
           ? await loadTrace(id, traceDir ? { cwd, dir: traceDir } : { cwd })
           : null;
-      // 轨迹落盘器的游标也要跟着推 —— 它只看 messages 有没有变长，看不出这些是「读回来的」
-      // 而不是「新产生的」。不推的话，它会把整批历史当新消息重写一遍，
-      // 于是轨迹文件里同一批消息出现两次。
-      //
+      // 轨迹落盘器的游标也要跟着拨到**这个**文件的末尾（seq = 行号，行号属于文件）：
+      //   - 已有文件：下一行 = 文件行数 + 1，版本头已存在不再写；
+      //   - 文件里已有的节点（读回来的那棵树）不再补 add。
       // 必须在 dispatch **之前**调：flush 是 store 订阅器，dispatch 一发生就晚了。
+      const traceFile =
+        id !== '' && traceDir !== null
+          ? tracePath(id, traceDir ? { cwd, dir: traceDir } : { cwd })
+          : null;
+      const hasTraceFile = traceFile !== null && existsSync(traceFile);
+      persistence?.beginSession({
+        nextLine: hasTraceFile && traceFile !== null ? countTraceLines(traceFile) + 1 : 1,
+        headerPending: !hasTraceFile,
+        existingNodes: tree?.order.length ?? 0,
+      });
       persistence?.skipMessages(messages.length);
       // 恢复进来的会话**已经有** init 段了（那个会话当初也发过话），别再补一份。
       wroteInit = true;

@@ -206,9 +206,9 @@ function waitForIdleState(store: { getState(): { phase: string }; subscribe(l: (
 }
 
 test('回放能跳过崩溃时截断的半行', () => {
-  const tree = createTraceStore();
   const good = toJsonl([
     {
+      seq: 1,
       op: 'add',
       node: {
         id: 'n1',
@@ -225,18 +225,6 @@ test('回放能跳过崩溃时截断的半行', () => {
   assert.equal(restored.order.length, 1, '只恢复完整的那一行');
   assert.equal(restored.nodes['n1']?.label, 'hi');
 });
-
-function createTraceStore(): TraceTree {
-  // 一个空树，用于上面的回放测试。
-  const state = createInitialState({
-    systemPrompt: 's',
-    providerName: 'p',
-    modelId: 'm',
-    toolNames: [],
-    sessionId: 'x',
-  });
-  return state.trace;
-}
 
 test('界面上渲染的树就是命令里那棵树（同一份逻辑，只是加了颜色）', () => {
   const reducer = createAgentReducer({});

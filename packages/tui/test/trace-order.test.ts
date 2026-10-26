@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { AssistantMessage, ToolCall } from '@earendil-works/pi-ai';
 import { createAgentStore, waitForIdle } from '@ela/core/store';
 import { createFauxRuntime } from '@ela/core/provider';
-import { renderTree } from '@ela/core';
+import { renderTree, shortId } from '@ela/core';
 import { renderColoredTree } from '../src/app';
 
 /**
@@ -41,14 +41,13 @@ const bashCall = (id: string, command: string): ToolCall => ({
   arguments: { command },
 });
 
-/** 从渲染结果里取出节点 id 的数字序列。 */
-function renderedIds(rendered: string): number[] {
+/** 从渲染结果里按行序取出节点的短 hash（id 是内容 hash，显示前 7 位）。 */
+function renderedIds(rendered: string): string[] {
   return rendered
     .split('\n')
     .filter((line) => line !== '')
-    .map((line) => /^[^n]*n(\d+)/.exec(line)?.[1])
-    .filter((x): x is string => x !== undefined)
-    .map(Number);
+    .map((line) => /([\da-f]{7}) /.exec(line)?.[1])
+    .filter((x): x is string => x !== undefined);
 }
 
 test('并行工具之后：节点仍按发生顺序排列（不倒流）', async () => {
@@ -81,16 +80,16 @@ test('并行工具之后：节点仍按发生顺序排列（不倒流）', async
   // 一个都不能少。
   assert.equal(ids.length, state.trace.order.length, '渲染的行数要与节点数一致');
 
-  // **核心断言**：id 单调自增，所以递增 == 发生顺序。
-  const sorted = [...ids].sort((a, b) => a - b);
+  // **核心断言**：渲染行的次序必须与树的发生顺序（order）一致。
   assert.deepEqual(
     ids,
-    sorted,
+    state.trace.order.map((id) => shortId(id)),
     `渲染顺序必须等于发生顺序，但拿到的是：\n${rendered}`,
   );
 
-  // 最后一个节点就该是最后一个发生的（不是最早那个）。
-  assert.equal(ids[ids.length - 1], state.trace.order.length, '最后一行是最后发生的节点');
+  // 最后一行就该是最后一个发生的节点。
+  const lastId = state.trace.order[state.trace.order.length - 1] ?? '';
+  assert.equal(ids[ids.length - 1], shortId(lastId), '最后一行是最后发生的节点');
 });
 
 test('工具失败：isError 真的被置上（pi 的 bash 失败不抛异常）', async () => {
@@ -126,9 +125,9 @@ test('工具失败：isError 真的被置上（pi 的 bash 失败不抛异常）
   //
   // 成败现在画在**颜色**上（红加粗 / 绿），不再有 `✗` / `✓` 字符 ——
   // 所以纯文本这一份只能断言「行在不在」，红绿另拿带色那份下来比。
-  assert.match(rendered, /○  n\d+ error: .*Command exited with code 1/);
-  assert.match(rendered, /n\d+ tool\.result: one/);
-  assert.match(rendered, /n\d+ tool\.call: bash \{"command":"exit 1"\}/);
+  assert.match(rendered, /○  [\da-f]{7} error: .*Command exited with code 1/);
+  assert.match(rendered, /[\da-f]{7} tool\.result: one/);
+  assert.match(rendered, /[\da-f]{7} tool\.call: bash \{"command":"exit 1"\}/);
 
   // 带色那份：失败那一行是**红 + 加粗**，成功那个不是。
   const colored = renderColoredTree(state.trace, 0);

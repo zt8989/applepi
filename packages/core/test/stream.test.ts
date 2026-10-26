@@ -123,7 +123,8 @@ test('LLM 失败：错误从 trace 派生，重新发消息后仍然在（不再
   const errorNotice = before.find((e) => e.kind === 'notice' && e.tone === 'error');
   assert.ok(errorNotice, '应当有一条 error 提示');
   if (errorNotice?.kind !== 'notice') throw new Error('unreachable');
-  assert.equal(errorNotice.nodeId.startsWith('n'), true);
+  // v2 的节点 id 是 40 位内容 hash（不再是 n1 这种自增号）。
+  assert.match(errorNotice.nodeId, /^[0-9a-f]{40}$/);
   // 超时卡只说一次：时长并进主句，detail 不再重复同一句话（旧轨迹里
   // 「LLM 调用超时（1s）」那种旧文案也能提取出时长，一样归一）。
   assert.equal(errorNotice.title, '大模型调用超时（1s）');
