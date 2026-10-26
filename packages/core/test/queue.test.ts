@@ -520,6 +520,106 @@ test('turn.end 会顺手开下一个 followUp 回合（投递点之后环不能�
   assert.notEqual(state.phase, 'idle', '环没闭合');
 });
 
+// ── 多条同构 followUp 在 turn.end 合并发送 ──
+//
+// pi-background-tasks 会在同一个收工点连发 N 条完成通知（首行 `<tag>` 尾行 `</tag>`
+// 的同模板消息）。来源扩展拿不到（`pi.sendMessage` 是所有扩展共用的一个函数），
+// 只能靠首尾行一致认「同构」，认出来就合并成一条消息、只开一个新回合。
+
+/** 把 N 条通知形状的 followUp 入队后关回合，返回最终状态。 */
+function closeWithQueued(texts: string[]): AgentState {
+  const reducer = createAgentReducer({});
+  let state = runningState();
+  for (const text of texts) {
+    state = reducer(state, { type: 'queue.input', text, as: 'followUp' }) as AgentState;
+  }
+  return reducer(state, { type: 'turn.end' }) as AgentState;
+}
+
+const notification = (body: string): string =>
+  `<background-task-notification>\n${body}\n</background-task-notification>`;
+
+test('turn.end 遇到多条同构 followUp：合并成一条消息，只开一个新回合', () => {
+  const state = closeWithQueued([
+    notification('任务 1 完成'),
+    notification('任务 2 完成'),
+    notification('任务 3 完成'),
+  ]);
+
+  // 整列一次消费，不再是「一条一个回合」。
+  assert.equal(state.followUpQueue.length, 0, '整列消费完');
+  assert.equal(state.messages.length, 2, '只加一条 user 消息（3 条合并成 1 条）');
+  const last = state.messages[state.messages.length - 1];
+  assert.equal(
+    last?.content,
+    [
+      notification('任务 1 完成'),
+      notification('任务 2 完成'),
+      notification('任务 3 完成'),
+    ].join('\n\n'),
+    '三条用空行连成一条',
+  );
+  assert.equal(state.turnIndex, 2, '只开一个新回合');
+  // 树上那条 user 节点带着条数，看得出来是几条并成的一条。
+  const mergedNode = Object.values(state.trace.nodes).find(
+    (n) => n?.meta?.queued === 'followUp',
+  );
+  assert.ok(mergedNode);
+  assert.equal(mergedNode.label, 'followUp×3: <background-task-notification>');
+  assert.notEqual(state.phase, 'idle', '合并后的回合照常开跑');
+});
+
+test('turn.end 遇到首尾行不一致的多条 followUp：不合并，退回一条一个回合', () => {
+  const state = closeWithQueued(['接着说 1', notification('任务完成')]);
+
+  // 首行对不上（「接着说 1」vs `<background-task-notification>`），只消费第一条。
+  assert.equal(state.followUpQueue.length, 1, '剩下的那条留在队列里');
+  const last = state.messages[state.messages.length - 1];
+  assert.equal(last?.content, '接着说 1');
+  assert.equal(state.turnIndex, 2, '只开一个回合（剩下的下个收工点再投）');
+});
+
+test('合并后的新回合照常被接线跑完（store 级：两条同构通知只多跑一个回合）', async () => {
+  const faux = createFauxRuntime();
+  faux.setResponses([
+    fauxAssistantMessage([fauxText('第一句')], { stopReason: 'stop' }),
+    fauxAssistantMessage([fauxText('一次答完两条')], { stopReason: 'stop' }),
+  ]);
+  const store = createAgentStore({
+    runtime: faux.runtime,
+    systemPrompt: 'test',
+    sessionId: 'q-followup-merge',
+  });
+
+  // 流到一半时连排两条同构通知。
+  let queued = 0;
+  store.subscribe(() => {
+    const s = store.getState();
+    if (queued >= 2 || s.phase !== 'thinking' || s.streamingText.length === 0) return;
+    queued += 1;
+    store.dispatch({ type: 'queue.input', text: notification(`任务 ${queued} 完成`), as: 'followUp' });
+  });
+
+  store.dispatch({ type: 'user.message', text: '你好' });
+  for (let i = 0; i < 200; i += 1) {
+    const s = store.getState();
+    if (s.phase === 'idle' && s.totalSteps >= 2) break;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  const state = store.getState();
+
+  assert.equal(state.phase, 'idle', '环收工了');
+  assert.equal(state.followUpQueue.length, 0, '两条都被取走');
+  assert.equal(state.totalSteps, 2, '只多跑了一个回合（不是两个）');
+  assert.equal(state.turnIndex, 2, '总共两个回合');
+  const userMessages = state.messages.filter((m) => m.role === 'user');
+  assert.equal(userMessages.length, 2, '第二条 user 消息就是合并后的那一条');
+  assert.equal(
+    userMessages[1]?.content,
+    [notification('任务 1 完成'), notification('任务 2 完成')].join('\n\n'),
+  );
+});
+
 test('turn.end 在队列空时正常收工（相位 idle，容器清空）', () => {
   const reducer = createAgentReducer({});
   let state = runningState();
