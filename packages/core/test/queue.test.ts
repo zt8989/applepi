@@ -163,6 +163,47 @@ test('steer 的 user 节点挂在 turn 容器下面（它是这回合里的一�
   assert.equal(steerNode.parentId, turnNode.id, 'steer 节点在 turn 容器里');
 });
 
+test('steer 错过投递窗口（最后一个 step 生成期间入队）：turn.end 后仍要被投递', async () => {
+  const faux = createFauxRuntime();
+  faux.setResponses([
+    fauxAssistantMessage(
+      [fauxText('查'), { type: 'toolCall', id: 'c1', name: 'bash', arguments: { command: 'echo hi' } }],
+      { stopReason: 'toolUse' },
+    ),
+    fauxAssistantMessage([fauxText('done')], { stopReason: 'stop' }),
+  ]);
+  const store = createAgentStore({
+    runtime: faux.runtime,
+    systemPrompt: 'test',
+    sessionId: 'q-steer-orphan',
+  });
+
+  // 在第二个响应（最终文本，无工具）开始流式之后才入队 —— 此时 tool.batch.done
+  // 已经过去，steer 错过了它唯一的投递窗口，只剩 turn.end 能救它。
+  let injected = false;
+  store.subscribe(() => {
+    const s = store.getState();
+    if (!injected && s.turns === 1 && s.turnSteps === 1 && s.openStepNodeId !== null && s.executing.length === 0) {
+      injected = true;
+      store.dispatch({ type: 'queue.input', text: '再补一句', as: 'steer' });
+    }
+  });
+
+  store.dispatch({ type: 'user.message', text: '查一下' });
+  await waitForIdle(store, 20_000);
+  await new Promise((r) => setTimeout(r, 80));
+
+  const state = store.getState();
+  assert.ok(injected, 'steer 确实入队过');
+  assert.equal(state.steerQueue.length, 0, '不能烂在队列里 —— turn.end 要接住它');
+  const steerMessage = state.messages.find(
+    (m) => m.role === 'user' && typeof m.content === 'string' && m.content === '再补一句',
+  );
+  assert.ok(steerMessage, '迟到的 steer 被投递（回合结束后接着说）');
+  const steerNode = Object.values(state.trace.nodes).find((n) => n?.meta?.queued === 'steer');
+  assert.ok(steerNode, '树上有 steer 节点');
+});
+
 // ── followUp：回合收工时才插，然后开新回合 ──
 
 /**

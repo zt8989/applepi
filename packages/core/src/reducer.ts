@@ -971,7 +971,7 @@ const transitions: TransitionHandlers = {
             ? 'aborted'
             : 'error';
     const closed = closeTurnNode(state, Date.now(), reason, turnReasonText(reason));
-    // **关回合后 followUp 直接开新回合 —— 在这条迁移里做，不是接线里。**
+    // **关回合后队列里还有话就直接接着说 —— 在这条迁移里做，不是接线里。**
     //
     // 为什么：这条路是被 llm.done / llm.failed / tool.batch.done 触发的，
     // 而那三个都是 `Cmd.run` 回来的 —— 那一刻 install() enhancer 的 cmdsQueue
@@ -979,16 +979,24 @@ const transitions: TransitionHandlers = {
     // 没人冲刷，于是「模型说完了，用户排的那句话就永远躺在队列里」。
     //
     // 而 reducer 是纯的，它可以直接开：开容器、算序号，全在这一条迁移里完成。
-    const queued = state.followUpQueue[0];
+    //
+    // **两条队列都接**：steer 的投递点只有 tool.batch.done 一处，若它是最后一步
+    // 生成期间才入队的（投递窗口已过），回合关掉时它还躺在队列里 —— 不在这里
+    // 接住它就成了无人投递的孤儿，还会在未来某个无关回合的 tool.batch.done
+    // 迟到插播。steer 优先于 followUp：它更早想说话。
+    const queuedAs: 'steer' | 'followUp' = state.steerQueue.length > 0 ? 'steer' : 'followUp';
+    const queued = (queuedAs === 'steer' ? state.steerQueue : state.followUpQueue)[0];
     if (queued === undefined) {
       return { ...closed, stepIndex: 0, turnSteps: state.turnSteps };
     }
     const now = Date.now();
-    // 「换过模型 / 档位」那一笔也先落下来：这条 followUp 马上要开一个新回合，
+    // 「换过模型 / 档位」那一笔也先落下来：这条话马上要开一个新回合，
     // 而新回合用的是「此刻生效」的那一版。
     const flushed = flushModelChange(closed, now);
-    // 先把 followUp 那句话作为 user 消息插进去（它开启新回合，所以算回合的起点），
+    // 先把那句话作为 user 消息插进去（它开启新回合，所以算回合的起点），
     // 再开回合容器 —— 于是 user 节点在树上排在 turn.start 之前，与正常入口一致。
+    // 回合已经关了，此刻的 steer 与 followUp 一样只能「接着说」，
+    // 所以落点（tip 下面、开新容器）与 followUp 相同，只是 meta 还标着来路。
     const message: Message = {
       role: 'user',
       content: queued.content ?? queued.text,
@@ -996,10 +1004,10 @@ const transitions: TransitionHandlers = {
     };
     const userNode = appendNode(flushed.trace, flushed.trace.tipId, 'user', {
       status: 'ok',
-      label: `followUp: ${summarize(queued.text)}`,
+      label: `${queuedAs}: ${summarize(queued.text)}`,
       detail: queued.text,
       message,
-      meta: { queued: 'followUp' },
+      meta: { queued: queuedAs },
       createdAt: now,
       endedAt: now,
     });
@@ -1019,7 +1027,9 @@ const transitions: TransitionHandlers = {
       // 否则新回合的第一步会被标成「重试」，`turns` 也会跨回合累计。
       ...newTurnCounters(),
       messages: [...closed.messages, message],
-      followUpQueue: closed.followUpQueue.slice(1),
+      // 只从取货的那条队列里消费一条，另一条原样保留（两列互不影响）。
+      steerQueue: queuedAs === 'steer' ? closed.steerQueue.slice(1) : closed.steerQueue,
+      followUpQueue: queuedAs === 'followUp' ? closed.followUpQueue.slice(1) : closed.followUpQueue,
       // 新的一句话 = 上一回合的收工理由作废。
       stopReason: null,
       stopCause: null,
@@ -2045,13 +2055,9 @@ export function loopWiring(table: {
       }
       // **无工具 = 回合真的收工了**（迁移里已经把 step 关掉）。
       //
-      // 队列里有货就不收工 —— 否则模型说完话就停下、用户输入的那句话永远没被看见。
-      //
-      // 判据是**队列**而不是相位：此时相位已是 idle，但 followUp 的意义就是
-      // 「模型说完了接着聊」，若只看相位就会把这条消息永远留在队列里。
-      if (peekQueued(true, state) !== null || peekQueued(false, state) !== null) {
-        return [closeTurn()];
-      }
+      // 队列里若还有话（含错过投递窗口的 steer），续跑由 `turn.end` 的迁移兜底：
+      // 它会关掉本回合并直接开下一个，所以这里无条件关就行。早期版本曾在这里
+      // 分支「有货就不收工」，后来续跑逻辑收进 `turn.end` 迁移后分支就成了死代码。
       return [closeTurn()];
     },
 
